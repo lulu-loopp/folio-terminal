@@ -95,6 +95,31 @@ pub fn resolve_default_shell(environment: &dyn ShellEnvironment) -> ResolvedShel
     }
 }
 
+/// PowerShell 7 and **only** PowerShell 7 — `BT_SHELL`'s override, else an install of `pwsh.exe`,
+/// else nothing.
+///
+/// The same first two steps as [`resolve_default_shell`] without its third, and the difference is
+/// the whole of it: that function answers "what shell should this terminal start when nothing
+/// says otherwise", so it must always answer, and Windows PowerShell is what it answers with. This
+/// one answers "where is PowerShell 7 on this machine", which has a real `None` — and a profile
+/// named `PowerShell` that quietly started 5.1 would be a row that says one thing and does
+/// another, on precisely the machines where the two are visibly different products.
+///
+/// `BT_SHELL` stays on this side of the split (ruling 2026-08-10, Q4: it is the PowerShell
+/// profile's override and not a fifth profile's worth of configuration), and it is still taken
+/// verbatim and unprobed — an override that pointed at nothing would leave the profile greyed
+/// rather than silently ignored, which is the honest reading of "used verbatim".
+#[must_use]
+pub fn resolve_powershell_seven(environment: &dyn ShellEnvironment) -> Option<OsString> {
+    if let Some(overridden) = environment
+        .var_os(BT_SHELL_ENV)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(overridden);
+    }
+    find_pwsh(environment)
+}
+
 /// `PATH` search first, then the two well-known install locations that are not guaranteed to be
 /// on `PATH`: the traditional MSI/`winget` layout under `%ProgramFiles%\PowerShell\7`, and the
 /// Microsoft Store app-execution alias under `%LocalAppData%\Microsoft\WindowsApps`. All three are

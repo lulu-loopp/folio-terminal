@@ -21879,6 +21879,96 @@ mod tests {
         );
     }
 
+    /// PIN — **why `cmd.exe` sends no OSC 133 at all**, checked rather than argued.
+    ///
+    /// The Q5 ruling (2026-08-11) allowed the Command Prompt profile `133;A` and `133;B` and let
+    /// `C`/`D` fall to the documented degradation, on the reading that A and B are two more facts
+    /// and the degradation costs only the two that are missing. This is the measurement that
+    /// overturns the premise: **A and B are not facts, they are a claim of authority**, and both
+    /// halves of that claim are paid for by a `C` that `cmd.exe` has no moment to send — `PROMPT`
+    /// is a format string expanded once, just before a line is read, and there is no
+    /// pre-execution or post-execution hook anywhere in the shell.
+    ///
+    /// Each half below is a regression against the *no-integration* baseline, which is the whole
+    /// point: sending these makes the pane worse than sending nothing, and sending nothing is a
+    /// documented, tested position rather than a gap.
+    ///
+    /// The profile-side pin is
+    /// `bt_app::shell_integration::command_prompt_reports_its_directory_and_claims_no_shell_integration`;
+    /// this is the fact underneath it, and it lives here because it is this crate's machine that
+    /// makes it true. If this test ever goes red — if a later ticket teaches the machine to close
+    /// an abandoned region, or to keep the cursor heuristic while authority is only partial — then
+    /// the reason `cmd` withholds these markers has expired and that decision should be revisited
+    /// rather than inherited.
+    #[test]
+    fn a_prompt_that_can_never_send_c_must_not_send_a_or_b_either() {
+        let started = Instant::now();
+
+        // Half one — `B` opens a region only `C` (or the *next* `A`) can close, so the command's
+        // own output is read as an unsent buffer for as long as it runs.
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session
+            .feed_at(b"\x1b]133;A\x1b\\D:\\src>\x1b]133;B\x1b\\", started)
+            .unwrap();
+        assert!(
+            !session.typed_shell_input_live(),
+            "an idle prompt holds nothing, whoever sent it"
+        );
+        session.feed_at(b"dir", started).unwrap();
+        assert!(session.typed_shell_input_live(), "a typed buffer holds it");
+        // Enter, and the command runs and prints. A shell with a full integration would have sent
+        // `C` between these two writes; this one has nowhere to send it from.
+        session
+            .feed_at(
+                b"\r\n Volume in drive D is Data\r\n 12 File(s)\r\n",
+                started,
+            )
+            .unwrap();
+        assert!(
+            session.typed_shell_input_live(),
+            "with no C, the gate cannot tell a command's output from the line that launched it — \
+             so every resize is deferred for as long as anything is printing"
+        );
+        assert!(
+            session.shell_input_region_open(),
+            "and every resize that does land owes an InvokePrompt chord to a shell that has no \
+             such binding"
+        );
+        // It releases only at the next prompt, which is the whole of the damage: one command's
+        // run is one interval of a window that cannot be resized.
+        session
+            .feed_at(b"\x1b]133;A\x1b\\D:\\src>", started)
+            .unwrap();
+        assert!(!session.typed_shell_input_live());
+
+        // Half two — `A` alone sends no region at all, and that is worse rather than safer: its
+        // one effect is to retire the cursor-line heuristic, whose replacement is the region.
+        let mut bare = DualPlaneSession::new(nz(80), nz(8));
+        assert!(
+            !bare.shell_integration_is_authoritative(ScreenId::Primary),
+            "the baseline: no marker, so the cursor heuristic is in force"
+        );
+        bare.feed_at(b"\x1b]133;A\x1b\\D:\\src>", started).unwrap();
+        assert!(
+            bare.shell_integration_is_authoritative(ScreenId::Primary),
+            "one A is the whole of the claim — authority is per screen, not per marker set"
+        );
+        assert_eq!(
+            bare.shell_phases.get(&ScreenId::Primary),
+            Some(&ShellIntegrationPhase::Prompt),
+            "and it never becomes a region, because only B builds one"
+        );
+        assert!(
+            !bare.semantic_input_overlaps_live(
+                ScreenId::Primary,
+                GridPoint { row: 0, column: 0 },
+                GridPoint { row: 0, column: 40 },
+            ),
+            "so the line being typed is covered by nothing: the heuristic is gone and the region \
+             that was supposed to replace it was never built"
+        );
+    }
+
     /// PIN: a screen that has never emitted OSC 133 is `Ineligible` in its entirety.
     ///
     /// This is scheme A's stated price and the reason gate A can be trusted: with no integration

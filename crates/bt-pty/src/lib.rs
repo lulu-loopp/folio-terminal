@@ -20,6 +20,7 @@ use thiserror::Error;
 mod shell;
 pub use shell::{
     ResolvedShell, ShellChoice, ShellEnvironment, SystemShellEnvironment, resolve_default_shell,
+    resolve_powershell_seven,
 };
 
 #[cfg(windows)]
@@ -57,6 +58,16 @@ pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap
 /// On PSReadLine 2.4.x the handler repairs the cached input anchor and render geometry without
 /// repainting; older/unproven versions consume the chord as a no-op.
 pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
+
+/// Windows PowerShell — the shell that is part of the operating system.
+///
+/// The floor under every resolution and every fallback in this crate, and named once so that the
+/// three places that have to agree on it (the fallback command, the "do not retry what already
+/// failed" guard, and the record a fallback leaves behind) cannot drift onto three spellings.
+/// A bare name rather than a path, deliberately: it is on `PATH` on every Windows there is, and a
+/// composed `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` would be this crate
+/// guessing at a layout the loader already knows.
+pub const WINDOWS_POWERSHELL: &str = "powershell.exe";
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 const TERM_PROGRAM: &str = "BetterTerminal";
@@ -265,7 +276,7 @@ impl PtyCommand {
     /// that names a *specific shell*: it is the guaranteed fallback every other spawn retries
     /// against, so it cannot ask a caller which flags PowerShell takes.
     pub fn powershell() -> Self {
-        Self::interactive_shell("powershell.exe").arg("-NoLogo")
+        Self::interactive_shell(WINDOWS_POWERSHELL).arg("-NoLogo")
     }
 
     /// An interactive, color-capable shell command for `program` — the `COLORTERM`/`TERM`
@@ -393,7 +404,7 @@ const POWERSHELL_INTERACTIVE_ARGS: &[&str] = &["-NoLogo"];
 fn program_is_windows_powershell(program: &OsStr) -> bool {
     Path::new(program)
         .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("powershell.exe")))
+        .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new(WINDOWS_POWERSHELL)))
 }
 
 #[derive(Default)]
@@ -523,10 +534,34 @@ pub struct PtySession {
     conpty_source: ConPtySource,
     /// Shared with the reader thread so `resize` can interleave `# RESIZE` markers with chunks.
     dump: Option<Arc<Mutex<PtyDump>>>,
-    /// Set once, only when `spawn_default` had to fall back to `powershell.exe` after its
-    /// resolved shell failed to spawn. `Runtime` surfaces this through the same status-text
-    /// channel as the math-worker downgrade notice, then discards it.
-    shell_fallback_notice: Option<String>,
+    /// Set once, only when a spawn had to fall back to [`WINDOWS_POWERSHELL`] after the
+    /// resolved shell failed to start. `Runtime` turns it into the pane's first line, then
+    /// discards it.
+    shell_fallback: Option<ShellFallback>,
+}
+
+/// What happened, for the window to say it in its own words.
+///
+/// **A fact, not a sentence**, and the change is the whole of this ticket's third item. The
+/// sentence this used to be was assembled here, out of the only two things this crate knows: the
+/// path of the program and the operating system's account of why it would not start. Both are the
+/// wrong register for the one place it is printed — the top of the user's own screen, where the
+/// shell's first line belongs. The path is not what the user picked (they picked *Git Bash*, not
+/// `D:\App\Tool\Git\bin\bash.exe`), and the OS's account arrives wrapped in the vendored
+/// launcher's debugging: the whole `CreateProcessW` call, the command line `Debug`-quoted with the
+/// `NUL` terminator `CreateProcessW` requires still on the end of it, and the working directory
+/// again.
+///
+/// So the crate that knows *why* keeps that for the log ([`eprintln!`], where a debugging string
+/// is exactly right), and hands up only what it also knows to be true: this program did not start,
+/// that one did. The crate that knows the **profiles** is the one that can name them, and it is
+/// the one that writes the line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShellFallback {
+    /// The program that would not start.
+    pub requested: OsString,
+    /// The program that did — always [`WINDOWS_POWERSHELL`], which is part of Windows.
+    pub started: &'static str,
 }
 
 impl PtySession {
@@ -537,7 +572,7 @@ impl PtySession {
     /// `BT_SHELL` semantics.
     ///
     /// If the resolved shell fails to spawn, this falls back to `powershell.exe` once and
-    /// records a one-line notice (`take_shell_fallback_notice`) instead of failing the session —
+    /// records what happened (`take_shell_fallback`) instead of failing the session —
     /// a Windows PowerShell 5.1 install is effectively guaranteed, while a `BT_SHELL` override or
     /// a `pwsh` resolved from a stale PATH entry is not.
     ///
@@ -584,8 +619,8 @@ impl PtySession {
     /// would not start are not facts about the one that did.
     ///
     /// It keeps the same recoverable-failure contract as `spawn_default`: a program that will not
-    /// start falls back once to `powershell.exe` and leaves a one-line notice
-    /// (`take_shell_fallback_notice`) rather than failing the session, because a window with no
+    /// start falls back once to `powershell.exe` and leaves a record of the swap
+    /// (`take_shell_fallback`) rather than failing the session, because a window with no
     /// shell in it is worse than a window with the wrong one *provided the swap is stated*. The
     /// retry is skipped when the program is already `powershell.exe`, where it would repeat an
     /// identical, already-failed spawn.
@@ -673,24 +708,30 @@ impl PtySession {
         match Self::spawn(command, size, wake.clone()) {
             Ok(session) => Ok(session),
             Err(spawn_error) if fall_back => {
-                let notice = format!(
-                    "{} failed to start ({spawn_error}); using powershell.exe instead",
+                // The whole of the operating system's account, kept where a debugging string is
+                // the right register and read by whoever is debugging. It is deliberately not
+                // carried up: see [`ShellFallback`].
+                eprintln!(
+                    "recoverable shell spawn failure: {} did not start ({spawn_error}); \
+                     using {WINDOWS_POWERSHELL} instead",
                     Path::new(&program).display()
                 );
-                eprintln!("recoverable shell spawn failure: {notice}");
                 let fallback = PtyCommand::powershell().working_directory(working_directory);
                 let mut session = Self::spawn(fallback, size, wake)?;
-                session.shell_fallback_notice = Some(notice);
+                session.shell_fallback = Some(ShellFallback {
+                    requested: program,
+                    started: WINDOWS_POWERSHELL,
+                });
                 Ok(session)
             }
             Err(spawn_error) => Err(spawn_error),
         }
     }
 
-    /// Take the one-shot notice left by a `spawn_default` fallback, if any. `None` once taken, and
+    /// Take the one-shot record of a spawn fallback, if there was one. `None` once taken, and
     /// `None` for every session that started its resolved shell cleanly.
-    pub fn take_shell_fallback_notice(&mut self) -> Option<String> {
-        self.shell_fallback_notice.take()
+    pub fn take_shell_fallback(&mut self) -> Option<ShellFallback> {
+        self.shell_fallback.take()
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
@@ -736,7 +777,7 @@ impl PtySession {
             reader: Some(reader_thread),
             conpty_source,
             dump,
-            shell_fallback_notice: None,
+            shell_fallback: None,
         })
     }
 
@@ -1581,7 +1622,7 @@ mod tests {
         let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", "powershell.exe");
         let mut session =
             PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
-        assert!(session.take_shell_fallback_notice().is_none());
+        assert!(session.take_shell_fallback().is_none());
         assert!(session.child_id().is_some());
         session.shutdown().unwrap();
     }
@@ -1592,16 +1633,14 @@ mod tests {
         let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", &missing);
         let mut session =
             PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
-        let notice = session
-            .take_shell_fallback_notice()
-            .expect("a spawn failure on the resolved shell must leave a fallback notice");
+        let fallback = session
+            .take_shell_fallback()
+            .expect("a spawn failure on the resolved shell must leave a record of the fallback");
+        assert_eq!(fallback.requested, missing.as_os_str());
+        assert_eq!(fallback.started, WINDOWS_POWERSHELL);
         assert!(
-            notice.contains("powershell.exe"),
-            "fallback notice should name the shell it fell back to: {notice:?}"
-        );
-        assert!(
-            session.take_shell_fallback_notice().is_none(),
-            "the notice is one-shot"
+            session.take_shell_fallback().is_none(),
+            "the record is one-shot"
         );
         assert!(session.child_id().is_some());
         session.shutdown().unwrap();
@@ -1628,13 +1667,11 @@ mod tests {
 
         let mut session =
             PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
-        let notice = session
-            .take_shell_fallback_notice()
-            .expect("an unresolvable pwsh.exe path must still fall back and leave a notice");
-        assert!(
-            notice.contains("powershell.exe"),
-            "fallback notice should name the shell it fell back to: {notice:?}"
-        );
+        let fallback = session
+            .take_shell_fallback()
+            .expect("an unresolvable pwsh.exe path must still fall back and leave a record");
+        assert_eq!(fallback.requested, pwsh_path.as_os_str());
+        assert_eq!(fallback.started, WINDOWS_POWERSHELL);
         assert!(session.child_id().is_some());
         session.shutdown().unwrap();
     }

@@ -229,10 +229,16 @@ fn migrate_profile_id_in_leaf(leaf: &mut Value) {
 /// MSI install, a `winget` install and a Store alias, and none of those differences means the user
 /// picked a different profile.
 ///
-/// Both PowerShells map to one slug, and that is the point of the ruling rather than a loss of
-/// information — `pwsh.exe` and `powershell.exe` were never two profiles, they were one profile's
-/// resolution order (`BT_SHELL`, then PowerShell 7, then Windows PowerShell), and which end of it
-/// a given machine landed on is a fact about the machine and not about what the user chose.
+/// **The two PowerShells map to two slugs**, and this reverses an earlier reading of the same
+/// ruling. While the application offered a single `PowerShell` profile whose resolution order ran
+/// `BT_SHELL` → PowerShell 7 → Windows PowerShell, which end a machine landed on was a fact about
+/// the machine rather than a choice, and one slug was right. The application now offers the two as
+/// separate profiles (Windows Terminal's arrangement, and the one a person with both installed
+/// expects), so which of them a pane was running is again something the user picked — and the
+/// executable a v1–v5 document recorded is the only surviving record of it. Folding both onto
+/// `"pwsh"` would spend that record: a pane that ran 5.1 would come back as PowerShell 7 wherever
+/// one is installed, which is a different shell with a different language version, and no later
+/// build could recover what it had been.
 ///
 /// **An unrecognized value is returned verbatim**, and is not mapped to the default profile. The
 /// two are not the same promise: mapping here would erase, permanently and at the next write, a
@@ -248,11 +254,15 @@ fn migrate_profile_id_in_leaf(leaf: &mut Value) {
 fn profile_slug(current: &str) -> &str {
     let file_name = current.rsplit(['\\', '/']).next().unwrap_or(current).trim();
     match () {
-        () if file_name.eq_ignore_ascii_case("pwsh.exe")
-            || file_name.eq_ignore_ascii_case("powershell.exe") =>
-        {
-            "pwsh"
-        }
+        // The two PowerShells are two profiles and always were two programs;
+        // this build is simply the first one that has a name for the second.
+        // A v1–v5 document recorded the executable that *actually ran*, so the
+        // path is a record of which of them it was, and mapping both onto one
+        // slug would spend that record to save a line — a pane that ran
+        // `powershell.exe` would come back as PowerShell 7 on a machine that has
+        // one, which is a different shell with a different language version.
+        () if file_name.eq_ignore_ascii_case("pwsh.exe") => "pwsh",
+        () if file_name.eq_ignore_ascii_case("powershell.exe") => "winps",
         () if file_name.eq_ignore_ascii_case("wsl.exe") => "wsl",
         () if file_name.eq_ignore_ascii_case("cmd.exe") => "cmd",
         () if file_name.eq_ignore_ascii_case("bash.exe")
@@ -618,9 +628,10 @@ mod tests {
         );
         assert_eq!(
             root["children"][1]["children"][0]["profile_id"],
-            json!("pwsh"),
-            "and so is one nested two splits deep — Windows PowerShell is the same profile as \
-             PowerShell 7, because they were always one profile's resolution order"
+            json!("winps"),
+            "and so is one nested two splits deep — and it arrives at Windows PowerShell rather \
+             than at PowerShell 7, because the path is the record of which of the two actually \
+             ran and this build has a profile for each"
         );
         assert_eq!(
             migrated["recent"][0]["seed"]["profile_id"],
@@ -661,10 +672,14 @@ mod tests {
         for (written, expected) in [
             // The executable paths §3.3 specified as the v1 transitional value.
             (r"C:\Program Files\PowerShell\7\pwsh.exe", "pwsh"),
+            // Two PowerShells, two slugs: the path is the record of which one
+            // actually ran, and this build has a profile for each.
             (
                 r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
-                "pwsh",
+                "winps",
             ),
+            ("powershell.exe", "winps"),
+            ("winps", "winps"),
             (r"C:\WINDOWS\System32\wsl.exe", "wsl"),
             (r"C:\WINDOWS\System32\cmd.exe", "cmd"),
             (r"C:\Program Files\Git\bin\bash.exe", "gitbash"),

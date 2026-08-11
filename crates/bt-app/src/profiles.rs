@@ -36,7 +36,7 @@ use std::{
     time::SystemTime,
 };
 
-use bt_pty::{ShellEnvironment, resolve_default_shell};
+use bt_pty::{ShellEnvironment, resolve_powershell_seven};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette, rounded_overlay_fill,
@@ -299,22 +299,27 @@ pub enum StartingDir {
 /// How a profile's executable is located on the machine.
 ///
 /// Two shapes rather than one because they answer to different authorities.
-/// [`Self::DefaultShell`] defers to a resolution *order* that is already ruled
-/// and already tested (`bt_pty::resolve_default_shell`: `BT_SHELL`, then a
-/// `pwsh` probe, then `powershell.exe`); [`Self::FirstOf`] is a list of places
-/// to look, in order, for a program that either is on this machine or is not.
+/// [`Self::PowerShellSeven`] defers to a resolution *order* that is already ruled
+/// and already tested (`bt_pty::resolve_powershell_seven`: `BT_SHELL`, then a
+/// `pwsh` probe); [`Self::FirstOf`] is a list of places to look, in order, for a
+/// program that either is on this machine or is not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgramSource {
-    /// `bt_pty::resolve_default_shell`'s answer — `BT_SHELL` first (ruling
+    /// `bt_pty::resolve_powershell_seven`'s answer — `BT_SHELL` first (ruling
     /// 2026-08-10, Q4: the override is **kept**, as a development back door, and
-    /// it covers this profile alone rather than becoming a fifth profile's
-    /// worth of configuration), then PowerShell 7, then Windows PowerShell.
+    /// it covers this profile alone rather than becoming another profile's worth
+    /// of configuration), then a `pwsh.exe` probe.
     ///
-    /// Never unavailable, and that is a fact about Windows rather than an
-    /// optimism: `powershell.exe` is part of the OS, so the last step of that
-    /// chain always answers. It is what makes [`FALLBACK_PROFILE`] safe to fall
-    /// back to.
-    DefaultShell,
+    /// **It stops there, and the missing third step is the point** (user ruling
+    /// 2026-08-11). It used to end at `powershell.exe`, back when one row called
+    /// `PowerShell` stood for the whole family and the row could not afford to
+    /// answer "no". Now that Windows PowerShell has a row of its own, a machine
+    /// without PowerShell 7 makes *this* row greyed and truthful instead of
+    /// startable and wrong: a user with both installed picks between them, and a
+    /// `PowerShell` row that quietly started 5.1 would be the picker lying about
+    /// which of the two it ran — on exactly the machines where the difference is
+    /// visible.
+    PowerShellSeven,
     /// The first of these that is a real file, in order.
     FirstOf(&'static [ProgramCandidate]),
 }
@@ -355,6 +360,12 @@ pub enum ProgramCandidate {
 /// there** — the two answers are not the same, and the difference is what the
 /// honest-capability matrix is made of.
 ///
+/// There is no `None`, and that is the P6 result rather than a tidy-up: every
+/// profile this build ships now has a way in. What differs is how far it
+/// reaches, and the variants say so — which is exactly the distinction a `None`
+/// would have flattened, by spelling "we found no door" and "the door is only
+/// wide enough for one marker" the same way.
+///
 /// The profile with no script is not degraded by a special case: a shell that
 /// never emits OSC 133 keeps the cursor/WRAPLINE heuristics, and one that never
 /// emits OSC 7 leaves the relative path undetected rather than guessing a
@@ -381,22 +392,100 @@ pub enum Integration {
     /// argument costs is the startup chain it replaces, which the script itself
     /// puts back — see `scripts/shell-integration/betterterminal.bash`.
     BashInitFile,
-    /// No script exists for this profile yet.
-    None,
+    /// No script at all — the whole integration is the `PROMPT` variable
+    /// `cmd.exe` prints its prompt from, and what fits in there is **one**
+    /// marker: `OSC 7`.
+    ///
+    /// `PROMPT` is not a hook, it is a format string, and `cmd.exe` expands it
+    /// at exactly one moment: just before it reads a line. There is no
+    /// pre-execution and no post-execution moment to be called at, so
+    /// `OSC 133;C` (a command was submitted) and `OSC 133;D;<code>` (it ended,
+    /// with this status) have nowhere to be emitted from. That much was known
+    /// (ruling 2026-08-11, Q5).
+    ///
+    /// **What that ruling assumed and this build disproves is that `A` and `B`
+    /// are free.** They are not two more facts, they are a claim of *authority*,
+    /// and the machine they claim it from is built on `C` closing what `B`
+    /// opened:
+    ///
+    /// * `133;A` alone turns `shell_integration_is_authoritative` on, and that
+    ///   flag's job is to **retire the cursor-line heuristic** — the rule that
+    ///   the line under the cursor is probably still being typed and must not be
+    ///   decorated yet. Its replacement is the semantic input region, which only
+    ///   `B` and `C` can build. A shell that sends `A` and stops has therefore
+    ///   switched the protection off and put nothing in its place, and a path
+    ///   typed at a `cmd` prompt would light up as a link mid-word.
+    /// * `133;B` opens an input region whose only closers are `C` and the *next*
+    ///   `A`. Without `C` it stays open across the command's entire run, so
+    ///   `typed_shell_input_live` reads the command's own output as an unsent
+    ///   buffer: the ConPTY resize gate holds for as long as anything is
+    ///   printing, and every resize commit owes an `InvokePrompt` chord to a
+    ///   shell with no such binding.
+    ///
+    /// A third cost is `M2-restart-shell-contract.md` §1.6's: it defines idle as
+    /// "已见 OSC 133 A/B、停在提示符", so a `cmd` pane sending A/B would be
+    /// classified **idle** and a future `Restart shell` would skip its
+    /// confirmation — precisely where we cannot know whether it is busy.
+    ///
+    /// All three are strictly worse than sending nothing, and sending nothing is
+    /// a documented, tested position rather than a gap: a screen that never emits
+    /// OSC 133 keeps the cursor/WRAPLINE heuristics byte for byte
+    /// (`docs/shell-integration.md`, "Authority and fallback"). So `cmd` stays
+    /// there, whole, and spends its one available slot on the marker that has no
+    /// bracket to leave dangling. Pinned at
+    /// `bt_term::…::a_prompt_that_can_never_send_c_must_not_send_a_or_b_either`.
+    CmdPrompt,
 }
 
-pub const PROFILES: [Profile; 4] = [
+pub const PROFILES: [Profile; 5] = [
     Profile {
         id: "pwsh",
+        // **Two PowerShells, two rows** (user ruling 2026-08-11), which is
+        // Windows Terminal's own arrangement and the one a machine with both
+        // installed makes necessary: 7 and 5.1 are different products with
+        // different language versions, and a single row could only ever start
+        // one of them while claiming to be both.
+        //
+        // This row keeps the bare name, because that is what the product it
+        // starts is called; the 5.1 row carries the qualifier, because
+        // "Windows PowerShell" is *its* real name and not a disambiguation this
+        // list invented.
         title: "PowerShell",
         mark: ChromeMark::ProfilePowerShell,
-        program: ProgramSource::DefaultShell,
+        program: ProgramSource::PowerShellSeven,
         // The flag this terminal has always passed, now said by the profile that
         // means it rather than by the spawn path every profile goes through.
         args: &["-NoLogo"],
         starting_dir: StartingDir::WindowsHome,
         paths: PathNamespace::Windows,
         qualifier: Qualifier::None,
+        integration: Integration::PowerShellOptIn,
+    },
+    Profile {
+        id: "winps",
+        title: "Windows PowerShell",
+        // The same mark. The mock-up has one PowerShell symbol and drew no
+        // second one, and there is nothing to invent: both rows start a
+        // PowerShell, the blue tile is what "a PowerShell is here" looks like,
+        // and the titles already say which. A second glyph would be this list
+        // asserting a visual distinction the family does not have.
+        mark: ChromeMark::ProfilePowerShell,
+        // Not `PowerShellSeven`, and not a bare name either: this is the one
+        // shell that is *part of Windows*, so it is named where Windows keeps
+        // it. That is what lets [`FALLBACK_PROFILE`] be this row — the probe
+        // finds it on every Windows there is, so the floor under every other
+        // profile is never itself greyed.
+        program: ProgramSource::FirstOf(&[ProgramCandidate::Under {
+            variable: "SystemRoot",
+            tail: r"System32\WindowsPowerShell\v1.0\powershell.exe",
+        }]),
+        args: &["-NoLogo"],
+        starting_dir: StartingDir::WindowsHome,
+        paths: PathNamespace::Windows,
+        qualifier: Qualifier::None,
+        // The same script, and it already handles this shell: `betterterminal.ps1`
+        // is written for 5.1 and 7 alike, and the PSReadLine 2.0.0 anchor repair
+        // 5.1 needs is an existing no-op sentinel rather than a second code path.
         integration: Integration::PowerShellOptIn,
     },
     Profile {
@@ -501,7 +590,7 @@ pub const PROFILES: [Profile; 4] = [
         starting_dir: StartingDir::WindowsHome,
         paths: PathNamespace::Windows,
         qualifier: Qualifier::None,
-        integration: Integration::None,
+        integration: Integration::CmdPrompt,
     },
 ];
 
@@ -515,13 +604,26 @@ pub const PROFILES: [Profile; 4] = [
 /// nothing was picked" is a name that will be read as the wrong one of the two by
 /// whoever touches it next.
 ///
-/// What it must satisfy is one property: it is [`ProgramSource::DefaultShell`],
-/// whose last resolution step is `powershell.exe`, which is part of Windows. So
-/// it always starts, which is what makes it safe to be the end of every fallback
-/// chain — see [`the_fallback_profile_can_always_be_started`]. The *user's*
-/// default carries no such guarantee (they can uninstall Git after choosing Git
-/// Bash), which is precisely why [`default_profile`] resolves through here.
-pub const FALLBACK_PROFILE: usize = 0;
+/// What it must satisfy is one property: it names a program that is **part of
+/// Windows**, so it always starts — which is what makes it safe to be the end of
+/// every fallback chain (see [`the_fallback_profile_can_always_be_started`]).
+/// The *user's* default carries no such guarantee (they can uninstall Git after
+/// choosing Git Bash), which is precisely why [`default_profile`] resolves
+/// through here.
+///
+/// **It is `winps` and no longer `pwsh`** (user ruling 2026-08-11), and the move
+/// follows the property rather than changing it. The floor used to be the
+/// PowerShell row because that row's resolution order *ended* at
+/// `powershell.exe`; now that PowerShell 7 has been given a row that answers
+/// honestly — greyed on a machine without it — the row that cannot fail is the
+/// one that names Windows PowerShell directly. Pointing the floor at a profile
+/// that can be greyed would be a fallback chain with a hole at the bottom.
+///
+/// It is also the more truthful landing for `bt-pty`'s own last-resort retry,
+/// which spawns `powershell.exe` when a profile's program will not start: a pane
+/// that ends up running 5.1 now says *Windows PowerShell* on its tab instead of
+/// wearing the name of the shell it failed to be.
+pub const FALLBACK_PROFILE: usize = 1;
 
 /// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from —
 /// `state.defaultProfile` (mock-up 3217), resolved for this machine.
@@ -577,6 +679,20 @@ pub fn index_of_id(id: &str) -> usize {
         .iter()
         .position(|profile| profile.id == id)
         .unwrap_or(FALLBACK_PROFILE)
+}
+
+/// Whether this build has a profile by that name at all.
+///
+/// The question [`index_of_id`] answers *away*: it folds "this profile" and "no
+/// such profile, have the default" into one number, which is right for every
+/// caller that needs a profile and wrong for the one caller that needs to know a
+/// substitution happened. `M2-restart-shell-contract.md` §3 requires that
+/// substitution to be visible — "绝不静默替换" — and a function that answers
+/// `FALLBACK_PROFILE` for a saved `"pwsh"` and a saved `"fish"` alike cannot tell
+/// anyone which of the two it was looking at.
+#[must_use]
+pub fn has_id(id: &str) -> bool {
+    PROFILES.iter().any(|profile| profile.id == id)
 }
 
 /// What a greyed row says when the pointer rests on it — the *why* behind the
@@ -915,9 +1031,9 @@ impl ProfilePrograms {
     pub fn probe(environment: &dyn ShellEnvironment) -> Self {
         Self {
             resolved: std::array::from_fn(|index| match PROFILES[index].program {
-                // Always answers: the last step of that chain is
-                // `powershell.exe`, which is part of the OS.
-                ProgramSource::DefaultShell => Some(resolve_default_shell(environment).program),
+                // A real `None` on a machine with no PowerShell 7, which is
+                // what greys the row rather than starting 5.1 under 7's name.
+                ProgramSource::PowerShellSeven => resolve_powershell_seven(environment),
                 ProgramSource::FirstOf(candidates) => candidates
                     .iter()
                     .filter_map(|candidate| Self::candidate_path(*candidate, environment))
@@ -1156,6 +1272,7 @@ pub fn layout(
     surface: (f32, f32),
     scale: f32,
     recent: &[RecentEntry],
+    measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> ProfileMenuLayout {
     let px = |value: f32| value * scale;
     let recent = menu_rows(recent);
@@ -1183,7 +1300,48 @@ pub fn layout(
         separator_block + section_block + item_height * recent.len() as f32
     };
 
-    let width = px(MENU_MIN_WIDTH_LOGICAL_PX).round();
+    // **`min-width`, at last read as a minimum.** The mock-up's menu is
+    // content-sized — `min-width: 180px` over `white-space: nowrap` rows — and
+    // this took that declaration for a fixed width, which was survivable only
+    // while every row fitted inside it. `Windows PowerShell` does not: with its
+    // `default` annotation beside it the pair wants about 200px, and a fixed
+    // 180 clipped the name mid-glyph in the out-of-the-box configuration, with
+    // no ellipsis to say so.
+    //
+    // The annotation slot always reserves the **widest** annotation a row could
+    // carry rather than the one it happens to carry today, so that changing the
+    // default profile — or unplugging the drive Git lives on — cannot make the
+    // menu change width under the pointer.
+    let annotation = measure(HINT_TEXT, px(HINT_FONT_LOGICAL_PX))
+        .max(measure(UNAVAILABLE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX)));
+    let mut row_content = |name: &str, font: f32, annotation: f32| {
+        px(ITEM_ICON_COLUMN_LOGICAL_PX)
+            + px(ITEM_GAP_LOGICAL_PX)
+            + measure(name, font)
+            + px(ITEM_GAP_LOGICAL_PX)
+            + annotation
+    };
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    // The **profile** rows decide the width, and the Recent rows do not.
+    //
+    // Not an oversight: a profile's title is this module's own (a constant, or a
+    // constant plus a qualifier this machine answered), so its length is a fact
+    // the product is responsible for and must make room for. A Recent row's name
+    // is a *directory* — arbitrary length, chosen by nobody here — and letting
+    // one stretch the popup across the window is exactly what mock-up 1030's
+    // `max-width: 260px` exists to prevent. Recent rows therefore go on being
+    // clamped into whatever width the profile rows established, which is the
+    // behaviour they already had; the ellipsis that clamp still owes them
+    // (mock-up 1031) is unchanged and still outstanding.
+    let content = (0..PROFILES.len())
+        // `title(index)` and not `Profile::title`: the qualifier is part of the
+        // string the row draws, and on a machine with two distributions it is
+        // the longest row in the list.
+        .map(|index| row_content(title(index), px(ITEM_FONT_LOGICAL_PX), annotation))
+        .fold(0.0_f32, f32::max);
+    let width = (chrome + content)
+        .max(px(MENU_MIN_WIDTH_LOGICAL_PX))
+        .round();
     let height =
         (2.0 * (border + padding) + item_height * PROFILES.len() as f32 + recent_block).round();
     let (surface_width, surface_height) = surface;
@@ -1721,15 +1879,27 @@ mod tests {
             self
         }
 
-        /// A machine with all four shells on it, spelled the way a real Windows
+        /// A machine with all five shells on it, spelled the way a real Windows
         /// install spells them.
         fn fully_equipped() -> Self {
-            Self::default()
-                .with_var("SystemRoot", r"C:\WINDOWS")
+            Self::bare_windows()
                 .with_var("ProgramFiles", r"C:\Program Files")
+                .with_file(r"C:\Program Files\PowerShell\7\pwsh.exe")
                 .with_file(r"C:\WINDOWS\System32\wsl.exe")
                 .with_file(r"C:\WINDOWS\System32\cmd.exe")
                 .with_file(r"C:\Program Files\Git\bin\bash.exe")
+        }
+
+        /// Windows with nothing installed on top of it — which still has Windows
+        /// PowerShell, because that one ships *inside* the OS.
+        ///
+        /// A fixture without it would be a machine that does not exist, and it
+        /// would quietly make [`FALLBACK_PROFILE`] unavailable, which is the one
+        /// thing this module guarantees can never happen.
+        fn bare_windows() -> Self {
+            Self::default()
+                .with_var("SystemRoot", r"C:\WINDOWS")
+                .with_file(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe")
         }
     }
 
@@ -1749,9 +1919,11 @@ mod tests {
         ProfilePrograms::probe(&FakeMachine::fully_equipped())
     }
 
-    /// A bare Windows box: PowerShell and nothing else this product can start.
+    /// A bare Windows box: Windows PowerShell and nothing else this product can
+    /// start — not even PowerShell 7, which is an install rather than part of
+    /// the OS.
     fn bare() -> ProfilePrograms {
-        ProfilePrograms::probe(&FakeMachine::default())
+        ProfilePrograms::probe(&FakeMachine::bare_windows())
     }
 
     fn at(secs: u64) -> SystemTime {
@@ -1809,6 +1981,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &mut fake_measure,
             );
             let frame = layout.frame;
             assert_eq!(
@@ -1821,10 +1994,37 @@ mod tests {
                 button[0].round(),
                 "scale {scale}: the menu's left edge is the button's, on a whole pixel"
             );
+            // `min-width: 180px` is a **floor**, and the mock-up's rows are
+            // content-sized over it (`white-space: nowrap`). Reading it as a
+            // fixed width clipped `Windows PowerShell` mid-glyph the day that
+            // row shipped, so the assertion is the declaration rather than a
+            // number: at least the minimum, and exactly what the longest row
+            // needs when that is more.
+            let width = (frame[2] - frame[0]).round();
+            assert!(
+                width >= (180.0 * scale).round(),
+                "scale {scale}: `min-width: 180px`, got {width}"
+            );
+            let longest = (0..PROFILES.len())
+                .map(|index| fake_measure(title(index), ITEM_FONT_LOGICAL_PX * scale))
+                .fold(0.0_f32, f32::max);
+            let annotation = fake_measure(HINT_TEXT, HINT_FONT_LOGICAL_PX * scale).max(
+                fake_measure(UNAVAILABLE_HINT_TEXT, HINT_FONT_LOGICAL_PX * scale),
+            );
+            let chrome = 2.0
+                * ((FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
+                    + MENU_PADDING_LOGICAL_PX * scale
+                    + ITEM_PADDING_X_LOGICAL_PX * scale);
             assert_eq!(
-                (frame[2] - frame[0]).round(),
-                (180.0 * scale).round(),
-                "scale {scale}: `.profile-menu` is 180px wide"
+                width,
+                (chrome
+                    + ITEM_ICON_COLUMN_LOGICAL_PX * scale
+                    + 2.0 * ITEM_GAP_LOGICAL_PX * scale
+                    + longest
+                    + annotation)
+                    .max(180.0 * scale)
+                    .round(),
+                "scale {scale}: and the longest row decides the rest"
             );
             assert_eq!(layout.items.len(), PROFILES.len());
         }
@@ -1853,7 +2053,14 @@ mod tests {
         let plus = [8.0_f32, 400.0, 181.0, 430.0];
         let chevron = [183.0_f32, 400.0, 211.0, 430.0];
 
-        let open = layout(chevron, MenuSide::Beside, (1400.0, 900.0), scale, NO_RECENT);
+        let open = layout(
+            chevron,
+            MenuSide::Beside,
+            (1400.0, 900.0),
+            scale,
+            NO_RECENT,
+            &mut fake_measure,
+        );
         assert_eq!(
             open.frame[0],
             (chevron[2] + 4.0 * scale).round(),
@@ -1864,7 +2071,14 @@ mod tests {
             "and level with its top rather than below its bottom"
         );
 
-        let parked = layout(plus, MenuSide::Beside, (1400.0, 900.0), scale, NO_RECENT);
+        let parked = layout(
+            plus,
+            MenuSide::Beside,
+            (1400.0, 900.0),
+            scale,
+            NO_RECENT,
+            &mut fake_measure,
+        );
         assert_eq!(
             parked.frame[1], open.frame[1],
             "a parked rail anchors on the `+` instead, and the two share a top, \
@@ -1872,7 +2086,14 @@ mod tests {
         );
 
         // The `Below` placement is still the strip's own, and still different.
-        let strip = layout(chevron, MenuSide::Below, (1400.0, 900.0), scale, NO_RECENT);
+        let strip = layout(
+            chevron,
+            MenuSide::Below,
+            (1400.0, 900.0),
+            scale,
+            NO_RECENT,
+            &mut fake_measure,
+        );
         assert_eq!(strip.frame[0], chevron[0].round());
         assert_eq!(strip.frame[1], (chevron[3] + 4.0 * scale).round());
     }
@@ -1891,6 +2112,7 @@ mod tests {
             surface,
             scale,
             NO_RECENT,
+            &mut fake_measure,
         );
         assert!(
             low.frame[3] <= surface.1 - 8.0 + 0.001,
@@ -1909,30 +2131,47 @@ mod tests {
     /// silently re-points it.
     ///
     /// This test replaces one that asserted `PROFILES.len() == 1` and was right
-    /// to: a list of four rows that all started PowerShell would have been three
-    /// rows that cannot do what they say. What makes four honest now is the rest
-    /// of this file — a program per profile, and a greyed row where the machine
+    /// to: a list of rows that all started PowerShell would have been rows that
+    /// cannot do what they say. What makes the list honest now is the rest of
+    /// this file — a program per profile, and a greyed row where the machine
     /// has none.
+    ///
+    /// The two PowerShells sit adjacent and in that order (user ruling
+    /// 2026-08-11): 7 first because it is the one a person who installed it
+    /// means by "PowerShell", 5.1 beside it because the pair is the choice.
     #[test]
     fn the_picker_offers_exactly_the_profiles_this_build_has() {
-        assert_eq!(PROFILES.len(), 4);
+        assert_eq!(PROFILES.len(), 5);
         let listed: Vec<_> = PROFILES.iter().map(|profile| profile.id).collect();
-        assert_eq!(listed, ["pwsh", "wsl", "gitbash", "cmd"]);
-        assert_eq!(PROFILES[FALLBACK_PROFILE].title, "PowerShell");
+        assert_eq!(listed, ["pwsh", "winps", "wsl", "gitbash", "cmd"]);
+        assert_eq!(PROFILES[FALLBACK_PROFILE].title, "Windows PowerShell");
 
-        // Four profiles, four marks: the icon column carries information only
-        // while no two rows carry the same thing.
+        // **Mark × title, and not the mark alone.** This used to require every
+        // mark to be distinct, and the two PowerShells retire that: they are one
+        // family and there is one PowerShell symbol in the mock-up, so drawing a
+        // second glyph would assert a visual distinction the family does not
+        // have. What has to stay unique is what `docs/UI-UX.md` §126-137 says
+        // identity *is* — "图标 × 目录", the icon and the text together — and in
+        // this list the text is the title. Two rows with the same mark are fine;
+        // two rows a reader cannot tell apart are not.
         for (index, left) in PROFILES.iter().enumerate() {
             for right in &PROFILES[index + 1..] {
                 assert_ne!(
-                    left.mark, right.mark,
-                    "{} and {} would be one row twice — a profile's icon is its mark",
-                    left.id, right.id
+                    (left.mark, left.title),
+                    (right.mark, right.title),
+                    "{} and {} would be one row twice",
+                    left.id,
+                    right.id
                 );
             }
         }
+        assert_eq!(
+            PROFILES[index_of_id("pwsh")].mark,
+            PROFILES[index_of_id("winps")].mark,
+            "and the two PowerShells share theirs on purpose"
+        );
 
-        // And four ids, because an id is what a seed is keyed on: two profiles
+        // And five ids, because an id is what a seed is keyed on: two profiles
         // sharing one would be two tabs that cannot be told apart on disk.
         let ids: std::collections::HashSet<_> = listed.iter().collect();
         assert_eq!(ids.len(), PROFILES.len());
@@ -1958,12 +2197,14 @@ mod tests {
     fn only_the_powershell_profile_asks_for_nologo() {
         for profile in PROFILES {
             let has_nologo = profile.args.contains(&"-NoLogo");
+            // Both PowerShells: the flag belongs to the family, not to one row.
+            let is_powershell = profile.id == "pwsh" || profile.id == "winps";
             assert_eq!(
                 has_nologo,
-                profile.id == "pwsh",
+                is_powershell,
                 "{} must {} pass -NoLogo",
                 profile.id,
-                if profile.id == "pwsh" { "" } else { "not" }
+                if is_powershell { "" } else { "not" }
             );
         }
         assert_eq!(PROFILES[index_of_id("cmd")].args, &[] as &[&str]);
@@ -1971,6 +2212,71 @@ mod tests {
             PROFILES[index_of_id("gitbash")].args,
             &["--login", "-i"],
             "without --login this is a bash that cannot find git"
+        );
+    }
+
+    /// PIN — the two PowerShells are two rows, two programs, and two answers.
+    ///
+    /// User ruling 2026-08-11, and it reverses this module's earlier reading. One
+    /// row called `PowerShell` whose resolution order ended at `powershell.exe`
+    /// was defensible while it was the *only* PowerShell row: which end of the
+    /// chain a machine landed on was a fact about the machine. It stops being
+    /// defensible on a machine that has both installed, which is the common case
+    /// — the row silently starts one of two visibly different products, and the
+    /// user has no way to ask for the other.
+    ///
+    /// Red gate, and each half catches a different way of half-doing it:
+    ///
+    /// * leave `pwsh` resolving through the old chain and a machine without
+    ///   PowerShell 7 gets a row labelled `PowerShell` that starts 5.1 — the
+    ///   original lie, now with a second row beside it making the lie visible;
+    /// * point `FALLBACK_PROFILE` at `pwsh` and the floor under every other
+    ///   profile becomes a row that is allowed to be greyed.
+    #[test]
+    fn the_two_powershells_are_two_rows_and_only_one_of_them_can_be_missing() {
+        let (seven, five) = (index_of_id("pwsh"), index_of_id("winps"));
+        assert_ne!(seven, five, "two rows, so two indices");
+        assert_eq!(PROFILES[seven].title, "PowerShell");
+        assert_eq!(PROFILES[five].title, "Windows PowerShell");
+
+        // On a machine with both, each row starts its own binary — which is the
+        // whole of what splitting them buys.
+        let both = ProfilePrograms::probe(&FakeMachine::fully_equipped());
+        assert_eq!(
+            both.program(seven)
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some(r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned())
+        );
+        assert_eq!(
+            both.program(five).map(|p| p.to_string_lossy().into_owned()),
+            Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned())
+        );
+
+        // On a machine with only what Windows ships, the 7 row says so rather
+        // than starting 5.1 under 7's name, and the 5.1 row is still there.
+        let plain = bare();
+        assert!(!plain.is_available(seven), "no install, no row that works");
+        assert!(plain.is_available(five), "and this one is part of the OS");
+        assert_eq!(five, FALLBACK_PROFILE);
+
+        // `BT_SHELL` still belongs to the 7 row (Q4) and still bypasses the
+        // probe: it names a shell, and naming one that is not there leaves the
+        // row greyed rather than silently ignored.
+        let overridden = ProfilePrograms::probe(
+            &FakeMachine::bare_windows().with_var("BT_SHELL", r"C:\Tools\pwsh.exe"),
+        );
+        assert_eq!(
+            overridden
+                .program(seven)
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some(r"C:\Tools\pwsh.exe".to_owned())
+        );
+        assert_eq!(
+            overridden
+                .program(five)
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned()),
+            "and it does not reach across into the row it is not for"
         );
     }
 
@@ -1986,9 +2292,15 @@ mod tests {
     #[test]
     fn the_fallback_profile_can_always_be_started() {
         assert_eq!(
-            PROFILES[FALLBACK_PROFILE].program,
-            ProgramSource::DefaultShell,
-            "the fallback profile resolves through the OS's own PowerShell chain"
+            PROFILES[FALLBACK_PROFILE].id, "winps",
+            "the floor is the shell that is part of Windows"
+        );
+        assert!(
+            !matches!(
+                PROFILES[FALLBACK_PROFILE].program,
+                ProgramSource::PowerShellSeven
+            ),
+            "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
         );
         // Even on a machine with nothing else on it.
         assert!(bare().is_available(FALLBACK_PROFILE));
@@ -2010,6 +2322,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &mut fake_measure,
         );
         for (chosen, profile) in PROFILES.iter().enumerate() {
             let layers = build(
@@ -2068,6 +2381,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
         // Every profile as the default in turn, so the longest name carrying the
         // hint is covered rather than only the first row's short one.
@@ -2130,6 +2444,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
 
         let bare_tips: Vec<_> = layout.tips(&bare(), &vault).collect();
@@ -2143,6 +2458,12 @@ mod tests {
         assert_eq!(
             profiles_tipped,
             vec![
+                // PowerShell 7 is an install and this box has none of it; the
+                // 5.1 row beside it is part of Windows and says nothing.
+                (
+                    index_of_id("pwsh"),
+                    "PowerShell — not found on this machine".to_owned()
+                ),
                 (
                     index_of_id("wsl"),
                     "WSL — not found on this machine".to_owned()
@@ -2682,6 +3003,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &mut fake_measure,
         );
         assert_eq!(
             layout.items.len(),
@@ -2745,15 +3067,22 @@ mod tests {
             "a profile mark carries its own colours, so only desaturation can quiet it"
         );
 
-        // The default profile is on the same machine and is untouched: greying
+        // The fallback profile is on the same machine and is untouched: greying
         // is per row, and the row that always works still looks like it works.
-        let pwsh = layer
-            .sprites
-            .iter()
-            .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
-            .expect("PowerShell is always startable");
-        assert_eq!(pwsh.opacity, 1.0);
-        assert!(!pwsh.grayscale);
+        //
+        // Its sprite is taken by *row index* rather than by mark, because the
+        // two PowerShells share a mark on purpose — a search would find whichever
+        // came first and could not tell the greyed 7 row from the startable 5.1
+        // one, which is exactly the pair this test has to distinguish.
+        let winps = layer.sprites[FALLBACK_PROFILE];
+        assert_eq!(winps.mark, ChromeMark::ProfilePowerShell);
+        assert_eq!(winps.opacity, 1.0);
+        assert!(!winps.grayscale);
+        // …while PowerShell 7, one row above it, is greyed on this machine.
+        let pwsh = layer.sprites[index_of_id("pwsh")];
+        assert_eq!(pwsh.mark, ChromeMark::ProfilePowerShell);
+        assert_eq!(pwsh.opacity, UNAVAILABLE_MARK_OPACITY);
+        assert!(pwsh.grayscale);
         assert!(
             layer.labels.iter().any(|label| label.text == HINT_TEXT),
             "and still says it is the default"
@@ -2787,6 +3116,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
         let programs = bare();
         let centre = |rect: [f32; 4]| {
@@ -2853,7 +3183,14 @@ mod tests {
     fn the_menu_claims_its_own_box_and_nothing_else() {
         let scale = 1.0;
         let button = anchor(scale);
-        let layout = layout(button, MenuSide::Below, (960.0, 600.0), scale, NO_RECENT);
+        let layout = layout(
+            button,
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            NO_RECENT,
+            &mut fake_measure,
+        );
         let frame = layout.frame;
         let item = layout.items[0];
         assert_eq!(
@@ -2903,6 +3240,7 @@ mod tests {
             (surface, 600.0),
             scale,
             NO_RECENT,
+            &mut fake_measure,
         );
         let frame = layout.frame;
         assert!(
@@ -2947,6 +3285,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &mut fake_measure,
         );
         let palette = chrome_palette();
         let rest = one_layer(build(
@@ -3066,6 +3405,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &mut fake_measure,
             );
             let item = layout.items[0];
             assert_eq!(
@@ -3101,6 +3441,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             NO_RECENT,
+            &mut fake_measure,
         );
         let palette = chrome_palette();
         let layers = build(
@@ -3170,6 +3511,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &mut fake_measure,
             );
             let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
             assert_eq!(
@@ -3220,6 +3562,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 NO_RECENT,
+                &mut fake_measure,
             );
             let full = layout(
                 anchor(scale),
@@ -3227,6 +3570,7 @@ mod tests {
                 (960.0 * scale, 600.0),
                 scale,
                 &vault,
+                &mut fake_measure,
             );
             assert_eq!(
                 (full.frame[3] - full.frame[1]) - (empty.frame[3] - empty.frame[1]),
@@ -3306,6 +3650,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
         let centre = |rect: [f32; 4]| {
             (
@@ -3355,6 +3700,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
         assert_eq!(RECENT_CAPACITY, 8, "the vault's own cap, not a second one");
         assert_eq!(layout.recent.len(), RECENT_CAPACITY);
@@ -3406,6 +3752,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
         let palette = chrome_palette();
         let layer = one_layer(build(
@@ -3489,7 +3836,14 @@ mod tests {
             term("C:\\Users\\Weiyi\\empty", Some(""), 120),
             files("D:\\Developer\\BetterTerminal\\", 180),
         ];
-        let layout = layout(anchor(1.0), MenuSide::Below, (960.0, 600.0), 1.0, &vault);
+        let layout = layout(
+            anchor(1.0),
+            MenuSide::Below,
+            (960.0, 600.0),
+            1.0,
+            &vault,
+            &mut fake_measure,
+        );
         let layer = one_layer(build(
             &layout,
             &equipped(),
@@ -3522,6 +3876,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
         let palette = chrome_palette();
         let layer = one_layer(build(
@@ -3596,6 +3951,7 @@ mod tests {
             (960.0, 600.0),
             scale,
             &vault,
+            &mut fake_measure,
         );
         let palette = chrome_palette();
         let layer = one_layer(build(

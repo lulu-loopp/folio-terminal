@@ -43,7 +43,7 @@
               },
               {
                 "kind": "term",
-                "profile_id": "pwsh",
+                "profile_id": "winps",
                 "cwd": "C:\\Users\\dev",
                 "manual_name": null
               }

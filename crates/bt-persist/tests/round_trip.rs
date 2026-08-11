@@ -95,12 +95,18 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
     let LayoutNodeV1::Split(inner) = root_split.children[1].as_ref() else {
         panic!("tab 0's second child must be the nested split");
     };
-    for (index, expected_cwd) in [(0usize, r"C:\Users\dev\project"), (1, r"C:\Users\dev")] {
+    // The two children were written as two different executables, and they
+    // arrive as two different slugs: the v1 document recorded which PowerShell
+    // actually ran, and this build has a profile for each of them.
+    for (index, expected_cwd, expected_id) in [
+        (0usize, r"C:\Users\dev\project", "pwsh"),
+        (1, r"C:\Users\dev", "winps"),
+    ] {
         let LayoutNodeV1::Leaf(LeafNodeV1::Term(term)) = inner.children[index].as_ref() else {
             panic!("the nested split's children are both term leaves");
         };
         assert_eq!(
-            term.profile_id, "pwsh",
+            term.profile_id, expected_id,
             "a term leaf two splits deep must arrive slugged"
         );
         // The step renamed the profile and nothing standing beside it.

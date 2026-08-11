@@ -10,7 +10,7 @@
 //! | PowerShell | none — the user dot-sources it into `$PROFILE` themselves |
 //! | Git Bash | `bash --init-file <script> -i`, replacing `--login -i` |
 //! | WSL | `wsl.exe … -- <login shell> --init-file <script> -i` |
-//! | Command Prompt | none — `cmd.exe` has no pre/post-command hook to install |
+//! | Command Prompt | the `PROMPT` variable, carrying `OSC 7` and nothing else |
 //!
 //! PowerShell's absence from that list is not an omission. `pwsh` has one
 //! startup file at one well-known path and no argument that would source a
@@ -19,12 +19,18 @@
 //! `--init-file`, which names the startup file for one interactive shell and
 //! touches nothing on disk, so bash gets the automatic install and PowerShell
 //! keeps the manual one. The asymmetry is the shells', not a preference.
+//!
+//! `cmd.exe` has no startup file to name and no hook to install, so its whole
+//! integration is a *format string* — see [`profiles::Integration::CmdPrompt`]
+//! for why that string carries `OSC 7` alone and no OSC 133 marker at all.
 
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
+
+use bt_pty::ShellEnvironment;
 
 use crate::{
     persist,
@@ -52,6 +58,44 @@ const SCRIPT_FILE: &str = "betterterminal.bash";
 /// already did.
 const INSTALLED_MARKER: &str = "BT_SHELL_INTEGRATION";
 
+/// The variable `cmd.exe` prints its prompt from, and this build's only way in.
+const CMD_PROMPT: &str = "PROMPT";
+
+/// What a Rust CLI tool asks before it will print an `OSC 8` hyperlink — see
+/// [`hyperlink_declaration`].
+const FORCE_HYPERLINK: &str = "FORCE_HYPERLINK";
+
+/// What `cmd.exe` prints when `PROMPT` is unset — its own documented default,
+/// `<drive and path>` then `>`.
+///
+/// Spelled out rather than left to the default, because the moment this profile
+/// sets `PROMPT` at all it owes the whole string: a prefix handed to a shell
+/// whose `PROMPT` was empty would be the *entire* prompt, and the user would
+/// lose the one thing every `cmd` prompt has ever shown.
+const CMD_DEFAULT_PROMPT: &str = "$P$G";
+
+/// The report, in the only alphabet `PROMPT` has.
+///
+/// `$e` is the escape character and `$P` the current drive and path — two of the
+/// dozen-odd substitutions `cmd.exe` performs on this string, and the only two
+/// that exist. `$e\` is therefore `ESC \`, the string terminator, and it is used
+/// rather than `BEL` because `PROMPT` has no code that produces a `BEL` byte;
+/// both terminators are accepted (`osc_7_reports_its_working_directory_uri_…`).
+///
+/// **The URI is Win32-spelled, and that is forced rather than chosen.** `$P`
+/// expands to `D:\Developer\BetterTerminal`, and `PROMPT` has no substitution,
+/// no loop and no escape hatch that could turn those separators into `/` or
+/// percent-encode a space — measured, not assumed: `cmd.exe` under ConPTY puts
+/// `file:///C:\Program Files` on the wire for a directory with a space in it. So
+/// the report says the directory in the spelling the shell can say it in, the
+/// same principle Git Bash's `pwd -W` follows, and `file_uri_to_local_path`
+/// accepts it because a backslash is not a path separator in a URI and never
+/// splits a segment. That acceptance is pinned in `bt-term`
+/// (`a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it`)
+/// so that tightening the URI parser cannot silently blank every `cmd` pane's
+/// directory — the failure would be invisible from inside that crate.
+const CMD_OSC7: &str = r"$e]7;file:///$P$e\";
+
 /// The variables a WSL shell is given, listed for `WSLENV` so that they cross
 /// the Win32/Linux boundary.
 ///
@@ -60,11 +104,16 @@ const INSTALLED_MARKER: &str = "BT_SHELL_INTEGRATION";
 /// them, because `wsl.exe` forwards nothing it was not told to. Forwarding them
 /// is not this ticket inventing a capability — it is the same declaration every
 /// other profile has always received, finally reaching the one that could not.
-const FORWARDED: [&str; 4] = [
+/// `FORCE_HYPERLINK` is listed whether or not this process sets it: the listing
+/// forwards whatever value ends up on the Win32 side, so a user who set their
+/// own answer has it carried into the distribution rather than overwritten by
+/// its absence.
+const FORWARDED: [&str; 5] = [
     INSTALLED_MARKER,
     "TERM_PROGRAM",
     "TERM_PROGRAM_VERSION",
     "COLORTERM",
+    FORCE_HYPERLINK,
 ];
 
 /// Where the script is on this machine, written out on first use.
@@ -113,12 +162,17 @@ pub struct ShellCommand {
 /// `place_arguments` are [`profiles::SpawnPlace`]'s and sit between the two,
 /// which matters for WSL alone: `--cd` is a flag to the *launcher* and must come
 /// before the `--` that ends the launcher's own arguments.
+///
+/// `environment` is read, not written: Command Prompt's integration is a
+/// variable this process already has one of, and prefixing rather than replacing
+/// it means the composition has to see what is there.
 #[must_use]
 pub fn shell_command(
     profile: usize,
     place_arguments: &[OsString],
     script: Option<&Path>,
     wsl: &WslFacts,
+    environment: &dyn ShellEnvironment,
 ) -> ShellCommand {
     let own = || {
         PROFILES[profile]
@@ -128,6 +182,22 @@ pub fn shell_command(
             .chain(place_arguments.iter().cloned())
             .collect::<Vec<_>>()
     };
+    let mut command = shell_command_for(profile, place_arguments, script, wsl, environment, &own);
+    command.environment.extend(hyperlink_declaration(
+        PROFILES[profile].integration,
+        environment,
+    ));
+    command
+}
+
+fn shell_command_for(
+    profile: usize,
+    place_arguments: &[OsString],
+    script: Option<&Path>,
+    wsl: &WslFacts,
+    environment: &dyn ShellEnvironment,
+    own: &dyn Fn() -> Vec<OsString>,
+) -> ShellCommand {
     match (PROFILES[profile].integration, script) {
         (Integration::BashInitFile, Some(script)) => match PROFILES[profile].paths {
             // Git Bash: bash *is* the program, and takes the flag directly. The
@@ -166,11 +236,83 @@ pub fn shell_command(
                 }
             }
         },
+        (Integration::CmdPrompt, _) => ShellCommand {
+            arguments: own(),
+            environment: vec![(
+                OsString::from(CMD_PROMPT),
+                cmd_prompt(environment.var_os(CMD_PROMPT)),
+            )],
+        },
         _ => ShellCommand {
             arguments: own(),
             environment: Vec::new(),
         },
     }
+}
+
+/// `FORCE_HYPERLINK=1`, unless somebody has already answered that question.
+///
+/// **This settles R-d** (`docs/M2-persistence-schema-v1.md` §296-299: "挂靠尚不
+/// 存在的 per-profile 环境变量覆盖机制，profile 系统落地时一并做"). The variable
+/// is the `supports-hyperlinks` convention — the crate half the Rust CLI
+/// ecosystem asks before it will emit `OSC 8` — and its default answer is a
+/// guess about the terminal made from `TERM` and a list of known names, which
+/// this terminal is not on and will not be for years. It renders `OSC 8`. So
+/// the answer is yes, and the terminal is the only party that knows it.
+///
+/// It used to be `betterterminal.ps1` line 16 that said so, which made a
+/// capability of the *terminal* a property of one profile's *opt-in script*:
+/// hyperlinks worked in PowerShell if you had installed the script, and nowhere
+/// else, for no reason a user could have discovered. It is stated here instead,
+/// for every profile, on the channel the profile system now has — which is what
+/// the deferred ruling was waiting for.
+///
+/// **Not stated for PowerShell**, and that is the one exception rather than an
+/// oversight: its script still sets it, and setting it from both ends would mean
+/// two places to change and one of them silently redundant. The script is also
+/// the half that ships to a user who has installed it into a `pwsh` this
+/// terminal did not start.
+///
+/// An inherited value of any kind — including `0`, which is how the crate spells
+/// "no" — is left exactly as it is. This is a declaration, not an override: the
+/// person who set it has answered the question already, and the whole point of
+/// answering it is that somebody wanted a say.
+fn hyperlink_declaration(
+    integration: Integration,
+    environment: &dyn ShellEnvironment,
+) -> Option<(OsString, OsString)> {
+    (integration != Integration::PowerShellOptIn && environment.var_os(FORCE_HYPERLINK).is_none())
+        .then(|| (OsString::from(FORCE_HYPERLINK), OsString::from("1")))
+}
+
+/// `existing` — whatever `PROMPT` this process inherited — with the working
+/// directory report in front of it.
+///
+/// **Prefixed, never replaced.** A `PROMPT` in the environment is a prompt
+/// somebody wrote: `setx PROMPT` is how a person keeps `$T$G` or a coloured
+/// two-line prompt across sessions, and a terminal that overwrote it would have
+/// silently taken their prompt away in exchange for a directory they cannot see.
+/// In front rather than behind because the report must be printed before the
+/// row the cursor ends on, and because a `PROMPT` ending in `$_` (a newline)
+/// would otherwise push our escape onto the line the user types on.
+///
+/// The report is emitted **once per prompt**, which is once per command, which
+/// is the same cadence every other profile's script reports at.
+fn cmd_prompt(existing: Option<OsString>) -> OsString {
+    let existing = existing.filter(|prompt| !prompt.is_empty());
+    // Already ours. A `cmd` pane exports `PROMPT` to everything it starts, so a
+    // BetterTerminal launched from one — or a `cmd` started inside a `cmd` —
+    // inherits a string that already carries the report, and prefixing again
+    // would print the directory twice per prompt and go on doubling.
+    if existing
+        .as_ref()
+        .is_some_and(|prompt| prompt.to_string_lossy().contains(CMD_OSC7))
+    {
+        return existing.unwrap_or_default();
+    }
+    let mut prompt = OsString::from(CMD_OSC7);
+    prompt.push(existing.unwrap_or_else(|| OsString::from(CMD_DEFAULT_PROMPT)));
+    prompt
 }
 
 /// The marker, plus — across the WSL boundary — the list of what to carry over.
@@ -203,6 +345,13 @@ pub(crate) const fn script_source() -> &'static str {
     SCRIPT
 }
 
+/// PowerShell's script, which this module never installs but does depend on for
+/// one declaration — see [`hyperlink_declaration`].
+#[cfg(test)]
+const fn script_source_ps1() -> &'static str {
+    include_str!("../../../scripts/shell-integration/betterterminal.ps1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +367,35 @@ mod tests {
 
     fn bash_wsl() -> WslFacts {
         crate::wsl::test_facts("Ubuntu-24.04", Some("/bin/bash"))
+    }
+
+    /// An environment holding exactly the variables a case is about.
+    struct Env(Vec<(&'static str, &'static str)>);
+
+    impl ShellEnvironment for Env {
+        fn var_os(&self, key: &str) -> Option<OsString> {
+            self.0
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| OsString::from(*value))
+        }
+
+        fn is_file(&self, _path: &Path) -> bool {
+            false
+        }
+    }
+
+    fn bare() -> Env {
+        Env(Vec::new())
+    }
+
+    fn prompt_of(command: &ShellCommand) -> String {
+        command
+            .environment
+            .iter()
+            .find(|(key, _)| key == "PROMPT")
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+            .expect("the cmd profile must carry a PROMPT")
     }
 
     /// PIN — the script is a POSIX file and must ship as one.
@@ -255,7 +433,13 @@ mod tests {
         let script = Path::new(
             r"C:\Users\dev\AppData\Roaming\BetterTerminal\shell-integration\betterterminal.bash",
         );
-        let command = shell_command(index_of_id("gitbash"), &[], Some(script), &bash_wsl());
+        let command = shell_command(
+            index_of_id("gitbash"),
+            &[],
+            Some(script),
+            &bash_wsl(),
+            &bare(),
+        );
         assert_eq!(
             args(&command),
             [
@@ -268,9 +452,10 @@ mod tests {
             !args(&command).iter().any(|argument| argument == "--login"),
             "`--login` and `--init-file` cannot both be honoured, so only one is passed"
         );
-        assert_eq!(
-            command.environment,
-            [(OsString::from("BT_SHELL_INTEGRATION"), OsString::from("1"))],
+        assert!(
+            command
+                .environment
+                .contains(&(OsString::from("BT_SHELL_INTEGRATION"), OsString::from("1"))),
             "the marker is what makes the script run the login chain it displaced"
         );
         // No script on this machine, and Git Bash is the shell it always was.
@@ -279,7 +464,8 @@ mod tests {
                 index_of_id("gitbash"),
                 &[],
                 None,
-                &bash_wsl()
+                &bash_wsl(),
+                &bare()
             )),
             ["--login", "-i"]
         );
@@ -299,7 +485,13 @@ mod tests {
             r"C:\Users\dev\AppData\Roaming\BetterTerminal\shell-integration\betterterminal.bash",
         );
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
-        let command = shell_command(index_of_id("wsl"), &place, Some(script), &bash_wsl());
+        let command = shell_command(
+            index_of_id("wsl"),
+            &place,
+            Some(script),
+            &bash_wsl(),
+            &bare(),
+        );
         assert_eq!(
             args(&command),
             [
@@ -329,23 +521,32 @@ mod tests {
                 index_of_id("wsl"),
                 &place,
                 Some(script),
-                &zsh
+                &zsh,
+                &bare()
             )),
             ["--cd", "/mnt/d/Developer"]
         );
     }
 
-    /// PIN — the two profiles with no script are left exactly as they were.
+    /// PIN — PowerShell is not injected into, by any door.
     #[test]
-    fn powershell_and_cmd_are_not_injected_into() {
-        for id in ["pwsh", "cmd"] {
+    fn powershell_is_not_injected_into() {
+        // **Both of them.** They are two profiles and one script: 5.1 and 7 read
+        // the same `$PROFILE` mechanism, `betterterminal.ps1` is written for
+        // both, and neither is written into by this product.
+        for id in ["pwsh", "winps"] {
             let profile = index_of_id(id);
-            assert_ne!(PROFILES[profile].integration, Integration::BashInitFile);
+            assert_eq!(
+                PROFILES[profile].integration,
+                Integration::PowerShellOptIn,
+                "{id}: PowerShell's script is the user's to install"
+            );
             let command = shell_command(
                 profile,
                 &[],
                 Some(Path::new(r"C:\script.bash")),
                 &bash_wsl(),
+                &bare(),
             );
             assert_eq!(
                 command.arguments,
@@ -353,9 +554,151 @@ mod tests {
                     .args
                     .iter()
                     .map(OsString::from)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                "{id}"
             );
-            assert!(command.environment.is_empty());
+            assert!(command.environment.is_empty(), "{id}");
         }
+    }
+
+    /// PIN — Command Prompt reports where it is standing, and claims nothing
+    /// else.
+    ///
+    /// Red gate, and it is the *absence* that is load-bearing: adding
+    /// `$e]133;A$e\` to this string is a one-token edit that looks like more
+    /// capability and is less. `133;A` turns
+    /// `DualPlaneSession::shell_integration_is_authoritative` on, whose whole
+    /// job is to retire the cursor-line heuristic in favour of the semantic
+    /// input region — a region only `133;B`/`133;C` can build, and `cmd.exe`
+    /// can emit neither, because `PROMPT` is expanded once before a line is
+    /// read and there is no second moment to be called at. The pane would come
+    /// out of that trade with its typed line decorated as it is typed. See
+    /// [`profiles::Integration::CmdPrompt`] for the `133;B` half.
+    #[test]
+    fn command_prompt_reports_its_directory_and_claims_no_shell_integration() {
+        let command = shell_command(
+            index_of_id("cmd"),
+            &[],
+            Some(Path::new(r"C:\script.bash")),
+            &bash_wsl(),
+            &bare(),
+        );
+        assert!(
+            command.arguments.is_empty(),
+            "cmd takes no argument that would leave it interactive"
+        );
+        let prompt = prompt_of(&command);
+        assert_eq!(
+            prompt, r"$e]7;file:///$P$e\$P$G",
+            "the report, then the prompt cmd would have printed on its own"
+        );
+        assert!(
+            !prompt.contains("133"),
+            "a shell that cannot close a region must not open one: {prompt}"
+        );
+    }
+
+    /// PIN — every shell this terminal starts is told that it renders
+    /// hyperlinks, and none is told over the top of an answer already given.
+    ///
+    /// This is R-d settled (`docs/M2-persistence-schema-v1.md` §296-299), and
+    /// the red gate is the *coverage*: with the declaration back inside
+    /// `betterterminal.ps1` where it used to live, `OSC 8` links worked in a
+    /// PowerShell whose owner had installed the opt-in script and in no other
+    /// pane in the window — a capability of the terminal reachable only through
+    /// one profile's optional file.
+    #[test]
+    fn every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told() {
+        let forced = |id: &str, environment: &dyn ShellEnvironment| {
+            shell_command(
+                index_of_id(id),
+                &[],
+                Some(Path::new(r"C:\s.bash")),
+                &bash_wsl(),
+                environment,
+            )
+            .environment
+            .into_iter()
+            .find(|(key, _)| key == "FORCE_HYPERLINK")
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+        };
+        for id in ["wsl", "gitbash", "cmd"] {
+            assert_eq!(forced(id, &bare()).as_deref(), Some("1"), "{id}");
+            // Any answer already in the environment is the user's, `0` very
+            // much included: this is a declaration, not an override.
+            for theirs in ["0", "1", ""] {
+                assert_eq!(
+                    forced(id, &Env(vec![("FORCE_HYPERLINK", theirs)])),
+                    None,
+                    "{id} must not overwrite an inherited {theirs:?}"
+                );
+            }
+        }
+        // PowerShell is the exception, and only because its own script is still
+        // the half that says this — stating it twice would be two places to
+        // change and one silently redundant.
+        assert_eq!(forced("pwsh", &bare()), None);
+        assert!(
+            script_source_ps1().contains("FORCE_HYPERLINK"),
+            "…so the PowerShell script must still be the one that says it"
+        );
+        // And across the WSL boundary a variable that is not listed does not
+        // travel, so the declaration is listed whether or not we set it.
+        let wsl = shell_command(
+            index_of_id("wsl"),
+            &[],
+            Some(Path::new(r"C:\s.bash")),
+            &bash_wsl(),
+            &Env(vec![("FORCE_HYPERLINK", "0")]),
+        );
+        assert!(
+            wsl.environment.iter().any(|(key, value)| key == "WSLENV"
+                && value.to_string_lossy().contains("FORCE_HYPERLINK/u")),
+            "the user's own answer has to cross too"
+        );
+    }
+
+    /// PIN — a prompt the user wrote survives, and is not doubled.
+    ///
+    /// Red gate on the first half: assigning `PROMPT` instead of prefixing it
+    /// passes every other test here and silently deletes a prompt somebody set
+    /// with `setx`. Red gate on the second: a `cmd` pane exports `PROMPT` to
+    /// its children, so without the idempotence check a BetterTerminal started
+    /// from a `cmd` pane prints the directory twice, and one started from
+    /// *that* prints it three times.
+    #[test]
+    fn a_prompt_the_user_already_set_is_kept_and_reported_in_front_of_exactly_once() {
+        let theirs = shell_command(
+            index_of_id("cmd"),
+            &[],
+            None,
+            &bash_wsl(),
+            &Env(vec![("PROMPT", "$T$S$P$G")]),
+        );
+        assert_eq!(prompt_of(&theirs), r"$e]7;file:///$P$e\$T$S$P$G");
+
+        let again = shell_command(
+            index_of_id("cmd"),
+            &[],
+            None,
+            &bash_wsl(),
+            &Env(vec![("PROMPT", r"$e]7;file:///$P$e\$T$S$P$G")]),
+        );
+        assert_eq!(
+            prompt_of(&again),
+            r"$e]7;file:///$P$e\$T$S$P$G",
+            "an inherited prompt that already reports is left alone"
+        );
+
+        // An empty `PROMPT` is not a prompt the user chose to have; it is what
+        // `cmd` reads as "use the default", and the default is what it gets.
+        let empty = shell_command(
+            index_of_id("cmd"),
+            &[],
+            None,
+            &bash_wsl(),
+            &Env(vec![("PROMPT", "")]),
+        );
+        assert_eq!(prompt_of(&empty), r"$e]7;file:///$P$e\$P$G");
     }
 }

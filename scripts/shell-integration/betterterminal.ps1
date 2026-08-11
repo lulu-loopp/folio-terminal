@@ -571,4 +571,12 @@ function Global:prompt {
 # pwsh reports its executable path as the initial console title on some hosts. Establish the
 # profile's stable default only after integration is installed; later OSC/title writes from child
 # programs remain authoritative. `[char]27` keeps this identical on PowerShell 5.1 and 7.
-[Console]::Write(([string][char]27) + ']0;PowerShell' + [char]7)
+#
+# It names the *edition*, and that matters now that the two are two profiles rather than two ends
+# of one resolution order. BetterTerminal drops a title that only repeats the profile's own name —
+# a shell agreeing with its launcher has announced nothing — and it can only do that if the two
+# strings match: a 5.1 session titled "PowerShell" under a profile called "Windows PowerShell"
+# would prefix every pane head in that tab with its own family name. `Desktop` is 5.1 and `Core`
+# is 7; `$PSVersionTable.PSEdition` is absent on 5.0 and earlier, where `Desktop` is still right.
+$btEdition = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell' } else { 'Windows PowerShell' }
+[Console]::Write(([string][char]27) + ']0;' + $btEdition + [char]7)

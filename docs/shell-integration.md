@@ -46,6 +46,214 @@ retracts the previous directory. An unresolvable report — a remote share, a ma
 truncated one — clears the stored directory for the same reason: leaving a stale directory to
 answer for a place the shell has left is the guess the ruling forbids.
 
+## Which spelling of a directory each profile reports
+
+OSC 7 carries a path, and a path only means something in a namespace. Each profile declares the one
+its shell stands in (`profiles::PathNamespace`), and its script reports in that namespace and no
+other:
+
+| profile | namespace | what OSC 7 carries | how the script gets it |
+|---|---|---|---|
+| PowerShell / Windows PowerShell | Windows | `file:///D:/src` | `$PWD.ProviderPath` |
+| Git Bash | Windows | `file:///D:/src` | `pwd -W`, the MSYS builtin for the Win32 spelling |
+| WSL | WSL | `file:///mnt/d/src`, `file:///home/weiyi` | `$PWD` |
+| Command Prompt | Windows | `file:///D:\src`, `file:///C:\Program Files` | `$P`, in the `PROMPT` variable |
+
+Command Prompt's report is spelled with **backslashes and unencoded spaces**, and that is forced
+rather than chosen. `PROMPT` is not a hook, it is a format string: its whole alphabet is a dozen
+`$`-substitutions, of which `$P` (the current drive and path) and `$e` (escape) are the two that
+matter, and there is no operation in that language that could turn `\` into `/` or percent-encode
+a space. So the report says the directory in the only spelling the shell can say it in. The decoder
+takes it — a backslash is not a delimiter in a URI, so a Windows path survives segmentation as one
+piece — and that acceptance is now a pinned decision rather than a happy accident
+(`a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it`), because tightening the
+URI parser is a reasonable-looking edit that would silently blank every Command Prompt pane's
+directory with no symptom inside the crate that made it.
+
+The one thing `PROMPT` cannot survive is a `%` in a directory name, which percent-decoding will
+read as the start of an escape. That report is malformed, and a malformed report clears the stored
+directory rather than leaving a stale one — the standing rule above, reached by the standing route.
+
+Git Bash reports the **Windows** spelling although it prints `/d/src` at its prompt, and that is not
+a translation for our convenience: the process's working directory *is* a Win32 directory, which is
+what `CreateProcess` was handed and what Explorer opens. `/d/src` is a third namespace only that
+shell understands, and adopting it would mean every existence check, every relative-image
+resolution and every inheritance into another pane had to learn a spelling nothing else speaks.
+`pwd -W` is a builtin and the answer is remembered against `$PWD`, so the subshell it needs happens
+when you `cd`, not on every prompt.
+
+WSL reports the POSIX path and does **not** convert. `wslpath -w` would answer
+`\\wsl.localhost\<distro>\home\weiyi` for a Linux home — a UNC whose authority the rules above are
+obliged to reject as a remote share — so converting would make the most common directory in WSL
+unreportable. A POSIX directory is stored and displayed as it is, and relative image path text
+beside it stays undetected, exactly as it does for a session that reported nothing: the resolution
+gate is still "drive-rooted", and this is the standing rule for a directory this terminal cannot
+resolve against rather than a new exception.
+
+### Carrying a directory between profiles
+
+A new tab opens where the shell you are looking at is standing, whenever the shell it starts can
+name that place (`profiles::cwd_for_spawn`). Between the two namespaces the map is WSL's own drive
+mounts, and it is not total:
+
+| from → to | `D:\src` | `/mnt/d/src` | `/home/weiyi` |
+|---|---|---|---|
+| → Windows profile | `D:\src` | `D:\src` | *no answer* |
+| → WSL | `/mnt/d/src` | `/mnt/d/src` | `/home/weiyi` |
+
+The empty cell is the honest one: a directory inside the distribution's own filesystem has no
+Windows spelling, so the new tab starts at its own profile's starting directory rather than at a
+place that does not exist. Same rule, same reason as an unreported directory — never guess one.
+
+## Injecting the script
+
+PowerShell's script is **opt-in and manual**: you dot-source it into `$PROFILE` yourself, and this
+product never writes there. The bash script is installed automatically, for one session at a time,
+and the asymmetry is the shells':
+
+* `pwsh` has one startup file at one well-known path and no argument that would source a second one
+  after it, so the only automatic injection available would be editing a file that belongs to you.
+* `bash --init-file <file>` names the startup file for one interactive shell and touches nothing on
+  disk.
+
+So a Git Bash profile is started as `bash --init-file <script> -i` and a WSL profile as
+`wsl.exe [--cd <dir>] -- <login shell> --init-file <script> -i`, with `BT_SHELL_INTEGRATION=1` in
+the environment. The script is written out to `%APPDATA%\BetterTerminal\shell-integration\` from a
+copy compiled into the binary, so the two halves of the OSC 133 agreement always ship together.
+
+**What `--init-file` costs, and how it is paid back.** It replaces `~/.bashrc`, and because bash
+consults it only for a shell that is *not* a login shell, BetterTerminal also drops the `--login`
+that Git Bash's own shortcut passes. The script therefore runs the startup chain itself, in bash's
+documented order — `/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`,
+`~/.profile` — before installing anything of its own. This is not cosmetic on Git for Windows:
+`/etc/profile` is what puts `/mingw64/bin` on the path, so a shell that skipped it is a Git Bash
+that cannot find git. The chain is a pinned test (`crates/bt-term/tests/shell_integration_bash.rs`),
+and `PATH`, `MSYSTEM` and `command -v git` were verified byte-identical to a plain `--login` shell.
+
+Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced, an
+existing `DEBUG` trap is chained rather than overwritten, and `PS1` is wrapped rather than rebuilt —
+re-wrapped on every prompt, because a theme that regenerates `PS1` in its own `PROMPT_COMMAND`
+(starship, powerline, and most prompt kits) would otherwise drop the markers after the first line.
+No `OSC 0`/`OSC 2` title is emitted: a title set by the shell outranks the working directory in the
+name stack, so a pane that announced itself once would stop following `cd`.
+
+**WSL and `WSLENV`.** `wsl.exe` forwards no environment variable it was not told to, so
+`BT_SHELL_INTEGRATION` and the `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`/`COLORTERM` declarations every
+other child already receives are listed in `WSLENV` — appended to whatever is already there, never
+replacing it.
+
+**Which shell, and which distribution.** `wsl.exe --list --verbose` names the installed
+distributions and marks the default with `*`; that distribution is then asked for its own name and
+its user's login shell (`getent passwd`). The init file is offered **only** when that shell is a
+bash — a distribution logging into zsh or fish keeps its shell and goes without markers, which is
+the fallback path below rather than a broken shell. When more than one distribution is installed,
+the profile is titled `WSL · <default>` so the row says which one it starts; a machine with one
+needs no qualifier and keeps the bare `WSL`.
+
+**Command Prompt has no script and no hook — its whole integration is `PROMPT`.** BetterTerminal
+reads whatever `PROMPT` this process inherited, puts the `OSC 7` report in front of it, and hands
+the result to `cmd.exe`. Prefixed and never replaced: a `PROMPT` in the environment is a prompt
+somebody wrote with `setx`, and a terminal that overwrote it would have taken their prompt away in
+exchange for a directory they cannot see. An unset `PROMPT` gets `cmd`'s own documented default,
+`$P$G`, spelled out — the moment we set the variable at all we owe the whole of it. And because a
+`cmd` pane exports `PROMPT` to everything it starts, a report already in the inherited value is
+left alone rather than prefixed a second time.
+
+## What each profile actually gets
+
+The honest matrix. Every "no" below is a shell's own limit, and every one of them lands on the
+fallback path described under **Authority and fallback** rather than on a guess.
+
+| | `133;A` | `133;B` | `133;C` | `133;D` + exit code | `OSC 7` | `OSC 0` title | `FORCE_HYPERLINK` | ↑ history |
+|---|---|---|---|---|---|---|---|---|
+| **PowerShell** (7, script installed) | yes | yes | yes | yes | yes | `PowerShell` | script | PSReadLine |
+| **Windows PowerShell** (5.1, script installed) | yes | yes | yes | yes | yes | `Windows PowerShell` | script | PSReadLine |
+| **either PowerShell** (script not installed) | no | no | no | no | no | — | no | PSReadLine |
+| **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
+| **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
+| **WSL** (zsh/fish login shell) | no | no | no | no | no | — | set, but not forwarded | that shell's own |
+| **Command Prompt** | **no** | **no** | no | no | **yes** | refused — see below | yes | not promised |
+
+Five rows need their reasons stated, because each looks like an omission and is not.
+
+**The two PowerShells are two profiles** (user ruling 2026-08-11), which is Windows Terminal's own
+arrangement and what a machine with both installed makes necessary: 7 and 5.1 are different
+products with different language versions, and one row could only ever start one of them while
+claiming to be both. `PowerShell` resolves to `pwsh.exe` and to nothing else — `BT_SHELL` still
+overrides it (Q4), and a machine without an install gets that row **greyed** rather than quietly
+started as 5.1. `Windows PowerShell` names `%SystemRoot%\System32\WindowsPowerShell\v1.0\
+powershell.exe`, ships inside the OS, and is therefore the profile every fallback lands on:
+`profiles::FALLBACK_PROFILE` moved to it, because a floor that can be greyed is a fallback chain
+with a hole in the bottom.
+
+They share the one PowerShell mark. The mock-up draws a single PowerShell symbol and inventing a
+second would assert a visual distinction the family does not have; identity here is the mark *and*
+the title (`docs/UI-UX.md` §126-137), and the titles already differ. What the script emits as its
+`OSC 0` now differs too, and has to: BetterTerminal drops a title that only repeats the profile's
+own name — a shell agreeing with its launcher has announced nothing — so `betterterminal.ps1` names
+the edition (`$PSVersionTable.PSEdition`), and a 5.1 session that still called itself `PowerShell`
+would prefix every pane head in its tab with its own family name.
+
+Sessions saved before the split keep the slug `"pwsh"` untouched: it meant "the user asked for
+PowerShell" and still does, with resolution now stricter. Sessions old enough to have stored an
+executable **path** (v1–v5) are split by that path — `pwsh.exe` → `pwsh`, `powershell.exe` →
+`winps` — because the path is the surviving record of which of the two actually ran, and folding
+both onto one slug would spend it.
+
+**Command Prompt sends no OSC 133 at all**, and this overturns the ruling of 2026-08-11 (Q5) that
+allowed it `A` and `B`. That ruling assumed `A` and `B` are two more facts and that missing `C`/`D`
+costs only what `C`/`D` would have bought. They are not facts — they are a claim of *authority*,
+and this implementation charges for it in `C`:
+
+* `133;A` alone turns `shell_integration_is_authoritative` on for the screen, and that flag's job
+  is to **retire the cursor-line heuristic** — the rule that the line under the cursor is probably
+  still being typed and must not be decorated yet. Its replacement is the semantic input region,
+  which only `B` and `C` build. A shell that sends `A` and stops has switched the protection off
+  and put nothing in its place: a path typed at a `cmd` prompt would light up as a link mid-word.
+* `133;B` opens an input region whose only closers are `C` and the *next* `A`. Without `C` it stays
+  open across the command's entire run, so the resize gate reads the command's own output as an
+  unsent buffer: the window cannot be resized for as long as anything is printing, and every resize
+  that does land owes an `InvokePrompt` chord to a shell that has no such binding.
+
+Both are strictly worse than sending nothing, and sending nothing is a documented, tested position.
+The measurement is pinned at `a_prompt_that_can_never_send_c_must_not_send_a_or_b_either` — if that
+test ever goes red the reason has expired and the decision should be revisited rather than
+inherited. What `cmd.exe` cannot do at all is the `C`/`D` pair itself: `PROMPT` is expanded once,
+just before a line is read, and the shell has no pre- or post-execution moment to be called at.
+Clink would supply both and is **not** required (Q5's surviving half); detecting it and upgrading
+the row is booked, not done.
+
+**Command Prompt's `OSC 0` is refused rather than absent.** `cmd.exe` calls `SetConsoleTitle` with
+its own image path on the way up, and ConPTY forwards it as `ESC ]0;C:\WINDOWS\System32\cmd.exe`.
+A program title outranks the working directory in the name stack, so without intervention every
+Command Prompt tab is *called* `C:\WINDOWS\System32\cmd.exe` and stays called that after `OSC 7`
+finally gives it a real directory. A shell reading its own command line back has not named itself,
+it has repeated what this terminal wrote — so a title equal to the pane's own resolved program is
+dropped before the name stack sees it (`LeafSession::announced_title`). This is the rule the pane
+head already applied to a title equal to the profile's *display name*, said in the other
+vocabulary. `title Build` in that same pane is kept.
+
+**`FORCE_HYPERLINK` is a fact about the terminal, and is now stated as one.** It is the
+`supports-hyperlinks` convention that half the Rust CLI ecosystem asks before it will emit `OSC 8`,
+and its default answer is a guess made from `TERM` and a list of known terminal names this one is
+not on. It renders `OSC 8`, so the answer is yes. Until now the only thing that said so was line 16
+of `betterterminal.ps1`, which made a capability of the terminal a property of one profile's
+*opt-in* script: links worked in a PowerShell whose owner had installed the script, and in no other
+pane in the window. It is now declared by the profile system — which is exactly the "per-profile
+environment override mechanism" the ruling at `docs/M2-persistence-schema-v1.md` §296-299 deferred
+this to, so **R-d is settled**. PowerShell alone still gets it from its script, because saying it
+twice would be two places to change and one silently redundant. Any inherited value is left alone,
+`0` included: this is a declaration, not an override, and someone who set it has already answered.
+Across the WSL boundary the name is listed in `WSLENV` whether or not this process set it, so the
+user's own answer travels too — but only on the path that has an init file, so a distribution
+logging into zsh gets the variable on the Win32 side and nothing in the distribution, which is the
+same boundary `TERM_PROGRAM` already stops at.
+
+**"↑ history" is not ours to promise.** The `DESIGN.md` §7.1.4 wording is limited to a profile
+where PSReadLine is detected with persistent history enabled. `cmd`'s recall is `doskey`'s and dies
+with the process; bash's is its own `HISTFILE`. Neither is a mechanism this terminal controls, so
+the UI does not promise either.
+
 ## Default shell and `BT_SHELL`
 
 Ruling (2026-08-04, evidence-backed): PowerShell 5.1 ships PSReadLine 2.0.0 (2020), whose stale
@@ -70,15 +278,40 @@ both. Modern terminals already default to `pwsh` when it is present, so BetterTe
 
 Whichever program is picked is launched the same way `spawn_default` always has: `-NoLogo` plus
 BetterTerminal's usual `TERM_PROGRAM`/`COLORTERM`/`TERM` declarations. If the resolved shell fails
-to start — a bad `BT_SHELL` override, or a `pwsh.exe` resolved from a stale `PATH` entry that no
-longer exists — BetterTerminal falls back to `powershell.exe` once and shows a one-line notice in
-the status line instead of failing the session outright.
+to start — a bad `BT_SHELL` override, a `pwsh.exe` resolved from a stale `PATH` entry that no longer
+exists, or a profile whose program has been uninstalled — BetterTerminal falls back to
+`powershell.exe` once and **writes a one-line banner into the pane's own first line** instead of
+failing the session outright, naming the program that would not start and the reason. The pane is
+then that fallback profile in every respect: its mark, its name, and the `profile_id` written to
+disk all say `pwsh`, because it is running one.
+
+The banner is in the pane and not in the status line, which is what it used to be. That is
+`docs/M2-restart-shell-contract.md` §3/§5#3's requirement — the substitution is never silent — and
+§2's reading of what a banner *is*: content appended to the transcript rather than an event with a
+channel of its own. It therefore scrolls with the shell's output, stays in the scrollback, and can
+be copied; the status line was drawn on one frame of the focused pane and discarded, so a pane that
+fell back while you were looking at another tab announced it to nobody.
 
 If you are on Windows PowerShell 5.1 by choice (`BT_SHELL=powershell.exe`, or no PowerShell 7
 install at all) and see stray/duplicated characters on a wrapped, unsubmitted input line right
 after narrowing the window, that is the PSReadLine 2.0.0 defect above — `Install-Module
 PSReadLine` (from the PowerShell Gallery) resolves it without changing anything else about your
 profile.
+
+## bash: Git Bash, WSL, and a hand-installed copy
+
+`scripts/shell-integration/betterterminal.bash` is what BetterTerminal injects, and it is also
+installable by hand for any bash it does not start itself — a shell over ssh, a distribution whose
+login shell you changed. Dot-source it as the last relevant line of `~/.bashrc`:
+
+```bash
+. "$HOME/betterterminal.bash"
+```
+
+Loaded that way, `BT_SHELL_INTEGRATION` is unset and the script sources nothing on your behalf:
+bash has already run your startup files, and running them again is exactly what the marker is there
+to prevent. It requires bash (the `DEBUG` trap and `PROMPT_COMMAND` it installs are bash's), is
+idempotent within one shell, and does nothing at all in a non-interactive one.
 
 ## PowerShell 7 and Windows PowerShell 5.1
 

@@ -565,6 +565,18 @@ struct LeafSession {
     /// a Git Bash pane out of a PowerShell tab produced a tab that said
     /// PowerShell over a running bash.
     profile: usize,
+    /// The executable this pane's shell was actually started from, as the
+    /// machine resolved it.
+    ///
+    /// Beside [`Self::profile`] rather than derived from it, because it is the
+    /// answer to a different question: a profile names a *choice*, this names
+    /// what that choice turned into on this machine — which `pwsh.exe` of the
+    /// several that may exist, or `BT_SHELL`'s override, or the `powershell.exe`
+    /// a failed spawn fell back to. Only the leaf that spawned it knows.
+    ///
+    /// `None` for a leaf with no process behind it (the probe path), where there
+    /// is no program and therefore nothing for a title to be repeating.
+    program: Option<PathBuf>,
     session: DualPlaneSession,
     projection: ViewportProjection,
     grid: GridSize,
@@ -1216,7 +1228,7 @@ impl TabState {
     fn display_title(&self) -> String {
         display_title(
             self.manual_name.as_deref(),
-            self.session.window_title(),
+            self.announced_title(),
             self.session.working_directory(),
             self.focused_profile_title(),
         )
@@ -1254,7 +1266,7 @@ impl TabState {
     fn tooltip_text(&self) -> String {
         let (name, source) = resolve_title(
             self.manual_name.as_deref(),
-            self.session.window_title(),
+            self.announced_title(),
             self.session.working_directory(),
             self.focused_profile_title(),
         );
@@ -1491,7 +1503,7 @@ impl TabState {
     fn terminal_name(&self, seat: SeatId) -> Option<String> {
         let leaf = self.sessions.get(&seat)?;
         pane_head_title(
-            leaf.session.window_title(),
+            leaf.announced_title(),
             leaf.session.working_directory(),
             // **This pane's own** profile, which is the one its shell was
             // actually launched from. The filter this feeds asks "has this
@@ -1526,7 +1538,100 @@ impl TabState {
     }
 }
 
+/// What Windows' console convention puts between a program and what it is
+/// running — `cmd.exe - ping -n 8 127.0.0.1`.
+const TITLE_ACTIVITY_SEPARATOR: &str = " - ";
+
 impl LeafSession {
+    /// The title this pane's program **announced**, as opposed to one it merely
+    /// repeated back.
+    ///
+    /// The name stack's second layer is "the program said what it is"
+    /// ([`display_title`], mock-up 2593: "each is something someone actually
+    /// said"). A program that sets the window title to *the path it was started
+    /// from* has not said anything: it has read back its own command line, which
+    /// this terminal wrote. Admitting it puts a fact the launcher already knows
+    /// on top of the one layer that was going to carry a fact it does not — the
+    /// folder the shell is standing in.
+    ///
+    /// It is not a hypothetical. `cmd.exe` calls `SetConsoleTitle` with its own
+    /// image path on the way up, which ConPTY forwards as
+    /// `ESC ]0;C:\WINDOWS\System32\cmd.exe BEL` — measured on this machine
+    /// through a real pseudoconsole, not inferred. Every Command Prompt tab in
+    /// this build is therefore *called* `C:\WINDOWS\System32\cmd.exe`, and would
+    /// have gone on being called that after `OSC 7` gave it a real directory to
+    /// be called instead, because a title outranks a folder.
+    ///
+    /// **The same rule the pane head already has, one layer lower.**
+    /// [`pane_head_title`] drops a title equal to the profile's own *display
+    /// name* on the grounds that it is "the shell agreeing with the launcher".
+    /// A title that leads with the profile's own *program* is that same
+    /// agreement said in the other vocabulary, and the reason it has to be
+    /// caught here rather than there is that the tab's stack never had the check
+    /// at all. Refusing it at the source gives both stacks the answer without
+    /// either learning a second rule.
+    ///
+    /// **The prefix, not the whole string**, because Windows' console convention
+    /// is `<image path> - <command line>` and `cmd.exe` uses it: at an idle
+    /// prompt the title is its own path, and for as long as a command runs it is
+    /// its own path, a dash, and the command. Both were measured off a real
+    /// pseudoconsole here — `C:\WINDOWS\System32\cmd.exe` and
+    /// `C:\WINDOWS\System32\cmd.exe - ping  -n 8 127.0.0.1`. Refusing only the
+    /// exact match caught the first and let the second through, so a `cmd` tab
+    /// went back to being called `C:\WINDOWS\System32\Syste…` for the whole of
+    /// every command it ran.
+    ///
+    /// So the launcher's half is taken off and the **remainder is kept**, which
+    /// is a gain rather than a concession: `ping -n 8 127.0.0.1` is the shell
+    /// saying what it is doing, it is the one thing a `cmd` pane can say about
+    /// being busy at all (it has no `OSC 133;C` to say it with — see
+    /// [`profiles::Integration::CmdPrompt`]), and it is precisely the layer the
+    /// name stack reserves for a program announcing itself. A remainder that is
+    /// empty is no announcement, and the folder names the tab.
+    ///
+    /// The separator is required, so nothing a shell might mean is mistaken for
+    /// this: `title Build` is kept whole, a program naming itself `cmd.exe`
+    /// without its directory is kept, a title that merely *starts* with the path
+    /// (`…\cmd.exe.log`) is kept, and a pane with no process behind it pays
+    /// nothing. Compared without case because Windows paths are.
+    fn announced_title(&self) -> Option<&str> {
+        let title = self.session.window_title()?.trim();
+        let Some(program) = &self.program else {
+            return Some(title);
+        };
+        let program = program.as_os_str().to_string_lossy();
+        let Some(rest) = title
+            .get(..program.len())
+            .filter(|lead| lead.eq_ignore_ascii_case(&program))
+            .and_then(|_| title.get(program.len()..))
+        else {
+            return Some(title);
+        };
+        // `<program>` alone, or `<program> - <what it is running>`.
+        let announcement = match rest.strip_prefix(TITLE_ACTIVITY_SEPARATOR) {
+            Some(activity) => activity.trim(),
+            None if rest.is_empty() => "",
+            // Something else entirely that happens to share a prefix.
+            None => title,
+        };
+        (!announcement.is_empty()).then_some(announcement)
+    }
+
+    /// Everything the name stack reads off this shell, for deciding whether the
+    /// chrome has to be relabelled.
+    ///
+    /// Both layers, because a tab's name is whichever of them answered — see
+    /// [`resolve_title`]. Compared as a pair rather than watched separately so
+    /// that a third layer added to that stack has one place to be added here.
+    /// Owned rather than borrowed: it is sampled before the drain and compared
+    /// after, and the drain is what may invalidate it.
+    fn name_evidence(&self) -> (Option<String>, Option<PathBuf>) {
+        (
+            self.announced_title().map(str::to_owned),
+            self.session.working_directory().map(Path::to_path_buf),
+        )
+    }
+
     /// The facts this one shell is reporting right now.
     ///
     /// On the leaf rather than on the tab, and that placement *is* half of
@@ -5967,6 +6072,8 @@ fn revive_plan(tab: &TabV1) -> (seats::Seats, TabSeed, BTreeMap<SeatId, LeafSeed
                 seat,
                 LeafSeed {
                     profile: profiles::index_of_id(&leaf.profile_id),
+                    unknown_profile_id: (!profiles::has_id(&leaf.profile_id))
+                        .then(|| leaf.profile_id.clone()),
                     cwd: Some(leaf.cwd.as_str())
                         .filter(|cwd| !cwd.is_empty())
                         .map(Path::new)
@@ -6066,6 +6173,20 @@ struct TabSeed {
 struct LeafSeed {
     /// Index into [`profiles::PROFILES`].
     profile: usize,
+    /// The `profile_id` that was on disk when this build has no such profile.
+    ///
+    /// `None` for every seed that named a profile this build has, which is every
+    /// seed that did not come off a disk written by a different build. It exists
+    /// so that the degradation can be **said out loud**:
+    /// `M2-restart-shell-contract.md` §3 requires the fall to the default
+    /// profile to carry a visible first line, and it names two ways in — an
+    /// unknown `profile_id` and a shell that is gone — with one rule for both
+    /// ("绝不静默替换"). Only the second half was implemented: `index_of_id`
+    /// resolves an unrecognised id to `FALLBACK_PROFILE` *before* the spawn, so
+    /// the shell starts cleanly, `bt-pty` has nothing to report, and the pane
+    /// came up as a PowerShell with no indication it had ever been anything
+    /// else. Carrying the id this far is what lets the banner name it.
+    unknown_profile_id: Option<String>,
     /// Where this shell opens. `None` is "wherever a fresh shell would" — an
     /// absence rather than a path, so that "the saved folder is gone" and "no
     /// folder was ever saved" arrive as one case instead of two.
@@ -6118,6 +6239,7 @@ fn create_leaf_session(
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
     let chosen = profiles::PROFILES[seed.profile];
+    let mut resolved_program = None;
     let mut pty = if probe_input.is_none() {
         // **The line the picker was missing.** Choosing a profile used to change
         // a tab's title and its mark and nothing else — `spawn_default_in` was
@@ -6169,7 +6291,9 @@ fn create_leaf_session(
             &place.arguments,
             shell_integration::script_path(),
             wsl::facts(),
+            &bt_pty::SystemShellEnvironment,
         );
+        resolved_program = Some(PathBuf::from(&program));
         Some(
             PtySession::spawn_shell_in(
                 program,
@@ -6184,9 +6308,7 @@ fn create_leaf_session(
     } else {
         None
     };
-    let shell_fallback_notice = pty
-        .as_mut()
-        .and_then(PtySession::take_shell_fallback_notice);
+    let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
     // **A pane is the shell it is actually running.** When the profile's own
     // program would not start, `bt-pty` falls back once to `powershell.exe` and
     // hands back the notice that says so — so what this leaf *is*, from here on,
@@ -6205,7 +6327,11 @@ fn create_leaf_session(
     // For the default profile itself this changes nothing, because that fallback
     // is `pwsh` → `powershell.exe` *within* the same profile: `FALLBACK_PROFILE`
     // is what it already was.
-    let profile = if shell_fallback_notice.is_some() {
+    let profile = if let Some(fallback) = &shell_fallback {
+        // And it is no longer running the program it was asked for either: the
+        // one fact that field exists to answer is "what is behind this pane", so
+        // it follows the swap the same way the profile does.
+        resolved_program = Some(PathBuf::from(fallback.started));
         profiles::FALLBACK_PROFILE
     } else {
         seed.profile
@@ -6235,9 +6361,23 @@ fn create_leaf_session(
         font_rev: 1,
         theme_rev: theme_revision(),
     });
-    if let Some(notice) = &shell_fallback_notice {
+    // **The other way into the same degradation**, and the half that used to be
+    // silent. A saved leaf naming a profile this build does not have resolves to
+    // `FALLBACK_PROFILE` before the spawn, so the shell starts cleanly and
+    // `bt-pty` has nothing to report — the pane simply came up a PowerShell,
+    // having been something else when it was saved, with nothing said. §3 and
+    // §5#3 give both ways in one rule, so they get one line in one register.
+    if let Some(unknown) = &seed.unknown_profile_id {
         session
-            .feed(fallback_banner(notice).as_bytes())
+            .feed(unknown_profile_banner(unknown).as_bytes())
+            .context("write the unknown-profile banner into the leaf's first line")?;
+    }
+    if let Some(fallback) = &shell_fallback {
+        session
+            // `seed.profile`, not `profile`: the banner's subject is the profile
+            // the user asked for, which is exactly the one the line above has
+            // just stopped this leaf from claiming to be.
+            .feed(fallback_banner(fallback, seed.profile).as_bytes())
             .context("write the shell fallback banner into the leaf's first line")?;
     }
     if let Some(bytes) = probe_input {
@@ -6249,6 +6389,7 @@ fn create_leaf_session(
     Ok(LeafSession {
         pty,
         profile,
+        program: resolved_program,
         session,
         projection,
         grid,
@@ -6347,6 +6488,7 @@ fn create_tab_state(
             &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
                 profile: default_profile,
                 cwd: None,
+                unknown_profile_id: None,
             }),
             programs,
             formulas,
@@ -6716,16 +6858,51 @@ fn absorb_tab_into_layout(
     ejected
 }
 
+/// What one drain turned up, beyond the bytes.
+///
+/// Three answers rather than a `bool` triple because they drive three different
+/// machines and two of them are easy to confuse: `arrived` is about painting
+/// cells, `renamed` about relabelling chrome, `moved` about what goes in the
+/// session file. A title moving renames without moving; a `cd` does both.
+#[derive(Clone, Copy, Debug, Default)]
+struct DrainOutcome {
+    /// Bytes reached the screen.
+    arrived: bool,
+    /// Something the name stack reads changed — see [`LeafSession::name_evidence`].
+    renamed: bool,
+    /// The shell reported a different working directory, which is **durable**
+    /// state: it is the `cwd` of this leaf in `session.json`.
+    moved: bool,
+}
+
+impl DrainOutcome {
+    fn merge(&mut self, other: Self) {
+        self.arrived |= other.arrived;
+        self.renamed |= other.renamed;
+        self.moved |= other.moved;
+    }
+}
+
 /// Drain one shell's pipe into its own screen.
 ///
-/// Returns whether anything arrived, and whether this shell's OSC 2 title
-/// changed — the two facts the caller needs to decide what to redraw and what to
-/// relabel.
-fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<(bool, bool)> {
+/// "Name" and not "title", and the difference was a live bug. This used to watch
+/// `window_title` alone, which is one of the two things [`resolve_title`] reads
+/// off a shell; the other is the folder it reported over OSC 7, and that is the
+/// layer that names most tabs most of the time. A `cd` therefore moved a tab's
+/// name without marking the chrome for redrawing, and the strip went on showing
+/// the previous folder until some unrelated event — a click, a resize, a tab
+/// switch — repainted it. Measured on a Command Prompt pane: `cd` into
+/// `C:\Program Files` left the tab reading `BetterTerminal` while the prompt one
+/// line below it read `C:\Program Files>`, and it stayed that way indefinitely.
+///
+/// It was invisible while `window_title` was the layer that named things, and
+/// every profile has it: a PowerShell tab is folder-named too. What made it
+/// surface now is Command Prompt, whose only report *is* the folder.
+fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
     if leaf.pty.is_none() {
-        return Ok((false, false));
+        return Ok(DrainOutcome::default());
     }
-    let title_before = leaf.session.window_title().map(str::to_owned);
+    let name_before = leaf.name_evidence();
     let mut changed = false;
     loop {
         let bytes = leaf
@@ -6759,10 +6936,12 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<(bool, bool)> {
         changed,
         leaf.session.resize_finish_deadline().is_some(),
     );
-    Ok((
-        changed,
-        leaf.session.window_title() != title_before.as_deref(),
-    ))
+    let name_after = leaf.name_evidence();
+    Ok(DrainOutcome {
+        arrived: changed,
+        renamed: name_after != name_before,
+        moved: name_after.1 != name_before.1,
+    })
 }
 
 /// Drain every shell this tab holds.
@@ -6771,15 +6950,12 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<(bool, bool)> {
 /// tab" has always meant *all of it*: a background pane that stops being read
 /// fills its pipe and blocks the shell writing into it. The tab's answer is the
 /// union of its leaves' — anything arrived anywhere, any title moved anywhere.
-fn drain_tab_pty(tab: &mut TabState) -> Result<(bool, bool)> {
-    let mut changed = false;
-    let mut title_changed = false;
+fn drain_tab_pty(tab: &mut TabState) -> Result<DrainOutcome> {
+    let mut outcome = DrainOutcome::default();
     for (_, leaf) in tab.leaves_mut() {
-        let (leaf_changed, leaf_title_changed) = drain_leaf_pty(leaf)?;
-        changed |= leaf_changed;
-        title_changed |= leaf_title_changed;
+        outcome.merge(drain_leaf_pty(leaf)?);
     }
-    Ok((changed, title_changed))
+    Ok(outcome)
 }
 
 impl Runtime {
@@ -7213,7 +7389,14 @@ impl Runtime {
         // that one entry — or empty, when the shell you are looking at has never
         // named a folder.
         let seats = seats::Seats::lone_terminal();
-        let leaves = BTreeMap::from([(seats.terminal(), LeafSeed { profile, cwd })]);
+        let leaves = BTreeMap::from([(
+            seats.terminal(),
+            LeafSeed {
+                profile,
+                cwd,
+                unknown_profile_id: None,
+            },
+        )]);
         let (tab, _) = create_tab_state(
             id,
             seats,
@@ -7364,6 +7547,7 @@ impl Runtime {
             LeafSeed {
                 profile: profiles::index_of_id(&profile_id),
                 cwd: profiles::revived_cwd(profiles::index_of_id(&profile_id), Path::new(&cwd)),
+                unknown_profile_id: (!profiles::has_id(&profile_id)).then(|| profile_id.clone()),
             },
         )]);
         let (tab, _) = create_tab_state(
@@ -7783,7 +7967,7 @@ impl Runtime {
                     (renaming == Some(tab.id)).then(|| {
                         display_title(
                             None,
-                            tab.session.window_title(),
+                            tab.announced_title(),
                             tab.session.working_directory(),
                             tab.focused_profile_title(),
                         )
@@ -8470,7 +8654,10 @@ impl Runtime {
     }
 
     /// Where the profile picker hangs right now, or `None` when it is shut.
-    fn profile_menu_layout(&self) -> Option<profiles::ProfileMenuLayout> {
+    ///
+    /// `&mut self` because the menu is content-sized and measuring a string goes
+    /// through the renderer's font system, which shapes and caches as it goes.
+    fn profile_menu_layout(&mut self) -> Option<profiles::ProfileMenuLayout> {
         if !self.profile_menu.is_open() {
             return None;
         }
@@ -8507,12 +8694,18 @@ impl Runtime {
                 profiles::MenuSide::Below,
             ),
         };
+        // The menu is content-sized, so laying it out is a measuring job — the
+        // same renderer, the same font, the same call `build` makes when it
+        // draws the strings this width was computed from.
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::layout(
             anchor,
             side,
             (width as f32, height as f32),
             scale,
             self.recent.entries(),
+            &mut measure,
         ))
     }
 
@@ -9766,6 +9959,8 @@ impl Runtime {
         let inherited = self.sessions.get(&source).map(|leaf| LeafSeed {
             profile: leaf.profile,
             cwd: leaf.session.working_directory().map(Path::to_path_buf),
+            // A running pane's profile is one this build has, by construction.
+            unknown_profile_id: None,
         });
         let inherited = inherited.unwrap_or_default();
         let proxy = self.event_proxy.clone();
@@ -10488,12 +10683,31 @@ impl Runtime {
     fn drain_pty(&mut self) -> Result<()> {
         let mut active_changed = false;
         let mut chrome_changed = false;
+        let mut moved = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
-            let (changed, title_changed) = drain_tab_pty(tab)?;
+            let outcome = drain_tab_pty(tab)?;
             if index == self.active_tab {
-                active_changed = changed;
+                active_changed = outcome.arrived;
             }
-            chrome_changed |= title_changed;
+            chrome_changed |= outcome.renamed;
+            moved |= outcome.moved;
+        }
+        // **A shell that moved is a session that changed.** `cwd` is a field of
+        // every terminal leaf in `session.json`, and until now nothing about a
+        // shell reporting a new one was a reason to write the file: the value on
+        // disk was whatever had been reported at the last *structural* event —
+        // a tab opened, a pin toggled, a split resized. For a tab that was
+        // itself the last such event that value is the empty string, because the
+        // save ran before the shell had said anything, and no later save
+        // corrected it. Measured: a Command Prompt tab opened, left alone and
+        // then closed persisted `"cwd": ""` while its own strip read `Weiyi`.
+        //
+        // This is §5.1's "有意义的变更" by its plain sense — the field is in the
+        // file — and the debounce that ruling exists to provide is what makes a
+        // per-prompt trigger cheap: reporting is once per prompt, the quiet
+        // window is one to two seconds, so a burst of `cd`s still writes once.
+        if moved {
+            self.mark_session_dirty(Instant::now());
         }
         if chrome_changed {
             self.window.set_title(&self.display_title());
@@ -10529,12 +10743,12 @@ impl Runtime {
                 if !due {
                     continue;
                 }
-                let title_before = leaf.session.window_title().map(str::to_owned);
+                let name_before = leaf.name_evidence();
                 let finished = leaf
                     .session
                     .finish_synchronized_update(now)
                     .context("finish timed-out DEC 2026 synchronized update")?;
-                chrome_changed |= leaf.session.window_title() != title_before.as_deref();
+                chrome_changed |= leaf.name_evidence() != name_before;
                 active_finished |= index == active && finished;
             }
         }
@@ -16299,8 +16513,96 @@ fn tab_surface_tip_boxes(
 ///
 /// `\r\n` and not `\n`, because this is a terminal and the cursor is in column
 /// one only if something puts it there.
-fn fallback_banner(notice: &str) -> String {
-    format!("\x1b[2m[BetterTerminal] {notice}\x1b[0m\r\n")
+///
+/// **One sentence, in the words the user chose from.** It used to be assembled
+/// in `bt-pty` out of the only two things that crate has — the resolved
+/// executable path and the operating system's account of the failure — and both
+/// were wrong for the top of somebody's screen. The path is not the thing they
+/// picked: they picked a row of the profile menu called *Git Bash*, and
+/// `D:\App\Tool\Git\bin\bash.exe` is an implementation detail of that row that
+/// changes when they reinstall Git. The OS's account arrived wrapped in the
+/// vendored launcher's own debugging — `CreateProcessW \`"…"\` in cwd \`"…"\`
+/// failed: …`, with the command line `Debug`-quoted and still carrying the `NUL`
+/// terminator `CreateProcessW` requires, so the line ended in a visible `\0`.
+///
+/// So the banner names the two **profiles**, which is what the user has names
+/// for, and the diagnosis stays in the log where whoever is diagnosing will
+/// look. Nothing is lost that was ever readable: a person who wants to know
+/// *why* Git Bash did not start is not going to learn it from an error number
+/// on their prompt line, and a person who wants to know *what they are typing
+/// into now* learns it from exactly this.
+fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String {
+    // The record's `started` is `powershell.exe`, and `FALLBACK_PROFILE` is the
+    // profile that resolves to it — one shell, and the name the user knows it
+    // by is the profile's.
+    debug_assert!(
+        fallback
+            .started
+            .eq_ignore_ascii_case(bt_pty::WINDOWS_POWERSHELL)
+    );
+    let (requested, started) = if requested == profiles::FALLBACK_PROFILE {
+        // **The one case the profiles cannot name**, and it is reachable rather
+        // than theoretical: `BT_SHELL` points the PowerShell profile at a shell
+        // that is not there, or a `pwsh` install is removed between sessions, and
+        // the swap happens *inside* one profile. Both names would be "PowerShell",
+        // and "PowerShell failed to start; using PowerShell instead" is a sentence
+        // that answers nothing.
+        //
+        // So the two executables are named, which is the only thing that differs
+        // here, and by file name rather than path: `pwsh.exe` → `powershell.exe`
+        // is the whole of what happened and is readable, where the full path is
+        // the launcher's bookkeeping — the same reason the rest of this line does
+        // not carry one.
+        (
+            Path::new(&fallback.requested)
+                .file_name()
+                .unwrap_or(fallback.requested.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+            fallback.started.to_owned(),
+        )
+    } else {
+        (
+            profiles::PROFILES[requested].title.to_owned(),
+            profiles::PROFILES[profiles::FALLBACK_PROFILE]
+                .title
+                .to_owned(),
+        )
+    };
+    banner_line(&format!(
+        "{requested} failed to start; using {started} instead."
+    ))
+}
+
+/// The first line of a pane whose saved profile this build does not have —
+/// `M2-restart-shell-contract.md` §3's *other* way into the fallback, and the
+/// half that was silent until now.
+///
+/// `index_of_id` resolves an unrecognised id to [`profiles::FALLBACK_PROFILE`]
+/// *before* the spawn, so the shell starts cleanly, `bt-pty` has nothing to
+/// report, and the pane came up a PowerShell having been something else when it
+/// was saved — with nothing said. §3 and §5#3 give one rule for both ways in
+/// ("绝不静默替换"), so they now speak in one register.
+///
+/// It quotes the id rather than paraphrasing it, because the id is the only
+/// thing anybody can act on: it is what stands in the session file, and it is
+/// what a removed profile — or a newer build — called this shell.
+///
+/// Kept to one short sentence. It can still wrap in a narrow pane — the id's
+/// length belongs to the file and the standing-in profile's name to the table,
+/// and neither is ours to bound — but every word in it is load-bearing, which is
+/// the part that *is* ours.
+fn unknown_profile_banner(unknown: &str) -> String {
+    let started = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
+    banner_line(&format!(
+        "Profile {unknown:?} is not in this build; using {started} instead."
+    ))
+}
+
+/// One dim, prefixed, self-terminating line — the register all of these speak
+/// in, in one place so that two of them cannot drift apart.
+fn banner_line(text: &str) -> String {
+    format!("\x1b[2m[BetterTerminal] {text}\x1b[0m\r\n")
 }
 
 /// `title="New tab (${defaultProfile().title})"` — mock-up 4367 and 4369.
@@ -17793,6 +18095,7 @@ mod tests {
             LeafSeed {
                 profile: profiles::index_of_id("pwsh"),
                 cwd: Some(here),
+                unknown_profile_id: None,
             }
         );
         assert_eq!(
@@ -17800,6 +18103,7 @@ mod tests {
             LeafSeed {
                 profile: profiles::index_of_id("cmd"),
                 cwd: None,
+                unknown_profile_id: None,
             }
         );
         assert_ne!(
@@ -18030,8 +18334,9 @@ mod tests {
         // Measured on the sanitised title, like every other decision here, so a
         // control character glued to the profile's name cannot smuggle the
         // prefix back in.
+        let smuggled = profile.replacen(' ', "\u{1b} \u{8}", 1) + "\u{7f}";
         assert_eq!(
-            pane_head_title(Some("Power\u{1b}Shell\u{8}"), Some(cwd), profile),
+            pane_head_title(Some(&smuggled), Some(cwd), profile),
             Some((whole.clone(), tooltip::NameSource::Cwd)),
             "the check sees what the head would print, not what arrived"
         );
@@ -21715,7 +22020,7 @@ mod tests {
                 None,
                 profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
-            "PowerShell",
+            profiles::PROFILES[profiles::FALLBACK_PROFILE].title,
             "and the profile catches what is left"
         );
     }
@@ -21817,7 +22122,12 @@ mod tests {
     fn the_new_tab_button_names_the_profile_it_would_start() {
         assert_eq!(
             new_tab_tip(profiles::FALLBACK_PROFILE),
-            "New tab (PowerShell)"
+            "New tab (Windows PowerShell)"
+        );
+        assert_eq!(
+            new_tab_tip(profiles::index_of_id("pwsh")),
+            "New tab (PowerShell)",
+            "the two PowerShells are told apart by the only thing that differs"
         );
         assert_eq!(
             new_tab_tip(profiles::index_of_id("cmd")),
@@ -21827,6 +22137,206 @@ mod tests {
         for (index, profile) in profiles::PROFILES.iter().enumerate() {
             assert_eq!(new_tab_tip(index), format!("New tab ({})", profile.title));
         }
+    }
+
+    /// PIN — a `cd` relabels the tab, and does not wait for something unrelated
+    /// to repaint the strip.
+    ///
+    /// Red gate: watching `window_title` alone — which is what
+    /// [`drain_leaf_pty`] did — passes every other test in this file and leaves
+    /// the tab strip showing the folder a shell left. Measured on a real
+    /// Command Prompt pane before the fix: `cd` into `C:\Program Files` left the
+    /// tab reading `BetterTerminal` while the prompt one line below it read
+    /// `C:\Program Files>`, and it stayed that way until a click happened to
+    /// repaint the chrome.
+    ///
+    /// The pair is what the name stack reads, so the pair is what has to be
+    /// watched; either half moving is a tab that has to be relabelled.
+    #[test]
+    fn everything_a_tab_is_named_from_is_watched_for_change() {
+        let mut leaf = leaf_saying("x");
+        let start = leaf.name_evidence();
+
+        // The folder layer — the one that names most tabs, and the one that was
+        // not being watched.
+        leaf.session.feed(b"\x1b]7;file:///D:\\src\x1b\\").unwrap();
+        let moved = leaf.name_evidence();
+        assert_ne!(moved, start, "an OSC 7 report moves the name");
+        leaf.session
+            .feed(b"\x1b]7;file:///D:\\other\x1b\\")
+            .unwrap();
+        assert_ne!(leaf.name_evidence(), moved, "and so does the next one");
+
+        // The title layer, still watched.
+        let before_title = leaf.name_evidence();
+        leaf.session.feed(b"\x1b]0;vim main.rs\x07").unwrap();
+        assert_ne!(leaf.name_evidence(), before_title);
+
+        // And ordinary output moves neither, so this does not relabel the strip
+        // on every byte a shell prints.
+        let quiet = leaf.name_evidence();
+        leaf.session.feed(b"hello\r\nworld\r\n").unwrap();
+        assert_eq!(leaf.name_evidence(), quiet);
+
+        // The two halves are told apart, because they drive different machines:
+        // a title relabels chrome that is not written down, a folder is a field
+        // of this leaf in `session.json` and has to reach the file.
+        let (title_before, place_before) = leaf.name_evidence();
+        leaf.session.feed(b"\x1b]0;vim other.rs\x07").unwrap();
+        let (title_after, place_after) = leaf.name_evidence();
+        assert_ne!(title_after, title_before, "the title moved");
+        assert_eq!(place_after, place_before, "and the folder did not");
+    }
+
+    /// PIN — a shell reading its own command line back is not a shell naming
+    /// itself, so it does not get the layer reserved for shells that do.
+    ///
+    /// Red gate, and it is a *live* one rather than a hypothetical: `cmd.exe`
+    /// calls `SetConsoleTitle` with its own image path on the way up, which
+    /// ConPTY forwards verbatim. Measured through a real pseudoconsole on this
+    /// machine — `ESC ]0;C:\WINDOWS\System32\cmd.exe BEL`, before the copyright
+    /// banner. Without this filter every Command Prompt tab in the window is
+    /// *called* `C:\WINDOWS\System32\cmd.exe`, and stays called that after
+    /// `OSC 7` finally gives it a real directory, because a program title
+    /// outranks a folder in the name stack and nothing was ever going to
+    /// dislodge it.
+    ///
+    /// The three cases underneath are the ones that must survive: a title the
+    /// user set, a title that merely *resembles* the program, and a pane with no
+    /// program at all. A filter that took any of those would be buying cmd's tab
+    /// name with somebody else's.
+    #[test]
+    fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
+        let program = PathBuf::from(r"C:\WINDOWS\System32\cmd.exe");
+        let titled = |title: &str, program: Option<&Path>| {
+            let mut leaf = leaf_saying("x");
+            leaf.program = program.map(Path::to_path_buf);
+            leaf.session
+                .feed(format!("\x1b]0;{title}\x07").as_bytes())
+                .unwrap();
+            leaf.announced_title().map(str::to_owned)
+        };
+
+        assert_eq!(
+            titled(r"C:\WINDOWS\System32\cmd.exe", Some(&program)),
+            None,
+            "cmd's own image path is the launcher's word, not the shell's"
+        );
+        // Windows' `<image path> - <command line>` convention, which `cmd.exe`
+        // uses for as long as a command runs. The launcher's half goes; what
+        // the shell actually said stays, and it is the only thing a Command
+        // Prompt pane can say about being busy.
+        assert_eq!(
+            titled(
+                r"C:\WINDOWS\System32\cmd.exe - ping  -n 8 127.0.0.1",
+                Some(&program)
+            )
+            .as_deref(),
+            Some("ping  -n 8 127.0.0.1")
+        );
+        // A title that merely shares the prefix is not that convention and is
+        // kept whole.
+        assert_eq!(
+            titled(r"C:\WINDOWS\System32\cmd.exe.log", Some(&program)).as_deref(),
+            Some(r"C:\WINDOWS\System32\cmd.exe.log")
+        );
+        // Windows paths are case-insensitive, and `%SystemRoot%` is spelled
+        // `C:\WINDOWS` by the environment and `C:\Windows` by half of everything
+        // else. One capital must not restore the defect.
+        assert_eq!(titled(r"c:\windows\system32\CMD.EXE", Some(&program)), None);
+
+        // A title the user set in that same pane — `title Build` — is a shell
+        // saying something, and outranks the folder exactly as it always did.
+        assert_eq!(
+            titled("Build", Some(&program)).as_deref(),
+            Some("Build"),
+            "the filter refuses one string, not the layer"
+        );
+        // Only the whole path is the command line read back. A program that
+        // announces itself as `cmd.exe` has chosen a name.
+        assert_eq!(
+            titled("cmd.exe", Some(&program)).as_deref(),
+            Some("cmd.exe")
+        );
+        // And a pane with no process behind it has nothing to be repeating.
+        assert_eq!(
+            titled(r"C:\WINDOWS\System32\cmd.exe", None).as_deref(),
+            Some(r"C:\WINDOWS\System32\cmd.exe")
+        );
+
+        // The consequence, through the two stacks that read it: with the title
+        // refused, the folder is what names both.
+        let mut leaf = leaf_saying("x");
+        leaf.program = Some(program.clone());
+        leaf.session
+            .feed(b"\x1b]0;C:\\WINDOWS\\System32\\cmd.exe\x07\x1b]7;file:///D:\\src\x1b\\")
+            .unwrap();
+        assert_eq!(
+            display_title(
+                None,
+                leaf.announced_title(),
+                leaf.session.working_directory(),
+                profiles::PROFILES[profiles::index_of_id("cmd")].title,
+            ),
+            "src",
+            "the tab wears the folder's leaf"
+        );
+        assert_eq!(
+            pane_head_title(
+                leaf.announced_title(),
+                leaf.session.working_directory(),
+                profiles::PROFILES[profiles::index_of_id("cmd")].title,
+            )
+            .map(|(name, _)| name),
+            Some(r"D:\src".to_owned()),
+            "and the head the whole path, with no executable prefixed to it"
+        );
+    }
+
+    /// PIN — the *other* half of "never silently", which was silent.
+    ///
+    /// `M2-restart-shell-contract.md` §3 names two ways into the fallback and
+    /// gives them one rule: an unknown `profile_id` and a shell that is gone
+    /// both fall to the default profile and both must say so. Only the second
+    /// was implemented. The first is the one that happens without anything
+    /// breaking — a profile removed from a build, or a session file written by a
+    /// newer one — and `index_of_id` folded it into `FALLBACK_PROFILE` before
+    /// the spawn, so nothing downstream could tell the substitution from an
+    /// ordinary PowerShell tab.
+    ///
+    /// Red gate: [`profiles::index_of_id`] alone cannot fail this test, because
+    /// it answers `FALLBACK_PROFILE` for a saved `"pwsh"` and a saved `"fish"`
+    /// alike; it takes [`profiles::has_id`] to know which happened, which is why
+    /// that function exists.
+    #[test]
+    fn a_pane_saved_as_a_profile_this_build_lacks_says_so_rather_than_pretending() {
+        assert!(profiles::has_id("cmd") && !profiles::has_id("fish"));
+        let banner = unknown_profile_banner("wsl-ubuntu");
+        let mut session = DualPlaneSession::with_quotas_and_cell_height(
+            nonzero_u32(120),
+            nonzero_u32(6),
+            DEFAULT_STAGING_QUOTA,
+            M0_FROZEN_LINE_QUOTA,
+            std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
+        );
+        session.feed(banner.as_bytes()).unwrap();
+        let first = session.terminal().visible_text()[0].clone();
+        assert!(
+            first.contains("[BetterTerminal]") && first.contains("\"wsl-ubuntu\""),
+            "the line names the terminal and quotes the id that is missing: {first:?}"
+        );
+        assert!(
+            first.contains("PowerShell"),
+            "and the profile that stood in for it, on the same row: {first:?}"
+        );
+        assert!(
+            session.terminal().visible_text()[1].trim().is_empty(),
+            "one sentence, ending its own line so the row beneath belongs to \
+             the shell"
+        );
+        // Same register as its sibling: dim, prefixed, and ending its own line
+        // so the shell's first prompt does not print over it.
+        assert!(banner.starts_with("\x1b[2m[BetterTerminal] ") && banner.ends_with("\x1b[0m\r\n"));
     }
 
     /// PIN — a pane that got a shell nobody asked for says so, in the pane, in
@@ -21842,9 +22352,14 @@ mod tests {
     /// still there an hour later, and copyable like anything else in the pane.
     #[test]
     fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
-        let notice = r"D:\App\Tool\Git\bin\bash.exe failed to start (os error 2); \
-             using powershell.exe instead";
-        let banner = fallback_banner(notice);
+        // What `bt-pty` hands up, including the shape that used to reach the
+        // glass: the vendored launcher `Debug`-quotes the command line it built
+        // for `CreateProcessW`, `NUL` terminator and all.
+        let fallback = bt_pty::ShellFallback {
+            requested: std::ffi::OsString::from("D:\\App\\Tool\\Git\\bin\\bash.exe\0"),
+            started: bt_pty::WINDOWS_POWERSHELL,
+        };
+        let banner = fallback_banner(&fallback, profiles::index_of_id("gitbash"));
         let mut session = DualPlaneSession::with_quotas_and_cell_height(
             nonzero_u32(80),
             nonzero_u32(6),
@@ -21854,12 +22369,47 @@ mod tests {
         );
         session.feed(banner.as_bytes()).unwrap();
         let visible = session.terminal().visible_text();
-        assert!(
-            visible[0].contains("[BetterTerminal]") && visible[0].contains("bash.exe"),
-            "the first line names the terminal and the shell that would not \
-             start, and is not mistakable for the shell's own output: {:?}",
-            visible[0]
+        assert_eq!(
+            visible[0].trim_end(),
+            "[BetterTerminal] Git Bash failed to start; using Windows PowerShell instead.",
+            "the line names the terminal and both profiles by the names the \
+             picker offers them under, and is not mistakable for the shell's \
+             own output"
         );
+        // Red gate on the whole point of the rework: the executable path, the
+        // operating system's account of the failure, and the `NUL` the command
+        // line carried are all diagnosis, and diagnosis belongs in the log.
+        for debris in [r"D:\App", "bash.exe", "os error", "CreateProcess", "\0"] {
+            assert!(
+                !visible[0].contains(debris),
+                "{debris:?} is debugging output and must not reach the pane: {:?}",
+                visible[0]
+            );
+        }
+        // **The swap inside one profile**, which `BT_SHELL` and a removed `pwsh`
+        // install both reach. Naming the profiles here would print "PowerShell
+        // failed to start; using PowerShell instead", so the executables are
+        // named — by file name, the one thing that differs and the only part a
+        // reader needs.
+        let inside = bt_pty::ShellFallback {
+            requested: std::ffi::OsString::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            started: bt_pty::WINDOWS_POWERSHELL,
+        };
+        let banner = fallback_banner(&inside, profiles::FALLBACK_PROFILE);
+        let mut one = DualPlaneSession::with_quotas_and_cell_height(
+            nonzero_u32(80),
+            nonzero_u32(6),
+            DEFAULT_STAGING_QUOTA,
+            M0_FROZEN_LINE_QUOTA,
+            std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
+        );
+        one.feed(banner.as_bytes()).unwrap();
+        assert_eq!(
+            one.terminal().visible_text()[0].trim_end(),
+            "[BetterTerminal] pwsh.exe failed to start; using powershell.exe instead.",
+            "one profile, two shells: the shells are what the line can tell apart"
+        );
+
         // And the cursor is left on the line beneath, so the shell's own first
         // prompt does not print over it.
         assert!(
@@ -22118,7 +22668,7 @@ mod tests {
                 None,
                 profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
-            "PowerShell"
+            profiles::PROFILES[profiles::FALLBACK_PROFILE].title
         );
         assert_eq!(
             display_title(
@@ -26589,6 +27139,9 @@ mod tests {
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.
             profile: profiles::FALLBACK_PROFILE,
+            // And no program either, which is the honest shape of the same
+            // fact: nothing was started, so nothing can have announced itself.
+            program: None,
             session,
             projection,
             grid,

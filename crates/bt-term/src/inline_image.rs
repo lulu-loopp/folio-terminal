@@ -1972,6 +1972,70 @@ mod tests {
         assert_eq!(file_uri_to_local_image_path("file:///D:/a.png/"), None);
     }
 
+    /// A Windows shell may spell its directory the only way it can spell it.
+    ///
+    /// `cmd.exe`'s whole shell integration is the `PROMPT` variable, whose alphabet is a dozen
+    /// `$`-substitutions and nothing else: `$P` expands to `D:\Developer`, and there is no
+    /// operation in that language that could turn the separators into `/` or percent-encode the
+    /// space in `C:\Program Files`. So the report arrives Win32-spelled, with raw spaces, and this
+    /// decoder accepts it — a backslash is not a delimiter in a URI, so a Windows path survives
+    /// `split('/')` as one segment, and `is_windows_drive_absolute` takes either separator.
+    ///
+    /// **Pinned because that acceptance is currently a consequence rather than a decision**, and
+    /// the two are indistinguishable until someone tightens the parser. Rejecting a backslash, or
+    /// requiring reserved characters to be encoded, are both reasonable-looking edits to a URI
+    /// decoder; either one silently blanks the working directory of every Command Prompt pane, and
+    /// nothing in this crate would notice, because from inside here it is one more malformed URI
+    /// on the "forget rather than guess" path. The failure would surface as an empty `Recent` row
+    /// and a pane head with no place in it, three layers away.
+    ///
+    /// The refusal underneath is the boundary of that leniency, and it is the only one in this
+    /// family: leniency about *separators* buys nothing about *authority*, so a URI that names
+    /// another host is still a remote share whichever way its slashes lean. Anything else that
+    /// is not drive-rooted does not fail here at all — it leaves by the POSIX door
+    /// (`Rooting::DriveOrPosixRoot`, pinned below), which is WSL's and is a different question.
+    /// `cmd.exe` cannot reach that door in any case: `$P` is always drive-rooted, because `cmd`
+    /// refuses to stand in a UNC directory at all.
+    #[test]
+    fn a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it() {
+        for (uri, expected) in [
+            // `$e]7;file:///$P$e\` at `D:\Developer\BetterTerminal`, measured off a real
+            // pseudoconsole rather than composed here.
+            (
+                r"file:///D:\Developer\BetterTerminal",
+                r"D:\Developer\BetterTerminal",
+            ),
+            // …and in a directory whose name has a space, which `PROMPT` cannot encode.
+            (r"file:///C:\Program Files", r"C:\Program Files"),
+            // The drive root, where `$P` is `C:\` and the separator is the one that makes it a
+            // root rather than a name.
+            (r"file:///C:\", r"C:\"),
+            // Mixed, because nothing forbids it and a path is a path.
+            (
+                r"file:///D:\Developer/BetterTerminal",
+                r"D:\Developer\BetterTerminal",
+            ),
+        ] {
+            assert_eq!(
+                file_uri_to_local_path(uri, None),
+                Some(PathBuf::from(expected)),
+                "{uri:?}"
+            );
+        }
+        assert_eq!(
+            file_uri_to_local_path(r"file://server\share\src", None),
+            None,
+            "a backslash in the path does not make another host's share ours"
+        );
+        // And a Windows-spelled path is still not an image reference: that reading is
+        // `Rooting::DriveOnly` and stricter on purpose, but it is stricter about *rooting*, not
+        // about separators, so it takes this one too.
+        assert_eq!(
+            file_uri_to_local_image_path(r"file:///D:\Developer\shot.png"),
+            Some(PathBuf::from(r"D:\Developer\shot.png"))
+        );
+    }
+
     /// A shell that is not a Windows process still has a directory, and OSC 7 is the only way it
     /// can say so — the WSL half of `docs/shell-integration.md`'s working-directory contract.
     ///
