@@ -18,12 +18,12 @@
 //! about content. Which session lives in the terminal seat, which file the
 //! preview shows — those never enter a `LayoutNode`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bt_layout::{
-    Axis, DIVIDER, Edit, EditError, LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize,
-    Presentation, Ratio, SUBPIXELS_PER_PX, Seat, SeatId, SeatKind, SeatLayout, SeatMetrics,
-    SizePolicy, SplitId, WorkAreaHint, apply, solve, window_min_inner_size,
+    Axis, DIVIDER, Edit, EditError, FILES_W, LayoutMode, LayoutNode, LogicalPx, LogicalRect,
+    LogicalSize, Presentation, Ratio, SUBPIXELS_PER_PX, Seat, SeatId, SeatKind, SeatLayout,
+    SeatMetrics, SizePolicy, SplitId, WorkAreaHint, apply, solve, window_min_inner_size,
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
@@ -240,6 +240,37 @@ impl Seats {
             .collect()
     }
 
+    /// Every Files leaf of this tab, in tree order.
+    ///
+    /// The exact sibling of [`Self::terminals`], down to the walk: the key set
+    /// the tab's files states are indexed by, in `seats_in_order`'s in-order
+    /// walk (D2). That the two share a walk is what lets the revive path pair
+    /// saved files leaves with their seats by `zip`, the same way it already
+    /// pairs saved terminals with theirs — the nth Files leaf of the file and
+    /// the nth entry here are the same pane, because nothing on disk names a
+    /// seat and position in the saved tree is the only pairing there is.
+    pub fn files(&self) -> Vec<SeatId> {
+        self.tree
+            .seats_in_order()
+            .into_iter()
+            .filter(|seat| seat.kind == SeatKind::Files)
+            .map(|seat| seat.id)
+            .collect()
+    }
+
+    /// This tab's files column, if it has one.
+    ///
+    /// Shaped like [`Self::preview`] because it answers the same question for
+    /// the same reason: the toggle needs to know whether to open one or close
+    /// the one that is already here.
+    pub fn files_seat(&self) -> Option<SeatId> {
+        self.tree
+            .seats_in_order()
+            .into_iter()
+            .find(|seat| seat.kind == SeatKind::Files)
+            .map(|seat| seat.id)
+    }
+
     /// Split a terminal seat, seating a second terminal beside it.
     ///
     /// Returns the new leaf's id, which is also the id the caller must spawn a
@@ -390,6 +421,138 @@ impl Seats {
                 }
             }
         }
+    }
+
+    /// Seat a files column down the whole left edge of this tab (A8), returning
+    /// the seat it minted.
+    ///
+    /// **A rim drop and not a split of the focused pane, and that is the whole
+    /// ruling.** `addFilesPane` takes `splitRootOf(w, "left")` rather than
+    /// `splitLeafIn` (mock-up 3701-3706): a tree is a thing you read *beside*
+    /// everything else, so however many panes the tab already holds, the column
+    /// runs the full height of the window instead of being squeezed into
+    /// whichever pane happened to have the keyboard. "That is also the natural
+    /// shape of a file sidebar. Want it somewhere else? Drag it — the pane
+    /// moves."
+    ///
+    /// `None` when the edit refuses, which is the honest answer rather than a
+    /// half-made pane: the caller has a files state to file under the returned
+    /// id, and there is nothing to file it under if no seat was made.
+    pub fn add_files_pane(&mut self, metrics: &SeatMetrics) -> Option<SeatId> {
+        let id = SeatId(self.next_seat);
+        let split_id = SplitId(self.next_split);
+        let arriving = LayoutNode::seat(Seat::new(id, SeatKind::Files));
+        match apply(
+            &self.tree,
+            metrics,
+            &Edit::RootRimDrop {
+                dir: Axis::Row,
+                leading: true,
+                arriving,
+                split_id,
+            },
+        ) {
+            Ok(outcome) => {
+                self.tree = outcome.tree;
+                self.next_seat += 1;
+                self.next_split += 1;
+                // A leaf arrived and every pane beside it narrowed (U8).
+                self.structure_revision += 1;
+                Some(id)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// The fixed column hanging off this split, and whether it is the leading
+    /// child.
+    ///
+    /// Asked *before* a drag starts so the gesture can pick its verb — pixels or
+    /// ratio — from the same reading `bt-layout::apply` will use when it commits
+    /// one. The two must agree on which side is fixed or the pointer would drag
+    /// one edge and the tree would write the other, so this walks the children in
+    /// the same order `drag_fixed_extent` does: side A first, then side B.
+    ///
+    /// `None` is the honest refusal of §3.4 — a split whose fixed side is not a
+    /// *bare* leaf (two files columns stacked, say) has no single width to drag,
+    /// and finding that out here means the gesture never starts rather than
+    /// starting and silently doing nothing.
+    pub fn fixed_column_of_split(
+        &self,
+        metrics: &SeatMetrics,
+        split: SplitId,
+    ) -> Option<(SeatId, bool)> {
+        fn fixed_side(
+            node: &LayoutNode,
+            split: SplitId,
+            metrics: &SeatMetrics,
+        ) -> Option<(SeatId, bool)> {
+            let LayoutNode::Split { id, dir, a, b, .. } = node else {
+                return None;
+            };
+            if *id != split {
+                return fixed_side(a, split, metrics).or_else(|| fixed_side(b, split, metrics));
+            }
+            // Fixedness holds on the row axis only: a files column in a
+            // vertical slot fills that slot's width and has no width of its
+            // own to drag.
+            if *dir != Axis::Row {
+                return None;
+            }
+            let bare_fixed = |side: &LayoutNode| match side {
+                LayoutNode::Seat(seat) => metrics
+                    .extent_class(seat.kind)
+                    .is_fixed_along(Axis::Row)
+                    .then_some(seat.id),
+                LayoutNode::Split { .. } => None,
+            };
+            bare_fixed(a)
+                .map(|id| (id, true))
+                .or_else(|| bare_fixed(b).map(|id| (id, false)))
+        }
+        fixed_side(&self.tree, split, metrics)
+    }
+
+    /// Drag a fixed column's width in pixels. Returns whether a width was
+    /// written.
+    ///
+    /// The pixel twin of [`Self::drag_divider`], and it defers to
+    /// `bt-layout::apply` for exactly the same reason: the clamp is `[0, usable]`
+    /// (§3.4, 2026-08-08) and a second opinion about it here would be a second
+    /// geometry. `FILES_W_MIN` does not appear in this path at all — it is what
+    /// the column would *like* to be, and a hand that keeps pulling past it is
+    /// entitled to a narrower column and the clipped filenames that come with it.
+    ///
+    /// Compared on the whole tree rather than on a list of widths because a
+    /// pixel drag rewrites no ratio: there is no `ratios()` difference to look
+    /// for, and the width it does write lives on a seat.
+    pub fn drag_fixed_extent(
+        &mut self,
+        metrics: &SeatMetrics,
+        split: SplitId,
+        requested: LogicalPx,
+        usable: LogicalPx,
+    ) -> Result<bool, EditError> {
+        let outcome = apply(
+            &self.tree,
+            metrics,
+            &Edit::DragFixedExtent {
+                split,
+                requested,
+                usable,
+            },
+        )?;
+        let changed = outcome.tree != self.tree;
+        self.tree = outcome.tree;
+        Ok(changed)
+    }
+
+    /// The width a seat is currently holding, if it is holding one.
+    ///
+    /// What Esc has to put back — the fixed-extent half of `DividerDrag::origin`,
+    /// and the *whole* of what a pixel drag moves.
+    pub fn fixed_extent_of(&self, seat: SeatId) -> Option<LogicalPx> {
+        self.tree.find_seat(seat).and_then(|seat| seat.fixed_extent)
     }
 
     /// Close one seat, promoting its sibling. Refused for the last seat: an
@@ -3698,6 +3861,12 @@ static NO_TERMINAL_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
 /// The same value for the identity marks: "no seat here is running a shell".
 #[cfg(test)]
 static NO_LEAF_MARKS: BTreeMap<SeatId, ChromeMark> = BTreeMap::new();
+/// And again for the roots: "no seat here is a view of a folder".
+///
+/// A files column with no entry falls back to its kind's own name, which is
+/// what every chrome test that predates the files state means by leaving it out.
+#[cfg(test)]
+static NO_FILES_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
 
 /// Every Terminal seat of `seats` running a PowerShell — the map a real tab of
 /// one profile hands in.
@@ -3756,6 +3925,7 @@ pub fn build_chrome_with_preview(
             preview_title,
             terminal_names: &NO_TERMINAL_NAMES,
             leaf_marks: &all_powershell(seats),
+            files_names: &NO_FILES_NAMES,
             preview_message,
             fit_overflow: None,
             profile_menu_open: false,
@@ -4012,6 +4182,21 @@ pub struct ChromeContent<'a> {
     /// Seats absent from the map are seats with no shell — a files column, a
     /// preview, a placeholder — and they pick their own mark from their kind.
     pub leaf_marks: &'a BTreeMap<SeatId, ChromeMark>,
+    /// What each Files seat of the active tab is rooted at, **already cut to the
+    /// last segment** — the head's own length (B14/B25).
+    ///
+    /// Resolved above for the same reason [`Self::terminal_names`] is: a root is
+    /// content, red line L1 keeps content out of the tree, and this module is
+    /// handed a string per seat id rather than a place to look one up.
+    ///
+    /// Cut above, too, and that is the one place it differs from
+    /// [`Self::terminal_names`]. A terminal head takes the whole path because it
+    /// has a whole bar to fill; a files head is 240 logical pixels wide by
+    /// construction, so the mock-up gives the head the last segment and the foot
+    /// the path entire (4758-4761). Sending the whole path here and cutting it
+    /// in the painter would put the ruling in the renderer, where the *other*
+    /// length would have to be re-derived to disagree with it.
+    pub files_names: &'a BTreeMap<SeatId, String>,
     pub preview_message: Option<&'a str>,
     /// What the L4 fit-what-fits strip could not show, when the window is in
     /// that state at all ([`fit_what_fits`]). `None` on every ordinary solve.
@@ -4204,6 +4389,7 @@ pub fn build_chrome_for_tabs(
         preview_title,
         terminal_names,
         leaf_marks,
+        files_names,
         preview_message,
         fit_overflow,
         profile_menu_open,
@@ -4217,6 +4403,7 @@ pub fn build_chrome_for_tabs(
     // which is the same argument `seat_short_caption` makes about deriving its
     // answer from `seat_caption` instead of re-reading the source.
     let terminal_name = |id: SeatId| terminal_names.get(&id).map(String::as_str);
+    let files_name = |id: SeatId| files_names.get(&id).map(String::as_str);
     let palette = chrome_palette();
     let mut quads = Vec::new();
     let mut labels = Vec::new();
@@ -4339,7 +4526,12 @@ pub fn build_chrome_for_tabs(
                     placement.kind,
                     leaf_marks.get(&placement.id).copied(),
                     placement.presentation,
-                    seat_short_caption(placement.kind, preview_title, terminal_name(placement.id)),
+                    seat_short_caption(
+                        placement.kind,
+                        preview_title,
+                        terminal_name(placement.id),
+                        files_name(placement.id),
+                    ),
                     &mut pane_labels,
                     &mut pane_sprites,
                 );
@@ -4439,8 +4631,13 @@ pub fn build_chrome_for_tabs(
                     },
                 ));
                 pane_labels.push(ChromeLabel {
-                    text: seat_caption(placement.kind, preview_title, terminal_name(placement.id))
-                        .to_owned(),
+                    text: seat_caption(
+                        placement.kind,
+                        preview_title,
+                        terminal_name(placement.id),
+                        files_name(placement.id),
+                    )
+                    .to_owned(),
                     rect: head.title,
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                     // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
@@ -4521,7 +4718,13 @@ pub fn build_chrome_for_tabs(
                     // exists to forbid. So it says what it is, in its own body,
                     // in the same quiet ink an empty preview uses.
                     SeatKind::Placeholder => Some(PLACEHOLDER_SEAT_NOTICE),
-                    _ => None,
+                    // P1 seats the column, states where it is rooted, and stops
+                    // there: the tree itself is P2's and its data plane is P3's.
+                    // The body says so rather than standing empty, because an
+                    // empty body and a broken one are the same picture — the
+                    // argument T227 already makes one line above.
+                    SeatKind::Files => Some(FILES_TREE_PENDING_NOTICE),
+                    SeatKind::Terminal => None,
                 };
                 if let Some(message) = body_notice {
                     // A state notice, not content: quiet ink, centred in the
@@ -6919,13 +7122,27 @@ pub(crate) fn seat_caption<'a>(
     kind: SeatKind,
     preview_title: Option<&'a str>,
     terminal_name: Option<&'a str>,
+    files_name: Option<&'a str>,
 ) -> &'a str {
     match kind {
         SeatKind::Preview => preview_title.unwrap_or_else(|| seat_title(kind)),
         SeatKind::Terminal => terminal_name
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| seat_title(kind)),
-        _ => seat_title(kind),
+        // **A files head names its root, not its kind** (B14, mock-up 4748):
+        // "A files pane ALWAYS shows its root — a tree is useless without
+        // knowing where it is." The literal `"Files"` that used to be printed
+        // here said the one thing the head already says with its folder mark,
+        // and withheld the only thing it was for.
+        //
+        // The *last segment*, where a terminal head takes the whole path: the
+        // mock-up splits those two deliberately (4758-4761), and the reason is
+        // that the head is 240px wide by construction. A whole path in a fixed
+        // 240px column is an ellipsis with a drive letter in front of it.
+        SeatKind::Files => files_name
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| seat_title(kind)),
+        SeatKind::Placeholder => seat_title(kind),
     }
 }
 
@@ -6936,6 +7153,14 @@ pub(crate) fn seat_caption<'a>(
 /// no code for, which is what a session written by a newer build looks like.
 pub(crate) const PLACEHOLDER_SEAT_NOTICE: &str =
     "This pane was saved by a newer version of BetterTerminal";
+
+/// What a files column says in its own body until the tree grows into it.
+///
+/// This slice gives the column a home, a width, a root and a place on disk; the
+/// rows themselves are the next one's. Said out loud for the same reason
+/// [`PLACEHOLDER_SEAT_NOTICE`] is: a pane that draws nothing is indistinguishable
+/// from a pane that is broken, and this one is neither.
+pub(crate) const FILES_TREE_PENDING_NOTICE: &str = "File tree coming soon";
 
 /// The tail line of the L4 strip: how many seats it had no row for.
 ///
@@ -6969,8 +7194,9 @@ pub(crate) fn seat_short_caption<'a>(
     kind: SeatKind,
     preview_title: Option<&'a str>,
     terminal_name: Option<&'a str>,
+    files_name: Option<&'a str>,
 ) -> &'a str {
-    let full = seat_caption(kind, preview_title, terminal_name);
+    let full = seat_caption(kind, preview_title, terminal_name, files_name);
     full.rsplit(['/', '\\'])
         .find(|segment| !segment.is_empty())
         .unwrap_or(full)
@@ -7539,6 +7765,38 @@ pub(crate) fn pane_mark(
     }
 }
 
+/// The width a pointer at `position` is asking a fixed column for, and the slot
+/// it has to fit inside. The clamp is `apply`'s job, not this function's.
+///
+/// The pixel mirror of [`requested_ratio`], and it takes `leading` because the
+/// same pointer motion means opposite things on the two sides: dragging right
+/// widens a column seated to the divider's left and narrows one seated to its
+/// right. Getting that backwards is not a rounding error, it is a column that
+/// runs away from the hand.
+///
+/// A width and not a position, so the caller never has to know where the slot
+/// starts — which is also what keeps this honest when the slot moves under a
+/// drag that is already running.
+pub fn requested_fixed_extent(
+    slot: SplitSlot,
+    leading: bool,
+    scale_ppm: u32,
+    position: f64,
+) -> Option<(LogicalPx, LogicalPx)> {
+    let usable = slot.slot.extent(slot.dir) - DIVIDER;
+    if !usable.subpixels().is_positive() {
+        return None;
+    }
+    let pointer = device_to_logical_signed(position, scale_ppm);
+    let near = slot.slot.near(slot.dir).subpixels();
+    let width = if leading {
+        pointer - near
+    } else {
+        near + slot.slot.extent(slot.dir).subpixels() - pointer
+    };
+    Some((LogicalPx::from_subpixels(width), usable))
+}
+
 /// The ratio a pointer at `position` (device pixels along `slot.dir`) is asking
 /// this split for. The clamp is `apply`'s job, not this function's.
 pub fn requested_ratio(
@@ -7583,6 +7841,44 @@ fn device_to_logical_signed(device_px: f64, scale_ppm: u32) -> i64 {
 /// tab it is asking about, and it only has to outlive the call.
 type TermLeafV1Fn<'a> = dyn Fn(SeatId) -> TermLeafV1 + 'a;
 
+/// The same question asked of a files column: "what is *this* seat a view of?"
+///
+/// The sibling of [`TermLeafV1Fn`] and total for the same reason — every Files
+/// leaf in this tree has a state behind it, because the two are created and
+/// destroyed together exactly as a Terminal and its shell are.
+type FilesLeafStateFn<'a> = dyn Fn(SeatId) -> FilesLeafState + 'a;
+
+/// What one files pane is a view of — the three facts red line L1 keeps out of
+/// the tree.
+///
+/// **The width is deliberately not here.** It is `Seat::fixed_extent`: a durable
+/// geometry field (§5) that the solver already reads, that `DragFixedExtent`
+/// already writes, and that already crosses the disk. A second copy on this
+/// struct would be a second answer to "how wide is this column", and the two
+/// would part company the first time a drag wrote one of them.
+///
+/// So the split is exactly the red line: the tree says *where the column is and
+/// how wide*, this says *what it is looking at*. `to_persisted` puts the two
+/// halves back together, which is the only place they ever meet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FilesLeafState {
+    /// Captured when the pane is opened and never followed afterwards (A7/R-g):
+    /// a tree that re-roots itself as you `cd` is the single most startling
+    /// thing an independent view can do.
+    pub root: String,
+    /// The expanded directories, by the stable node id §3.4 stores.
+    ///
+    /// A `BTreeSet` rather than a `HashSet` for the reason L8 puts on the
+    /// solver's own output, and here it is sharper: **this set reaches the
+    /// disk**. A set has no order of its own, so the order it is written in has
+    /// to be a rule rather than whatever a hash seed produced this run —
+    /// otherwise the same session writes a different file every time it is
+    /// saved, and a byte-for-byte round trip is not even expressible.
+    pub open: BTreeSet<String>,
+    /// The selected node, by the same stable id.
+    pub sel: Option<String>,
+}
+
 impl Seats {
     /// The durable form of this tree, with every terminal leaf asked about
     /// **itself**.
@@ -7606,8 +7902,18 @@ impl Seats {
     /// is a black rectangle — so there is no "missing" case for a lookup to
     /// answer, and a `&dyn Fn` says that where an `Option`-returning map would
     /// invite a default nobody should ever write.
-    pub fn to_persisted(&self, term: &TermLeafV1Fn<'_>) -> LayoutNodeV1 {
-        to_persisted(&self.tree, term)
+    /// `files` is the same question asked of every Files leaf, and it arrives
+    /// the same way and for the same reason: a seat does not know its root.
+    ///
+    /// It answers three fields and not four. The `width` this writes comes off
+    /// the seat, because that is where it lives — see [`FilesLeafState`] for why
+    /// the two halves are apart everywhere except here.
+    pub fn to_persisted(
+        &self,
+        term: &TermLeafV1Fn<'_>,
+        files: &FilesLeafStateFn<'_>,
+    ) -> LayoutNodeV1 {
+        to_persisted(&self.tree, term, files)
     }
 
     /// Rebuild a tree from disk. Split ids are re-minted from the shape (§3.2:
@@ -7638,7 +7944,11 @@ impl Seats {
     }
 }
 
-fn to_persisted(node: &LayoutNode, term: &TermLeafV1Fn<'_>) -> LayoutNodeV1 {
+fn to_persisted(
+    node: &LayoutNode,
+    term: &TermLeafV1Fn<'_>,
+    files: &FilesLeafStateFn<'_>,
+) -> LayoutNodeV1 {
     match node {
         LayoutNode::Seat(seat) => LayoutNodeV1::Leaf(match seat.kind {
             // The seed proper — profile, place, your name for it — and the whole
@@ -7648,14 +7958,25 @@ fn to_persisted(node: &LayoutNode, term: &TermLeafV1Fn<'_>) -> LayoutNodeV1 {
             // `seat.id`, so a leaf is written from the shell that was actually
             // standing in it.
             SeatKind::Terminal => LeafNodeV1::Term(term(seat.id)),
-            SeatKind::Files => LeafNodeV1::Files(bt_persist::FilesLeafV1 {
-                root: String::new(),
-                open: Vec::new(),
-                sel: None,
-                width: seat
-                    .fixed_extent
-                    .map_or(240, |extent| extent.floor_px().max(0) as u32),
-            }),
+            // The two halves of a files leaf, put together at the only point
+            // they meet. `root`/`open`/`sel` are asked of the seat, exactly as a
+            // terminal's seed is; `width` is read off the seat itself, because
+            // it is geometry and geometry is what this tree holds.
+            //
+            // All four used to be written unconditionally — three of them as
+            // empty placeholders — which meant a session.json carrying a real
+            // root was silently flattened to `""` by the first save after it was
+            // read. The tree had nowhere to keep a root, so the writer invented
+            // one that was always wrong.
+            SeatKind::Files => {
+                let state = files(seat.id);
+                LeafNodeV1::Files(bt_persist::FilesLeafV1 {
+                    root: state.root,
+                    open: state.open.into_iter().collect(),
+                    sel: state.sel,
+                    width: seat.fixed_extent.unwrap_or(FILES_W).floor_px().max(0) as u32,
+                })
+            }
             SeatKind::Preview => LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
                 pinned: seat.pinned,
             }),
@@ -7675,8 +7996,8 @@ fn to_persisted(node: &LayoutNode, term: &TermLeafV1Fn<'_>) -> LayoutNodeV1 {
             // 1). A decimal string or a JSON float would not round-trip.
             ratio: ratio.ppm(),
             children: [
-                Box::new(to_persisted(a, term)),
-                Box::new(to_persisted(b, term)),
+                Box::new(to_persisted(a, term, files)),
+                Box::new(to_persisted(b, term, files)),
             ],
         }),
     }
@@ -8699,6 +9020,247 @@ mod tests {
         );
     }
 
+    /// **A8 — a files column takes the whole left edge, not a slice of the
+    /// focused pane.**
+    ///
+    /// `addFilesPane` is `splitRootOf(w, "left")` and pointedly not
+    /// `splitLeafIn` (mock-up 3701-3706): however many panes the tab already
+    /// holds, the tree runs the full height of the window rather than being
+    /// squeezed into whichever pane had the keyboard. "That is also the natural
+    /// shape of a file sidebar."
+    ///
+    /// Red gate: build it with `SplitSeat` on the focused seat and the column
+    /// stops being full height the moment the tab holds a horizontal split.
+    #[test]
+    fn a_files_pane_takes_the_whole_left_edge_however_many_panes_are_already_there() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let viewport = viewport_of(1600, 900, dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        // A tab already cut across, so "the whole left edge" is a different
+        // rectangle from "the left half of the focused pane".
+        seats
+            .split_terminal(&metrics, seats.terminal(), Axis::Col, false)
+            .expect("a lone terminal splits");
+
+        let column = seats
+            .add_files_pane(&metrics)
+            .expect("a files column fits beside two stacked terminals");
+        let layout = solved(&seats, viewport, &metrics);
+        let column_rect = layout
+            .get(column)
+            .and_then(|placement| placement.rect)
+            .expect("the column is on screen");
+
+        assert_eq!(
+            column_rect.near(Axis::Col),
+            viewport.near(Axis::Col),
+            "the column starts at the top of the viewport"
+        );
+        assert_eq!(
+            column_rect.extent(Axis::Col),
+            viewport.extent(Axis::Col),
+            "and runs its whole height — a rim drop, not a split of one pane"
+        );
+        assert_eq!(
+            column_rect.near(Axis::Row),
+            viewport.near(Axis::Row),
+            "and it is the leading column"
+        );
+        assert_eq!(
+            column_rect.extent(Axis::Row),
+            FILES_W,
+            "wearing its kind's opening width"
+        );
+        // Both terminals are still there, narrowed rather than displaced.
+        assert_eq!(seats.terminals().len(), 2);
+        assert_eq!(seats.files(), vec![column]);
+    }
+
+    /// **F66/F70 — the files column drags in pixels, and Esc puts back the one
+    /// width it moved.**
+    ///
+    /// The pixel half of §3.4. Two things are being pinned at once and both
+    /// matter: that the gesture writes a `fixed_extent` rather than a ratio, and
+    /// that the *ratios of the tree are bit-identical before and after* — a
+    /// pixel drag has an empty focus set, so theorem N says nothing else moved.
+    /// A drag that quietly rewrote the ratio beside it would look right on the
+    /// frame it happened and wrong on the next window resize.
+    ///
+    /// Red gate: point the gesture at `drag_divider` instead and the width stays
+    /// at 240 while a ratio moves — which is the exact failure "a fixed column
+    /// stops being fixed" describes.
+    #[test]
+    fn a_files_column_drag_writes_pixels_and_esc_puts_the_width_back() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let viewport = viewport_of(1600, 900, dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let column = seats.add_files_pane(&metrics).expect("a column fits");
+        let ratios_before = seats.tree().ratios();
+        let origin = seats.fixed_extent_of(column).unwrap_or(FILES_W);
+
+        let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
+        let (seat, leading) = seats
+            .fixed_column_of_split(&metrics, slot.id)
+            .expect("the split has a bare fixed column on one side");
+        assert_eq!(seat, column);
+        assert!(leading, "the column was seated at the leading edge");
+
+        // A pointer at 320 logical pixels, which is nobody's default.
+        let (requested, usable) =
+            requested_fixed_extent(slot, leading, scale_ppm(dpi_milli), 320.0)
+                .expect("the slot has room");
+        assert!(
+            seats
+                .drag_fixed_extent(&metrics, slot.id, requested, usable)
+                .expect("a bare fixed leaf accepts the drag")
+        );
+        assert_eq!(
+            seats.fixed_extent_of(column),
+            Some(LogicalPx::px(320)),
+            "the width goes where the hand went"
+        );
+        assert_eq!(
+            seats.tree().ratios(),
+            ratios_before,
+            "L9/theorem N: a pixel drag rewrites no ratio at all"
+        );
+
+        // Esc: back through the same edit, which is what makes the rollback ask
+        // the current clamp rather than trusting a width that fitted a window
+        // that may since have changed.
+        assert!(
+            seats
+                .drag_fixed_extent(&metrics, slot.id, origin, usable)
+                .expect("the restore is the same edit")
+        );
+        assert_eq!(
+            seats.fixed_extent_of(column),
+            Some(origin),
+            "F70: Esc restores the width, not a ratio"
+        );
+        assert_eq!(seats.tree().ratios(), ratios_before);
+    }
+
+    /// **Where the hand stops being obeyed: `FILES_W_MIN` is a floor on the
+    /// *solve*, even though it is not a clamp on the *edit*.**
+    ///
+    /// Recorded rather than asserted as desirable, because the two halves of
+    /// `bt-layout` currently say different things and this slice is not the
+    /// place to overturn either:
+    ///
+    /// * `edit.rs` clamps a fixed drag to `[0, usable]` and says in as many
+    ///   words that "a hand that keeps pulling past it is entitled to a narrower
+    ///   column" — the 2026-08-08 Sovereign ruling, which took the minima out of
+    ///   the user's way.
+    /// * `tree.rs`'s `Seat::fixed_width` answers `max(fixed_extent, min_row)`,
+    ///   so the solver lays the column out at 170 no matter how much narrower
+    ///   the stored width is.
+    ///
+    /// The stored value therefore goes where the hand went and the *picture*
+    /// stops at 170. Everything stays self-consistent across a save and reload —
+    /// the width is carried, and re-solving it gives the same 170 — so nothing
+    /// here is broken today; what is unresolved is whether §2.3's `max` outranks
+    /// the Sovereign revision, and that is a ruling, not a bug fix.
+    ///
+    /// This pin exists so the answer cannot change silently: if the floor is
+    /// ever relaxed, this test fails and says which of the two rules moved.
+    #[test]
+    fn a_files_column_dragged_under_its_floor_stores_the_hand_and_draws_the_floor() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let viewport = viewport_of(1600, 900, dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let column = seats.add_files_pane(&metrics).expect("a column fits");
+        let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
+        let (_, leading) = seats
+            .fixed_column_of_split(&metrics, slot.id)
+            .expect("a bare fixed column");
+
+        // 90 logical pixels — well under the 170 the column would like.
+        let (requested, usable) = requested_fixed_extent(slot, leading, scale_ppm(dpi_milli), 90.0)
+            .expect("the slot has room");
+        seats
+            .drag_fixed_extent(&metrics, slot.id, requested, usable)
+            .expect("the edit accepts it");
+
+        assert_eq!(
+            seats.fixed_extent_of(column),
+            Some(LogicalPx::px(90)),
+            "the edit stores what the hand asked for: no floor in `[0, usable]`"
+        );
+        let drawn = solved(&seats, viewport, &metrics)
+            .get(column)
+            .and_then(|placement| placement.rect)
+            .expect("the column is on screen")
+            .extent(Axis::Row);
+        assert_eq!(
+            drawn,
+            bt_layout::FILES_W_MIN,
+            "but the solve holds it to `max(fixed_extent, FILES_W_MIN)` — the \
+             open question named in this test's own doc"
+        );
+    }
+
+    /// **§3.4 — a fixed subtree that is not a bare leaf has no single width to
+    /// drag, and the gesture finds that out before it starts.**
+    ///
+    /// Two files columns stacked share a slot but not a width, and the honest
+    /// answer is to refuse rather than to write a share into a fixed slot. The
+    /// point of asking *here* — in the same reading the pointer uses to choose
+    /// its verb — is that the refusal happens at button-down, so the drag never
+    /// begins, instead of beginning and silently doing nothing for its whole
+    /// length.
+    #[test]
+    fn a_stacked_pair_of_files_columns_offers_the_pointer_no_width_to_drag() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let viewport = viewport_of(1600, 900, dpi_milli);
+        // Built through `from_persisted` because `Seats` has no verb that stacks
+        // two files columns — which is itself the point: this shape is one a
+        // saved document can hold and a gesture cannot make, so the persisted
+        // path is both the honest way to reach it and the way it will actually
+        // arrive in the wild.
+        let files_leaf = |width: u32| {
+            Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                bt_persist::FilesLeafV1 {
+                    root: String::new(),
+                    open: Vec::new(),
+                    sel: None,
+                    width,
+                },
+            )))
+        };
+        let seats = Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 300_000,
+            children: [
+                // Two files columns stacked: a fixed *subtree*, not a fixed leaf.
+                Box::new(LayoutNodeV1::Split(SplitNodeV1 {
+                    dir: SplitDirV1::Col,
+                    ratio: 500_000,
+                    children: [files_leaf(240), files_leaf(200)],
+                })),
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: String::new(),
+                    manual_name: None,
+                }))),
+            ],
+        }))
+        .expect("the tree carries a terminal");
+
+        let layout = solved(&seats, viewport, &metrics);
+        let root = seats.split_slots(&layout)[0];
+        assert_eq!(
+            seats.fixed_column_of_split(&metrics, root.id),
+            None,
+            "no single width to drag, so the pointer takes the ratio grip and \
+             `bt-layout` refuses the pixel edit for the same reason"
+        );
+    }
+
     /// Save, "restart", reload: the tree comes back and solves to the same
     /// rectangles. What crossed the disk was intent — shape, direction, and a
     /// `u32` ppm ratio — and never a rectangle (red line L11).
@@ -8730,11 +9292,14 @@ mod tests {
                 // Every leaf answers the same here on purpose: this pin is
                 // about the tree's shape surviving the round trip, and a
                 // per-seat answer would be noise in it.
-                root: seats.to_persisted(&|_| TermLeafV1 {
-                    profile_id: "pwsh".to_owned(),
-                    cwd: String::new(),
-                    manual_name: None,
-                }),
+                root: seats.to_persisted(
+                    &|_| TermLeafV1 {
+                        profile_id: "pwsh".to_owned(),
+                        cwd: String::new(),
+                        manual_name: None,
+                    },
+                    &|_| FilesLeafState::default(),
+                ),
                 pinned: false,
                 focused_leaf: "leaf-0".to_owned(),
             }],
@@ -9373,6 +9938,7 @@ mod tests {
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
+                    files_names: &NO_FILES_NAMES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -9577,6 +10143,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open,
@@ -12079,6 +12646,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -12265,6 +12833,7 @@ mod tests {
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
+                    files_names: &NO_FILES_NAMES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -12360,6 +12929,7 @@ mod tests {
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
+                    files_names: &NO_FILES_NAMES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -12560,6 +13130,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &all_powershell(seats),
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -13627,7 +14198,7 @@ mod tests {
     fn a_terminal_pane_head_prints_its_own_name_and_falls_back_honestly() {
         let name = r"D:\Developer\BetterTerminal\crates\bt-app";
         assert_eq!(
-            seat_caption(SeatKind::Terminal, None, Some(name)),
+            seat_caption(SeatKind::Terminal, None, Some(name), None),
             name,
             "C28: the head has a bar to fill and prints the place whole"
         );
@@ -13635,26 +14206,64 @@ mod tests {
         // named itself, and the honest answer is then the kind's own name; never
         // an empty caption, and never a guess at the filesystem.
         assert_eq!(
-            seat_caption(SeatKind::Terminal, None, None),
+            seat_caption(SeatKind::Terminal, None, None, None),
             "Terminal",
             "nothing said, nothing borrowed"
         );
         assert_eq!(
-            seat_caption(SeatKind::Terminal, None, Some("")),
+            seat_caption(SeatKind::Terminal, None, Some(""), None),
             "Terminal",
             "an empty name is not a name"
         );
-        // The other kinds are untouched: a preview names its file, and the two
-        // that have no session of their own answer by kind.
+        // The other kinds are untouched: a preview names its file, and the one
+        // that has no content of its own answers by kind.
         assert_eq!(
-            seat_caption(SeatKind::Preview, Some("notes.md"), Some(name)),
+            seat_caption(SeatKind::Preview, Some("notes.md"), Some(name), None),
             "notes.md"
         );
-        assert_eq!(seat_caption(SeatKind::Files, None, Some(name)), "Files");
         assert_eq!(
-            seat_caption(SeatKind::Placeholder, None, Some(name)),
+            seat_caption(SeatKind::Placeholder, None, Some(name), None),
             "Unavailable",
             "T227: a leaf this build cannot name says so rather than borrowing one"
+        );
+    }
+
+    /// **B14 — a files head names its root, and a terminal's name is not its to
+    /// borrow.**
+    ///
+    /// The head used to print the literal `"Files"`, which said the one thing the
+    /// folder mark beside it already says and withheld the only thing the head is
+    /// for: "a files pane ALWAYS shows its root — a tree is useless without
+    /// knowing where it is" (mock-up 4572).
+    ///
+    /// The third assertion is the one that matters most and is easiest to lose: a
+    /// files column sitting beside a terminal must not pick up the *terminal's*
+    /// name because that argument happens to be populated. The two names travel
+    /// in the same call and only the kind keeps them apart.
+    ///
+    /// Red gate: return `terminal_name` from the `Files` arm and it goes red on
+    /// the third; return `seat_title(kind)` and it goes red on the first.
+    #[test]
+    fn a_files_pane_head_names_its_root_and_never_a_neighbours_shell() {
+        assert_eq!(
+            seat_caption(SeatKind::Files, None, None, Some("BetterTerminal")),
+            "BetterTerminal",
+            "B14: the head says where the tree is rooted"
+        );
+        assert_eq!(
+            seat_caption(SeatKind::Files, None, None, None),
+            "Files",
+            "a column with no root yet falls back to its kind, not to an empty bar"
+        );
+        assert_eq!(
+            seat_caption(SeatKind::Files, None, Some(r"C:\shell\cwd"), None),
+            "Files",
+            "a files column is not named by the terminal standing next to it"
+        );
+        assert_eq!(
+            seat_caption(SeatKind::Files, None, None, Some("")),
+            "Files",
+            "an empty root is not a root"
         );
     }
 
@@ -13953,18 +14562,18 @@ mod tests {
     fn the_ghost_cuts_a_name_at_its_last_separator_where_the_head_prints_it_whole() {
         let path = r"D:\Developer\BetterTerminal\crates\bt-app";
         assert_eq!(
-            seat_short_caption(SeatKind::Terminal, None, Some(path)),
+            seat_short_caption(SeatKind::Terminal, None, Some(path), None),
             "bt-app",
             "3304: the label riding the pointer answers `which one is this`"
         );
         assert_eq!(
-            seat_caption(SeatKind::Terminal, None, Some(path)),
+            seat_caption(SeatKind::Terminal, None, Some(path), None),
             path,
             "4559: the head has a bar to fill and answers `where is this`"
         );
         assert_ne!(
-            seat_caption(SeatKind::Terminal, None, Some(path)),
-            seat_short_caption(SeatKind::Terminal, None, Some(path)),
+            seat_caption(SeatKind::Terminal, None, Some(path), None),
+            seat_short_caption(SeatKind::Terminal, None, Some(path), None),
             "two questions, two lengths — a session under a path answers them \
              differently or the distinction is not being drawn at all"
         );
@@ -13972,8 +14581,18 @@ mod tests {
         // title and a kind name reach both readers unchanged. That is what lets
         // one derive from the other instead of reading the source twice.
         assert_eq!(
-            seat_short_caption(SeatKind::Terminal, None, Some("cargo build")),
-            seat_caption(SeatKind::Terminal, None, Some("cargo build"))
+            seat_short_caption(SeatKind::Terminal, None, Some("cargo build"), None),
+            seat_caption(SeatKind::Terminal, None, Some("cargo build"), None)
+        );
+        // **The files column asks the same two questions and gets one answer**,
+        // because its name arrives already cut (B25): the head takes the last
+        // segment and the foot — when it exists — takes the path entire. So the
+        // ghost's cut is a no-op here rather than a second opinion about where
+        // to cut, which is the whole reason the cutting is done above this
+        // module rather than inside it.
+        assert_eq!(
+            seat_short_caption(SeatKind::Files, None, None, Some("BetterTerminal")),
+            seat_caption(SeatKind::Files, None, None, Some("BetterTerminal"))
         );
     }
 
@@ -14097,6 +14716,7 @@ mod tests {
                 preview_title: None,
                 terminal_names,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow,
                 profile_menu_open: false,
@@ -14146,6 +14766,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -14923,6 +15544,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -15156,6 +15778,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -15398,6 +16021,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -15543,6 +16167,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -16712,6 +17337,7 @@ mod tests {
                 preview_title: None,
                 terminal_names: &names,
                 leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -19252,8 +19878,10 @@ mod drop_plan_tests {
             cwd: r"C:\Users".to_owned(),
             manual_name: None,
         };
-        let mut revived = Seats::from_persisted(&seats.to_persisted(&|_| seed.clone()))
-            .expect("the tree has a terminal");
+        let mut revived = Seats::from_persisted(
+            &seats.to_persisted(&|_| seed.clone(), &|_| FilesLeafState::default()),
+        )
+        .expect("the tree has a terminal");
         revived.restore_focus_token(&format!("leaf-{focus_index}"));
         assert_eq!(
             in_order(&revived),

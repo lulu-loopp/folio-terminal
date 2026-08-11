@@ -27,6 +27,8 @@ pub(crate) enum Action {
     SplitHorizontal,
     SplitVertical,
     DuplicatePaneSplit,
+    /// Open this tab's files column, or close the one it already has.
+    FilesPane,
     OpenSettings,
 }
 
@@ -100,6 +102,21 @@ pub(crate) const BINDINGS: &[(Action, Chord)] = &[
         Action::DuplicatePaneSplit,
         Chord::new(CTRL_SHIFT, character("d")),
     ),
+    // **`Ctrl+Shift+B`, and pointedly not the mock-up's `Ctrl+B`.**
+    //
+    // The mock-up binds a bare `Ctrl+B` (6126-6134), which discipline ① above
+    // forbids outright: `^B` is readline's "back one character" and tmux's
+    // default prefix, and it is exactly the sort of letter the audit refused to
+    // take from the shell. `DESIGN.md` §7.1.5 had already flagged the tmux
+    // collision and deferred it to the P2-7 audit; the audit closed without a
+    // Files row at all, so this is that row arriving late rather than a binding
+    // being overturned.
+    //
+    // Shift is what every other window action wears for the same reason, which
+    // leaves `^B` where it belongs and puts this beside `Ctrl+Shift+W` and
+    // friends. A toggle, not an opener, matching both the mock-up's own
+    // behaviour and VS Code's `Ctrl+B`.
+    (Action::FilesPane, Chord::new(CTRL_SHIFT, character("b"))),
     (Action::OpenSettings, Chord::new(CTRL, character(","))),
 ];
 
@@ -208,7 +225,21 @@ mod tests {
             press(character("d"), CTRL_SHIFT),
             Some(Action::DuplicatePaneSplit)
         );
+        assert_eq!(press(character("b"), CTRL_SHIFT), Some(Action::FilesPane));
         assert_eq!(press(character(","), CTRL), Some(Action::OpenSettings));
+    }
+
+    /// The Files row wears Shift because the key the mock-up asked for is the
+    /// shell's. Red gate: bind `Action::FilesPane` to a bare `CTRL` and
+    /// `bare_control_letters_stay_with_the_terminal` goes red on `Ctrl+B`.
+    #[test]
+    fn the_files_pane_row_leaves_control_b_to_the_shell() {
+        assert_eq!(
+            press(character("b"), CTRL),
+            None,
+            "^B is readline's back-one-character and tmux's prefix"
+        );
+        assert_eq!(press(character("b"), CTRL_SHIFT), Some(Action::FilesPane));
     }
 
     #[test]
@@ -285,7 +316,9 @@ mod tests {
     fn the_altgr_family_is_never_claimed() {
         let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
         let ctrl_alt_shift = ctrl_alt.union(ModifiersState::SHIFT);
-        for text in ["a", "d", "e", "n", "p", "t", "w", "-", "=", ",", "1", "9"] {
+        for text in [
+            "a", "b", "d", "e", "n", "p", "t", "w", "-", "=", ",", "1", "9",
+        ] {
             assert_eq!(press(character(text), ctrl_alt), None, "AltGr+{text}");
             assert_eq!(
                 press(character(text), ctrl_alt_shift),
@@ -309,7 +342,7 @@ mod tests {
     /// Bare and plain-Shift typing belongs to the shell; the table must never intercept it.
     #[test]
     fn unmodified_typing_is_never_intercepted() {
-        for text in ["a", "n", "w", "t", "d", "p", "-", "=", ",", "1", "9"] {
+        for text in ["a", "b", "n", "w", "t", "d", "p", "-", "=", ",", "1", "9"] {
             assert_eq!(press(character(text), ModifiersState::empty()), None);
             assert_eq!(press(character(text), ModifiersState::SHIFT), None);
         }
@@ -338,8 +371,8 @@ mod tests {
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 11 single actions plus GotoTab(1..=9).
-        assert_eq!(BINDINGS.len(), 20);
+        // 12 single actions plus GotoTab(1..=9).
+        assert_eq!(BINDINGS.len(), 21);
 
         for (index, (_, chord)) in BINDINGS.iter().enumerate() {
             for (other_action, other_chord) in BINDINGS.iter().skip(index + 1) {
@@ -372,6 +405,7 @@ mod tests {
             Action::SplitHorizontal,
             Action::SplitVertical,
             Action::DuplicatePaneSplit,
+            Action::FilesPane,
             Action::OpenSettings,
         ];
         expected.extend((1..=9u8).map(Action::GotoTab));

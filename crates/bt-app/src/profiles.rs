@@ -96,6 +96,21 @@ const HINT_TEXT: &str = "default";
 /// are not equally actionable.
 const UNAVAILABLE_HINT_TEXT: &str = "not installed";
 
+/// **The `˅` menu's second section: one row, and what it is for** (H113,
+/// mock-up 7417-7423).
+///
+/// Every row above it makes a **tab**; this one adds a **pane** to the tab you
+/// are already in, and that is a different enough verb that the mock-up puts a
+/// rule between them rather than letting it read as a fifth profile.
+const FILES_PANE_TEXT: &str = "Files pane";
+/// The annotation that keeps the row honest about the difference.
+///
+/// It rides the same `.default-hint` slot as `default` and `3m ago`, and it is
+/// doing the same job: saying the one thing about the row that its caption does
+/// not. Without it "Files pane" sits under four rows that all open new tabs and
+/// looks like the fifth.
+const FILES_PANE_HINT_TEXT: &str = "this tab";
+
 // ── the greyed row ─────────────────────────────────────────────────────────
 /// `.ticon-wrap.dead .ticon { opacity: .35; filter: grayscale(1) }` (mock-up
 /// line 314) — the mock-up's own register for a mark that names something not
@@ -989,6 +1004,22 @@ pub fn revived_cwd(profile: usize, cwd: &Path) -> Option<PathBuf> {
 /// started. A value cached for the life of the process would be trading nothing
 /// for a home directory that cannot then follow a `%USERPROFILE%` the user
 /// changed under us.
+/// `%USERPROFILE%`, the place this machine calls home.
+///
+/// Named here rather than read at the one call site because it is already the
+/// rule [`spawn_place`] applies for [`StartingDir::WindowsHome`], and "where
+/// does a thing start when nothing else says" must have exactly one answer. A
+/// files pane opened from a shell that has never reported a folder falls back to
+/// it (H115), which is the same fallback a shell of that profile would take.
+///
+/// Read through the environment rather than cached for the life of the process,
+/// for the reason [`spawn_place`]'s own note gives: a cached home cannot follow a
+/// `%USERPROFILE%` the user changed under us.
+#[must_use]
+pub fn home_directory(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
+    environment.var_os("USERPROFILE").map(PathBuf::from)
+}
+
 #[must_use]
 pub fn spawn_place(
     profile: usize,
@@ -1131,6 +1162,13 @@ pub enum MenuRow {
     /// seed. It is the vault's own index, so [`crate::seed::SeedVault::take`]
     /// consumes it directly.
     Recent(usize),
+    /// Give the tab you are looking at a files column (H113).
+    ///
+    /// Carries no index, and that is the third thing the tag is load-bearing
+    /// for: this row indexes nothing. Both variants above name a position in a
+    /// list, and a row that names no list is precisely the row that would have
+    /// been mis-read as `Profile(4)` if the menu had gone on counting rows.
+    FilesPane,
 }
 
 /// Whether the picker is up, and which row the pointer is on.
@@ -1188,6 +1226,15 @@ pub struct ProfileMenuLayout {
     frame: [f32; 4],
     /// One row per entry of [`PROFILES`], top to bottom.
     items: Vec<[f32; 4]>,
+    /// The `.menu-sep` above the `Files pane` row.
+    ///
+    /// Unconditional where the Recent separator is optional, and the asymmetry
+    /// is the mock-up's: a Recent heading over an empty list is a promise the
+    /// menu cannot keep, while `Files pane` is always available — every tab can
+    /// be given a files column.
+    files_separator: [f32; 4],
+    /// The `Files pane` row itself.
+    files_pane: [f32; 4],
     /// `.menu-sep`'s 1px rule, or `None` when there is nothing to separate.
     ///
     /// The three Recent boxes are `Option`/empty together and never singly:
@@ -1318,6 +1365,8 @@ pub fn layout(
     } else {
         separator_block + section_block + item_height * recent.len() as f32
     };
+    // The second section is one rule and one row, and it is never absent.
+    let files_block = separator_block + item_height;
 
     // **`min-width`, at last read as a minimum.** The mock-up's menu is
     // content-sized — `min-width: 180px` over `white-space: nowrap` rows — and
@@ -1333,6 +1382,9 @@ pub fn layout(
     // menu change width under the pointer.
     let annotation = measure(HINT_TEXT, px(HINT_FONT_LOGICAL_PX))
         .max(measure(UNAVAILABLE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX)));
+    // Measured before the closure below borrows `measure` for the rest of the
+    // function, not because the order matters to the layout.
+    let files_hint = measure(FILES_PANE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX));
     let mut row_content = |name: &str, font: f32, annotation: f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
             + px(ITEM_GAP_LOGICAL_PX)
@@ -1352,17 +1404,25 @@ pub fn layout(
     // clamped into whatever width the profile rows established, which is the
     // behaviour they already had; the ellipsis that clamp still owes them
     // (mock-up 1031) is unchanged and still outstanding.
+    // The `Files pane` row joins the profiles in deciding the width, for the
+    // same reason they do and not the reason Recent does not: its caption and
+    // its annotation are both this module's own constants, so their length is a
+    // fact the product is responsible for making room for.
+    let files_row = row_content(FILES_PANE_TEXT, px(ITEM_FONT_LOGICAL_PX), files_hint);
     let content = (0..PROFILES.len())
         // `title(index)` and not `Profile::title`: the qualifier is part of the
         // string the row draws, and on a machine with two distributions it is
         // the longest row in the list.
         .map(|index| row_content(title(index), px(ITEM_FONT_LOGICAL_PX), annotation))
-        .fold(0.0_f32, f32::max);
+        .fold(files_row, f32::max);
     let width = (chrome + content)
         .max(px(MENU_MIN_WIDTH_LOGICAL_PX))
         .round();
-    let height =
-        (2.0 * (border + padding) + item_height * PROFILES.len() as f32 + recent_block).round();
+    let height = (2.0 * (border + padding)
+        + item_height * PROFILES.len() as f32
+        + files_block
+        + recent_block)
+        .round();
     let (surface_width, surface_height) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
     let (left, top) = match side {
@@ -1399,6 +1459,18 @@ pub fn layout(
         items.push([content_left, cursor, content_right, cursor + item_height]);
         cursor += item_height;
     }
+    // The second section, laid down before Recent so the menu reads in the order
+    // the mock-up writes it: what makes a tab, then what makes a pane, then what
+    // brings one back.
+    let files_separator = [
+        content_left,
+        cursor + separator_margin,
+        content_right,
+        cursor + separator_margin + separator_thickness,
+    ];
+    cursor += separator_block;
+    let files_pane = [content_left, cursor, content_right, cursor + item_height];
+    cursor += item_height;
     let (separator, section_label, recent_rows) = if recent.is_empty() {
         (None, None, Vec::new())
     } else {
@@ -1427,6 +1499,8 @@ pub fn layout(
         scale,
         frame,
         items,
+        files_separator,
+        files_pane,
         separator,
         section_label,
         recent: recent_rows,
@@ -1469,6 +1543,11 @@ pub fn hit(
                     .then_some(MenuRow::Profile(index)),
             );
         }
+    }
+    // Always available: every tab can be given a files column, so unlike a
+    // profile row there is no machine to probe for and no greyed state to be in.
+    if contains(layout.files_pane, x, y) {
+        return Some(Some(MenuRow::FilesPane));
     }
     for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
         if contains(*row, x, y) {
@@ -1584,6 +1663,34 @@ pub fn build(
             &mut sprites,
         );
     }
+
+    // ── the second section: `Files pane` ───────────────────────────────────
+    quads.push(OverlayQuad {
+        rect: layout.files_separator,
+        color: palette.menu_border,
+        alpha: separator_alpha(palette.menu_border),
+    });
+    push_row(
+        &Row {
+            rect: layout.files_pane,
+            // The **generic** folder, not a profile's own artwork: this row
+            // names a kind of pane, and every profile mark in the list above it
+            // names a shell. Borrowing one here would say the tree belongs to
+            // whichever shell lent its glyph.
+            mark: ChromeMark::Folder,
+            name: FILES_PANE_TEXT,
+            hint: Some(hint(FILES_PANE_HINT_TEXT.to_owned())),
+            hovered: hover == Some(MenuRow::FilesPane),
+            // A files column needs no program behind it, so there is nothing
+            // this machine could be missing and no greyed state to reach.
+            available: true,
+        },
+        scale,
+        palette,
+        &mut quads,
+        &mut labels,
+        &mut sprites,
+    );
 
     if let Some(rule) = layout.separator {
         quads.push(OverlayQuad {
@@ -1989,9 +2096,23 @@ mod tests {
 
     /// The height the Recent section adds at `scale`: `.menu-sep` with its two
     /// margins, `.menu-label` with its padding, and one row per seed.
+    /// The `Files pane` section: one rule and one row, always drawn.
+    ///
+    /// Named beside [`recent_block`] so the three height pins state the menu's
+    /// shape the same way, and so the day this section grows a second row there
+    /// is one place to say so.
+    fn files_block(scale: f32) -> f32 {
+        separator_block(scale) + (ITEM_HEIGHT_LOGICAL_PX * scale).round()
+    }
+
+    /// `.menu-sep` — 1px between two 5px margins.
+    fn separator_block(scale: f32) -> f32 {
+        2.0 * (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round()
+            + (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0)
+    }
+
     fn recent_block(scale: f32, rows: usize) -> f32 {
-        let separator = 2.0 * (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round()
-            + (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+        let separator = separator_block(scale);
         let heading = ((SECTION_LABEL_PADDING_TOP_LOGICAL_PX
             + SECTION_LABEL_LINE_LOGICAL_PX
             + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
@@ -2544,7 +2665,9 @@ mod tests {
             .iter()
             .filter_map(|(row, _, text)| match row {
                 MenuRow::Profile(index) => Some((*index, text.clone())),
-                MenuRow::Recent(_) => None,
+                // The files row's caption says everything it knows, so it is
+                // never tipped — the same rule an available profile row follows.
+                MenuRow::Recent(_) | MenuRow::FilesPane => None,
             })
             .collect();
         assert_eq!(
@@ -2580,6 +2703,7 @@ mod tests {
             let expected = match row {
                 MenuRow::Profile(index) => layout.items[*index],
                 MenuRow::Recent(index) => layout.recent[*index],
+                MenuRow::FilesPane => layout.files_pane,
             };
             assert_eq!(*rect, expected);
         }
@@ -3637,9 +3761,14 @@ mod tests {
             assert_eq!(
                 layout.frame[3] - layout.frame[1],
                 (2.0 * (border + MENU_PADDING_LOGICAL_PX * scale)
-                    + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * PROFILES.len() as f32)
-                    .round(),
-                "scale {scale}: the profiles and the menu's own padding, and nothing else"
+                    + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * PROFILES.len() as f32
+                    // The `Files pane` section is unconditional, so it is here
+                    // even with an empty vault — that asymmetry is the point of
+                    // this pin, not an exception to it.
+                    + files_block(scale))
+                .round(),
+                "scale {scale}: the profiles, the files row and the menu's own \
+                 padding, and nothing else"
             );
             assert_eq!(layout.separator, None);
             assert_eq!(layout.section_label, None);
@@ -3663,8 +3792,8 @@ mod tests {
             );
             assert_eq!(
                 layer.sprites.len(),
-                PROFILES.len(),
-                "scale {scale}: one mark per profile row and no more"
+                PROFILES.len() + 1,
+                "scale {scale}: one mark per profile row, plus the files row's folder"
             );
         }
     }
@@ -3701,8 +3830,10 @@ mod tests {
             let rule = full.separator.expect("a filled vault is separated");
             let band = full.section_label.expect("and titled");
             let last_profile = *full.items.last().expect("the profile list");
+            // The Recent rule now follows the `Files pane` row rather than the
+            // last profile: the menu has three sections, and this one is third.
             assert_eq!(
-                rule[1] - last_profile[3],
+                rule[1] - full.files_pane[3],
                 (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round(),
                 "scale {scale}: `margin: 5px 0` above the rule"
             );
@@ -3829,6 +3960,7 @@ mod tests {
             (2.0 * ((FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
                 + MENU_PADDING_LOGICAL_PX * scale)
                 + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * PROFILES.len() as f32
+                + files_block(scale)
                 + recent_block(scale, RECENT_CAPACITY))
             .round(),
             "and the menu is only as tall as the rows it draws"
@@ -3853,8 +3985,8 @@ mod tests {
         );
         assert_eq!(
             layer.sprites.len(),
-            PROFILES.len() + RECENT_CAPACITY,
-            "one mark per drawn row"
+            PROFILES.len() + 1 + RECENT_CAPACITY,
+            "one mark per drawn row, the files row included"
         );
     }
 

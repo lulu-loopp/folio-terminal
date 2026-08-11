@@ -634,7 +634,42 @@ struct TabState {
     /// is a black rectangle, so seats and sessions are created and destroyed
     /// together.
     sessions: BTreeMap<SeatId, LeafSession>,
+    /// This tab's files columns, one per Files leaf, keyed by the seat they draw
+    /// into — the exact sibling of [`Self::sessions`], and deliberately a second
+    /// table rather than a second variant inside the first.
+    ///
+    /// **Why it is here at all.** Red line L1 forbids the solver's `Seat` from
+    /// carrying a files root, so the mapping from geometry identity to content
+    /// has to live in `bt-app`. That is not a workaround for the red line, it is
+    /// the red line working: `sessions` is already exactly this shape for
+    /// exactly this reason, and the persistence brief records the same move
+    /// being made once before — `profile` came off `TabState` and onto
+    /// `LeafSession` so that a fact about a pane would travel with the pane.
+    ///
+    /// **Why two tables and not one tagged union.** `sessions` carries an
+    /// invariant this one must not have — it is never empty and it always
+    /// contains `focused_leaf`, because a tab is a strip entry with at least one
+    /// shell behind it (I106). Folding files leaves into that map would make
+    /// that sentence unstateable, and `sessions_match_terminals` unwritable.
+    /// Two maps, each total over its own kind, keeps both invariants sayable and
+    /// both checkable — see [`Self::files_match_files_seats`].
+    ///
+    /// **Why the two cannot drift.** The mock-up's own bug here (UI-UX §10
+    /// principle 20, the "data family") was a centre swap that exchanged `uid`
+    /// and left `kind` behind, so a terminal lost its session and a files pane
+    /// gained one it could not draw. That failure cannot be expressed in this
+    /// port: `Edit::CenterSwap` trades whole `Seat` values, `SeatId` included,
+    /// so an id-keyed table needs no remapping at all — the content follows the
+    /// id, the id follows the seat, and only the seat changes rectangles.
+    files: BTreeMap<SeatId, seats::FilesLeafState>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
+    ///
+    /// **Always a Terminal seat in this build**, which is what lets `sessions`
+    /// keep the invariant above. Opening a files column does not move it and
+    /// clicking into one does not take it (the focus move is guarded on
+    /// `sessions.contains_key`): a files pane has nothing to type into until
+    /// `InputOwner::FilesTree` exists, and a keyboard focus parked on a seat
+    /// with no session is the crash I106 is the report for.
     focused_leaf: SeatId,
     /// "Bring this one back next time."
     ///
@@ -1428,6 +1463,57 @@ impl TabState {
     }
 
     /// Every leaf of this tab, focused one included, in seat order.
+    /// What one files column is looking at.
+    ///
+    /// The single door every path takes to a files leaf's content, which is the
+    /// lesson UI-UX §10 principle 20 draws out of the mock-up's own three
+    /// families of bomb: "the right way to generalise a tagged union is to give
+    /// it one helper that safely takes an identity off *any* leaf, and make
+    /// every path go through it, instead of each one reaching for
+    /// `session(l.uid)` on its own." A missing entry is answered with the
+    /// default rather than a panic, because the honest reading of "this seat has
+    /// no files state" is an unrooted column, not a dead window.
+    fn files_state(&self, seat: SeatId) -> seats::FilesLeafState {
+        self.files.get(&seat).cloned().unwrap_or_default()
+    }
+
+    /// The head's name for a files column: the last segment of its root.
+    ///
+    /// `None` for a column with no root yet, which falls through to the kind's
+    /// own name in `seat_caption` exactly as a silent shell does.
+    fn files_head_name(&self, seat: SeatId) -> Option<String> {
+        let state = self.files.get(&seat)?;
+        cwd_leaf(Path::new(&state.root))
+    }
+
+    /// Every files column of this tab, named for its head.
+    ///
+    /// The files half of [`Self::terminal_names`], resolved the same way and
+    /// handed to the chrome the same way — one string per seat id, cut to the
+    /// length the head asks for before it leaves this module.
+    fn files_names(&self) -> BTreeMap<SeatId, String> {
+        self.files
+            .keys()
+            .filter_map(|seat| Some((*seat, self.files_head_name(*seat)?)))
+            .collect()
+    }
+
+    /// Whether this tab's files states and its Files leaves are the same set.
+    ///
+    /// The sibling of [`Self::sessions_match_terminals`] and asserted in the
+    /// same places, because the two tables fail the same way: a state left
+    /// behind by a closed column is a leak that comes back as a *wrong root* the
+    /// next time that seat id is minted, and a column with no state is a head
+    /// that cannot say where it is. Neither shows up as a crash, which is
+    /// precisely why it is worth a `debug_assert` rather than trust.
+    fn files_match_files_seats(&self) -> bool {
+        let mut keys: Vec<SeatId> = self.files.keys().copied().collect();
+        let mut seats = self.seats.files();
+        keys.sort_unstable();
+        seats.sort_unstable();
+        keys == seats
+    }
+
     fn leaves(&self) -> impl Iterator<Item = (&SeatId, &LeafSession)> {
         self.sessions.iter()
     }
@@ -1728,7 +1814,37 @@ struct DividerDrag {
     /// restoring edit writes nothing else: `DragDivider`'s focus set is this one
     /// split, and theorem N says every ratio outside a focus set is bit-identical
     /// before and after.
-    origin: bt_layout::Ratio,
+    grip: DividerGrip,
+}
+
+/// **What a divider drag is actually moving** — §3.4's two kinds of seam.
+///
+/// One field on one struct rather than a second `Option` beside it, because
+/// there is one gesture: a second slot would allow both to be `Some`, and the
+/// six places that tear a drag down would each have to remember to clear two.
+/// The pointer chooses the grip once, when the button goes down, from the same
+/// reading of the tree the edit will use.
+///
+/// The distinction is not cosmetic. Most dividers move a *proportion* and the
+/// two sides share what is there; a divider with a files column on one side
+/// moves *pixels*, and the column keeps its width while everything else divides
+/// the rest. Dragging the second as though it were the first writes a ratio into
+/// a slot whose width is not a ratio, which is how a fixed column stops being
+/// fixed.
+#[derive(Clone, Copy, Debug)]
+enum DividerGrip {
+    /// The ordinary seam: this split's own ratio.
+    Ratio(bt_layout::Ratio),
+    /// A fixed column's width in pixels (F66). `leading` says which side of the
+    /// divider the column sits on, because the same pointer motion widens one
+    /// side and narrows the other.
+    ///
+    /// `origin` is the *effective* width the column had when the button went
+    /// down — what Esc puts back, and the pixel counterpart of the ratio above.
+    FixedExtent {
+        leading: bool,
+        origin: bt_layout::LogicalPx,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -6075,7 +6191,14 @@ fn plan_launch(saved: &[TabV1], active: usize) -> LaunchPlan {
 /// leaf at all, and the fallback to `lone_terminal` then zips one seat against
 /// zero saved leaves and produces no entries — which is right, because there
 /// was nothing saved to pair with.
-fn revive_plan(tab: &TabV1) -> (seats::Seats, TabSeed, BTreeMap<SeatId, LeafSeed>) {
+fn revive_plan(
+    tab: &TabV1,
+) -> (
+    seats::Seats,
+    TabSeed,
+    BTreeMap<SeatId, LeafSeed>,
+    BTreeMap<SeatId, seats::FilesLeafState>,
+) {
     let mut seats =
         seats::Seats::from_persisted(&tab.root).unwrap_or_else(seats::Seats::lone_terminal);
     seats.restore_focus_token(&tab.focused_leaf);
@@ -6121,7 +6244,34 @@ fn revive_plan(tab: &TabV1) -> (seats::Seats, TabSeed, BTreeMap<SeatId, LeafSeed
             )
         })
         .collect();
-    (seats, seed, leaves)
+    // **The same pairing rule, on the other kind of leaf.** `Seats::files` walks
+    // the tree in the order `from_persisted` minted its ids in, which is the
+    // order `persisted_files_leaves` reads the file in, so the nth saved files
+    // leaf and the nth files seat are the same pane. Nothing on disk names a
+    // seat and nothing should (§3.2); position in a tree the file *does* carry
+    // is the only pairing available, and it is exact.
+    //
+    // The width is not here, and its absence is the fix rather than an
+    // omission: `Seats::from_persisted` has already written it onto the seat as
+    // `fixed_extent`, which is where a width lives. This carries the three
+    // facts the tree has nowhere to put — and those three are exactly the ones
+    // that used to be read off disk and dropped on the floor.
+    let files = seats
+        .files()
+        .into_iter()
+        .zip(persisted_files_leaves(&tab.root))
+        .map(|(seat, leaf)| {
+            (
+                seat,
+                seats::FilesLeafState {
+                    root: leaf.root.clone(),
+                    open: leaf.open.iter().cloned().collect(),
+                    sel: leaf.sel.clone(),
+                },
+            )
+        })
+        .collect();
+    (seats, seed, leaves, files)
 }
 
 /// Every Term leaf of a persisted tree, in the order the tree is drawn.
@@ -6145,6 +6295,30 @@ fn collect_term_leaves<'a>(node: &'a LayoutNodeV1, out: &mut Vec<&'a TermLeafV1>
             }
         }
     }
+}
+
+/// Every Files leaf of a persisted tree, in the order the tree is drawn.
+///
+/// The exact sibling of [`persisted_term_leaves`], and it has to be the same
+/// walk for the same reason: the pairing in [`revive_plan`] is a `zip` against
+/// `Seats::files`, and two walks that agree everywhere except on one shape would
+/// hand a column somebody else's root — which looks like a working files pane
+/// pointed at the wrong folder, not like a bug.
+fn persisted_files_leaves(node: &LayoutNodeV1) -> Vec<&bt_persist::FilesLeafV1> {
+    fn collect<'a>(node: &'a LayoutNodeV1, out: &mut Vec<&'a bt_persist::FilesLeafV1>) {
+        match node {
+            LayoutNodeV1::Leaf(LeafNodeV1::Files(leaf)) => out.push(leaf),
+            LayoutNodeV1::Leaf(_) => {}
+            LayoutNodeV1::Split(split) => {
+                for child in &split.children {
+                    collect(child, out);
+                }
+            }
+        }
+    }
+    let mut leaves = Vec::new();
+    collect(node, &mut leaves);
+    leaves
 }
 
 /// How many panes a persisted tab held — the number its badge would show.
@@ -6477,6 +6651,11 @@ fn create_tab_state(
     wake: OutputWake,
     probe_input: Option<&[u8]>,
     leaves: &BTreeMap<SeatId, LeafSeed>,
+    // What each Files leaf of this tree is a view of, when the caller has one
+    // saved. The files half of `leaves`, carried the same way: a Files seat with
+    // no entry is a column with no root yet, exactly as a Terminal seat with no
+    // entry is a shell in a fresh folder.
+    files: &BTreeMap<SeatId, seats::FilesLeafState>,
     seed: TabSeed,
     programs: &profiles::ProfilePrograms,
     // What a Terminal seat with no entry in `leaves` is started as — the
@@ -6539,10 +6718,20 @@ fn create_tab_state(
         .as_ref()
         .map(|pty| pty.conpty_source().to_string())
         .unwrap_or_else(|| "direct-input".to_string());
+    // Built off the *tree* and not off the caller's map, so the table is total
+    // over this tab's Files leaves by construction — the same invariant the loop
+    // above gives `sessions`, reached the same way. A seat the caller said
+    // nothing about is an unrooted column, which is a state, not a gap.
+    let files: BTreeMap<SeatId, seats::FilesLeafState> = seats
+        .files()
+        .into_iter()
+        .map(|seat| (seat, files.get(&seat).cloned().unwrap_or_default()))
+        .collect();
     Ok((
         assemble_tab_state(
             id,
             sessions,
+            files,
             terminal_seat_id,
             seed,
             seats,
@@ -6570,9 +6759,16 @@ fn create_tab_state(
 /// that holds the keyboard, and the [`TabSeed`] that says what the tab inherits
 /// — are arguments, and everything else is the same sentence for every tab there
 /// has ever been.
+///
+/// Four of them now: the two content tables are separate arguments because they
+/// are separate invariants (see [`TabState::files`]), and folding them into a
+/// pair would move the argument list rather than shorten it — the same reading
+/// [`create_tab_state`] above records for its own.
+#[allow(clippy::too_many_arguments)]
 fn assemble_tab_state(
     id: TabId,
     sessions: BTreeMap<SeatId, LeafSession>,
+    files: BTreeMap<SeatId, seats::FilesLeafState>,
     focused_leaf: SeatId,
     seed: TabSeed,
     seats: seats::Seats,
@@ -6586,6 +6782,7 @@ fn assemble_tab_state(
     let tab = TabState {
         id,
         sessions,
+        files,
         focused_leaf,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
@@ -6616,6 +6813,10 @@ fn assemble_tab_state(
     debug_assert!(
         tab.sessions_match_terminals(),
         "item 6: a new tab's shells and its Terminal leaves are the same set"
+    );
+    debug_assert!(
+        tab.files_match_files_seats(),
+        "A3: a new tab's files states and its Files leaves are the same set"
     );
     tab
 }
@@ -6690,6 +6891,12 @@ fn pane_into_new_tab(
     let tab = assemble_tab_state(
         id,
         BTreeMap::from([(key, session)]),
+        // Empty, and provably so rather than by omission: this verb takes the
+        // `?` above only for a seat with a session behind it, and
+        // `pane_can_become_a_tab` refuses every other kind on the way in. A
+        // files column reaching the strip is I124, and the day it does the seat
+        // arriving here brings its state with it exactly as this session does.
+        BTreeMap::new(),
         key,
         TabSeed {
             // The profile is not stated here any more, and its absence is the
@@ -6814,6 +7021,18 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
                 "{now:?} was already running a shell: the renumbering collided"
             );
         }
+        // A files column crossing into another tab keeps what it was looking
+        // at, for the same reason the shell beside it keeps its scrollback: the
+        // pane is *moving*, not being rebuilt. Re-keyed on the way in because
+        // the arriving tree renumbers its seats, which is the whole of why
+        // `arrived` is a list of pairs rather than a list of ids.
+        if let Some(state) = source.files.remove(was) {
+            let displaced = target.files.insert(*now, state);
+            debug_assert!(
+                displaced.is_none(),
+                "{now:?} was already showing a folder: the renumbering collided"
+            );
+        }
     }
     if let Some((_, now)) = arrived.iter().find(|(was, _)| *was == source.focused_leaf) {
         target.seats.set_focus(*now);
@@ -6828,6 +7047,10 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
     debug_assert!(
         source.sessions.is_empty(),
         "T226: a merge takes the whole fleet, so no empty tab is left holding shells"
+    );
+    debug_assert!(
+        source.files.is_empty(),
+        "T226: a merge takes the whole tree, so no empty tab is left holding folders"
     );
     // **Item 6 is asserted at the end of the *gesture*, not here, and the
     // difference is N161.** A merge on its own leaves the target matching its
@@ -7145,13 +7368,14 @@ impl Runtime {
                 seats::Seats::lone_terminal(),
                 TabSeed::default(),
                 BTreeMap::new(),
+                BTreeMap::new(),
             )]
         } else {
             plan.open.iter().map(revive_plan).collect()
         };
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
-        for (index, (seats, seed, leaves)) in restored_roots.into_iter().enumerate() {
+        for (index, (seats, seed, leaves, files)) in restored_roots.into_iter().enumerate() {
             let (tab, conpty_source) = create_tab_state(
                 TabId(index as u64 + 1),
                 seats,
@@ -7167,6 +7391,9 @@ impl Runtime {
                 // tab happens to be — that address IS what a seed is for, and
                 // now there is one per pane.
                 &leaves,
+                // And every files column comes back rooted where it was left,
+                // which before this slice was nowhere at all.
+                &files,
                 seed,
                 &profile_programs,
                 default_profile,
@@ -7446,6 +7673,9 @@ impl Runtime {
             wake,
             None,
             &leaves,
+            // A new tab is one terminal and nothing else — no files leaf to
+            // root, so nothing to say about one.
+            &BTreeMap::new(),
             TabSeed::default(),
             &self.profile_programs,
             self.default_profile(),
@@ -7599,6 +7829,10 @@ impl Runtime {
             wake,
             None,
             &leaves,
+            // A `Seed::Term` reopens as one terminal. The files locus reopening
+            // as a files *tab* is M174, and it waits on I124 with everything
+            // else that needs a tab with no shell in it.
+            &BTreeMap::new(),
             TabSeed {
                 manual_name,
                 // A reopened tab is not pinned: it is coming back because you
@@ -7659,7 +7893,7 @@ impl Runtime {
         let placeholder = self.placeholder_tab.take();
         let first_revived = self.tabs.len();
         for tab in &pending {
-            let (seats, seed, leaves) = revive_plan(tab);
+            let (seats, seed, leaves, files) = revive_plan(tab);
             let proxy = self.event_proxy.clone();
             let wake: OutputWake = Arc::new(move || {
                 let _ = proxy.send_event(AppEvent::PtyOutput);
@@ -7674,6 +7908,7 @@ impl Runtime {
                 wake,
                 None,
                 &leaves,
+                &files,
                 seed,
                 &self.profile_programs,
                 self.default_profile(),
@@ -8070,6 +8305,9 @@ impl Runtime {
         // here rather than in `seats`, which knows nothing about sessions (L1).
         let terminal_names = self.terminal_names();
         let leaf_marks = self.leaf_marks();
+        // B14, per leaf: every files pane head names its *own* root. Resolved
+        // beside the terminal names for the same reason and by the same rule.
+        let files_names = self.files_names();
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
             // An open pane with nothing chosen invites rather than sits mute.
@@ -8112,6 +8350,7 @@ impl Runtime {
                 preview_title: preview_title.as_deref(),
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
+                files_names: &files_names,
                 preview_message: preview_message.as_deref(),
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
@@ -8498,6 +8737,7 @@ impl Runtime {
         // something the pane itself does not — nor name two panes alike, which is
         // what one cwd for the whole tab did.
         let terminal_names = tab.terminal_names();
+        let files_names = tab.files_names();
         let palette = bt_render::chrome_palette();
         // False for every tab a peek can be showing — `peek_strip::eligible`
         // refuses the active one outright — but asked rather than assumed, so
@@ -8550,6 +8790,7 @@ impl Runtime {
                         seat.kind,
                         preview_title.as_deref(),
                         terminal_names.get(&seat.id).map(String::as_str),
+                        files_names.get(&seat.id).map(String::as_str),
                     )
                     .to_owned(),
                     focused: seat.id == focus,
@@ -9096,6 +9337,11 @@ impl Runtime {
         // as the tab this pane would become, and a pane that came back wearing a
         // sibling's name would be the drag pointing at the wrong room.
         let name = self.terminal_name(seat);
+        // And the same question asked of a files column, which answers with its
+        // root rather than with its kind — otherwise a tree being torn out is
+        // dressed as the word "Files" while the pane it came from says where it
+        // is rooted, and the stand-in stops being a picture of the thing.
+        let files_name = self.files_head_name(seat);
         let title = self
             .preview_image
             .as_ref()
@@ -9103,8 +9349,13 @@ impl Runtime {
         Some((
             slot.min(self.tabs.len()),
             seats::TabContent {
-                title: seats::seat_short_caption(kind, title.as_deref(), name.as_deref())
-                    .to_owned(),
+                title: seats::seat_short_caption(
+                    kind,
+                    title.as_deref(),
+                    name.as_deref(),
+                    files_name.as_deref(),
+                )
+                .to_owned(),
                 // A pane torn into its own tab holds exactly one pane, and the
                 // badge is for tabs that hold more than one (A2/C27). Zero rather
                 // than one only because the count is of a tab that does not exist
@@ -9402,6 +9653,7 @@ impl Runtime {
                 // stand-in it hands off to are two pictures of one pane, so they
                 // read the same door ([`Runtime::strip_stand_in`]).
                 let name = self.terminal_name(seat);
+                let files_name = self.files_head_name(seat);
                 let title = self
                     .preview_image
                     .as_ref()
@@ -9410,7 +9662,13 @@ impl Runtime {
                     mark,
                     size,
                     colour,
-                    seats::seat_short_caption(kind, title.as_deref(), name.as_deref()).to_owned(),
+                    seats::seat_short_caption(
+                        kind,
+                        title.as_deref(),
+                        name.as_deref(),
+                        files_name.as_deref(),
+                    )
+                    .to_owned(),
                 ))
             }
         }
@@ -9685,8 +9943,13 @@ impl Runtime {
             .iter()
             .map(|tab| TabV1 {
                 // Every terminal leaf is asked about itself, so a tab whose two
-                // panes stand in two folders writes two folders.
-                root: tab.seats.to_persisted(&|seat| tab.term_leaf(seat)),
+                // panes stand in two folders writes two folders — and every
+                // files leaf likewise, so a column that was rooted somewhere
+                // writes *there* instead of the empty string it used to be
+                // flattened to on the way past.
+                root: tab
+                    .seats
+                    .to_persisted(&|seat| tab.term_leaf(seat), &|seat| tab.files_state(seat)),
                 pinned: tab.pinned,
                 // Positional rather than a stable id: the in-order index is a function of the
                 // same tree shape the file carries, so it cannot point outside that tree.
@@ -9883,6 +10146,80 @@ impl Runtime {
         self.commit_seat_geometry()
     }
 
+    /// **`addFilesPane` and its undo, as one verb** — the `˅` menu's `Files pane`
+    /// row and `Ctrl+Shift+B` both land here.
+    ///
+    /// A toggle rather than an adder, which is both the mock-up's reading (6126:
+    /// a tab that already has a files pane closes it) and VS Code's `Ctrl+B`.
+    /// The two entries share the verb rather than the shape, so the menu row and
+    /// the chord can never come to mean two different things.
+    ///
+    /// **The root is captured here and never again** (A7). It is the focused
+    /// terminal's working directory at this instant, falling back to `HOME` when
+    /// that shell has never said where it stands. `follow-focus` was ruled out
+    /// on 2026-07-16 — a tree that re-roots itself as you `cd` is the single most
+    /// startling thing an independent view can do — so this is the one moment the
+    /// column ever looks at a terminal's cwd.
+    ///
+    /// Keyboard focus deliberately does not move. There is no
+    /// `InputOwner::FilesTree` yet, and a `focused_leaf` naming a seat with no
+    /// session is exactly the crash I106 reports; the column takes *layout*
+    /// focus, which is a different thing and is what makes it the last pane to
+    /// be given up when the window runs out of room.
+    fn toggle_files_pane(&mut self) -> Result<()> {
+        let metrics = self.seat_metrics();
+        if let Some(open) = self.seats.files_seat() {
+            // Closing a files pane is closing a pane: the same verb, so the
+            // state teardown, the tab-closes-with-its-last-pane rule and the
+            // re-solve are the ones every other pane already gets.
+            return self.close_pane(open);
+        }
+        let root = self.files_root_for_new_pane();
+        let Some(seat) = self.seats.add_files_pane(&metrics) else {
+            return Ok(());
+        };
+        self.files.insert(
+            seat,
+            seats::FilesLeafState {
+                root,
+                ..seats::FilesLeafState::default()
+            },
+        );
+        debug_assert!(
+            self.files_match_files_seats(),
+            "A3: opening a files pane files a state under the seat it minted"
+        );
+        // The tree changed, so everything downstream of its shape follows, in
+        // the order `toggle_preview_seat` already establishes for the same
+        // event: a stale pointer picture first, then the window minimum, then
+        // the re-solve that re-columns every shell beside the new column.
+        self.seat_pointer = seats::ChromePointer::default();
+        self.divider_drag = None;
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()?;
+        self.mark_session_dirty(Instant::now());
+        Ok(())
+    }
+
+    /// Where a files pane opened right now would be rooted (H115).
+    ///
+    /// The focused shell's own folder, because that is the place the user is
+    /// standing when they ask for the tree; `HOME` when it has never named one,
+    /// which is the same answer `cwd_for_spawn` gives a new tab in the same
+    /// situation. Read through `sessions` by id rather than through the `Deref`,
+    /// so this is answerable on a tab whose keyboard is somewhere unexpected.
+    fn files_root_for_new_pane(&self) -> String {
+        self.sessions
+            .get(&self.focused_leaf)
+            .and_then(|leaf| leaf.session.working_directory())
+            .map(|cwd| cwd.display().to_string())
+            .or_else(|| {
+                profiles::home_directory(&bt_pty::SystemShellEnvironment)
+                    .map(|home| home.display().to_string())
+            })
+            .unwrap_or_default()
+    }
+
     /// `closePane` (mock-up 3558-3578, I102/I103/I105).
     ///
     /// One verb for every kind of leaf: the leaf leaves the tree, its sibling is
@@ -9937,9 +10274,22 @@ impl Runtime {
             // cross-boundary gestures that also take a leaf out of a tab.
             self.refocus_after_losing(seat);
         }
+        // A files column holds a root the way a terminal holds a shell, and the
+        // pane going away takes that too. There is no process to shut down —
+        // closing a files pane *is* discarding what it was looking at — but the
+        // entry has to go, because seat ids are re-minted from a counter and a
+        // state left behind comes back as the next column silently inheriting a
+        // root nobody chose for it.
+        if kind == bt_layout::SeatKind::Files {
+            self.files.remove(&seat);
+        }
         debug_assert!(
             self.sessions_match_terminals(),
             "item 6: closing a pane leaves the tab's shells matching its tree"
+        );
+        debug_assert!(
+            self.files_match_files_seats(),
+            "A3: closing a pane leaves the tab's files states matching its tree"
         );
         // The pointer's whole picture is stale: the rectangle it was over has
         // been re-solved out from under it, and a `pane_hover` naming a seat
@@ -10002,6 +10352,10 @@ impl Runtime {
             shortcuts::Action::DuplicatePaneSplit => {
                 self.split_focused_terminal(self.duplicate_split_axis())
             }
+            // The keyboard door onto the files column, and the `˅` menu's
+            // `Files pane` row is the mouse one. Both are `toggle_files_pane`,
+            // so neither can drift into meaning something the other does not.
+            shortcuts::Action::FilesPane => self.toggle_files_pane(),
             shortcuts::Action::OpenSettings => self.toggle_settings_panel(),
         }
     }
@@ -12665,19 +13019,38 @@ impl Runtime {
             Axis::Col => position.y,
         };
         let scale_ppm = seats::scale_ppm(self.renderer.metrics().dpi_milli().get());
-        let Some((requested, usable)) = seats::requested_ratio(slot, scale_ppm, along) else {
-            return Ok(true);
-        };
         let metrics = self.seat_metrics();
         // A refusal, and a clamp that changed nothing, both mean "do not
         // re-solve": §2.4 rules that an infeasible drag has zero side effects
         // rather than writing a value the next solve will "correct", which
         // would dress a refusal up as a jitter.
-        if self
-            .seats
-            .drag_divider(&metrics, drag.split, requested, usable)
-            == Ok(true)
-        {
+        //
+        // The two grips ask the same question of the same slot and differ only
+        // in what they write — a proportion or a width — which is exactly the
+        // difference §3.4 draws. Both defer their clamp to `bt-layout::apply`,
+        // so neither holds an opinion this module could get out of step with.
+        let moved = match drag.grip {
+            DividerGrip::Ratio(_) => {
+                let Some((requested, usable)) = seats::requested_ratio(slot, scale_ppm, along)
+                else {
+                    return Ok(true);
+                };
+                self.seats
+                    .drag_divider(&metrics, drag.split, requested, usable)
+                    == Ok(true)
+            }
+            DividerGrip::FixedExtent { leading, .. } => {
+                let Some((requested, usable)) =
+                    seats::requested_fixed_extent(slot, leading, scale_ppm, along)
+                else {
+                    return Ok(true);
+                };
+                self.seats
+                    .drag_fixed_extent(&metrics, drag.split, requested, usable)
+                    == Ok(true)
+            }
+        };
+        if moved {
             self.commit_seat_geometry()?;
         }
         Ok(true)
@@ -12715,15 +13088,24 @@ impl Runtime {
             .find(|slot| slot.id == drag.split)
             .map(|slot| slot.slot.extent(slot.dir) - bt_layout::DIVIDER);
         let metrics = self.seat_metrics();
-        let restored = match usable {
-            Some(usable) => {
+        let restored = match (usable, drag.grip) {
+            // The split is gone from the solve, so there is no value of its to
+            // put back and nothing to re-solve for.
+            (None, _) => false,
+            (Some(usable), DividerGrip::Ratio(origin)) => {
                 self.seats
-                    .drag_divider(&metrics, drag.split, drag.origin, usable)
+                    .drag_divider(&metrics, drag.split, origin, usable)
                     == Ok(true)
             }
-            // The split is gone from the solve, so there is no ratio of its to
-            // put back and nothing to re-solve for.
-            None => false,
+            // The pixel half of the same sentence, and it goes back through the
+            // same edit for the same reason: a window that changed size under
+            // the gesture gets the current legal width nearest the one we
+            // started from, rather than a width that fitted a slot that is gone.
+            (Some(usable), DividerGrip::FixedExtent { origin, .. }) => {
+                self.seats
+                    .drag_fixed_extent(&metrics, drag.split, origin, usable)
+                    == Ok(true)
+            }
         };
         if restored {
             self.commit_seat_geometry()?;
@@ -14027,19 +14409,42 @@ impl Runtime {
                 else {
                     return Ok(true);
                 };
-                let Some(origin) = self
-                    .seats
-                    .tree()
-                    .ratios()
-                    .into_iter()
-                    .find_map(|(id, ratio)| (id == split).then_some(ratio))
-                else {
-                    return Ok(true);
+                // **Which seam this is, decided once and from the tree** (F66).
+                // A split with a bare fixed column on one side has no ratio worth
+                // dragging — its width is pixels — so the grip is chosen here,
+                // by the same reading `bt-layout::apply` will use to commit it.
+                // Deciding per frame instead would let a mid-gesture re-solve
+                // change the verb under the hand.
+                let metrics = self.seat_metrics();
+                let grip = match self.seats.fixed_column_of_split(&metrics, split) {
+                    Some((column, leading)) => DividerGrip::FixedExtent {
+                        leading,
+                        // The width it is wearing right now, which is what Esc
+                        // owes. A column that has never been dragged is sitting
+                        // on its kind's opening width, and saying so explicitly
+                        // is what makes the rollback total.
+                        origin: self
+                            .seats
+                            .fixed_extent_of(column)
+                            .unwrap_or(bt_layout::FILES_W),
+                    },
+                    None => {
+                        let Some(origin) = self
+                            .seats
+                            .tree()
+                            .ratios()
+                            .into_iter()
+                            .find_map(|(id, ratio)| (id == split).then_some(ratio))
+                        else {
+                            return Ok(true);
+                        };
+                        DividerGrip::Ratio(origin)
+                    }
                 };
                 self.divider_drag = Some(DividerDrag {
                     split,
                     dir: slot.dir,
-                    origin,
+                    grip,
                 });
                 self.seat_pointer.dragging = Some(split);
                 self.apply_pointer_cursor();
@@ -14195,6 +14600,13 @@ impl Runtime {
                             }
                             Some(profiles::MenuRow::Recent(index)) => {
                                 self.reopen_recent(index)?;
+                            }
+                            // The mouse door onto the files column. Every row
+                            // above makes a tab; this one gives the tab you are
+                            // in a pane, through the same verb `Ctrl+Shift+B`
+                            // reaches.
+                            Some(profiles::MenuRow::FilesPane) => {
+                                self.toggle_files_pane()?;
                             }
                             None => {}
                         }
@@ -18249,7 +18661,7 @@ mod tests {
     #[test]
     fn a_seed_naming_a_profile_we_do_not_have_still_comes_back() {
         let tab = saved_tab("wsl-ubuntu", "C:\\a", Some("notes"), true);
-        let (seats, seed, leaves) = revive_plan(&tab);
+        let (seats, seed, leaves, _files) = revive_plan(&tab);
         assert_eq!(
             leaves.get(&seats.terminal()).map(|leaf| leaf.profile),
             Some(profiles::FALLBACK_PROFILE),
@@ -18282,7 +18694,7 @@ mod tests {
             })))
         };
         let here = std::env::current_dir().expect("a test runs somewhere");
-        let (seats, _, leaves) = revive_plan(&TabV1 {
+        let (seats, _, leaves, _files) = revive_plan(&TabV1 {
             root: LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
                 dir: bt_persist::SplitDirV1::Row,
                 ratio: 500_000,
@@ -18381,15 +18793,18 @@ mod tests {
         };
         // Answered by seat id, and refusing any other — which also pins that
         // the closure is asked about each terminal leaf exactly once, by name.
-        let saved = seats.to_persisted(&|seat| TermLeafV1 {
-            profile_id: "pwsh".to_owned(),
-            cwd: match seat {
-                seat if seat == left => here.to_string_lossy().into_owned(),
-                seat if seat == right => up.to_string_lossy().into_owned(),
-                other => panic!("only the tree's own terminal seats are asked, not {other:?}"),
+        let saved = seats.to_persisted(
+            &|seat| TermLeafV1 {
+                profile_id: "pwsh".to_owned(),
+                cwd: match seat {
+                    seat if seat == left => here.to_string_lossy().into_owned(),
+                    seat if seat == right => up.to_string_lossy().into_owned(),
+                    other => panic!("only the tree's own terminal seats are asked, not {other:?}"),
+                },
+                manual_name: None,
             },
-            manual_name: None,
-        });
+            &|seat| panic!("a tree of two terminals has no files leaf to ask about ({seat:?})"),
+        );
         let written = persisted_term_leaves(&saved);
         assert_eq!(written.len(), 2, "two leaves, asked about separately");
         assert_eq!(written[0].cwd, here.to_string_lossy());
@@ -18400,7 +18815,7 @@ mod tests {
         );
 
         // ── the read half ──
-        let (revived, _, folders) = revive_plan(&TabV1 {
+        let (revived, _, folders, _files) = revive_plan(&TabV1 {
             root: saved,
             pinned: false,
             focused_leaf: "leaf-0".to_owned(),
@@ -18427,6 +18842,212 @@ mod tests {
         );
     }
 
+    /// A tree carrying a files leaf, saved the way the runtime saves one.
+    ///
+    /// `[files | terminal]`, which is also the shape `add_files_pane` produces:
+    /// the column takes the whole left edge and the shell keeps the rest.
+    fn saved_files_and_terminal(files: bt_persist::FilesLeafV1) -> TabV1 {
+        TabV1 {
+            root: LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+                dir: bt_persist::SplitDirV1::Row,
+                ratio: 300_000,
+                children: [
+                    Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(files))),
+                    Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                        profile_id: "pwsh".to_owned(),
+                        cwd: String::new(),
+                        manual_name: None,
+                    }))),
+                ],
+            }),
+            pinned: false,
+            focused_leaf: "leaf-1".to_owned(),
+        }
+    }
+
+    /// **M170 — a saved files root survives a trip through this build.**
+    ///
+    /// The bug this closes was silent and destructive in the worst combination:
+    /// `to_persisted` wrote `root: String::new(), open: vec![], sel: None`
+    /// unconditionally, and `from_persisted` read those three fields off disk and
+    /// dropped them, because `Seat` has nowhere to put them (red line L1). So a
+    /// `session.json` that named a folder was **flattened to the empty string by
+    /// the first save after it was read** — no error, no warning, and the loss
+    /// visible only as a files pane that had forgotten where it was.
+    ///
+    /// Nothing on disk had to change to fix it: `FilesLeafV1` has carried all
+    /// four fields since v1 and the round-trip test in `bt-persist` has been
+    /// green the whole time. The schema was never the problem — there was no
+    /// runtime home for the value to be read *into*, which is what A3 is.
+    ///
+    /// Written as read-then-write over the *same* bytes rather than as four
+    /// field assertions, because that is the property that actually matters and
+    /// it cannot be satisfied by accident: every field has to survive, in order,
+    /// with the width the tree carries separately put back beside the three the
+    /// side table holds.
+    ///
+    /// Red gate: put `String::new()` back in `to_persisted`'s Files arm, or drop
+    /// the `files` map from `revive_plan`, and the comparison fails on the root.
+    #[test]
+    fn a_saved_files_root_comes_back_and_goes_out_again_unchanged() {
+        let saved = bt_persist::FilesLeafV1 {
+            root: r"C:\Users\dev\project".to_owned(),
+            // Deliberately not sorted the way a `BTreeSet` would emit them, so a
+            // reader that merely echoed the input would pass while one that
+            // genuinely round-trips a *set* has to canonicalise. The set has no
+            // order of its own; the order it is written in is a rule.
+            open: vec!["node-12".to_owned(), "node-45".to_owned()],
+            sel: Some("node-45".to_owned()),
+            // Nobody's default: 240 is what an undragged column writes, so a
+            // width that survived by being re-derived rather than carried would
+            // be indistinguishable from one that survived properly.
+            width: 197,
+        };
+        let (seats, _, _, files) = revive_plan(&saved_files_and_terminal(saved.clone()));
+
+        // ── the read half: the three facts landed on the seat that owns them ──
+        let [column] = seats.files()[..] else {
+            panic!("the saved tree holds exactly one files leaf");
+        };
+        let state = files
+            .get(&column)
+            .expect("the column came back with a root");
+        assert_eq!(
+            state.root, saved.root,
+            "the root crossed the disk, which is the whole of M170"
+        );
+        assert_eq!(
+            state.open.iter().cloned().collect::<Vec<_>>(),
+            saved.open,
+            "and so did the expanded set"
+        );
+        assert_eq!(state.sel, saved.sel, "and the selection");
+        // The width is *not* in the side table: it rode back on the seat, where
+        // a width lives. Asserted here so the split stays deliberate.
+        assert_eq!(
+            seats.fixed_extent_of(column),
+            Some(bt_layout::LogicalPx::px(i64::from(saved.width))),
+            "the width came back on the seat, not in the state beside it"
+        );
+
+        // ── the write half: the same bytes go back out ──
+        let written = seats.to_persisted(
+            &|_| TermLeafV1 {
+                profile_id: "pwsh".to_owned(),
+                cwd: String::new(),
+                manual_name: None,
+            },
+            &|seat| files.get(&seat).cloned().unwrap_or_default(),
+        );
+        let [out] = persisted_files_leaves(&written)[..] else {
+            panic!("one files leaf in, one files leaf out");
+        };
+        assert_eq!(
+            *out, saved,
+            "read then written must be the same files leaf, field for field"
+        );
+    }
+
+    /// **A files column that has never been rooted still writes a legal leaf.**
+    ///
+    /// The honest empty case, and it is worth pinning beside the one above so
+    /// that "the root survives" is not accidentally satisfied by "the root is
+    /// always whatever was on disk". A column opened and never given a folder
+    /// writes the empty string — which is what the old code wrote for *every*
+    /// column, and the difference is that now it is a fact rather than a default.
+    #[test]
+    fn a_files_column_with_no_root_writes_an_honest_empty_leaf() {
+        let (seats, _, _, files) =
+            revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
+                root: String::new(),
+                open: Vec::new(),
+                sel: None,
+                width: 240,
+            }));
+        let [column] = seats.files()[..] else {
+            panic!("one files leaf");
+        };
+        assert_eq!(files[&column], seats::FilesLeafState::default());
+        let written = seats.to_persisted(
+            &|_| TermLeafV1 {
+                profile_id: "pwsh".to_owned(),
+                cwd: String::new(),
+                manual_name: None,
+            },
+            &|seat| files.get(&seat).cloned().unwrap_or_default(),
+        );
+        let [out] = persisted_files_leaves(&written)[..] else {
+            panic!("one files leaf");
+        };
+        assert_eq!(out.root, "");
+        assert_eq!(
+            out.width, 240,
+            "an undragged column keeps its opening width"
+        );
+    }
+
+    /// **The pairing rule holds for files leaves too** — two columns, two roots,
+    /// and never crossed.
+    ///
+    /// The files half of `each_saved_pane_comes_back_as_the_shell_it_was_saved_as`,
+    /// and it exists for the same reason: the pairing is a `zip` of two walks,
+    /// and two walks that agree everywhere except on one shape hand a column
+    /// somebody else's folder. That failure does not look like a bug — it looks
+    /// like a working files pane pointed at the wrong place.
+    ///
+    /// Red gate: reverse either walk, or pair by anything other than tree order,
+    /// and the two roots swap.
+    #[test]
+    fn two_saved_files_columns_come_back_to_their_own_roots() {
+        let files = |root: &str, width: u32| {
+            Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                bt_persist::FilesLeafV1 {
+                    root: root.to_owned(),
+                    open: Vec::new(),
+                    sel: None,
+                    width,
+                },
+            )))
+        };
+        let (seats, _, _, states) = revive_plan(&TabV1 {
+            root: LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+                dir: bt_persist::SplitDirV1::Row,
+                ratio: 500_000,
+                children: [
+                    files(r"C:\left", 200),
+                    Box::new(LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+                        dir: bt_persist::SplitDirV1::Row,
+                        ratio: 500_000,
+                        children: [
+                            Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                                profile_id: "pwsh".to_owned(),
+                                cwd: String::new(),
+                                manual_name: None,
+                            }))),
+                            files(r"D:\right", 300),
+                        ],
+                    })),
+                ],
+            }),
+            pinned: false,
+            focused_leaf: "leaf-1".to_owned(),
+        });
+        let [left, right] = seats.files()[..] else {
+            panic!("two files leaves in, two files seats out");
+        };
+        assert_eq!(states[&left].root, r"C:\left");
+        assert_eq!(states[&right].root, r"D:\right");
+        assert_eq!(
+            seats.fixed_extent_of(left),
+            Some(bt_layout::LogicalPx::px(200)),
+            "each column keeps its own width as well as its own root"
+        );
+        assert_eq!(
+            seats.fixed_extent_of(right),
+            Some(bt_layout::LogicalPx::px(300))
+        );
+    }
+
     /// A shell that never reported a folder starts where a fresh one would, and
     /// says so by contributing no entry at all.
     ///
@@ -18437,7 +19058,7 @@ mod tests {
     /// to read and not two.
     #[test]
     fn a_saved_pane_that_named_no_folder_contributes_no_entry() {
-        let (seats, _, none) = revive_plan(&saved_row_of_two("", ""));
+        let (seats, _, none, _files) = revive_plan(&saved_row_of_two("", ""));
         assert!(
             none.values().all(|leaf| leaf.cwd.is_none()),
             "two silent shells, two absences"
@@ -18450,7 +19071,7 @@ mod tests {
         );
 
         let here = std::env::current_dir().expect("a test runs somewhere");
-        let (seats, _, one) = revive_plan(&saved_row_of_two(
+        let (seats, _, one, _files) = revive_plan(&saved_row_of_two(
             &here.to_string_lossy(),
             "C:\\definitely\\not\\here",
         ));
@@ -18807,6 +19428,7 @@ mod tests {
                 bt_layout::SeatKind::Terminal,
                 None,
                 names.get(&left).map(String::as_str),
+                None,
             ),
             "bt-app",
             "3304: the label riding the pointer still gets the one word"
@@ -27250,6 +27872,30 @@ mod tests {
     /// becomes a tab with nothing running in it — I106's crash by its own name.
     /// Answer `false` for Terminal and the tear-out is never offered at all and
     /// N157 is unreachable again.
+    ///
+    /// **Still `false` for Files after the files state landed, and the reason is
+    /// worth writing down** — the slice that gave a files column a home, a root
+    /// and a place on disk was also the slice that expected to overturn this,
+    /// and could not. A files *tab* is not one more `true` here; it is a tab with
+    /// an empty `sessions` map, and three separate layers currently rule that
+    /// out:
+    ///
+    /// 1. `Runtime` derefs to `TabState` derefs to `LeafSession`, a chain that
+    ///    resolves roughly a hundred `self.session` / `self.grid` /
+    ///    `self.projection` accesses to *the focused shell*. Each is a path that
+    ///    assumes a terminal, and each needs an answer for a tab that has none —
+    ///    which is a ruling per call site, not a mechanical edit. This is
+    ///    precisely the bomb family `UI-UX.md` §10 principle 20 describes.
+    /// 2. `seats::Seats` carries a mandatory `terminal: SeatId`, `lone_seat`
+    ///    debug-asserts the arriving seat is a Terminal, and `from_persisted`
+    ///    answers `None` for a tree with no Term leaf at all.
+    /// 3. The strip's identity paths — `tabLabel`'s three-level fallback,
+    ///    `tabIcon`'s folder mark, `tabTip`, `tabKey`, and `paintStrip`'s guard
+    ///    against a tab with no `.ticon`/`.unreaddot` (I118-I123) — are all
+    ///    unbuilt, and they are what a files tab would be *made of*.
+    ///
+    /// So the honest answer here is unchanged, and the file's own note above
+    /// still stands: the day files tabs land, this function deletes itself.
     #[test]
     fn only_a_terminal_pane_can_become_a_tab_of_its_own() {
         assert!(
@@ -27267,6 +27913,148 @@ mod tests {
         assert!(
             !pane_can_become_a_tab(bt_layout::SeatKind::Placeholder),
             "an unrecognised leaf must not be promoted into a terminal"
+        );
+    }
+
+    /// A tab holding one files column and one terminal, with the column rooted.
+    fn tab_with_a_files_column(id: u64, root: &str) -> TabState {
+        let (seats, _, _, files) =
+            revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
+                root: root.to_owned(),
+                open: Vec::new(),
+                sel: None,
+                width: 240,
+            }));
+        let terminals = seats.terminals();
+        let focused = terminals[0];
+        let sessions: BTreeMap<SeatId, LeafSession> = terminals
+            .iter()
+            .map(|s| (*s, leaf_saying("SHELL")))
+            .collect();
+        let (layout, overflow) = cross_solve(&seats);
+        assemble_tab_state(
+            TabId(id),
+            sessions,
+            files,
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        )
+    }
+
+    /// **A3/A6 — one safe accessor, and the two tables stay the same shape as
+    /// the tree.**
+    ///
+    /// The lesson `UI-UX.md` §10 principle 20 draws out of the mock-up's three
+    /// families of bomb is not "add a null check"; it is "give the tagged union
+    /// *one* helper that safely takes an identity off any leaf, and make every
+    /// path go through it". These are that helper's pins.
+    ///
+    /// The keyboard assertion is the sharpest of them. `sessions` is documented
+    /// as never empty and as always containing `focused_leaf`, and every
+    /// `self.session` in this file rides that invariant through two `Deref`s. A
+    /// files column that took the keyboard would break it silently — the panic
+    /// would land in whatever unrelated path next dereferenced the tab.
+    #[test]
+    fn a_files_column_has_a_home_beside_the_shells_and_never_takes_the_keyboard() {
+        let tab = tab_with_a_files_column(1, r"C:\Users\dev\project");
+        let [column] = tab.seats.files()[..] else {
+            panic!("the tab holds one files column");
+        };
+
+        assert!(
+            tab.files_match_files_seats(),
+            "A3: the files table and the Files leaves are the same set"
+        );
+        assert!(
+            tab.sessions_match_terminals(),
+            "and the sessions table is still the terminals'"
+        );
+        assert!(
+            !tab.sessions.contains_key(&column),
+            "a files column has no shell, and must not be filed as though it had"
+        );
+        assert!(
+            !tab.files.contains_key(&tab.focused_leaf),
+            "I106: the keyboard is on a terminal, never on the column"
+        );
+        assert!(
+            tab.sessions.contains_key(&tab.focused_leaf),
+            "which is the invariant every `Deref` in this file rides on"
+        );
+
+        // The safe accessor answers for both kinds without the caller having to
+        // know which it is holding.
+        assert_eq!(tab.files_state(column).root, r"C:\Users\dev\project");
+        assert_eq!(
+            tab.files_head_name(column).as_deref(),
+            Some("project"),
+            "B14: the head takes the last segment"
+        );
+        assert_eq!(
+            tab.files_head_name(tab.focused_leaf),
+            None,
+            "and a terminal seat has no root to give it"
+        );
+        assert_eq!(
+            tab.files_state(tab.focused_leaf),
+            seats::FilesLeafState::default(),
+            "an absent entry is an unrooted column, not a panic"
+        );
+        assert_eq!(
+            tab.files_names().len(),
+            1,
+            "one name per rooted column, and none for the shells"
+        );
+    }
+
+    /// **N159, on the other table — a files column crossing into another tab
+    /// keeps what it was looking at, and is re-keyed on the way in.**
+    ///
+    /// The merge renumbers the arriving tab's seats, which is why `arrived` is a
+    /// list of pairs. A session is moved across under its new id; so must a
+    /// root, or the column arrives blank and the user watches a folder they
+    /// chose turn into nothing because the pane changed tabs.
+    ///
+    /// Red gate: drop the `files` half of `absorb_tab_sessions`'s loop and the
+    /// root assertion fails while every terminal assertion stays green — which
+    /// is exactly how the bug would reach a release.
+    #[test]
+    fn a_merge_carries_a_files_columns_root_across_the_renumbering() {
+        let mut source = tab_with_a_files_column(1, r"D:\notes");
+        let mut target = cross_tab(2, &["ALPHA"]);
+        let [column] = source.seats.files()[..] else {
+            panic!("one column");
+        };
+        let source_terminal = source.seats.terminals()[0];
+
+        // The renumbering a real merge would hand over: both leaves land on new
+        // ids in the target's tree.
+        let landed_column = SeatId(90);
+        let landed_terminal = SeatId(91);
+        absorb_tab_sessions(
+            &mut source,
+            &mut target,
+            &[(column, landed_column), (source_terminal, landed_terminal)],
+        );
+
+        assert_eq!(
+            target
+                .files
+                .get(&landed_column)
+                .map(|state| state.root.clone()),
+            Some(r"D:\notes".to_owned()),
+            "the root travelled, and under the id the pane now answers to"
+        );
+        assert!(
+            source.files.is_empty(),
+            "T226: the merge took the whole tree, folders included"
+        );
+        assert!(
+            target.sessions.contains_key(&landed_terminal),
+            "and the shell beside it moved the same way"
         );
     }
 
@@ -27520,6 +28308,8 @@ mod tests {
         assemble_tab_state(
             TabId(id),
             sessions,
+            // `cross_seats` builds a row of terminals and nothing else.
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,
