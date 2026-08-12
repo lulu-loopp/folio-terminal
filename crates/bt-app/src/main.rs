@@ -508,6 +508,96 @@ enum RowActivation {
     Nowhere,
 }
 
+impl RowActivation {
+    /// The path the row names, or nothing when the column has no root to name
+    /// it from.
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Preview(path) | Self::DefaultApp(path) => Some(path),
+            Self::Nowhere => None,
+        }
+    }
+
+    /// What the menu's first row should say it will do — the wording the verb
+    /// earns, not the wording the specification will earn later.
+    ///
+    /// `DESIGN.md` §7.1.3 rules that activating any file opens the preview, and
+    /// [`Runtime::activate_files_row`] records why this build cannot yet: only
+    /// pictures have a preview to go to, and the rest go to the system's own
+    /// handler. A menu row is the one place that interim becomes a *sentence*,
+    /// and a sentence can lie where a double click cannot. So the row is named
+    /// after the door it will actually open, and the day the second door closes
+    /// this collapses to one word without anything else moving.
+    fn open_text(&self) -> &'static str {
+        match self {
+            Self::Preview(_) => "Open preview",
+            // The system's own verb, which is literally the string handed to
+            // `ShellExecuteW`.
+            Self::DefaultApp(_) => "Open",
+            Self::Nowhere => "Open",
+        }
+    }
+}
+
+/// A file row's context menu while it is up (K143).
+#[derive(Clone, Debug)]
+struct FileMenuState {
+    /// Where it was raised, in physical pixels of the surface.
+    point: [f32; 2],
+    /// The row it is about, already resolved to a path and a door.
+    activation: RowActivation,
+    hover: Option<profiles::FileMenuRow>,
+}
+
+/// The exact characters an `Insert path into terminal` press puts in the input
+/// line (K144).
+///
+/// Three rules, all the mock-up's (8078-8079):
+///
+/// * **A path with a space in it is quoted.** The string is about to be read by
+///   a shell, and to a shell a space is where one word ends. Quoted with `"`
+///   rather than `'` because this window's shells are Windows shells, where `'`
+///   is a literal character to `cmd` and a *different* kind of quote to
+///   PowerShell — and because a Windows path cannot itself contain a `"`, the
+///   character is illegal in a file name, so there is nothing to escape.
+/// * **A space in front**, unless there is already one there. Otherwise the path
+///   is welded onto whatever the user had typed, and `cat` becomes `catC:\…`.
+/// * **A space after**, always. The overwhelmingly common next thing is another
+///   argument, and the one case it is not — pressing Enter — does not care.
+fn inserted_path_text(path: &Path, needs_leading_space: bool) -> String {
+    let path = path.to_string_lossy();
+    let quoted = if path.chars().any(char::is_whitespace) {
+        format!("\"{path}\"")
+    } else {
+        path.into_owned()
+    };
+    let lead = if needs_leading_space { " " } else { "" };
+    format!("{lead}{quoted} ")
+}
+
+/// Whether the cell in front of the cursor is something the path would be
+/// welded onto.
+///
+/// **The screen is the only honest witness.** The mock-up could ask its model
+/// what the input line held; a real shell keeps that string inside itself, and
+/// nothing this window can ask will get it. What this window *does* own is the
+/// grid the shell has drawn on, and the character immediately left of the cursor
+/// is the last one the input line put there — which is precisely the thing the
+/// rule is about. At column zero there is nothing in front to weld to, and an
+/// unwritten cell reads as a blank, so both answer "no space needed" without a
+/// special case.
+fn input_line_needs_a_space_first(session: &bt_term::DualPlaneSession) -> bool {
+    let cursor = session.terminal().cursor();
+    let Some(column) = (cursor.column as usize).checked_sub(1) else {
+        return false;
+    };
+    session
+        .terminal()
+        .visible_row(cursor.row)
+        .and_then(|row| row.cells.get(column).map(|cell| cell.text.clone()))
+        .is_some_and(|text| !text.chars().all(char::is_whitespace) && !text.is_empty())
+}
+
 /// Which of the two doors a row's name opens (K156).
 ///
 /// Pure, and asked of the *whole* path rather than of the row's name, because
@@ -914,6 +1004,16 @@ struct Runtime {
     /// that comes back to where the child already sits would then still send it a resize.
     modifiers: ModifiersState,
     math_context_menu: bt_platform::MathContextMenu,
+    /// The system folder chooser behind the root menu's `Browse…` (E55).
+    folder_picker: bt_platform::FolderPicker,
+    /// Which column asked for it, so the answer knows where to land.
+    ///
+    /// Beside the picker rather than inside it, because the picker is a bridge
+    /// to Windows and a `SeatId` means nothing there. It is cleared when the
+    /// answer is collected, and a column that closes while the dialog is open
+    /// simply finds no seat to re-root — [`Runtime::reroot_files_column`]
+    /// already returns for a seat it cannot find.
+    folder_picker_seat: Option<SeatId>,
     custom_window_frame: bt_platform::CustomWindowFrame,
     window: Arc<Window>,
     startup_started: Instant,
@@ -1257,6 +1357,14 @@ struct Runtime {
     files_row_clicks: FilesRowClicks,
     /// Which files column has its root menu up (E53-E61).
     root_menu: profiles::RootMenu,
+    /// The file row's context menu, and the row it was raised on (K143).
+    ///
+    /// It holds the *path*, not the row — an index into a list the tree may
+    /// rebuild under it, or a host that may close. Once the menu is up, all
+    /// three of its verbs are about one file, and that file's name is a fact
+    /// nothing behind the menu can change. It is also what lets one menu serve
+    /// both hosts (K146) without carrying which one it came from.
+    file_menu: Option<FileMenuState>,
     /// How wide each files head's name was last *drawn* — see
     /// [`Runtime::measure_files_names`] for why the hit test reads it from here
     /// rather than measuring for itself.
@@ -4246,6 +4354,17 @@ struct RevealTween {
     to: f32,
     started: Option<Instant>,
     span: Duration,
+    /// The control points this reveal is drawn with.
+    ///
+    /// A field rather than the one module-wide constant, because the mock-up
+    /// does not use one curve: the rail's width is `.18s **ease**` (813) and the
+    /// files row's triangle is `120ms **cubic-bezier(.2,0,0,1)**` (C33) — a
+    /// noticeably snappier curve that leaves most of its travel in the first
+    /// third. Both were being drawn with CSS `ease`, which is right for one of
+    /// them. [`Self::over`] and [`Self::resting`] keep `EASE`, so every existing
+    /// reveal is unchanged and only the caller that asked for another curve gets
+    /// one.
+    curve: [f32; 4],
 }
 
 impl RevealTween {
@@ -4256,6 +4375,7 @@ impl RevealTween {
             to: 0.0,
             started: None,
             span,
+            curve: EASE,
         }
     }
 
@@ -4266,11 +4386,17 @@ impl RevealTween {
     /// state needs to be told where that is, or its first `retarget` would ease
     /// from an origin the window was never in.
     fn resting(position: f32, span: Duration) -> Self {
+        Self::resting_on(position, span, EASE)
+    }
+
+    /// The same, drawn with a curve of its own.
+    fn resting_on(position: f32, span: Duration, curve: [f32; 4]) -> Self {
         Self {
             from: position,
             to: position,
             started: None,
             span,
+            curve,
         }
     }
 
@@ -4307,6 +4433,7 @@ impl RevealTween {
             // carries nothing but polish.
             started: (motion == Motion::Full).then(|| now + delay),
             span: self.span,
+            curve: self.curve,
         };
     }
 
@@ -4321,7 +4448,7 @@ impl RevealTween {
             return (self.to, false);
         }
         let progress = elapsed.as_secs_f32() / duration.as_secs_f32();
-        let eased = cubic_bezier(progress, EASE);
+        let eased = cubic_bezier(progress, self.curve);
         (self.from + (self.to - self.from) * eased, true)
     }
 }
@@ -6666,6 +6793,35 @@ fn persisted_files_leaves(node: &LayoutNodeV1) -> Vec<&bt_persist::FilesLeafV1> 
     leaves
 }
 
+/// What one saved tab is *named by* on the restore prompt (M175).
+///
+/// **A tab is named by the terminal it holds, and a tab that holds none is named
+/// by the folder it was looking at.** The second half is the part that had to be
+/// written: the fallback used to hand over an empty root, which draws a row
+/// about a nameless place — a line offering to bring something back without
+/// saying what. The root is read off the same saved tree the badge's pane count
+/// comes from, so the row and the badge cannot describe two different tabs.
+///
+/// A tree with neither is still possible on paper — every leaf an unknown kind
+/// from a newer build — and it answers with an empty root, because there is
+/// genuinely nothing here to name it with. That is the honest row, and it is the
+/// same row the degradation ladder (M177) already promises.
+fn restore_row_seed(node: &LayoutNodeV1) -> seed::Seed {
+    first_term_leaf(node).map_or_else(
+        || seed::Seed::Files {
+            root: persisted_files_leaves(node)
+                .first()
+                .map(|leaf| leaf.root.clone())
+                .unwrap_or_default(),
+        },
+        |leaf| seed::Seed::Term {
+            profile_id: leaf.profile_id.clone(),
+            cwd: leaf.cwd.clone(),
+            manual_name: leaf.manual_name.clone(),
+        },
+    )
+}
+
 /// How many panes a persisted tab held — the number its badge would show.
 fn persisted_pane_count(node: &LayoutNodeV1) -> usize {
     match node {
@@ -7135,12 +7291,10 @@ fn assemble_tab_state(
         pending_keyboard_at: None,
         // A tab that arrives pinned wears its pin from the first frame; it
         // is a fact about the tab, not an offer that has to be hovered out.
-        pin_reveal: RevealTween {
-            from: f32::from(u8::from(seed.pinned)),
-            to: f32::from(u8::from(seed.pinned)),
-            started: None,
-            span: Duration::from_millis(WINDOW_TAB_PIN_REVEAL_MS),
-        },
+        pin_reveal: RevealTween::resting(
+            f32::from(u8::from(seed.pinned)),
+            Duration::from_millis(WINDOW_TAB_PIN_REVEAL_MS),
+        ),
         last_drawn_pin_reveal: None,
         // Out, and out for every tab including this one if it arrives active:
         // "an active tab does NOT show it by default" (H104), which the mock-up
@@ -7659,6 +7813,9 @@ impl Runtime {
         let math_context_menu = bt_platform::MathContextMenu::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("install deferred formula context menu")?;
+        let folder_picker = bt_platform::FolderPicker::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred folder chooser")?;
         // Only now, with the self-drawn frame owning WM_NCCALCSIZE, does "the
         // window's rectangle" mean one thing instead of two. Restate the geometry
         // as that one rectangle: what winit built is the saved size plus a native
@@ -7808,6 +7965,8 @@ impl Runtime {
             pending_frames: LatestFrameSlot::default(),
             modifiers: ModifiersState::default(),
             math_context_menu,
+            folder_picker,
+            folder_picker_seat: None,
             custom_window_frame,
             window,
             startup_started,
@@ -7886,6 +8045,7 @@ impl Runtime {
             tab_clicks: TabClicks::default(),
             files_row_clicks: FilesRowClicks::default(),
             root_menu: profiles::RootMenu::default(),
+            file_menu: None,
             float: float::FloatHost::default(),
             float_drag: None,
             float_hover: None,
@@ -9466,16 +9626,7 @@ impl Runtime {
             .pending_restore
             .iter()
             .map(|tab| {
-                let seed = first_term_leaf(&tab.root).map_or(
-                    seed::Seed::Files {
-                        root: String::new(),
-                    },
-                    |leaf| seed::Seed::Term {
-                        profile_id: leaf.profile_id.clone(),
-                        cwd: leaf.cwd.clone(),
-                        manual_name: leaf.manual_name.clone(),
-                    },
-                );
+                let seed = restore_row_seed(&tab.root);
                 let mut row =
                     restore::RestoreRow::from_seed(&seed, persisted_pane_count(&tab.root));
                 row.label_text_width = measure(&row.label, restore::ROW_FONT_LOGICAL_PX * scale);
@@ -9685,6 +9836,14 @@ impl Runtime {
         // one surface in this window that is never covered, and a float has
         // controls with tips of their own.
         layers.extend(self.float_layer(now));
+        // Above the float, and deliberately not in the `else if` chain that
+        // makes the other two popups exclusive. It is exclusive with them by
+        // state — [`Runtime::open_file_menu`] closes both — but it cannot share
+        // their *level*: this menu is very often raised on a row **inside** the
+        // floating window (K146), and a menu drawn under the window it belongs
+        // to is a menu that is not there. `#file-menu { z-index: 60 }` against
+        // the root menu's 55 is the mock-up saying the same thing (637, 628).
+        layers.extend(self.file_menu_layer());
         layers.extend(self.tooltip_layer());
         // Above even the tip: `z-index: 100` against its `60` (mock-up 1717).
         // The tip's claim to being uncoverable is that it explains what is under
@@ -10149,7 +10308,17 @@ impl Runtime {
     }
 
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
+    ///
+    /// **E61's rule stated in both directions.** The root menu's opener has
+    /// always closed this one; this one did not close the root menu, and got
+    /// away with it only because the press that opens it also falls through the
+    /// root menu's outside-press handler on its way here. That is precisely the
+    /// "mutual exclusion left to a press falling through" the mock-up's own
+    /// judgement forbids — it holds until some other door (a chord, a menu row,
+    /// a restored gesture) opens this menu without a press in the right place.
     fn toggle_profile_menu(&mut self) -> Result<()> {
+        self.root_menu.close();
+        self.file_menu = None;
         self.profile_menu.toggle();
         self.start_chevron_turn();
         if self.refresh_chrome() {
@@ -10592,11 +10761,17 @@ impl Runtime {
     /// startling thing an independent view can do — so this is the one moment the
     /// column ever looks at a terminal's cwd.
     ///
-    /// Keyboard focus deliberately does not move. There is no
-    /// `InputOwner::FilesTree` yet, and a `focused_leaf` naming a seat with no
-    /// session is exactly the crash I106 reports; the column takes *layout*
+    /// Keyboard focus deliberately does not move, and `focused_leaf` is not
+    /// touched: it names a *shell*, and a `focused_leaf` naming a seat with no
+    /// session is exactly the crash I106 reports. The column takes *layout*
     /// focus, which is a different thing and is what makes it the last pane to
     /// be given up when the window runs out of room.
+    ///
+    /// (This paragraph used to say there was no `InputOwner::FilesTree` yet.
+    /// There is — [`Runtime::files_focus`] is it, and `files_tree_key` is its
+    /// rung of §7.1.5's ladder. What stayed true is the sentence around it:
+    /// giving a column the *keyboard* is a separate act from opening one, and
+    /// opening one from a chord does not perform it.)
     fn toggle_files_pane(&mut self) -> Result<()> {
         let metrics = self.seat_metrics();
         if let Some(open) = self.seats.files_seat() {
@@ -11773,6 +11948,58 @@ impl Runtime {
         Ok(())
     }
 
+    /// `Browse…` — ask the system for a folder the quick list could not name
+    /// (E55).
+    ///
+    /// **The chooser only gets queued here.** It is a modal dialog with a
+    /// message loop of its own, and starting one from inside this callback would
+    /// re-enter the application's event handling underneath the very borrow that
+    /// began it — see [`bt_platform::FolderPicker`], which is built on the same
+    /// deferral the formula menu already needed for a far shorter-lived pump.
+    /// The answer arrives in [`Runtime::apply_folder_pick_result`].
+    ///
+    /// **A chooser that cannot be shown leaves the column where it was.** The
+    /// row is a way of reaching a folder, not a promise about Windows: if the
+    /// dialog does not come up, the honest outcome is the root you already had,
+    /// and the reason is written to the log the other recoverable failures use
+    /// rather than turned into a banner about COM apartments.
+    fn browse_for_root(&mut self, seat: SeatId) {
+        let start = self.tabs[self.active_tab].files_state(seat).root;
+        let start = (!start.is_empty()).then(|| PathBuf::from(start));
+        match self.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.folder_picker_seat = Some(seat),
+            // Already queued or already open: a second `Browse…` while one is up
+            // is one dialog, not two, and the seat that asked first keeps the
+            // answer.
+            Ok(false) => {}
+            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+        }
+    }
+
+    /// Collect the folder chooser's answer, once the dialog has shut.
+    fn apply_folder_pick_result(&mut self) -> Result<()> {
+        let Some(result) = self.folder_picker.take_result() else {
+            return Ok(());
+        };
+        let seat = self.folder_picker_seat.take();
+        match result {
+            // A folder was chosen. Re-rooting is the same verb the quick list's
+            // rows commit, down to clearing the expansion set and keeping the
+            // width (E56) — a folder reached by a different route is not a
+            // different kind of destination.
+            Ok(Some(path)) => {
+                if let Some(seat) = seat {
+                    let path = path.to_string_lossy().into_owned();
+                    self.reroot_files_column(seat, &path)?;
+                }
+            }
+            // Cancelled. Nothing happened, and nothing should be said about it.
+            Ok(None) => {}
+            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+        }
+        Ok(())
+    }
+
     /// The button on the head: open the menu here, or shut it if it is already
     /// here (E57).
     fn toggle_root_menu(&mut self, seat: SeatId) -> Result<()> {
@@ -11800,6 +12027,257 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    // ── the file row's context menu (K143-K146) ─────────────────────────────
+
+    /// Where the file menu is, if one is up.
+    ///
+    /// Unlike [`Runtime::root_menu_layout`] this cannot fold for want of an
+    /// anchor: the anchor is the point the pointer was at, and a point does not
+    /// stop existing when the tree behind it is rebuilt. What the menu *does*
+    /// fold for is the window changing size under it, which the caller handles
+    /// by closing it — a menu is a moment, and a resize ends the moment.
+    fn file_menu_layout(&mut self) -> Option<profiles::FileMenuLayout> {
+        let menu = self.file_menu.as_ref()?;
+        let point = menu.point;
+        let open_text = menu.activation.open_text();
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        Some(profiles::file_menu_layout(
+            point,
+            (width as f32, height as f32),
+            scale,
+            open_text,
+            &mut measure,
+        ))
+    }
+
+    /// Raise the menu on one file row.
+    ///
+    /// **Directories are not offered one, and the refusal is here rather than at
+    /// each caller** (K143, mock-up 8122: "directory rows etc. keep the native
+    /// menu for now"). All three verbs are about a *file*: two of them hand out
+    /// its path for something else to open, and the third opens it. A folder has
+    /// a path too, which is exactly why the rule has to be stated somewhere
+    /// rather than left to look like an oversight — the folder's own verbs are
+    /// the root menu's and the drag's, and they live where they belong.
+    ///
+    /// A column with no root raises nothing either: [`RowActivation::Nowhere`]
+    /// means there is no path to put on a clipboard, and a menu of three verbs
+    /// that all do nothing is worse than no menu.
+    fn open_file_menu(&mut self, activation: RowActivation, point: [f32; 2]) -> Result<()> {
+        if activation.path().is_none() {
+            return Ok(());
+        }
+        // E61: the opener closes the others. Not the float — that is a place, not
+        // a popup, and this menu is very often *about a row inside it*.
+        self.profile_menu.close();
+        self.root_menu.close();
+        self.file_menu = Some(FileMenuState {
+            point,
+            activation,
+            hover: None,
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Raise the file menu on a row named by the keyboard rather than by the
+    /// pointer (K143's "可键盘化").
+    ///
+    /// It hangs from the row's own bottom-left corner, which is where a menu
+    /// belonging to a list item belongs when no pointer said otherwise — the
+    /// same placement the root menu takes under its button. The rectangle is
+    /// re-derived from the live layout at the moment of the press, through the
+    /// one function the hit test also uses, so a menu raised by a key and a menu
+    /// raised by a click on the same row cannot come up in two places.
+    fn raise_file_menu_on_row(&mut self, seat: SeatId, key: &str) -> Result<()> {
+        let now = Instant::now();
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let trees = self.files_trees(now);
+        let Some(index) = trees
+            .get(&seat)
+            .and_then(|tree| tree.rows.iter().position(|row| row.key == key))
+        else {
+            return Ok(());
+        };
+        let Some(geometry) = seats::files_tree_geometry_of(&self.seat_layout, &trees, scale, seat)
+        else {
+            return Ok(());
+        };
+        let rect = geometry.row_rect(index);
+        let root = self.tabs[self.active_tab].files_state(seat).root;
+        self.open_file_menu(files_row_activation(&root, key), [rect[0], rect[3]])
+    }
+
+    /// The file row under a point, in either host, resolved to the door it
+    /// opens — or nothing, when the point is not on a *file* row.
+    ///
+    /// The float is asked first because the float is drawn over the columns, so
+    /// a row of a peek standing across a docked column is the row the pointer is
+    /// really on. Both hosts re-derive their rows from the state rather than
+    /// remembering the painted list, on [`Runtime::press_files_row`]'s reasoning.
+    fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<RowActivation> {
+        if let Some(float::FloatPart::Row(index)) = self.float_part_at(position) {
+            let win = self.float.live()?;
+            let rows = files::tree_view(&win.files, &win.cache).rows;
+            let row = rows.get(index)?;
+            if !matches!(row.kind, files::RowKind::File) {
+                return None;
+            }
+            return Some(files_row_activation(&win.files.root, &row.key));
+        }
+        let Some(seats::ChromeTarget::FilesRow { seat, index }) = self.chrome_target_at(position)
+        else {
+            return None;
+        };
+        let now = Instant::now();
+        let trees = self.files_trees(now);
+        let row = trees.get(&seat)?.rows.get(index)?;
+        if !matches!(row.kind, files::RowKind::File) {
+            return None;
+        }
+        let key = row.key.clone();
+        Some(files_row_activation(
+            &self.tabs[self.active_tab].files_state(seat).root,
+            &key,
+        ))
+    }
+
+    /// The file menu's own level of the overlay stack, or nothing when none is
+    /// up.
+    fn file_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some(layout) = self.file_menu_layout() else {
+            return Vec::new();
+        };
+        let Some(menu) = self.file_menu.as_ref() else {
+            return Vec::new();
+        };
+        profiles::file_menu_build(&layout, menu.activation.open_text(), menu.hover)
+    }
+
+    fn close_file_menu(&mut self) -> Result<bool> {
+        if self.file_menu.take().is_none() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Do what one row of the file menu says, and put the menu away.
+    ///
+    /// The menu closes *first* in every case, on the mock-up's own order
+    /// (8094): two of these verbs move the keyboard somewhere else, and a menu
+    /// still on screen after the focus has left it is a menu the next Esc will
+    /// be spent on.
+    fn run_file_menu_row(&mut self, row: profiles::FileMenuRow) -> Result<()> {
+        let Some(menu) = self.file_menu.take() else {
+            return Ok(());
+        };
+        let activation = menu.activation;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        let Some(path) = activation.path().map(Path::to_path_buf) else {
+            return Ok(());
+        };
+        match row {
+            // The same two doors the double click walks through, reached through
+            // the same match rather than through a second copy of it: the menu
+            // row and the double click are one verb with two ways of asking for
+            // it, and a window in which they could ever disagree would be a
+            // window where the menu's own wording had become a lie.
+            profiles::FileMenuRow::Open => match activation {
+                RowActivation::Preview(path) => self.open_preview_image(path)?,
+                RowActivation::DefaultApp(path) => self.open_local_path(&path),
+                RowActivation::Nowhere => {}
+            },
+            profiles::FileMenuRow::CopyPath => self.copy_path_to_clipboard(&path)?,
+            profiles::FileMenuRow::InsertPath => self.insert_path_into_terminal(&path)?,
+        }
+        Ok(())
+    }
+
+    /// Put one row's whole path on the clipboard (K143).
+    ///
+    /// The path as the *user* would write it — `full_path`'s own separators —
+    /// because the whole point of this verb is that the string is about to be
+    /// pasted somewhere this window does not control.
+    fn copy_path_to_clipboard(&mut self, path: &Path) -> Result<()> {
+        let text = path.to_string_lossy().into_owned();
+        let result = write_terminal_clipboard_text(&self.window, &text);
+        recoverable_clipboard_write(result, "copy a files row's path");
+        Ok(())
+    }
+
+    /// Put one row's path into the shell's input line and give it the keyboard
+    /// (K144).
+    ///
+    /// **This is where "insert path" lives** — `DESIGN.md` §7.1.3 records the
+    /// 2026-07-17 ruling that took it off the drag (where it made one gesture
+    /// mean two different families of thing) and put it here, "explicit,
+    /// discoverable, keyboard-reachable".
+    ///
+    /// **Which terminal.** The one holding the keyboard, which `focused_leaf`
+    /// always names — a tab's invariant is that it holds a session for it. The
+    /// mock-up also searched the tree for a fallback terminal, because in the
+    /// mock-up focus could be *on* the files pane; here layout focus and the
+    /// keyboard are two different words (see [`Runtime::focus_pane_at`]), and
+    /// the keyboard's shell never stops being a shell.
+    ///
+    /// **It is sent as a paste, not as typing.** The bytes are wrapped by
+    /// [`input::paste_bytes`] exactly as a clipboard paste is, so a shell in
+    /// bracketed-paste mode is told this arrived as one lump — which is what
+    /// stops a path from being read as anything but characters.
+    fn insert_path_into_terminal(&mut self, path: &Path) -> Result<()> {
+        let active = self.active_tab;
+        let seat = self.tabs[active].focused_leaf;
+        let text = inserted_path_text(
+            path,
+            input_line_needs_a_space_first(&self.tabs[active].focused().session),
+        );
+
+        // The keyboard goes back to the shell before the characters do. The
+        // press that raised this menu very likely came from a column that had
+        // taken the keyboard, and a path that arrived in a shell the arrow keys
+        // still do not reach is a path you cannot edit.
+        if self.set_files_keyboard(None) {
+            self.refresh_chrome();
+        }
+        // And layout focus follows, which is the mock-up's `w.focus = leaf.id`:
+        // you are being sent somewhere to finish a command, so that is where the
+        // window should be pointing.
+        if self.seats.set_focus(seat) {
+            self.apply_window_min_inner_size()?;
+            self.commit_seat_geometry()?;
+            self.mark_session_dirty(Instant::now());
+        }
+
+        let LeafSession {
+            pty,
+            session,
+            projection,
+            ..
+        } = self.tabs[active].focused_mut();
+        paste_text(session, projection, &text, |chunk| {
+            if let Some(pty) = pty.as_mut() {
+                pty.write(chunk)
+                    .context("write an inserted files row path to PTY")?;
+            }
+            Ok(())
+        })?;
+        self.pending_keyboard_at = Some(Instant::now());
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Keyboard,
+        })
     }
 
     // ── the floating window (§7.1.2) ────────────────────────────────────────
@@ -12771,9 +13249,15 @@ impl Runtime {
             // reaches a shell. It simply has nothing to do with this one.
             return Ok(true);
         };
-        if event.repeat && matches!(command, files::TreeCommand::Activate) {
+        if event.repeat
+            && matches!(
+                command,
+                files::TreeCommand::Activate | files::TreeCommand::ContextMenu
+            )
+        {
             // Holding Enter down on a file would open it once per repeat.
-            // Travel repeats happily; opening is a verb you mean once.
+            // Travel repeats happily; opening is a verb you mean once — and so
+            // is asking a row what can be done with it.
             return Ok(true);
         }
         if command == files::TreeCommand::Release {
@@ -12799,7 +13283,11 @@ impl Runtime {
             files::TreeAction::Select(key)
             | files::TreeAction::Opened(key)
             | files::TreeAction::Closed(key)
-            | files::TreeAction::Activate(key) => Some(key.clone()),
+            | files::TreeAction::Activate(key)
+            // Scrolled into view like any other answered key: the menu is about
+            // to be hung off this row's rectangle, and a rectangle that is
+            // scrolled out of the body is not somewhere a menu can hang from.
+            | files::TreeAction::ContextMenu(key) => Some(key.clone()),
         };
         match &action {
             files::TreeAction::Opened(key) | files::TreeAction::Closed(key) => {
@@ -12817,11 +13305,18 @@ impl Runtime {
                 let key = key.clone();
                 self.activate_files_row(seat, &key)?;
             }
+            files::TreeAction::ContextMenu(_) => {}
             files::TreeAction::None | files::TreeAction::Select(_) | files::TreeAction::Release => {
             }
         }
         if let Some(key) = selected {
             self.reveal_files_row(seat, &key);
+        }
+        // After the scroll, not before: the anchor is the row's rectangle, and
+        // `reveal_files_row` may have just moved it.
+        if let files::TreeAction::ContextMenu(key) = &action {
+            let key = key.clone();
+            self.raise_file_menu_on_row(seat, &key)?;
         }
         if !matches!(action, files::TreeAction::None) {
             self.mark_session_dirty(now);
@@ -14884,6 +15379,28 @@ impl Runtime {
                 return Ok(());
             }
         }
+        // And the file menu the same way again, above both — it is drawn above
+        // both. Leaving it *without* clearing the hover would be wrong for the
+        // opposite reason to the two above: this is the one menu a keyboard can
+        // walk, and a row lit by a key press must not be un-lit by a pointer
+        // that merely happens to be resting somewhere else.
+        if let Some(layout) = self.file_menu_layout() {
+            let over = profiles::file_menu_hit(&layout, position.x, position.y);
+            if let Some(row) = over
+                && let Some(menu) = self.file_menu.as_mut()
+                && menu.hover != row
+            {
+                menu.hover = row;
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            if over.is_some() {
+                self.note_tooltip(None)?;
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
+        }
         // A float being moved or resized owns the pointer outright, above the
         // divider for the reason it is a separate state at all: it is a window
         // over the layout, so while your hand is on it the layout underneath is
@@ -16694,6 +17211,43 @@ impl Runtime {
             }
             return Ok(());
         }
+        // The file menu, above the float and above the other two popups, for the
+        // reason `refresh_overlay` gives: it is drawn over the floating window
+        // because it is very often *about a row inside it*, and a press has to
+        // reach whatever is drawn on top.
+        if let (Some(layout), Some(position)) = (self.file_menu_layout(), self.pointer_position) {
+            match profiles::file_menu_hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed
+                        && button == MouseButton::Left
+                        && let Some(row) = row
+                    {
+                        self.run_file_menu_row(row)?;
+                    }
+                    return Ok(());
+                }
+                None => {
+                    // A press outside puts it away and then goes on being the
+                    // press it always was — including a *second right press*,
+                    // which is how a context menu is moved from one row to
+                    // another everywhere else, and which the raise below then
+                    // completes.
+                    if state == ElementState::Pressed {
+                        self.close_file_menu()?;
+                    }
+                }
+            }
+        }
+        // The right press that raises it (K143/K146). Both hosts, float first
+        // because the float is drawn over the columns.
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && let Some(position) = self.pointer_position
+            && let Some(activation) = self.file_row_under(position)
+        {
+            self.open_file_menu(activation, [position.x as f32, position.y as f32])?;
+            return Ok(());
+        }
         // A release ends whatever the float was doing, wherever it lands: a
         // gesture that began on the header can finish anywhere, and a window that
         // kept following the pointer after the button came up would be a window
@@ -16777,12 +17331,17 @@ impl Runtime {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         let seat = self.root_menu.seat();
                         self.close_root_menu()?;
-                        if let (Some(seat), Some(profiles::RootMenuRow::Choice(index))) =
-                            (seat, row)
-                            && let Some(choice) = choices.get(index)
-                        {
-                            let path = choice.path.clone();
-                            self.reroot_files_column(seat, &path)?;
+                        match (seat, row) {
+                            (Some(seat), Some(profiles::RootMenuRow::Choice(index))) => {
+                                if let Some(choice) = choices.get(index) {
+                                    let path = choice.path.clone();
+                                    self.reroot_files_column(seat, &path)?;
+                                }
+                            }
+                            (Some(seat), Some(profiles::RootMenuRow::Browse)) => {
+                                self.browse_for_root(seat)
+                            }
+                            _ => {}
                         }
                     }
                     return Ok(());
@@ -17694,6 +18253,50 @@ impl Runtime {
                     self.refresh_chrome();
                     self.present_chrome_change()?;
                 }
+            }
+            return Ok(());
+        }
+        // **The file menu owns the keyboard outright while it is up**, which the
+        // two popups below it deliberately do not.
+        //
+        // Not an inconsistency — a difference in what the two were promised.
+        // §7.1.3 rules the file row's menu "显式、可发现、**可键盘化**", and a
+        // menu that can be walked has to be a menu that keeps the keys it walks
+        // with: an Up that also scrolled the shell behind it would be a menu
+        // borrowing the keyboard rather than holding it. The other two are
+        // pointer surfaces with an Esc, and they are audited as such (they are
+        // recorded in the block's own audit as still owing this).
+        if self.file_menu.is_some() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    if !event.repeat {
+                        self.close_file_menu()?;
+                    }
+                }
+                // Repeats are honoured on the travel keys and nowhere else, for
+                // the reason the tree's own handler gives: holding an arrow down
+                // is one continuous "further", and holding Enter is not one
+                // continuous "again".
+                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                    let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
+                    if let Some(menu) = self.file_menu.as_mut() {
+                        menu.hover = Some(profiles::FileMenuRow::step(menu.hover, forwards));
+                    }
+                    if self.refresh_overlay() {
+                        self.present_chrome_change()?;
+                    }
+                }
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                    if !event.repeat
+                        && let Some(row) = self.file_menu.as_ref().and_then(|menu| menu.hover)
+                    {
+                        self.run_file_menu_row(row)?;
+                    }
+                }
+                // Everything else is swallowed rather than passed down. With a
+                // menu on screen there is nothing to type into — the same
+                // sentence D49 makes about a focused column, and the same answer.
+                _ => {}
             }
             return Ok(());
         }
@@ -18665,6 +19268,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             return;
         };
         runtime.apply_math_context_menu_result();
+        if let Err(error) = runtime.apply_folder_pick_result() {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.drain_pty() {
             self.fail(event_loop, error);
             return;
@@ -18883,12 +19490,31 @@ fn paste_from_clipboard(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
     read: impl FnOnce() -> Result<String>,
-    mut write: impl FnMut(&[u8]) -> Result<()>,
+    write: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<bool> {
     let Some(text) = recoverable_clipboard_read(read()) else {
         return Ok(false);
     };
-    let bytes = input::paste_bytes(&text, session.bracketed_paste_mode());
+    paste_text(session, projection, &text, write)?;
+    Ok(true)
+}
+
+/// Deliver one string to a shell the way a paste is delivered.
+///
+/// Split out of [`paste_from_clipboard`] rather than copied because the files
+/// tree's `Insert path into terminal` (K144) is a paste in every respect that
+/// matters to the shell and to the view — the selection goes, the view returns
+/// to the bottom, the bytes are bracketed if the shell asked for bracketing, and
+/// they go down the one synchronous writer in chunks so ConPTY can push back.
+/// The only thing that differs is where the string came from, which is the one
+/// thing this function does not ask.
+fn paste_text(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    text: &str,
+    mut write: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let bytes = input::paste_bytes(text, session.bracketed_paste_mode());
     session.set_view_selection(None);
     projection.set_selection(None);
     projection.scroll_to_bottom();
@@ -18897,7 +19523,7 @@ fn paste_from_clipboard(
     for chunk in bytes.chunks(input::PASTE_WRITE_CHUNK_BYTES) {
         write(chunk)?;
     }
-    Ok(true)
+    Ok(())
 }
 
 fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
@@ -30390,6 +31016,162 @@ mod tests {
             files_row_activation(root, "/notes.md"),
             RowActivation::DefaultApp(PathBuf::from(root).join("notes.md")),
             "L167: the id's slashes never reach the filesystem"
+        );
+    }
+
+    /// PIN — M175. The restore prompt names a files-only tab by the folder it
+    /// was looking at, not by nothing at all.
+    ///
+    /// The red gate: the fallback built `Seed::Files { root: String::new() }`
+    /// literally, one function away from the walker that could have answered.
+    /// The row still drew — this is why no test caught it — it just drew a place
+    /// with no name, so the prompt offered to bring back a tab it could not
+    /// describe.
+    #[test]
+    fn a_files_only_tab_is_named_on_the_restore_prompt_by_the_folder_it_held() {
+        let files = |root: &str| {
+            LayoutNodeV1::Leaf(LeafNodeV1::Files(bt_persist::FilesLeafV1 {
+                root: root.to_owned(),
+                open: Vec::new(),
+                sel: None,
+                width: 240,
+            }))
+        };
+        assert_eq!(
+            restore_row_seed(&files(r"C:\Users\dev\project")),
+            seed::Seed::Files {
+                root: r"C:\Users\dev\project".to_owned()
+            }
+        );
+
+        // A tab with a shell in it is still named by the shell, whichever side
+        // of the split the folder is on.
+        let mixed = LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+            dir: bt_persist::SplitDirV1::Row,
+            ratio: 250_000,
+            children: [
+                Box::new(files(r"C:\repo")),
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: r"C:\repo\crates".to_owned(),
+                    manual_name: None,
+                }))),
+            ],
+        });
+        assert_eq!(
+            restore_row_seed(&mixed),
+            seed::Seed::Term {
+                profile_id: "pwsh".to_owned(),
+                cwd: r"C:\repo\crates".to_owned(),
+                manual_name: None,
+            },
+            "a tab's identity is its terminal wherever the column sits"
+        );
+
+        // And two columns are named by the first one drawn, which is the same
+        // rule `first_term_leaf` follows for shells.
+        let two = LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+            dir: bt_persist::SplitDirV1::Row,
+            ratio: 500_000,
+            children: [Box::new(files(r"C:\first")), Box::new(files(r"C:\second"))],
+        });
+        assert_eq!(
+            restore_row_seed(&two),
+            seed::Seed::Files {
+                root: r"C:\first".to_owned()
+            }
+        );
+    }
+
+    /// PIN — K143. The menu's first row is named after the door it will
+    /// actually open, so it cannot promise a preview and then start Notepad.
+    ///
+    /// The red gate: naming the row `Open preview` unconditionally (which is
+    /// what §7.1.3's *finished* wording says, and what the mock-up hard-codes at
+    /// 8087) makes the menu lie about every file this build cannot draw — which
+    /// today is every file that is not a picture.
+    #[test]
+    fn the_menus_first_row_is_named_after_the_door_that_row_opens() {
+        let root = r"C:\work";
+        assert_eq!(
+            files_row_activation(root, "/shot.png").open_text(),
+            "Open preview"
+        );
+        assert_eq!(files_row_activation(root, "/notes.md").open_text(), "Open");
+        assert_eq!(
+            files_row_activation(root, "/shot.png").path(),
+            Some(files::full_path(root, "/shot.png").as_path())
+        );
+        assert_eq!(
+            files_row_activation("", "/notes.md").path(),
+            None,
+            "and a column with no root has nothing to put on a clipboard"
+        );
+    }
+
+    /// PIN — K144. The exact characters an `Insert path into terminal` press
+    /// puts into the shell.
+    ///
+    /// Three separate red gates, and each has its own way of going wrong:
+    /// dropping the quotes turns one argument with a space in it into two; the
+    /// leading space is what stops the path being welded to a half-typed
+    /// command; and the trailing one is what lets the next argument be typed
+    /// without reaching for the space bar first.
+    #[test]
+    fn an_inserted_path_is_quoted_when_it_has_to_be_and_spaced_on_both_sides() {
+        let plain = Path::new(r"C:\work\notes.md");
+        assert_eq!(inserted_path_text(plain, false), r"C:\work\notes.md ");
+        assert_eq!(inserted_path_text(plain, true), r" C:\work\notes.md ");
+
+        let spaced = Path::new(r"C:\Program Files\thing.exe");
+        assert_eq!(
+            inserted_path_text(spaced, false),
+            "\"C:\\Program Files\\thing.exe\" ",
+            "a space in a path is where a shell would end the word"
+        );
+        assert_eq!(
+            inserted_path_text(spaced, true),
+            " \"C:\\Program Files\\thing.exe\" "
+        );
+        assert!(
+            inserted_path_text(plain, false).ends_with(' '),
+            "always a space after, so the next argument can just be typed"
+        );
+        assert!(
+            !inserted_path_text(plain, false).starts_with(' '),
+            "and never one in front when the input line already ends in one"
+        );
+    }
+
+    /// PIN — K144's leading space, read off the screen the shell drew.
+    ///
+    /// The rule the mock-up could state by looking at its own model of the input
+    /// line, restated as something a real terminal can answer: the character
+    /// immediately left of the cursor. A prompt that already ends in a space
+    /// wants no second one; a half-typed word wants one; column zero has nothing
+    /// in front of it to be welded to.
+    #[test]
+    fn the_space_in_front_is_decided_by_what_the_cursor_is_standing_after() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(80).unwrap(), NonZeroU32::new(24).unwrap());
+        assert!(
+            !input_line_needs_a_space_first(&session),
+            "column zero has nothing in front of it"
+        );
+        session.feed(b"PS D:\\work> ").unwrap();
+        assert!(
+            !input_line_needs_a_space_first(&session),
+            "a prompt that ends in a space has already left the gap"
+        );
+        session.feed(b"cat").unwrap();
+        assert!(
+            input_line_needs_a_space_first(&session),
+            "a half-typed command would otherwise have the path welded to it"
+        );
+        session.feed(b" ").unwrap();
+        assert!(
+            !input_line_needs_a_space_first(&session),
+            "and typing the space yourself does not earn a second one"
         );
     }
 

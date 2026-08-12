@@ -103,18 +103,18 @@ mod windows_impl {
     use std::{
         ffi::c_void,
         os::windows::ffi::OsStrExt,
-        path::Path,
+        path::{Path, PathBuf},
         sync::{
             Arc, Mutex, OnceLock,
             atomic::{AtomicI32, Ordering},
         },
     };
-    use windows::core::PCWSTR;
+    use windows::core::{HRESULT, PCWSTR};
 
     use windows::Win32::{
         Foundation::{
-            COLORREF, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT,
-            RECT, SetLastError, WIN32_ERROR, WPARAM,
+            COLORREF, ERROR_CANCELLED, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM,
+            LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError, WIN32_ERROR, WPARAM,
         },
         Graphics::Dwm::{
             DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -125,6 +125,10 @@ mod windows_impl {
             MONITORINFO, MonitorFromWindow,
         },
         System::{
+            Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+            },
             DataExchange::{
                 CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
                 OpenClipboard, SetClipboardData,
@@ -134,7 +138,11 @@ mod windows_impl {
         UI::{
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::GetKeyboardLayout,
-            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW},
+            Shell::{
+                DefSubclassProc, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+                FileOpenDialog, IFileOpenDialog, IShellItem, RemoveWindowSubclass,
+                SHCreateItemFromParsingName, SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
+            },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
                 GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
@@ -167,7 +175,9 @@ mod windows_impl {
     ];
     const WHEEL_PAGESCROLL: u32 = u32::MAX;
     const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
+    const DEFERRED_FOLDER_PICKER_MESSAGE: u32 = WM_APP + 0x4b8;
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
+    const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
     const TITLE_BAR_LOGICAL_PX: u32 = 40;
     const CAPTION_BUTTON_LOGICAL_PX: u32 = 46;
@@ -867,71 +877,94 @@ mod windows_impl {
         }
     }
 
+    /// One deferred native gesture, from asked-for to answered.
+    ///
+    /// `Ask` is what the request carried and `Answer` is what it came back with.
+    /// The request's own arguments ride in `Posted` rather than in a second
+    /// field beside the phase, because they are only meaningful while the phase
+    /// is `Posted`: a start folder left lying around after the dialog closed is
+    /// a value with no owner and no expiry.
     #[derive(Debug)]
-    enum DeferredMenuPhase {
+    enum DeferredPhase<Ask, Answer> {
         Idle,
-        Posted,
+        Posted(Ask),
         Showing,
-        Complete(Result<bool, String>),
+        Complete(Answer),
     }
 
+    /// The gate that keeps a nested native message pump out of a winit callback.
+    ///
+    /// Generic over both ends so the one state machine serves every gesture that
+    /// has to be deferred this way — the formula menu, whose nested pump is
+    /// `TrackPopupMenu`'s, and the folder picker, whose nested pump is
+    /// `IFileDialog::Show`'s. Both have exactly the same hazard and therefore
+    /// exactly the same shape: post a private message, do the blocking thing
+    /// after the initiating callback has returned, and leave the answer where
+    /// the next turn of the loop will find it.
     #[derive(Debug)]
-    struct DeferredMenuState {
-        phase: Mutex<DeferredMenuPhase>,
+    struct DeferredState<Ask, Answer> {
+        phase: Mutex<DeferredPhase<Ask, Answer>>,
     }
 
-    impl DeferredMenuState {
+    impl<Ask, Answer> DeferredState<Ask, Answer> {
         fn new() -> Self {
             Self {
-                phase: Mutex::new(DeferredMenuPhase::Idle),
+                phase: Mutex::new(DeferredPhase::Idle),
             }
         }
 
-        fn begin_request(&self) -> bool {
+        fn begin_request(&self, ask: Ask) -> bool {
             let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
-            if !matches!(*phase, DeferredMenuPhase::Idle) {
+            if !matches!(*phase, DeferredPhase::Idle) {
                 return false;
             }
-            *phase = DeferredMenuPhase::Posted;
+            *phase = DeferredPhase::Posted(ask);
             true
         }
 
         fn cancel_request(&self) {
             let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
-            if matches!(*phase, DeferredMenuPhase::Posted) {
-                *phase = DeferredMenuPhase::Idle;
+            if matches!(*phase, DeferredPhase::Posted(_)) {
+                *phase = DeferredPhase::Idle;
             }
         }
 
-        fn begin_showing(&self) -> bool {
+        /// Take the gesture's arguments and move it to `Showing`, or `None` when
+        /// this is not a posted request to begin.
+        fn begin_showing(&self) -> Option<Ask> {
             let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
-            if !matches!(*phase, DeferredMenuPhase::Posted) {
-                return false;
+            if !matches!(*phase, DeferredPhase::Posted(_)) {
+                return None;
             }
-            *phase = DeferredMenuPhase::Showing;
-            true
+            let DeferredPhase::Posted(ask) = std::mem::replace(&mut *phase, DeferredPhase::Showing)
+            else {
+                unreachable!("phase was matched as posted immediately before replacement")
+            };
+            Some(ask)
         }
 
-        fn complete(&self, result: Result<bool, String>) {
+        fn complete(&self, answer: Answer) {
             let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
-            if matches!(*phase, DeferredMenuPhase::Showing) {
-                *phase = DeferredMenuPhase::Complete(result);
+            if matches!(*phase, DeferredPhase::Showing) {
+                *phase = DeferredPhase::Complete(answer);
             }
         }
 
-        fn take_result(&self) -> Option<Result<bool, String>> {
+        fn take_result(&self) -> Option<Answer> {
             let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
-            let DeferredMenuPhase::Complete(_) = &*phase else {
+            let DeferredPhase::Complete(_) = &*phase else {
                 return None;
             };
-            let DeferredMenuPhase::Complete(result) =
-                std::mem::replace(&mut *phase, DeferredMenuPhase::Idle)
+            let DeferredPhase::Complete(answer) =
+                std::mem::replace(&mut *phase, DeferredPhase::Idle)
             else {
                 unreachable!("phase was matched as complete immediately before replacement")
             };
-            Some(result)
+            Some(answer)
         }
     }
+
+    type MathMenuState = DeferredState<(), Result<bool, String>>;
 
     /// Formula context-menu bridge whose nested native message pump never starts inside a winit
     /// application callback. `request` only posts a private window message. The subclass receives
@@ -939,13 +972,13 @@ mod windows_impl {
     /// emitted by TrackPopupMenu's nested pump finds winit's event-handler slot restored.
     pub struct MathContextMenu {
         hwnd: HWND,
-        state: Arc<DeferredMenuState>,
+        state: Arc<MathMenuState>,
     }
 
     impl MathContextMenu {
         pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
             let hwnd = HWND(hwnd.get() as *mut c_void);
-            let state = Arc::new(DeferredMenuState::new());
+            let state = Arc::new(MathMenuState::new());
             // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
             // keeps dwRefData live for the full installed interval; the callback takes its own
             // temporary strong reference before entering the nested menu loop.
@@ -968,7 +1001,7 @@ mod windows_impl {
         /// Queue the native menu once. A second request while the first is posted, showing, or
         /// waiting to be consumed is an ordinary coalesced UI race and returns `Ok(false)`.
         pub fn request(&self) -> Result<bool, String> {
-            if !self.state.begin_request() {
+            if !self.state.begin_request(()) {
                 return Ok(false);
             }
             // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
@@ -1019,7 +1052,7 @@ mod windows_impl {
             // SAFETY: forwarding untouched messages is the required subclass contract.
             return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
         }
-        let state_pointer = reference_data as *const DeferredMenuState;
+        let state_pointer = reference_data as *const MathMenuState;
         if state_pointer.is_null() {
             return LRESULT(0);
         }
@@ -1029,7 +1062,7 @@ mod windows_impl {
         unsafe { Arc::increment_strong_count(state_pointer) };
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
-        if state.begin_showing() {
+        if state.begin_showing().is_some() {
             state.complete(track_math_context_menu(hwnd));
         }
         LRESULT(0)
@@ -1063,6 +1096,214 @@ mod windows_impl {
                 (Ok(selected), Ok(())) => Ok(selected),
                 (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             }
+        }
+    }
+
+    type FolderPickerState = DeferredState<Vec<u16>, Result<Option<PathBuf>, String>>;
+
+    /// The system's own folder chooser, on the same deferred footing as
+    /// [`MathContextMenu`] and for a sharper version of the same reason (E55).
+    ///
+    /// `IFileDialog::Show` is **modal**: it runs a nested message loop that goes
+    /// on dispatching to this window for as long as the dialog is open. Started
+    /// from inside a winit callback that would re-enter the application's own
+    /// event handling while the `&mut` borrow that started it is still live —
+    /// the exact hazard the formula menu's comment records, except that a menu
+    /// closes in a moment and a folder chooser can stand open for a minute while
+    /// somebody goes looking. So the press only *posts*: the dialog opens from
+    /// the subclass, after the callback has returned, and the answer waits in
+    /// this state until the next turn of the loop collects it.
+    pub struct FolderPicker {
+        hwnd: HWND,
+        state: Arc<FolderPickerState>,
+    }
+
+    impl FolderPicker {
+        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
+            let hwnd = HWND(hwnd.get() as *mut c_void);
+            let state = Arc::new(FolderPickerState::new());
+            // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
+            // keeps dwRefData live for the full installed interval; the callback takes its own
+            // temporary strong reference before entering the nested dialog loop.
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(folder_picker_subclass),
+                    FOLDER_PICKER_SUBCLASS_ID,
+                    Arc::as_ptr(&state) as usize,
+                )
+            };
+            if !installed.as_bool() {
+                return Err(format!(
+                    "SetWindowSubclass(folder picker) failed: {}",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(Self { hwnd, state })
+        }
+
+        /// Queue the chooser once, starting at `start` if that names a folder.
+        ///
+        /// A second request while one is posted, showing or waiting to be
+        /// collected returns `Ok(false)` — the same coalescing the formula menu
+        /// does, and here it is also what stops a second press on `Browse…`
+        /// from stacking a second modal dialog behind the first.
+        pub fn request(&self, start: Option<&Path>) -> Result<bool, String> {
+            let start = start
+                .map(|start| {
+                    let mut units = start.as_os_str().encode_wide().collect::<Vec<_>>();
+                    units.push(0);
+                    units
+                })
+                .unwrap_or_default();
+            if !self.state.begin_request(start) {
+                return Ok(false);
+            }
+            // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
+            // and never dispatches the subclass synchronously on this callback stack.
+            if let Err(error) = unsafe {
+                PostMessageW(
+                    Some(self.hwnd),
+                    DEFERRED_FOLDER_PICKER_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            } {
+                self.state.cancel_request();
+                return Err(format!("PostMessageW(folder picker) failed: {error}"));
+            }
+            Ok(true)
+        }
+
+        /// The chosen folder, `None` for a cancelled dialog, or the reason the
+        /// chooser could not be shown — once, and only once the dialog is shut.
+        pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
+            self.state.take_result()
+        }
+    }
+
+    impl Drop for FolderPicker {
+        fn drop(&mut self) {
+            // SAFETY: this object is dropped on the same event-loop thread that installed the
+            // subclass. A callback already inside the dialog owns a temporary Arc, so nested
+            // CloseRequested teardown cannot invalidate its state.
+            let _ = unsafe {
+                RemoveWindowSubclass(
+                    self.hwnd,
+                    Some(folder_picker_subclass),
+                    FOLDER_PICKER_SUBCLASS_ID,
+                )
+            };
+        }
+    }
+
+    unsafe extern "system" fn folder_picker_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        if message != DEFERRED_FOLDER_PICKER_MESSAGE {
+            // SAFETY: forwarding untouched messages is the required subclass contract.
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        let state_pointer = reference_data as *const FolderPickerState;
+        if state_pointer.is_null() {
+            return LRESULT(0);
+        }
+        // SAFETY: the installed FolderPicker owns one Arc at callback entry. Incrementing before
+        // constructing the temporary Arc keeps state alive even if a nested CloseRequested drops
+        // the Runtime while the dialog is open.
+        unsafe { Arc::increment_strong_count(state_pointer) };
+        // SAFETY: the increment immediately above created the strong reference consumed here.
+        let state = unsafe { Arc::from_raw(state_pointer) };
+        if let Some(start) = state.begin_showing() {
+            state.complete(show_folder_picker(hwnd, &start));
+        }
+        LRESULT(0)
+    }
+
+    /// Show `IFileOpenDialog` in its pick-a-folder guise and report what came
+    /// back.
+    ///
+    /// `IFileOpenDialog` rather than the older `SHBrowseForFolder`, because the
+    /// latter draws a tree from 1995 with no address bar, no typing, no
+    /// favourites and no resize — and this row exists precisely for the folders
+    /// the quick list above it could not name, which are the ones you need to
+    /// navigate to.
+    ///
+    /// `FOS_FORCEFILESYSTEM` is what keeps the answer a *path*: without it the
+    /// dialog will happily return a shell namespace item — a library, a phone
+    /// over MTP, a search results folder — that has no directory behind it for
+    /// anything here to enumerate.
+    fn show_folder_picker(hwnd: HWND, start: &[u16]) -> Result<Option<PathBuf>, String> {
+        // SAFETY: every call below runs on the window's own GUI thread, reached only from the
+        // posted-message subclass after winit's initiating callback has returned. The apartment
+        // is initialized and balanced here, and each COM object is dropped by the `windows`
+        // crate's own `Release` at the end of its scope.
+        unsafe {
+            let apartment = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            if apartment == RPC_E_CHANGED_MODE {
+                // The thread is already a multi-threaded apartment, which a shell
+                // dialog may not be shown from. Reported rather than forced: the
+                // caller's answer to a chooser it cannot show is to leave the
+                // root where it was, which is the correct outcome and not one
+                // worth breaking someone's apartment model to avoid.
+                return Err("the event-loop thread is not a single-threaded apartment".to_owned());
+            }
+            // S_FALSE means "already initialized, and this call counted" — it is a
+            // success that still owes a `CoUninitialize`, which is why the balance
+            // is taken from `is_ok` rather than from `== S_OK`.
+            let balance = apartment.is_ok();
+            let result = (|| {
+                let dialog: IFileOpenDialog =
+                    CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|error| format!("CoCreateInstance(FileOpenDialog): {error}"))?;
+                let options = dialog
+                    .GetOptions()
+                    .map_err(|error| format!("IFileDialog::GetOptions: {error}"))?;
+                dialog
+                    .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
+                    .map_err(|error| format!("IFileDialog::SetOptions: {error}"))?;
+                // Where the column is already rooted, so the chooser opens where
+                // you are looking rather than wherever Windows last left it. Its
+                // failure is not this function's failure: a root that has since
+                // been deleted or unplugged is a perfectly good reason to open at
+                // the system's default instead of refusing to open at all.
+                if start.len() > 1
+                    && let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+                        PCWSTR(start.as_ptr()),
+                        None,
+                    )
+                {
+                    let _ = dialog.SetFolder(&folder);
+                }
+                if let Err(error) = dialog.Show(Some(hwnd)) {
+                    return if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
+                        Ok(None)
+                    } else {
+                        Err(format!("IFileDialog::Show: {error}"))
+                    };
+                }
+                let item = dialog
+                    .GetResult()
+                    .map_err(|error| format!("IFileOpenDialog::GetResult: {error}"))?;
+                let name = item
+                    .GetDisplayName(SIGDN_FILESYSPATH)
+                    .map_err(|error| format!("IShellItem::GetDisplayName: {error}"))?;
+                let path = name.to_string();
+                // The shell allocated it; the shell's allocator frees it. This is
+                // the one allocation in this function that Rust does not own.
+                CoTaskMemFree(Some(name.0.cast()));
+                path.map(|path| Some(PathBuf::from(path)))
+                    .map_err(|error| format!("the chosen folder's name is not UTF-16: {error}"))
+            })();
+            if balance {
+                CoUninitialize();
+            }
+            result
         }
     }
 
@@ -1282,10 +1523,11 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            CLIPBOARD_OPEN_RETRY_DELAYS, DeferredMenuState, names_a_program, primary_language_id,
-            retry_open_clipboard, validate_local_image_path, validate_openable_path,
+            CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, MathMenuState, names_a_program,
+            primary_language_id, retry_open_clipboard, validate_local_image_path,
+            validate_openable_path,
         };
-        use std::path::Path;
+        use std::path::{Path, PathBuf};
 
         #[test]
         fn clipboard_open_retry_is_bounded_and_can_recover() {
@@ -1334,16 +1576,58 @@ mod windows_impl {
 
         #[test]
         fn deferred_menu_state_requires_posted_dispatch_before_showing() {
-            let state = DeferredMenuState::new();
+            let state = MathMenuState::new();
             assert_eq!(state.take_result(), None);
-            assert!(state.begin_request());
-            assert!(!state.begin_request());
+            assert!(state.begin_request(()));
+            assert!(!state.begin_request(()));
             assert_eq!(state.take_result(), None);
-            assert!(state.begin_showing());
-            assert!(!state.begin_showing());
+            assert!(state.begin_showing().is_some());
+            assert!(state.begin_showing().is_none());
             state.complete(Ok(true));
             assert_eq!(state.take_result(), Some(Ok(true)));
-            assert!(state.begin_request());
+            assert!(state.begin_request(()));
+        }
+
+        /// PIN — the gesture's own arguments survive the deferral, and only the
+        /// dispatch that actually shows the dialog receives them.
+        ///
+        /// The red gate this stands in front of: a folder chooser whose start
+        /// folder was read at *show* time rather than at *request* time would
+        /// open wherever the column happened to be pointing by then — which,
+        /// because the whole point of the deferral is that time passes, is not
+        /// necessarily where it was pointing when the row was pressed.
+        #[test]
+        fn a_deferred_request_carries_its_arguments_to_the_dispatch_that_shows_it() {
+            let state = FolderPickerState::new();
+            let start: Vec<u16> = "C:\\work\0".encode_utf16().collect();
+            assert!(state.begin_request(start.clone()));
+            assert!(
+                !state.begin_request(Vec::new()),
+                "a second ask while one is queued is coalesced, not stacked"
+            );
+            assert_eq!(state.begin_showing(), Some(start));
+            assert_eq!(
+                state.begin_showing(),
+                None,
+                "and the arguments are handed out exactly once"
+            );
+            state.complete(Ok(Some(PathBuf::from(r"C:\chosen"))));
+            assert_eq!(
+                state.take_result(),
+                Some(Ok(Some(PathBuf::from(r"C:\chosen"))))
+            );
+            assert_eq!(state.take_result(), None);
+        }
+
+        /// PIN — a cancelled chooser and a chooser that could not be shown are
+        /// two different answers, and neither is "a folder was chosen".
+        #[test]
+        fn a_cancelled_chooser_is_not_a_failure_and_not_a_choice() {
+            let state = FolderPickerState::new();
+            assert!(state.begin_request(Vec::new()));
+            assert!(state.begin_showing().is_some());
+            state.complete(Ok(None));
+            assert_eq!(state.take_result(), Some(Ok(None)));
         }
 
         #[test]
@@ -1419,7 +1703,7 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    CustomWindowFrame, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
+    CustomWindowFrame, FolderPicker, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
     client_area_animation_enabled, clipboard_text, get_dpi_for_window, get_window_rect,
     get_work_area, install_window_class_background, is_window_minimized, open_local_file,
     open_local_path, request_window_close, set_clipboard_text, set_window_outer_rect,

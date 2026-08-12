@@ -520,6 +520,17 @@ fn drag_fixed_extent(
     // that keeps pulling past it is entitled to a narrower column and the
     // clipped filenames that come with it. What a width may not do is leave the
     // slot it lives in — that is not a preference, it is arithmetic.
+    //
+    // **KNOWN DIVERGENCE, awaiting a ruling** (Files block P7). What is written
+    // here below 170 is not what gets drawn: [`Seat::fixed_width`] raises every
+    // declared width to `min_size` (§2.3) before a `Lawful` solve sees it, so a
+    // column dragged to 90 is stored at 90, persisted at 90, and drawn at 170.
+    // Two pins describe the two halves and neither is wrong on its own —
+    // `a_fixed_column_drag_goes_where_the_hand_goes_but_never_leaves_its_slot`
+    // holds this line, `a_stacked_pair_of_fixed_columns_has_no_single_width_to_drag`
+    // holds the other. Converging them means overturning one, which is a
+    // decision about whose minimum wins and not a defect to be patched.
+    // See `scratchpad/files-block-final-audit.md`, ruling request R2.
     let width = requested.clamp_to(LogicalPx::ZERO, usable.max(LogicalPx::ZERO));
     let mut next = tree.clone();
     let mut leaf_path = path.clone();

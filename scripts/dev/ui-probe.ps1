@@ -67,7 +67,7 @@
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "chord", "capture", "close", "wheel", "resize", "click", "dblclick", "hover", "drag", "burst")]
+  [ValidateSet("launch", "type", "key", "chord", "capture", "close", "wheel", "resize", "click", "rightclick", "dblclick", "hover", "drag", "burst")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
@@ -195,6 +195,14 @@ public class Probe {
       case 0x25: case 0x26:            // Left / Up
       case 0x27: case 0x28:            // Right / Down
       case 0x2D: case 0x2E:            // Insert / Delete
+      /* VK_APPS, the Menu key. Extended like the navigation island around it,
+         and missing here until 2026-08-11: without the flag Windows reports
+         scancode 0x5D instead of 0xE05D, and winit's scancode table — which it
+         consults before the virtual key — has no 0x5D, so the press arrived as
+         some other key entirely and a context menu bound to the Menu key looked
+         like it was not bound at all. The app was innocent; this line was the
+         bug. */
+      case 0x5D:                       // Menu (VK_APPS)
       case 0x90:                       // NumLock
       case 0xA3: case 0xA5:            // RightCtrl / RightAlt
         return true;
@@ -299,6 +307,18 @@ public class Probe {
     System.Threading.Thread.Sleep(40);
     mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
   }
+  /* The secondary button, which is what raises a context menu. Its own method
+     rather than a flag on `Click`, so the existing callers keep the signature
+     they were written against and nothing has to be re-read to be sure it still
+     presses the left one. Same park-then-press shape and the same reason. */
+  public static void RightClick(int x, int y) {
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(120);
+    mouse_event(0x0008, 0, 0, 0, UIntPtr.Zero);   // RIGHTDOWN
+    System.Threading.Thread.Sleep(40);
+    mouse_event(0x0010, 0, 0, 0, UIntPtr.Zero);   // RIGHTUP
+    System.Threading.Thread.Sleep(120);
+  }
   public static void MoveTo(int x, int y) {
     SetCursorPos(x, y);
     System.Threading.Thread.Sleep(150);
@@ -337,7 +357,11 @@ $NAMED_KEYS = @{
   Space = 0x20; Delete = 0x2E; Insert = 0x2D
   Left = 0x25; Up = 0x26; Right = 0x27; Down = 0x28
   Home = 0x24; End = 0x23; PageUp = 0x21; PageDown = 0x22
-  F9 = 0x78
+  F9 = 0x78; F10 = 0x79
+  # VK_APPS — the Menu key, which is how a keyboard raises a context menu on
+  # every Windows application. Named `Menu` here rather than `Apps` because that
+  # is what is printed on the keycap.
+  Menu = 0x5D
 }
 
 function Get-AppWindow([int]$targetPid) {
@@ -423,6 +447,16 @@ switch ($Cmd) {
     $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
     [Probe]::Click($px, $py)
     "clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
+  }
+  "rightclick" {
+    $h = Get-AppWindow $ProcId
+    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not clicking blind" }
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+    $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
+    $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+    [Probe]::RightClick($px, $py)
+    "right-clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
   }
   "dblclick" {
     # Two presses inside the multi-click interval, from *one* process. Two

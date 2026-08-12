@@ -1671,6 +1671,36 @@ mod tests {
         );
     }
 
+    /// PIN — and the *entrance* is off under reduced motion too, which the
+    /// retirement test above cannot see.
+    ///
+    /// The red gate: `sweep` and `deadline` only say that nothing further is
+    /// owed. A `fade` that kept its five-pixel rise under reduced motion would
+    /// satisfy both of them and still leave every peek permanently displaced
+    /// upward, with no animation left to bring it down — a window drawn in the
+    /// wrong place forever, because the thing that used to move it was turned
+    /// off rather than completed.
+    #[test]
+    fn reduced_motion_gives_a_peek_no_entrance_to_play() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        open_peek(&mut host, TAB, now);
+        let born = host
+            .drawn()
+            .expect("open")
+            .fade(now, Motion::Reduced, SCALE);
+        assert_eq!(born.opacity, 1.0, "it is simply there on the first frame");
+        assert_eq!(born.rise, 0.0, "and it is there in its final place");
+        assert!(!born.moving, "with nothing owed");
+        host.dismiss(now);
+        let leaving = host
+            .drawn()
+            .expect("closing")
+            .fade(now, Motion::Reduced, SCALE);
+        assert_eq!(leaving.opacity, 0.0, "and gone the same way");
+        assert!(!leaving.moving);
+    }
+
     /// The entrance rises into place, and the exit falls back the way it came.
     #[test]
     fn the_entrance_rises_and_the_exit_reverses_it() {

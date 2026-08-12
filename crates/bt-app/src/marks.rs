@@ -142,6 +142,20 @@ pub enum ChromeMark {
     Folder,
     /// `#i-panel` — a pane whose kind this build cannot name.
     Panel,
+    /// `#i-copy` — "put this row's path on the clipboard" (K143).
+    ///
+    /// Two overlapping rounded rectangles, the back one drawn as an open corner
+    /// rather than a whole outline: the idiom reads as *one thing now standing
+    /// in two places*, which is what a copy is, and the mock-up draws it that
+    /// way at line 2162.
+    Copy,
+    /// `#i-paste` — "put this row's path into the shell's input line" (K143).
+    ///
+    /// A clipboard with a filled tab and three ruled lines. It is the *paste*
+    /// glyph and not a second copy glyph because the verb it labels is the one
+    /// that moves text into somewhere — the same distinction the two words keep
+    /// everywhere else, and the reason the mock-up carries both (line 2239).
+    Paste,
     /// `#i-float` — "pop this column out into a floating window" (B18/B19), the
     /// `.pane-float` button on a files head.
     ///
@@ -320,6 +334,8 @@ impl ChromeMark {
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
+            Self::Copy => "i-copy",
+            Self::Paste => "i-paste",
             Self::Float => "i-float",
             Self::DockLeft => "i-dock-left",
             Self::ResizeGrip => "fly-resize",
@@ -1044,6 +1060,8 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::DockLeft => 18,
         ChromeMark::ResizeGrip => 19,
         ChromeMark::Check => 20,
+        ChromeMark::Copy => 21,
+        ChromeMark::Paste => 22,
         // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
@@ -1057,7 +1075,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 21] = [
+const SYMBOL_VIEW_BOX: [&str; 23] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1089,11 +1107,14 @@ const SYMBOL_VIEW_BOX: [&str; 21] = [
     "0 0 8 8",
     // `#i-check`, the house sixteen again.
     "0 0 16 16",
+    // `#i-copy` and `#i-paste`, the house sixteen a third and fourth time.
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 21] = [
+const SYMBOL_BODY: [&str; 23] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1206,6 +1227,17 @@ const SYMBOL_BODY: [&str; 21] = [
     r##"<path d="M7.25 0V1A6.25 6.25 0 0 1 1 7.25H0" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".55"/>"##,
     // #i-check
     r##"<path d="M3 8.4l3.2 3.2L13 4.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"##,
+    // #i-copy
+    concat!(
+        r#"<rect x="5.4" y="2.4" width="8.2" height="8.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
+        r#"<path d="M10.6 13.6H3.9a1.5 1.5 0 01-1.5-1.5V5.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+    ),
+    // #i-paste
+    concat!(
+        r#"<rect x="3" y="2.8" width="10" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
+        r#"<rect x="5.6" y="1.4" width="4.8" height="2.8" rx=".9" fill="currentColor"/>"#,
+        r#"<path d="M5.4 7.2h5.2M5.4 9.6h5.2M5.4 12h3.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>"#,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the

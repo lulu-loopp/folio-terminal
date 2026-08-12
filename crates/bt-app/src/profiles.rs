@@ -2038,6 +2038,14 @@ pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<Root
 pub enum RootMenuRow {
     /// An index into the [`root_choices`] the menu was laid out from.
     Choice(usize),
+    /// `Browse…` — the escape hatch to any folder at all (E55).
+    ///
+    /// Its own variant rather than a last index, because it is the one row whose
+    /// meaning is not "go to this named place": the list above it is a set of
+    /// answers and this is the question re-asked of the system. Keeping it out
+    /// of the index space also means a menu whose choices changed underneath a
+    /// press cannot turn a stale index into "browse", or the reverse.
+    Browse,
 }
 
 /// Which column's root menu is up, and which row the pointer is on.
@@ -2089,6 +2097,11 @@ pub struct RootMenuLayout {
     frame: [f32; 4],
     label: [f32; 4],
     items: Vec<[f32; 4]>,
+    /// The hairline above `Browse…` — unconditional, because the row below it is
+    /// unconditional too. The profile menu's is an `Option` only because the
+    /// Recent section it introduces can be empty.
+    browse_separator: [f32; 4],
+    browse: [f32; 4],
 }
 
 impl RootMenuLayout {
@@ -2124,6 +2137,9 @@ pub fn root_menu_layout(
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
     let padding = px(MENU_PADDING_LOGICAL_PX);
     let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    let separator_block = 2.0 * separator_margin + separator_thickness;
     let section_block = px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX
         + SECTION_LABEL_LINE_LOGICAL_PX
         + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
@@ -2152,14 +2168,26 @@ pub fn root_menu_layout(
                 + note
         })
         .fold(0.0, f32::max);
+    // `Browse…` is measured with the rest rather than assumed to fit: it is a
+    // translated string one day, and a row that overflowed the box it was not
+    // counted into would be clipped by the very menu it belongs to.
+    let content = content.max(
+        px(ITEM_ICON_COLUMN_LOGICAL_PX)
+            + px(ITEM_GAP_LOGICAL_PX)
+            + measure(BROWSE_TEXT, px(ITEM_FONT_LOGICAL_PX)),
+    );
     let width = (chrome + content)
         .clamp(
-            px(MENU_MIN_WIDTH_LOGICAL_PX),
-            px(MENU_MIN_WIDTH_LOGICAL_PX + RECENT_ITEM_MAX_WIDTH_LOGICAL_PX),
+            px(ROOT_MENU_MIN_WIDTH_LOGICAL_PX),
+            px(ROOT_MENU_MIN_WIDTH_LOGICAL_PX + RECENT_ITEM_MAX_WIDTH_LOGICAL_PX),
         )
         .round();
-    let height =
-        (2.0 * (border + padding) + section_block + item_height * choices.len() as f32).round();
+    let height = (2.0 * (border + padding)
+        + section_block
+        + item_height * choices.len() as f32
+        + separator_block
+        + item_height)
+        .round();
 
     let (surface_width, _) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
@@ -2180,11 +2208,21 @@ pub fn root_menu_layout(
         items.push([content_left, cursor, content_right, cursor + item_height]);
         cursor += item_height;
     }
+    let browse_separator = [
+        content_left,
+        cursor + separator_margin,
+        content_right,
+        cursor + separator_margin + separator_thickness,
+    ];
+    cursor += separator_block;
+    let browse = [content_left, cursor, content_right, cursor + item_height];
     RootMenuLayout {
         scale,
         frame,
         label,
         items,
+        browse_separator,
+        browse,
     }
 }
 
@@ -2197,6 +2235,9 @@ pub fn root_menu_hit(layout: &RootMenuLayout, x: f64, y: f64) -> Option<Option<R
         if contains(*item, x, y) {
             return Some(Some(RootMenuRow::Choice(index)));
         }
+    }
+    if contains(layout.browse, x, y) {
+        return Some(Some(RootMenuRow::Browse));
     }
     contains(layout.frame, x, y).then_some(None)
 }
@@ -2272,6 +2313,37 @@ pub fn root_menu_build(
             &mut sprites,
         );
     }
+
+    // ── the escape hatch (E55) ──────────────────────────────────────────────
+    quads.push(OverlayQuad {
+        rect: layout.browse_separator,
+        color: palette.menu_border,
+        alpha: separator_alpha(palette.menu_border),
+    });
+    push_row(
+        &Row {
+            rect: layout.browse,
+            // The *open* folder, which is the mock-up's own choice (line 5150) and
+            // the only row here that earns it by meaning rather than by state: the
+            // rows above wear an open folder to say "you are already here", and
+            // this one wears it to say "go and look".
+            mark: ChromeMark::FolderOpen,
+            name: BROWSE_TEXT,
+            // No note. Every row above answers "why is this offered?"; this one is
+            // offered because nothing else was, and a hint saying so would be the
+            // menu apologising for itself.
+            hint: None,
+            hovered: hover == Some(RootMenuRow::Browse),
+            // The system always has a folder picker; there is no machine on which
+            // this row is a promise the window cannot keep.
+            available: true,
+        },
+        scale,
+        palette,
+        &mut quads,
+        &mut labels,
+        &mut sprites,
+    );
     vec![OverlayLayer {
         quads,
         labels,
@@ -2282,6 +2354,271 @@ pub fn root_menu_build(
 
 /// `.rm-label` — the heading over the list (mock-up 5138).
 const ROOT_SECTION_LABEL: &str = "OPEN FOLDER";
+
+/// The escape hatch's own words (mock-up 5151).
+///
+/// The ellipsis is load-bearing and is the real character rather than three
+/// dots: it is the platform convention for "this opens something that will ask
+/// you again", which is exactly the promise that separates this row from the
+/// rows above it, each of which commits the moment it is pressed.
+const BROWSE_TEXT: &str = "Browse…";
+
+/// `.root-menu { min-width: 190px }` (mock-up 629).
+///
+/// Its own constant rather than the profile picker's 180: the mock-up gives the
+/// two menus different floors, and this one is wider because every row in it is
+/// a directory name followed by a note, where the picker's rows are short shell
+/// names. Sharing the number made the root menu 10px narrower than drawn.
+const ROOT_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 190.0;
+
+// ── the file row's context menu (K143/K145) ─────────────────────────────────
+
+/// One row of the menu a file row raises under the pointer.
+///
+/// Exactly three verbs, and the list is closed rather than a `Vec`: `DESIGN.md`
+/// §7.1.3 names them — "Open preview / Copy path / Insert path into terminal" —
+/// and the mock-up's fourth (`Save as…`, mock-up 8088) is conditional on a
+/// *terminal artefact* and is raised from the inline-image path, not from a row
+/// of the tree. A menu whose length cannot vary is also a menu whose keyboard
+/// walk cannot go looking for a row that is not there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileMenuRow {
+    /// Hand the row to whatever opens it — the same verb its double click has,
+    /// which is why the caller supplies the wording (see [`file_menu_layout`]).
+    Open,
+    CopyPath,
+    InsertPath,
+}
+
+impl FileMenuRow {
+    /// The rows in the order they are drawn, which is the order a keyboard
+    /// walks them.
+    pub const ALL: [Self; 3] = [Self::Open, Self::CopyPath, Self::InsertPath];
+
+    /// The row `steps` away, stopping at the ends rather than wrapping round.
+    ///
+    /// Clamped, not cyclic, because the tree this menu was raised from clamps
+    /// too (D45): one window should not hold two different ideas of what the
+    /// bottom of a list does. From nowhere, a step in either direction lands on
+    /// the end it came from — pressing Up on a fresh menu offers the last row,
+    /// which is the convention every platform menu keeps.
+    #[must_use]
+    pub fn step(current: Option<Self>, forwards: bool) -> Self {
+        let Some(current) = current else {
+            return if forwards {
+                Self::ALL[0]
+            } else {
+                Self::ALL[Self::ALL.len() - 1]
+            };
+        };
+        let index = Self::ALL
+            .iter()
+            .position(|row| *row == current)
+            .expect("every row is in ALL");
+        let index = if forwards {
+            (index + 1).min(Self::ALL.len() - 1)
+        } else {
+            index.saturating_sub(1)
+        };
+        Self::ALL[index]
+    }
+
+    fn mark(self) -> ChromeMark {
+        match self {
+            Self::Open => ChromeMark::File,
+            Self::CopyPath => ChromeMark::Copy,
+            Self::InsertPath => ChromeMark::Paste,
+        }
+    }
+}
+
+/// Every rectangle the file menu draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileMenuLayout {
+    scale: f32,
+    frame: [f32; 4],
+    items: [[f32; 4]; 3],
+    /// The rule under `Open` — mock-up 8089, which separates *what this row is*
+    /// from *what its path is*.
+    separator: [f32; 4],
+}
+
+/// `Insert path into terminal` — the widest of the three, and the reason the
+/// menu is measured rather than given a fixed width.
+pub const INSERT_PATH_TEXT: &str = "Insert path into terminal";
+pub const COPY_PATH_TEXT: &str = "Copy path";
+
+/// The menu hung under the point a row was right-clicked at.
+///
+/// **A point, not a widget.** Every other popup in this window hangs off a
+/// button and must therefore re-find that button after a re-render (E59/E60).
+/// This one is raised at the pointer, so the anchor is a coordinate that no
+/// re-layout can move or destroy — which is also why it does not need the live
+/// re-measure the root menu pays for on every frame.
+///
+/// `open_text` is the caller's because only the caller knows where the row
+/// leads: a picture goes to the preview seat and everything else goes to the
+/// system's own handler, and the menu must not promise the one while doing the
+/// other.
+#[must_use]
+pub fn file_menu_layout(
+    point: [f32; 2],
+    surface: (f32, f32),
+    scale: f32,
+    open_text: &str,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> FileMenuLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let padding = px(MENU_PADDING_LOGICAL_PX);
+    let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    let separator_block = 2.0 * separator_margin + separator_thickness;
+
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    let row_width = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
+        px(ITEM_ICON_COLUMN_LOGICAL_PX)
+            + px(ITEM_GAP_LOGICAL_PX)
+            + measure(text, px(ITEM_FONT_LOGICAL_PX))
+    };
+    let content = row_width(open_text, measure)
+        .max(row_width(COPY_PATH_TEXT, measure))
+        .max(row_width(INSERT_PATH_TEXT, measure));
+    let width = (chrome + content)
+        .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
+        .round();
+    let height = (2.0 * (border + padding) + 3.0 * item_height + separator_block).round();
+
+    // Both axes clamped, unlike the root menu's one. A menu hung under a button
+    // can only ever run off the side, because the button it hangs from is on a
+    // horizontal strip near the top; a menu raised at the pointer can be raised
+    // at the bottom row of a tall column, where an unclamped drop would put
+    // every one of its verbs under the window's own edge.
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    let left = point[0].min(surface_width - width - edge).max(edge).round();
+    let top = point[1]
+        .min(surface_height - height - edge)
+        .max(edge)
+        .round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+    let open = [content_left, cursor, content_right, cursor + item_height];
+    cursor += item_height;
+    let separator = [
+        content_left,
+        cursor + separator_margin,
+        content_right,
+        cursor + separator_margin + separator_thickness,
+    ];
+    cursor += separator_block;
+    let copy_path = [content_left, cursor, content_right, cursor + item_height];
+    cursor += item_height;
+    let insert_path = [content_left, cursor, content_right, cursor + item_height];
+    FileMenuLayout {
+        scale,
+        frame,
+        items: [open, copy_path, insert_path],
+        separator,
+    }
+}
+
+/// What a point is over, with the same three answers the other menus give.
+#[must_use]
+pub fn file_menu_hit(layout: &FileMenuLayout, x: f64, y: f64) -> Option<Option<FileMenuRow>> {
+    let (x, y) = (x as f32, y as f32);
+    for (row, rect) in FileMenuRow::ALL.iter().zip(layout.items) {
+        if contains(rect, x, y) {
+            return Some(Some(*row));
+        }
+    }
+    contains(layout.frame, x, y).then_some(None)
+}
+
+/// The file menu as one overlay layer.
+#[must_use]
+pub fn file_menu_build(
+    layout: &FileMenuLayout,
+    open_text: &str,
+    hover: Option<FileMenuRow>,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+
+    for (row, rect) in FileMenuRow::ALL.iter().zip(layout.items) {
+        push_row(
+            &Row {
+                rect,
+                mark: row.mark(),
+                name: match row {
+                    FileMenuRow::Open => open_text,
+                    FileMenuRow::CopyPath => COPY_PATH_TEXT,
+                    FileMenuRow::InsertPath => INSERT_PATH_TEXT,
+                },
+                hint: None,
+                hovered: hover == Some(*row),
+                // All three verbs act on a path this process enumerated. There
+                // is no machine on which one of them is a promise that cannot be
+                // kept — the refusals these verbs *can* meet (a program the tree
+                // will not run, a shell that has gone) happen after the press
+                // and are spoken then, which is the same answer the double
+                // click gives.
+                available: true,
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
+        if *row == FileMenuRow::Open {
+            quads.push(OverlayQuad {
+                rect: layout.separator,
+                color: palette.menu_border,
+                alpha: separator_alpha(palette.menu_border),
+            });
+        }
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
+/// `.term-menu { min-width: 172px }` (mock-up 638), which `#file-menu` wears —
+/// the mock-up gives the two the same skin and says so at K145.
+///
+/// Narrower than either of the other two menus, and rightly: its rows are three
+/// fixed verbs rather than directory names of unknown length, so nothing in it
+/// can grow, and a floor sized for names it will never hold would leave a band
+/// of empty menu beside every row.
+const FILE_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 172.0;
 
 #[cfg(test)]
 mod tests {
@@ -2452,6 +2789,65 @@ mod tests {
         assert_eq!(first.2, r"C:\Users\dev", "the tip says the whole path");
     }
 
+    /// PIN — `Browse…` is the last row, it is below a rule, and it is reachable
+    /// (E55).
+    ///
+    /// The red gate this replaces: for one whole block the menu could only offer
+    /// paths the application already knew — HOME, a shell's cwd, the parent —
+    /// so a folder that was none of those three was not reachable from the
+    /// window at all. Asserting the row's *position* as well as its existence is
+    /// what stops it from being quietly re-ordered into the list of places,
+    /// where it would read as one of them.
+    #[test]
+    fn browse_is_the_last_row_of_the_root_menu_and_answers_a_press() {
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &choices,
+            &mut fake_measure,
+        );
+        let last_choice = *layout.items.last().expect("the menu offers somewhere");
+        assert!(
+            layout.browse_separator[1] >= last_choice[3],
+            "the rule sits under the last place, not over it"
+        );
+        assert!(
+            layout.browse[1] >= layout.browse_separator[3],
+            "and `Browse…` sits under the rule"
+        );
+        assert!(
+            layout.browse[3] <= layout.frame[3],
+            "the menu is tall enough to hold the row it grew"
+        );
+
+        let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        let (x, y) = middle(layout.browse);
+        assert_eq!(
+            root_menu_hit(&layout, f64::from(x), f64::from(y)),
+            Some(Some(RootMenuRow::Browse))
+        );
+        let (x, y) = middle(layout.browse_separator);
+        assert_eq!(
+            root_menu_hit(&layout, f64::from(x), f64::from(y)),
+            Some(None),
+            "the rule is body — pressing a hairline commits nothing"
+        );
+
+        let layer = one_layer(root_menu_build(
+            &layout,
+            &choices,
+            r"C:\work\project",
+            Some(RootMenuRow::Browse),
+            &mut fake_measure,
+        ));
+        assert!(
+            layer.labels.iter().any(|label| label.text == BROWSE_TEXT),
+            "the row says its own name"
+        );
+    }
+
     /// PIN — the folder the column is already rooted at is the one drawn open.
     /// That mark is the menu's "you are here", and getting it from the *current
     /// root* rather than from the hover is what keeps it from following the
@@ -2478,6 +2874,16 @@ mod tests {
                 .sprites
                 .iter()
                 .filter(|sprite| sprite.mark == ChromeMark::FolderOpen)
+                // Only among the *choices*. `Browse…` wears the open folder
+                // unconditionally (it means "go and look", not "you are here"),
+                // so counting the whole menu would let a choice row lose its
+                // mark without the count noticing.
+                .filter(|sprite| {
+                    layout
+                        .items
+                        .iter()
+                        .any(|item| sprite.rect[1] >= item[1] && sprite.rect[3] <= item[3])
+                })
                 .count()
         };
         assert_eq!(open_marks(r"C:\Users\dev"), 1);
@@ -4771,6 +5177,161 @@ mod tests {
                 .any(|label| label.text == powershell_seven()
                     && label.color == palette.menu_item_text),
             "while the profile row it is not stays `--ink2`"
+        );
+    }
+
+    // ── K143-K145: the file row's context menu ─────────────────────────────
+
+    /// PIN — the menu is the three verbs `DESIGN.md` §7.1.3 names, in that
+    /// order, with the rule between the row that *opens the file* and the two
+    /// that *do something with its path*.
+    ///
+    /// Order is asserted from the drawn labels rather than from the enum,
+    /// because the enum's order is only a promise until something reads it in
+    /// that order: a painter that walked `items` backwards would still satisfy
+    /// a test that only counted rows.
+    #[test]
+    fn the_file_menu_draws_three_verbs_with_a_rule_under_the_first() {
+        let layout = file_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            "Open preview",
+            &mut fake_measure,
+        );
+        let layer = one_layer(file_menu_build(&layout, "Open preview", None));
+        let names: Vec<&str> = layer
+            .labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Open preview", COPY_PATH_TEXT, INSERT_PATH_TEXT],
+            "three rows, top to bottom, and no heading over them"
+        );
+        assert!(
+            layout.separator[1] >= layout.items[0][3] && layout.separator[3] <= layout.items[1][1],
+            "the rule lies between the first row and the second"
+        );
+        assert_eq!(
+            layer
+                .sprites
+                .iter()
+                .map(|sprite| sprite.mark)
+                .collect::<Vec<_>>(),
+            vec![ChromeMark::File, ChromeMark::Copy, ChromeMark::Paste],
+            "each verb wears its own glyph — the copy and the paste are not one mark twice"
+        );
+    }
+
+    /// PIN — the caller names the first row, so the menu cannot promise a
+    /// preview for a file that is going to the system's own handler.
+    #[test]
+    fn the_first_row_says_where_this_particular_file_is_going() {
+        for open_text in ["Open preview", "Open"] {
+            let layout = file_menu_layout(
+                [300.0, 200.0],
+                (960.0, 600.0),
+                1.0,
+                open_text,
+                &mut fake_measure,
+            );
+            let layer = one_layer(file_menu_build(&layout, open_text, None));
+            assert_eq!(
+                layer.labels.first().map(|label| label.text.as_str()),
+                Some(open_text)
+            );
+        }
+    }
+
+    /// PIN — a menu raised in the bottom-right corner is pulled whole back
+    /// inside the window, on **both** axes.
+    ///
+    /// The red gate: the root menu clamps only horizontally, because a button on
+    /// the top strip cannot be near the bottom. A file row can be — it is the
+    /// last row of a tall column — and an unclamped drop puts all three verbs
+    /// under the window's edge, where the menu is visible and unusable.
+    #[test]
+    fn a_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
+        let surface = (960.0, 600.0);
+        let layout = file_menu_layout(
+            [950.0, 596.0],
+            surface,
+            1.0,
+            "Open preview",
+            &mut fake_measure,
+        );
+        assert!(layout.frame[2] <= surface.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(layout.frame[3] <= surface.1 - MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(layout.frame[0] >= MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(layout.frame[1] >= MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(
+            file_menu_hit(
+                &layout,
+                f64::from(layout.items[2][0] + 1.0),
+                f64::from((layout.items[2][1] + layout.items[2][3]) / 2.0),
+            ) == Some(Some(FileMenuRow::InsertPath)),
+            "and the row that would have fallen off is still the one that answers"
+        );
+    }
+
+    /// PIN — rows answer, the body swallows, outside is nobody's; and the rule
+    /// is body, so a press on a hairline commits no verb.
+    #[test]
+    fn the_file_menu_answers_a_press_on_each_of_its_three_rows() {
+        let layout = file_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            "Open",
+            &mut fake_measure,
+        );
+        let middle = |rect: [f32; 4]| {
+            (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+        for (row, rect) in FileMenuRow::ALL.iter().zip(layout.items) {
+            let (x, y) = middle(rect);
+            assert_eq!(file_menu_hit(&layout, x, y), Some(Some(*row)));
+        }
+        let (x, y) = middle(layout.separator);
+        assert_eq!(file_menu_hit(&layout, x, y), Some(None));
+        assert_eq!(
+            file_menu_hit(
+                &layout,
+                f64::from(layout.frame[0] - 4.0),
+                f64::from(layout.frame[1] - 4.0)
+            ),
+            None
+        );
+    }
+
+    /// PIN — the keyboard walk stops at both ends instead of wrapping round,
+    /// which is the law the tree beside it already keeps (D45).
+    #[test]
+    fn the_file_menus_keyboard_walk_clamps_at_both_ends() {
+        assert_eq!(FileMenuRow::step(None, true), FileMenuRow::Open);
+        assert_eq!(FileMenuRow::step(None, false), FileMenuRow::InsertPath);
+        assert_eq!(
+            FileMenuRow::step(Some(FileMenuRow::Open), false),
+            FileMenuRow::Open,
+            "up from the first row stays on the first row"
+        );
+        assert_eq!(
+            FileMenuRow::step(Some(FileMenuRow::InsertPath), true),
+            FileMenuRow::InsertPath,
+            "and down from the last stays on the last"
+        );
+        assert_eq!(
+            FileMenuRow::step(Some(FileMenuRow::Open), true),
+            FileMenuRow::CopyPath
+        );
+        assert_eq!(
+            FileMenuRow::step(Some(FileMenuRow::InsertPath), false),
+            FileMenuRow::CopyPath
         );
     }
 }

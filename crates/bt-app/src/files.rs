@@ -271,9 +271,17 @@ impl DirCache {
         self.turns
             .entry(key.to_owned())
             .or_insert_with(|| {
-                crate::RevealTween::resting(
+                crate::RevealTween::resting_on(
                     1.0 - target,
                     Duration::from_millis(crate::seats::FILES_ROW_TRI_TURN_MS),
+                    // `.frow .tri { transition: transform 120ms
+                    // cubic-bezier(.2,0,0,1) }` (C33) — the mock-up's snappy
+                    // curve, not CSS `ease`. It is the same curve the tab
+                    // reorder and the profile chevron turn on, and it matters
+                    // most on a short travel like this one: `ease` spends its
+                    // first third barely moving, which on 120ms reads as the
+                    // triangle hesitating before it turns.
+                    crate::GRAB_EASE,
                 )
             })
             .retarget(target, now, motion);
@@ -561,6 +569,16 @@ pub enum TreeCommand {
     End,
     /// Enter or Space: a folder folds and unfolds, a file opens.
     Activate,
+    /// The Menu key, or `Shift+F10`: raise the selected file row's own menu
+    /// (K143).
+    ///
+    /// The keyboard's half of a verb the pointer already has. §7.1.3 requires
+    /// the file row's menu to be "可键盘化", and a menu that can only be reached
+    /// by right-clicking is a menu a keyboard cannot reach at all — which would
+    /// leave `Insert path into terminal`, whose whole reason for existing is to
+    /// be the *discoverable* home of a verb taken off the drag, unreachable
+    /// without a mouse.
+    ContextMenu,
     /// Esc: hand the keyboard back to the terminal.
     Release,
 }
@@ -572,15 +590,27 @@ pub enum TreeCommand {
 /// `Shift+PageUp` is a request to scroll a terminal's history whatever pane is
 /// lit. What the tree claims is the bare navigation set, which is exactly the
 /// set no chord table contains.
+///
+/// **`Shift+F10` is the one chord, and it is not an exception to that rule.**
+/// It is the system-wide name of the Menu key on the very many keyboards that
+/// do not have one, which makes it part of the same *bare* vocabulary rather
+/// than a shortcut competing with the table: no chord table anywhere contains
+/// it either, because on every platform it already means this.
 pub fn tree_command(
     key: &winit::keyboard::Key,
     modifiers: winit::keyboard::ModifiersState,
 ) -> Option<TreeCommand> {
     use winit::keyboard::{Key, NamedKey};
+    if modifiers == winit::keyboard::ModifiersState::SHIFT
+        && matches!(key, Key::Named(NamedKey::F10))
+    {
+        return Some(TreeCommand::ContextMenu);
+    }
     if !modifiers.is_empty() {
         return None;
     }
     Some(match key {
+        Key::Named(NamedKey::ContextMenu) => TreeCommand::ContextMenu,
         Key::Named(NamedKey::ArrowUp) => TreeCommand::Up,
         Key::Named(NamedKey::ArrowDown) => TreeCommand::Down,
         Key::Named(NamedKey::ArrowLeft) => TreeCommand::Left,
@@ -612,6 +642,8 @@ pub enum TreeAction {
     Closed(String),
     /// A file was opened.
     Activate(String),
+    /// A file row asked for its own menu (K143).
+    ContextMenu(String),
     /// The keyboard goes back to the terminal.
     Release,
 }
@@ -657,7 +689,11 @@ pub fn apply_tree_command(
     let Some(at) = at else {
         return match command {
             TreeCommand::End => select(state, nodes.len() - 1),
-            TreeCommand::Activate => TreeAction::None,
+            // Nothing is selected, so there is nothing to act *on*. Both of
+            // these ask a question about a particular row, and neither should
+            // answer it by first picking one — a menu that appeared over a row
+            // the user had not chosen would be a menu about the wrong file.
+            TreeCommand::Activate | TreeCommand::ContextMenu => TreeAction::None,
             _ => select(state, 0),
         };
     };
@@ -703,6 +739,14 @@ pub fn apply_tree_command(
             // A folder that resolves to one of its own ancestors has nothing to
             // show that is not already on screen, exactly as under the mouse.
             RowKind::Cycle | RowKind::Notice(_) => TreeAction::None,
+        },
+        // Only files, which is the same line the right button is held to
+        // (K143): "目录行不弹". A folder standing under the selection answers
+        // the Menu key with silence rather than with a menu of three verbs that
+        // are all about a file.
+        TreeCommand::ContextMenu => match row.kind {
+            RowKind::File => TreeAction::ContextMenu(key),
+            RowKind::Directory { .. } | RowKind::Cycle | RowKind::Notice(_) => TreeAction::None,
         },
         TreeCommand::Release => TreeAction::Release,
     }
@@ -1399,6 +1443,125 @@ mod tests {
         assert_eq!(column.sel.as_deref(), Some("/docs/a.md"));
         let (_, action) = press(Some("/src"), TreeCommand::Up);
         assert_eq!(action, TreeAction::Select("/docs/a.md".to_owned()));
+    }
+
+    /// PIN — C33. The row's triangle turns over its own 120ms, and reduced
+    /// motion leaves it standing at the end rather than part-way.
+    ///
+    /// The red gate this fills: nothing anywhere referenced `turn_row` or
+    /// `row_turn`, so the disclosure triangle's whole animation — the one
+    /// constant the mock-up spells out for it and the degradation the accessible
+    /// preference owes — was carried entirely by a shared tween that only the
+    /// *chevron* had a test for. A triangle wired to the wrong span, or one
+    /// whose reduced branch left it frozen half-turned, would have been drawn
+    /// wrong with every test in the workspace still green.
+    #[test]
+    fn a_row_triangle_turns_over_its_own_120ms_and_snaps_under_reduced_motion() {
+        let now = Instant::now();
+        let turn = Duration::from_millis(crate::seats::FILES_ROW_TRI_TURN_MS);
+        assert_eq!(turn, Duration::from_millis(120), "the mock-up's own number");
+
+        let mut cache = DirCache::default();
+        cache.turn_row("/docs", true, now, crate::Motion::Full);
+        assert_eq!(
+            cache.row_turn("/docs", true, now, crate::Motion::Full),
+            (0.0, true),
+            "it starts shut and owes a frame"
+        );
+        let (part, moving) = cache.row_turn("/docs", true, now + turn / 2, crate::Motion::Full);
+        assert!(
+            part > 0.0 && part < 1.0 && moving,
+            "half way through it is half way over, not at one end"
+        );
+        // And it is on the mock-up's curve rather than CSS `ease`. A quarter of
+        // the way through the span, `cubic-bezier(.2,0,0,1)` is already past
+        // halfway (≈.61) where `ease` is not (≈.42) — the two are only told
+        // apart early, which is exactly where a 120ms turn is watched.
+        let (quarter, _) = cache.row_turn("/docs", true, now + turn / 4, crate::Motion::Full);
+        assert!(
+            quarter > 0.55,
+            "the triangle leads with its travel: {quarter} should be past half by a quarter of the way"
+        );
+        assert_eq!(
+            cache.row_turn("/docs", true, now + turn, crate::Motion::Full),
+            (1.0, false),
+            "and 120ms is when it arrives"
+        );
+
+        let mut cache = DirCache::default();
+        cache.turn_row("/docs", true, now, crate::Motion::Reduced);
+        assert_eq!(
+            cache.row_turn("/docs", true, now, crate::Motion::Reduced),
+            (1.0, false),
+            "with the preference set it is simply turned, on the first frame"
+        );
+        assert!(!cache.any_turning(now, crate::Motion::Reduced));
+    }
+
+    /// PIN — K143's keyboard half. The Menu key and `Shift+F10` are the same
+    /// request, and they are the *only* chord the tree takes.
+    ///
+    /// The red gate: without this the file row's menu is reachable only by right
+    /// button, which makes `Insert path into terminal` — a verb moved here in
+    /// 2026-07-17 expressly to be discoverable and keyboard-reachable —
+    /// unreachable without a mouse.
+    #[test]
+    fn the_menu_key_and_shift_f10_are_the_two_names_of_one_request() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::ContextMenu), ModifiersState::empty()),
+            Some(TreeCommand::ContextMenu)
+        );
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::F10), ModifiersState::SHIFT),
+            Some(TreeCommand::ContextMenu)
+        );
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::F10), ModifiersState::empty()),
+            None,
+            "a bare F10 is not this window's key"
+        );
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::F10), ModifiersState::CONTROL),
+            None,
+            "and neither is any other chord on it"
+        );
+        assert_eq!(
+            tree_command(
+                &Key::Named(NamedKey::ContextMenu),
+                ModifiersState::SHIFT | ModifiersState::CONTROL
+            ),
+            None,
+            "the bare navigation set stays bare"
+        );
+    }
+
+    /// PIN — only a file row raises a menu, which is the same line the right
+    /// button is held to ("目录行不弹", K143).
+    #[test]
+    fn only_a_file_row_answers_the_menu_key() {
+        let (column, action) = press(Some("/read.me"), TreeCommand::ContextMenu);
+        assert_eq!(action, TreeAction::ContextMenu("/read.me".to_owned()));
+        assert_eq!(
+            column.sel.as_deref(),
+            Some("/read.me"),
+            "asking a row about itself does not move the selection"
+        );
+        assert_eq!(
+            press(Some("/docs"), TreeCommand::ContextMenu).1,
+            TreeAction::None,
+            "an open folder has none of these three verbs"
+        );
+        assert_eq!(
+            press(Some("/src"), TreeCommand::ContextMenu).1,
+            TreeAction::None,
+            "and neither has a shut one"
+        );
+        assert_eq!(
+            press(None, TreeCommand::ContextMenu).1,
+            TreeAction::None,
+            "and a column standing nowhere does not pick a row to be asked about"
+        );
     }
 
     /// PIN — D45. Travel stops at the ends rather than coming out the other one.

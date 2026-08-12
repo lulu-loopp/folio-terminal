@@ -1752,10 +1752,17 @@ pub struct TabTrailer {
     /// **A tab is the header of the terminal it holds — when it holds exactly
     /// one.** A split tab has no single terminal to speak for (each pane head
     /// speaks for its own, H110) and a files-only tab has no terminal at all, so
-    /// neither wears one. The mock-up's note (4320-4325) adds the consequence
-    /// that makes this safe to compute per frame: the condition is already part
-    /// of the tab's key, so the trigger appears and disappears exactly when the
-    /// tab is rebuilt — **never in the middle of a gesture**.
+    /// neither wears one.
+    ///
+    /// **Why computing it per frame is safe** — and it is not the mock-up's own
+    /// reason. The mock-up (4320-4325) says the condition is part of `tabKey`,
+    /// so the trigger can only appear or vanish when the tab's DOM node is
+    /// rebuilt. This build has no tab key and no nodes: the strip is redrawn
+    /// whole every frame. What stands in for that guarantee is two facts
+    /// together — this predicate can only change when the *tree* changes, which
+    /// no hover or pointer motion does; and the peek's intent is anchored on a
+    /// `TabId` rather than on a drawn rectangle (G86), so a redraw between the
+    /// hover and its maturity re-finds the same trigger instead of losing it.
     pub files: bool,
     /// How lit the trigger is: `0` at rest, `.6` on a hovered tab, `1` when the
     /// pointer is on the trigger itself (H76/H104).
@@ -8141,30 +8148,12 @@ pub fn hit_files_tree(
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
     for placement in &layout.rects {
-        if placement.kind != SeatKind::Files
-            || !matches!(placement.presentation, Presentation::Full)
-        {
+        if placement.kind != SeatKind::Files {
             continue;
         }
-        let Some(device) = placement.device_rect else {
+        let Some(geometry) = files_tree_geometry_of(layout, trees, scale, placement.id) else {
             continue;
         };
-        let Some(tree) = trees.get(&placement.id) else {
-            continue;
-        };
-        // A column showing a single sentence about itself has no rows to hit.
-        if whole_tree_notice(&tree.rows).is_some() {
-            continue;
-        }
-        let rect = [
-            device.left as f32,
-            device.top as f32,
-            device.right as f32,
-            device.bottom as f32,
-        ];
-        let head = pane_head_geometry(rect, placement.kind, scale);
-        let body = [rect[0], head.head[3], rect[2], rect[3]];
-        let geometry = files_tree_geometry(body, tree.rows.len(), tree.scroll_px, scale);
         if let Some(index) = geometry.row_at(x, y) {
             return Some(ChromeTarget::FilesRow {
                 seat: placement.id,
@@ -8173,6 +8162,50 @@ pub fn hit_files_tree(
         }
     }
     None
+}
+
+/// Where one docked column's rows are, or nothing when that column has none to
+/// place.
+///
+/// Split out of [`hit_files_tree`] so that the pointer and the *keyboard* reach
+/// one derivation of the same rectangles. The keyboard needs them because a menu
+/// raised by a key has no pointer to hang from and must hang from the selected
+/// row instead (K143's "可键盘化"), and a second copy of this arithmetic is
+/// exactly how a menu comes up beside the row it is about.
+#[must_use]
+pub fn files_tree_geometry_of(
+    layout: &SeatLayout,
+    trees: &BTreeMap<SeatId, FilesTreeContent>,
+    scale: f32,
+    seat: SeatId,
+) -> Option<FilesTreeGeometry> {
+    let placement = layout
+        .rects
+        .iter()
+        .find(|placement| placement.id == seat && placement.kind == SeatKind::Files)?;
+    if !matches!(placement.presentation, Presentation::Full) {
+        return None;
+    }
+    let device = placement.device_rect?;
+    let tree = trees.get(&seat)?;
+    // A column showing a single sentence about itself has no rows to hit.
+    if whole_tree_notice(&tree.rows).is_some() {
+        return None;
+    }
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    let head = pane_head_geometry(rect, placement.kind, scale);
+    let body = [rect[0], head.head[3], rect[2], rect[3]];
+    Some(files_tree_geometry(
+        body,
+        tree.rows.len(),
+        tree.scroll_px,
+        scale,
+    ))
 }
 
 /// Draw one files column's rows.
