@@ -660,6 +660,13 @@ pub type FloatId = u64;
 ///   most temporary, and a transient window buried under a permanent one is a
 ///   window you cannot see and cannot get rid of.
 ///
+/// **The list admits duplicates by root, and that is deliberate** (2026-08-12,
+/// the second of the day's two rulings — see [`Self::observe`]). Nothing here
+/// asks whether a root is already open, because two windows on one folder are
+/// two viewports rather than two copies: each has its own unfolding, its own
+/// selection and its own scroll, which is what a person is asking for when they
+/// open the same folder twice. Explorer and Finder both answer that way.
+///
 /// This is also the ground the preview float will stand on (§7.1's 小窗 is one
 /// form with many tenants): the second floating tenant does not need a second
 /// host, it needs a second entry in this list.
@@ -846,31 +853,6 @@ impl FloatHost {
         self.live(id).is_some_and(|win| !win.mode.is_transient())
     }
 
-    /// The topmost live pinned window showing `root`, if one is.
-    ///
-    /// **同根去重 (user ruling 2026-08-12).** Asking for a tree you already have
-    /// a window of is asking to be *shown* that window, not to be given a second
-    /// copy of it — Chrome's own answer when you open a page that is already
-    /// open. Identity is the root path and nothing else: two triggers standing
-    /// in the same directory are two doors into one room.
-    ///
-    /// The peek is deliberately not consulted. A peek is a question, it is
-    /// already on top, and re-asking it is what re-summoning a peek means.
-    #[must_use]
-    pub fn pinned_at_root(&self, root: &str) -> Option<FloatId> {
-        self.pinned
-            .iter()
-            .rev()
-            .find(|win| win.is_live() && win.files.root == root)
-            .map(|win| win.epoch)
-    }
-
-    /// Whether any live window was summoned from `trigger`.
-    #[must_use]
-    pub fn origin_is_live(&self, trigger: FloatTrigger) -> bool {
-        self.live_windows().any(|win| win.origin == Some(trigger))
-    }
-
     /// Bring a pinned window to the front. Returns whether the order changed.
     ///
     /// A press anywhere inside a window raises it, which is what every stacking
@@ -922,24 +904,37 @@ impl FloatHost {
 
     /// Note the trigger under the pointer and arm the intent (G86/H112).
     ///
-    /// Resting on a trigger that already has a window on screen re-arms nothing,
-    /// for the tooltip's reason: a trembling hand would otherwise close and
-    /// reopen it forever. That one guard now covers both modes, and covering
-    /// both is what let the older, blunter one go.
+    /// **The one guard is the peek's own.** Resting on the trigger whose peek is
+    /// already up re-arms nothing, for the tooltip's reason: a trembling hand
+    /// would otherwise close and reopen it forever. That is the whole of it — a
+    /// *pinned* window blocks no hover at all, however it was summoned.
     ///
-    /// **改判 2026-08-12 — hover is no longer switched off by a pinned window.**
-    /// This used to begin `if self.pinned_is_open() { … return }`, which read as
-    /// the 「hover 永不劫持 pinned」 law but was a much larger claim: one pinned
-    /// window anywhere made *every* trigger in the product stop answering a
-    /// hover, so the peek could never be summoned again until it was closed
-    /// (user report). The law itself is untouched and in fact stronger now — a
-    /// hover cannot move, replace or close a pinned window, because a peek is a
-    /// window of its own in a slot of its own and never touches the pinned list.
-    /// See [`FloatHost`]'s own note.
+    /// # Two rulings, in the order they were made
+    ///
+    /// **改判 2026-08-12 (i) — hover is no longer switched off by a pinned
+    /// window.** This used to begin `if self.pinned_is_open() { … return }`,
+    /// which read as the 「hover 永不劫持 pinned」 law but was a much larger
+    /// claim: one pinned window anywhere made *every* trigger in the product stop
+    /// answering a hover, so the peek could never be summoned again until it was
+    /// closed (user report). The law itself is untouched and in fact stronger now
+    /// — a hover cannot move, replace or close a pinned window, because a peek is
+    /// a window of its own in a slot of its own and never touches the pinned
+    /// list. See [`FloatHost`]'s own note.
+    ///
+    /// **改判 2026-08-12 (ii) — 同根去重 repealed, and the guard narrowed with
+    /// it.** The morning's fix replaced `pinned_is_open` with "any live window
+    /// was summoned from this trigger", which was still too wide: a trigger whose
+    /// window you had kept went quiet, so the hover worked everywhere except the
+    /// places you had already been. Same disease, smaller blast radius. The guard
+    /// now asks only about the peek, which is the only window a *re-arm* could
+    /// disturb. Opening a second window on a root you already have is legal and
+    /// ordinary — see
+    /// `a_second_ask_for_a_root_already_open_is_answered_like_any_other` for the
+    /// four reasons.
     pub fn observe(&mut self, trigger: Option<FloatTrigger>, now: Instant) {
         match trigger {
             Some(trigger) => {
-                if self.origin_is_live(trigger) {
+                if self.peek().is_some_and(|win| win.origin == Some(trigger)) {
                     self.settling = None;
                     return;
                 }
@@ -1057,6 +1052,9 @@ impl FloatHost {
     /// every window that was already there and takes none of them away. And it
     /// keeps its [`FloatId`] across the move, which is what lets a directory read
     /// that was in flight when the hand kept the window still find its way home.
+    ///
+    /// A sister already showing the same root is **not** consulted, merged with
+    /// or overwritten — see `two_windows_on_one_root_unfold_independently`.
     ///
     /// Returns the promoted window's identity, so the gesture that promoted it
     /// can go on carrying *that* window and not merely "the float".
@@ -2019,52 +2017,131 @@ mod tests {
         assert_eq!(host.peek_id(), None, "the peek slot is free again");
     }
 
-    /// PIN ③ — **a trigger whose root already has a window raises that window
-    /// rather than opening a second.**
+    /// PIN ③ — **a second ask for a root that already has a window is answered
+    /// like any other: a peek is born, and the standing window is not touched.**
     ///
-    /// 同根去重, by root path and by nothing else: two triggers standing in one
-    /// directory are two doors into one room. It is Chrome's answer to opening a
-    /// page that is already open, and the ruling says so in as many words.
+    /// # Two rulings, and this test has now carried both
     ///
-    /// **改判**: this overturns the mock-up's 「re-click 关闭」 contract for a
-    /// pinned window (3742-3751 — pressing the trigger again was one of §7.1.2's
-    /// four closers). Two windows are now reachable at once, so the trigger's job
-    /// changed from "toggle the one window" to "show me that tree", and a toggle
-    /// that sometimes means "raise the other one" and sometimes means "close this
-    /// one" is a control nobody can predict. The other three closers — `×`, Esc,
-    /// Dock — are untouched, so nothing has become unclosable.
+    /// **2026-08-12 (morning), 同根去重 — instituted.** When 浮窗多开 landed, a
+    /// trigger whose root already had a pinned window *raised* that window rather
+    /// than opening a second, by analogy with a browser focusing the tab that
+    /// already holds the page. This test asserted that raise.
     ///
-    /// Red gate / mutation: have `pinned_at_root` return `None` always, and the
-    /// caller opens a duplicate — `stack` grows to three.
+    /// **2026-08-12 (same day), 同根去重 — repealed**, and it is the repeal that
+    /// is asserted below. Four reasons, and the last is the one that decides it:
+    ///
+    /// * **Precedent is the other way.** Explorer and Finder both open a second
+    ///   window on the same folder without complaint; it is the file manager's
+    ///   normal way of comparing two places in one tree.
+    /// * **Two windows on one root are not duplicates.** Each is its own viewport
+    ///   with its own unfolding, its own selection and its own scroll (G81 makes
+    ///   the `{root, open, sel}` a throwaway *per window*), so "the same root"
+    ///   says nothing about what the two are showing — which is exactly what the
+    ///   companion test `two_windows_on_one_root_unfold_independently` pins.
+    /// * **It made hover unpredictable** — the same disease that retired the
+    ///   mock-up's 「re-click 关闭」 contract on the morning ruling. A hover that
+    ///   produces a peek over most triggers and silently produces nothing over
+    ///   the ones whose root happens to be open is a gesture the user cannot
+    ///   model, and the failure mode reads exactly like the bug 浮窗多开 was
+    ///   built to fix.
+    /// * **The costs are lopsided.** A window opened by mistake costs one click
+    ///   on `×`. A window *refused* costs the user the thing they asked for, with
+    ///   no feedback saying why. Between a cheap wrong answer and an expensive
+    ///   one, the design takes the cheap one.
+    ///
+    /// Red gate / mutation: put the dedup back — have `observe` refuse to arm
+    /// when any live window shares the trigger, or have the caller raise instead
+    /// of opening — and the peek below never arrives.
     #[test]
-    fn a_second_ask_for_a_root_already_open_raises_that_window() {
+    fn a_second_ask_for_a_root_already_open_is_answered_like_any_other() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        let same = open_pinned_at(
+        let box_ = frame(100.0, 100.0, 264.0, 300.0);
+        let standing = open_pinned_at(&mut host, Some(TAB), "C:/x", box_, now);
+
+        // The very same trigger, hovered again. It arms, it matures, and it is
+        // answered — the standing window is not a reason to say nothing.
+        host.observe(Some(TAB), now);
+        assert_eq!(
+            host.take_due(now + FLY_OPEN),
+            Some(TAB),
+            "a trigger whose root is already open still answers a hover"
+        );
+        let peek = open_peek_at(&mut host, TAB, "C:/x", now);
+        assert_eq!(
+            stack(&host),
+            vec![standing, peek],
+            "the peek joined; nothing was raised in its place"
+        );
+        assert_eq!(
+            host.live(standing).map(|win| win.frame),
+            Some(box_),
+            "and the window already showing that root did not move"
+        );
+    }
+
+    /// PIN — **two windows on one root are two viewports, not two copies.**
+    ///
+    /// The load-bearing half of repealing 同根去重 (2026-08-12): if the second
+    /// window were a copy, refusing to open it would cost nothing and the dedup
+    /// would have been right. It is not a copy — G81 gives every float its own
+    /// throwaway `{root, open, sel}` — so unfolding a directory in one leaves the
+    /// other exactly as it was, which is the whole reason a person opens the same
+    /// folder twice.
+    ///
+    /// The first window is unfolded **before** the second is asked for, which is
+    /// the ordering that makes this a test of its own rather than a second
+    /// spelling of `a_directory_read_comes_home_to_the_window_that_asked`: the
+    /// claim is that opening another window on a root *leaves the one already
+    /// there alone*, and a state that is only written after both exist could
+    /// never catch a birth that clobbers a sister.
+    ///
+    /// Red gate / mutation: have `promote` copy the newcomer's `files` over every
+    /// pinned window sharing its root (the shape a "keep one view per root"
+    /// implementation naturally takes) — `/crates` is wiped out of the first
+    /// window and the first assertion reads `(false, true)`.
+    #[test]
+    fn two_windows_on_one_root_unfold_independently() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let first = open_pinned_at(
             &mut host,
             Some(TAB),
             "C:/x",
             frame(100.0, 100.0, 264.0, 300.0),
             now,
         );
-        let other = open_pinned_at(
-            &mut host,
-            Some(OTHER),
-            "C:/y",
-            frame(500.0, 200.0, 264.0, 300.0),
-            now,
+        host.live_mut(first)
+            .expect("open")
+            .files
+            .open
+            .insert("/crates".to_owned());
+
+        // The same root asked for again, and kept.
+        open_peek_at(&mut host, TAB, "C:/x", now);
+        let second = host.promote().expect("the second ask was kept");
+        assert_ne!(first, second, "two windows, two identities");
+        assert_eq!(stack(&host), vec![first, second], "and both stand");
+
+        host.live_mut(second)
+            .expect("open")
+            .files
+            .open
+            .insert("/docs".to_owned());
+
+        let unfolded = |host: &FloatHost, id: FloatId| {
+            let files = &host.live(id).expect("open").files;
+            (files.open.contains("/crates"), files.open.contains("/docs"))
+        };
+        assert_eq!(
+            unfolded(&host, first),
+            (true, false),
+            "the first window shows what was unfolded in it, and nothing else"
         );
         assert_eq!(
-            host.pinned_at_root("C:/x"),
-            Some(same),
-            "the root is recognised however it is asked for"
-        );
-        assert_eq!(host.pinned_at_root("C:/nowhere"), None);
-        assert!(host.raise(same), "and asking again brings it forward");
-        assert_eq!(
-            stack(&host),
-            vec![other, same],
-            "no duplicate was opened; the order changed instead"
+            unfolded(&host, second),
+            (false, true),
+            "and the second likewise — one root, two answers to \"where am I looking\""
         );
     }
 

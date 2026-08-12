@@ -13600,34 +13600,39 @@ impl Runtime {
         .unwrap_or_default()
     }
 
-    /// Summon a float at a trigger — or, when the tree it asks for is already in
-    /// a window, bring that window forward instead.
+    /// Summon a float at a trigger. **Always** — a trigger has one answer.
     ///
-    /// **同根去重 (user ruling 2026-08-12, rule ③).** The old line here was
-    /// §7.1.2's 全窗口单例: there was no second window to open, so any trigger
-    /// moved the one window. Now there can be many, and the question a trigger
-    /// asks is "show me this tree" — so a tree already on screen is *shown*
-    /// (raised) rather than duplicated, which is what a browser does when you
-    /// open a page you already have open. Identity is the **root path**: two
-    /// triggers standing in one directory are two doors into one room.
+    /// # 同根去重: instituted and repealed the same day (2026-08-12)
     ///
-    /// Both ways in come through here, so a hover and a click answer alike — and
-    /// a hover that raises a window still moves nothing of it, which is the
-    /// 「hover 永不劫持 pinned」 law kept whole.
+    /// The morning's 浮窗多开 ruling put a dedup here: when the root a trigger
+    /// named was already in a pinned window, this raised that window instead of
+    /// opening a second, by analogy with a browser focusing the tab that already
+    /// holds the page. The afternoon's ruling **removes it**, and the four
+    /// reasons are worth keeping where the temptation to re-add it lives:
+    ///
+    /// * **The precedent is the other way.** Explorer and Finder both open a
+    ///   second window on a folder you already have open — comparing two places
+    ///   in one tree is what a file manager is *for*.
+    /// * **Two windows on one root are not duplicates.** Each carries its own
+    ///   throwaway `{root, open, sel}` (G81) and its own scroll, so they can show
+    ///   entirely different parts of the same tree.
+    /// * **It made the hover unpredictable.** A peek that comes up over most
+    ///   triggers and silently fails over the ones whose root you have already
+    ///   opened is a gesture nobody can model — and it fails in exactly the shape
+    ///   of the bug 浮窗多开 was built to fix. It is the same disease that
+    ///   retired 「re-click 关闭」 in the morning ruling, caught one step later.
+    /// * **The costs are lopsided.** An unwanted window costs one click on `×`;
+    ///   a refused one costs the user the thing they asked for and says nothing
+    ///   about why.
+    ///
+    /// Raising is not gone, it is merely no longer the *trigger's* job: pressing
+    /// a window brings it forward ([`float::FloatHost::raise`], from
+    /// [`Self::press_float`]), which is where a stacking gesture belongs.
     fn open_float(&mut self, trigger: float::FloatTrigger, mode: float::FloatMode) -> Result<()> {
         let Some(anchor) = self.trigger_rect(trigger) else {
             return Ok(());
         };
         let root = self.trigger_root(trigger);
-        if let Some(id) = self.float.pinned_at_root(&root) {
-            // A raise that changes nothing owes no frame, which is what makes
-            // resting on a trigger whose window is already frontmost free.
-            if self.float.raise(id) {
-                self.refresh_chrome();
-                self.present_chrome_change()?;
-            }
-            return Ok(());
-        }
         let state = seats::FilesLeafState {
             root,
             ..seats::FilesLeafState::default()
@@ -13715,22 +13720,23 @@ impl Runtime {
         self.present_chrome_change()
     }
 
-    /// A press on a trigger — the ladder (G91), one rung shorter than it was.
+    /// A press on a trigger — the ladder (G91), now only two rungs.
     ///
     /// A peek from *this* trigger → promote it **in place**, keeping the tree you
     /// have already unfolded, because the gesture is called "keep this" and not
-    /// "start again". Anything else → [`Self::open_float`], which opens a window
-    /// or raises the one already showing that root.
+    /// "start again". Anything else → [`Self::open_float`], which opens a window.
     ///
     /// **改判 2026-08-12 — the third rung is gone.** It used to be "already pinned
     /// here → this is you asking for it to go", which is the mock-up's
     /// re-click-closes contract (3742-3751) and one of §7.1.2's four closers. With
     /// several windows reachable at once the trigger's meaning changed under it:
-    /// it now says "show me this tree", and 同根去重 answers that by raising. A
-    /// control that means *raise the other one* when the root is elsewhere and
-    /// *close this one* when it is here is a control nobody can predict. The
-    /// ruling settles it in favour of raising; `×`, Esc and Dock are untouched,
-    /// so nothing has become unclosable.
+    /// it now says "show me this tree", and a control that means *close this one*
+    /// when the root happens to be open and *open one* when it does not is a
+    /// control nobody can predict. So the trigger has exactly one answer, every
+    /// time, and pressing it again gives you another window on that tree — which
+    /// is Explorer's answer and, after the same day's second ruling repealed
+    /// 同根去重, this product's too (see [`Self::open_float`]). `×`, Esc and Dock
+    /// are untouched, so nothing has become unclosable.
     fn press_float_trigger(&mut self, trigger: float::FloatTrigger) -> Result<()> {
         if self
             .float
