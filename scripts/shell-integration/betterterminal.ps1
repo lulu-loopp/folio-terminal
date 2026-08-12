@@ -217,7 +217,13 @@ $Global:__BetterTerminalShellIntegration = @{
 # which clears the visible viewport, so unsupported/unproven versions consume the same chord as a
 # no-op rather than leaking it into the input buffer.
 $psReadLineVersion = (Get-Module PSReadLine).Version
-if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
+# A PSReadLine that derives its edit anchor from the prompt's own cell width — the
+# BetterTerminal fork, 2.4.6-bt.anchorfix and later — keeps its coordinates true across
+# every resize (the `%=` quotient loss upstream never fixed, probed 2026-08-13), so the
+# reflection repair below is dead weight there. The no-op branch still consumes the
+# chord, exactly as it does for unproven versions, so it cannot leak into the buffer.
+$psReadLineSelfAnchors = $psReadLineVersion -ge [version]'2.4.6'
+if (-not $psReadLineSelfAnchors -and $psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
         param($key, $arg)
         $historyNavigation = & $Global:__BetterTerminalShellIntegration.HistoryNavigationCapture
