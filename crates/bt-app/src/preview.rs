@@ -1650,6 +1650,93 @@ pub fn take_preview_worker_notice(notice_pending: &mut bool) -> Option<&'static 
     }
 }
 
+/// How thick the bar under a too-wide block is *drawn*.
+pub const BLOCK_SCROLL_THICKNESS_LOGICAL_PX: f32 = 2.0;
+/// How thick it is to a **hand** — the divider's `SEAT_DIVIDER_HIT_LOGICAL_PX`
+/// and for its reason: one drawn pixel is not a target.
+///
+/// The reported bug (2026-08-12) was that the bar could not be dragged at all;
+/// half of the answer was giving it a drag, and the other half is admitting
+/// that two pixels is not something anyone can put a pointer on. The band is
+/// grown around the drawn rule on every side, so the tolerance is the same
+/// whether the approach is from inside the block or from the gap below it.
+pub const BLOCK_SCROLL_HIT_LOGICAL_PX: f32 = 7.0;
+
+/// The scroll bar a block that is wider than its page wears along its bottom.
+///
+/// One answer for the painter, the hit test and the drag alike: a thumb drawn
+/// somewhere the pointer is not tested is a thumb that looks draggable and
+/// is not, which is the whole of the bug this replaced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockScrollBar {
+    /// The full-width rule the thumb runs along.
+    pub track: [f32; 4],
+    /// The visible share of the content, drawn in proportion.
+    pub thumb: [f32; 4],
+    /// The thumb widened to something a hand can land on.
+    pub grab: [f32; 4],
+    /// How far the thumb's left edge may travel along the track.
+    pub travel: f32,
+    /// How far the content may travel under the block's own rectangle.
+    pub overflow: f32,
+}
+
+/// The bar for a block of `content` pixels shown through `clip`, scrolled by
+/// `offset` — or `None` when the whole block fits and there is nothing to say.
+#[must_use]
+pub fn block_scroll_bar(
+    clip: [f32; 4],
+    offset: f32,
+    content: f32,
+    scale: f32,
+) -> Option<BlockScrollBar> {
+    let [left, _, right, bottom] = clip;
+    let page = (right - left).max(1.0);
+    let overflow = content - page;
+    if overflow <= 0.0 {
+        return None;
+    }
+    let thickness = (BLOCK_SCROLL_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let top = bottom - thickness;
+    let width = (page * (page / content)).max(1.0);
+    let travel = (page - width).max(0.0);
+    let start = left + travel * (offset.clamp(0.0, overflow) / overflow);
+    let thumb = [start, top, start + width, bottom];
+    // Grown on every side by the same amount, the way `seats::hit_band` grows a
+    // divider: the tolerance is a property of the hand, not of the direction it
+    // comes from.
+    let grow = ((BLOCK_SCROLL_HIT_LOGICAL_PX * scale - thickness) / 2.0).max(0.0);
+    Some(BlockScrollBar {
+        track: [left, top, right, bottom],
+        thumb,
+        grab: [
+            thumb[0] - grow,
+            thumb[1] - grow,
+            thumb[2] + grow,
+            thumb[3] + grow,
+        ],
+        travel,
+        overflow,
+    })
+}
+
+/// Where a thumb dragged to `x` — held `grab` pixels from its own left edge —
+/// leaves the block's offset.
+///
+/// **Linear in the track, clamped at both ends by the same numbers the wheel
+/// clamps by**: a thumb is a picture of the offset, so dragging it is reading
+/// that picture backwards and nothing else. A track with no travel (a thumb as
+/// wide as its track, which cannot happen while `overflow > 0`) answers zero
+/// rather than dividing by it.
+#[must_use]
+pub fn block_scroll_dragged_to(bar: &BlockScrollBar, x: f32, grab: f32) -> f32 {
+    if bar.travel <= 0.0 {
+        return 0.0;
+    }
+    let along = (x - grab - bar.track[0]) / bar.travel;
+    (along * bar.overflow).clamp(0.0, bar.overflow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

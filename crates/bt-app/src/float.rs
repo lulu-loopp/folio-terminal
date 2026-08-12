@@ -388,35 +388,65 @@ pub fn float_height_for_body(body_height: f32, scale: f32) -> f32 {
         + body_height.max(0.0)
 }
 
-/// Where a fresh float is placed relative to the trigger that summoned it (G89).
+/// Where a fresh float stands relative to the trigger that summoned it (G89).
 ///
 /// Under the trigger, left-aligned to it, six pixels down; flipped **above** it
 /// when there is no room below; and horizontally clamped — never flipped —
 /// which is `peek_box_layout`'s rule and the shape
 /// `M2-tiny-window-priority.md` §3.3 asks every float to copy: 主轴翻转、次轴
 /// clamp.
+///
+/// # The third case, and why this returns a frame (user report 2026-08-12)
+///
+/// 主轴翻转 has an unstated premise — that one of the two sides *can* hold the
+/// window. A trigger in the middle of the window breaks it: a float summoned
+/// from the lower pane of an up/down split is taller than the room below **and**
+/// taller than the room above, and the old shape answered that by flipping
+/// above anyway, overflowing the top, and letting the vertical clamp haul it to
+/// the viewport's edge. Left-aligned to a trigger that lives at the right end
+/// of a pane head, the result was a window in the *window's* top-right corner
+/// with nothing beneath it — a float that has visibly stopped belonging to the
+/// control that opened it, which is the one thing a placement owes.
+///
+/// So the main axis is decided in three steps, not two: take the side that
+/// fits, else the side with **more room**, and give the window that much
+/// height. Shrinking is the honest answer where flipping has run out — every
+/// other float in this file already accepts a smaller size rather than a wrong
+/// place ([`clamp_pinned`], §3.4's strip floor), and 6px below a real head beats
+/// the design height measured from somewhere the user was not looking. Which is
+/// why the return value is the whole frame: the height is part of the answer.
 #[must_use]
 pub fn float_placement(
     trigger: [f32; 4],
     size: [f32; 2],
     viewport: [f32; 4],
     scale: f32,
-) -> [f32; 2] {
+) -> [f32; 4] {
     let px = |logical: f32| logical * scale;
     let margin = px(FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX);
     let gap = px(FLOAT_WINDOW_TRIGGER_GAP_LOGICAL_PX);
+    let strip = px(FLOAT_WINDOW_MIN_STRIP_LOGICAL_PX);
     let left_limit = viewport[0] + margin;
     let right_limit = viewport[2] - margin - size[0];
     let left = trigger[0].clamp(left_limit, right_limit.max(left_limit));
-    let mut top = trigger[3] + gap;
-    if top + size[1] > viewport[3] - margin {
-        top = trigger[1] - gap - size[1];
-    }
-    let top_limit = viewport[1] + margin;
-    let bottom_limit = viewport[3] - margin - size[1];
+    let under = trigger[3] + gap;
+    let room_under = (viewport[3] - margin - under).max(0.0);
+    let room_over = (trigger[1] - gap - (viewport[1] + margin)).max(0.0);
+    let (top, height) = if size[1] <= room_under {
+        (under, size[1])
+    } else if size[1] <= room_over {
+        (trigger[1] - gap - size[1], size[1])
+    } else if room_under >= room_over {
+        (under, room_under.max(strip))
+    } else {
+        let height = room_over.max(strip);
+        (trigger[1] - gap - height, height)
+    };
     [
         left.round(),
-        top.clamp(top_limit, bottom_limit.max(top_limit)).round(),
+        top.round(),
+        (left + size[0]).round(),
+        (top + height).round(),
     ]
 }
 
@@ -1604,7 +1634,11 @@ mod tests {
     fn a_fresh_float_opens_under_its_trigger_six_pixels_down() {
         let trigger = frame(300.0, 40.0, 19.0, 19.0);
         let placed = float_placement(trigger, [264.0, 400.0], VIEWPORT, SCALE);
-        assert_eq!(placed, [300.0, 65.0], "left-aligned to the icon, 6px below");
+        assert_eq!(
+            placed,
+            [300.0, 65.0, 564.0, 465.0],
+            "left-aligned to the icon, 6px below, at the size it asked for"
+        );
     }
 
     /// G89: no room below is answered by flipping *above*, which is
@@ -1630,6 +1664,43 @@ mod tests {
             1280.0 - 8.0 - 264.0,
             "pulled in to the 8px viewport margin"
         );
+    }
+
+    /// A window called from the **lower** pane of an up/down split hangs off
+    /// *that* head, not off the top of the window (user report, 2026-08-12).
+    ///
+    /// The shape of the bug: at the DPI where the 62%-of-viewport cap outgrows
+    /// the 460-logical-pixel one, a float is tall enough that **neither** side
+    /// of a mid-window trigger can hold it — and the old placement answered
+    /// that by flipping above, overflowing, and letting the cross-axis clamp
+    /// drag it to the viewport's top edge. Left-aligned to a trigger that
+    /// lives at the right end of a pane head, that lands in the window's
+    /// top-right corner with nothing beneath it, which is exactly what the
+    /// screenshot showed. Both triggers are asked here, from one real split,
+    /// because the top pane's answer was never wrong and must stay right.
+    #[test]
+    fn a_float_summoned_from_the_lower_pane_head_hangs_off_that_head() {
+        // The DPI is the point: at 1.5 the viewport fraction is the binding cap.
+        const HIDPI: f32 = 1.5;
+        let viewport = [0.0, 51.0, 1920.0, 1080.0];
+        let split = [[0.0, 51.0, 1920.0, 565.0], [0.0, 565.0, 1920.0, 1080.0]];
+        // Tall enough to want the whole cap — a home folder's worth of rows.
+        let size = float_opening_size(100_000.0, viewport, HIDPI);
+        let gap = FLOAT_WINDOW_TRIGGER_GAP_LOGICAL_PX * HIDPI;
+        for (which, pane) in split.iter().enumerate() {
+            let trigger =
+                crate::seats::pane_head_geometry(*pane, bt_layout::SeatKind::Terminal, HIDPI)
+                    .files
+                    .expect("a terminal head carries the folder trigger");
+            let placed = float_placement(trigger, size, viewport, HIDPI);
+            let below = (placed[1] - (trigger[3] + gap)).abs() <= 1.0;
+            let above = ((trigger[1] - gap) - placed[3]).abs() <= 1.0;
+            assert!(
+                below || above,
+                "pane {which}: the window hangs off its trigger {trigger:?}, \
+                 not off the viewport — got {placed:?}"
+            );
+        }
     }
 
     /// §7.1.2: 主窗口缩小自动重钳位——平移回视口、尺寸不变.

@@ -1044,6 +1044,37 @@ struct PreviewEditPaint {
     /// `(visual_row, column)` — drawn only while the surface holds the keyboard.
     caret: Option<(usize, usize)>,
     caret_width: f32,
+    /// The IME's composition, standing where it will land.
+    preedit: Option<PreviewPreedit>,
+}
+
+/// A composition in flight over the edit surface (user report, 2026-08-12).
+///
+/// # Why this is not the terminal's machine
+///
+/// `bt_render::compose_preedit` draws a composition by writing the letters into
+/// the grid's own cells with `CellFlags::UNDERLINE`, which is the right shape
+/// for a surface made of cells and impossible for one that is not: the preview's
+/// body is paragraphs on a monospace lattice, with no cell to overwrite. So the
+/// *form* is copied and the machine is not — the letters where they will land,
+/// underlined, with the IME's own caret inside them — and the one thing this
+/// surface must add is an opaque ground beneath them, because a grid's cells
+/// replace what was there and a paragraph drawn over another paragraph does not.
+///
+/// **v2**: the target clause is not styled. Spike 04 found all three Chinese
+/// IMEs report a collapsed caret and no clause segmentation, so there is nothing
+/// to style yet; the day one reports it, `Preedit::cursor_byte` grows a range
+/// and this grows a second band.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewPreedit {
+    /// The visual row and the column the composition begins at — the caret's.
+    row: usize,
+    column: usize,
+    text: String,
+    /// Its own width in columns, which is what the ground and the rule span.
+    columns: usize,
+    /// How far into it the IME's caret sits, in columns.
+    caret_columns: usize,
 }
 
 /// `.pv-edit`'s body: plain monospace lines, no wrapping.
@@ -1089,34 +1120,69 @@ fn build_preview_text_body(
         }
         if let Some((row, column)) = edit.caret {
             let box_of_row = geometry.line_rect(row);
-            let x = box_of_row[0] + advance * column as f32;
+            // A composition stands between the caret's column and the caret: the
+            // letters are already where they will land, and the caret is inside
+            // them where the IME says it is.
+            let caret_column = match &edit.preedit {
+                Some(preedit) => {
+                    let left = box_of_row[0] + advance * preedit.column as f32;
+                    let right = left + advance * preedit.columns as f32;
+                    // The ground first — this surface is not a cell grid, so the
+                    // document's own text is still under these letters.
+                    quads.push(bt_render::PreviewQuad {
+                        rect: [left, box_of_row[1], right, box_of_row[3]],
+                        color: palette.seat_body,
+                    });
+                    quads.push(bt_render::PreviewQuad {
+                        rect: [left, box_of_row[3] - edit.caret_width, right, box_of_row[3]],
+                        color: palette.preview_body_text,
+                    });
+                    preedit.column + preedit.caret_columns
+                }
+                None => column,
+            };
+            let x = box_of_row[0] + advance * caret_column as f32;
             quads.push(bt_render::PreviewQuad {
                 rect: [x, box_of_row[1], x + edit.caret_width, box_of_row[3]],
                 color: palette.preview_caret,
             });
         }
     }
+    let mut paragraphs: Vec<_> = range
+        .filter_map(|row| {
+            let (line, from, to) = wrap.row_span(row)?;
+            let text = lines.get(line)?;
+            // The columns this row draws, cut out of the line by column and
+            // not by byte: the surface is a cell grid and a wide character
+            // occupies two of its cells.
+            let start = preview_edit::byte_at_column(text, from);
+            let end = preview_edit::byte_at_column(text, to);
+            Some(mono_paragraph(
+                text[start..end].to_owned(),
+                geometry.line_rect(row),
+                geometry.font_size,
+                geometry.line_height,
+                palette.preview_body_text,
+            ))
+        })
+        .collect();
+    // Last, so the composition's letters stand over the document's — the ground
+    // and the rule under them were pushed with the quads, which are drawn first.
+    if let Some(preedit) = edit.and_then(|edit| edit.preedit.as_ref()) {
+        let box_of_row = geometry.line_rect(preedit.row);
+        let left = box_of_row[0] + advance * preedit.column as f32;
+        paragraphs.push(mono_paragraph(
+            preedit.text.clone(),
+            [left, box_of_row[1], box_of_row[2].max(left), box_of_row[3]],
+            geometry.font_size,
+            geometry.line_height,
+            palette.preview_body_text,
+        ));
+    }
     bt_render::PreviewBody {
         clip,
         quads,
-        paragraphs: range
-            .filter_map(|row| {
-                let (line, from, to) = wrap.row_span(row)?;
-                let text = lines.get(line)?;
-                // The columns this row draws, cut out of the line by column and
-                // not by byte: the surface is a cell grid and a wide character
-                // occupies two of its cells.
-                let start = preview_edit::byte_at_column(text, from);
-                let end = preview_edit::byte_at_column(text, to);
-                Some(mono_paragraph(
-                    text[start..end].to_owned(),
-                    geometry.line_rect(row),
-                    geometry.font_size,
-                    geometry.line_height,
-                    palette.preview_body_text,
-                ))
-            })
-            .collect(),
+        paragraphs,
         blocks: Vec::new(),
         foot: None,
     }
@@ -1269,6 +1335,21 @@ fn build_preview_table_body(
     }
 }
 
+/// Everything the bars under the too-wide blocks are told for one frame.
+///
+/// One value rather than three parameters, because the three are one subject —
+/// where each block stands in its own scroll, which of them the hand is on, and
+/// the scale all of that is measured in — and because a painter with eight
+/// parameters is a painter whose next argument goes in the wrong slot.
+#[derive(Clone, Copy)]
+struct BlockScrollPaint<'a> {
+    /// How far each block of the document has been scrolled inside itself.
+    offsets: &'a [f32],
+    /// The block whose thumb is lit, and whether a hand is on it.
+    lit: Option<(usize, bool)>,
+    scale: f32,
+}
+
 /// `.pv-md`'s body: the rendered document.
 ///
 /// **Every row is placed at the height the measuring pass wrote down for it.**
@@ -1278,10 +1359,15 @@ fn build_preview_markdown_body(
     body: [f32; 4],
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
-    block_scroll: &[f32],
+    bars: BlockScrollPaint<'_>,
     document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
     palette: &bt_render::ChromePalette,
 ) -> bt_render::PreviewBody {
+    let BlockScrollPaint {
+        offsets: block_scroll,
+        lit,
+        scale,
+    } = bars;
     let (blocks, layout) = document;
     // **The page has no horizontal axis; the wide blocks have their own** (user
     // ruling, 2026-08-13, overturning the same day's earlier "the whole page
@@ -1304,7 +1390,7 @@ fn build_preview_markdown_body(
     // time and zipping the two would be one list of *visible* wide blocks against
     // one list of *all* of them — and a document scrolled past its first table
     // would draw every indicator against the wrong block.
-    let mut scrollers: Vec<(bt_render::PreviewBlock, (f32, f32))> = Vec::new();
+    let mut scrollers: Vec<(bt_render::PreviewBlock, (usize, f32, f32))> = Vec::new();
     for (index, (block, placed)) in blocks.iter().zip(layout).enumerate() {
         let top = origin + placed.top;
         let height = placed.height;
@@ -1332,7 +1418,7 @@ fn build_preview_markdown_body(
                     quads: Vec::new(),
                     paragraphs: Vec::new(),
                 },
-                (offset, placed.width),
+                (index, offset, placed.width),
             ));
             (left - offset, right - offset, scrollers.len())
         } else {
@@ -1508,14 +1594,9 @@ fn build_preview_markdown_body(
             }
         }
     }
-    // The indicators, after the blocks so they stand over their own contents.
-    // Two flat rules — the block's bottom edge as a track and the visible share
-    // of it as a thumb — in the inks a grid line and a quiet caption already use,
-    // because the smallest honest thing that says "there is more this way" is a
-    // proportion, and this surface has no scrollbar family to borrow a shape
-    // from.
+    // The bars, after the blocks so they stand over their own contents.
     for (block, indicator) in &mut scrollers {
-        push_block_scroll_indicator(block, *indicator, palette);
+        push_block_scroll_indicator(block, *indicator, lit, scale, palette);
     }
     bt_render::PreviewBody {
         clip: body,
@@ -1529,29 +1610,103 @@ fn build_preview_markdown_body(
 /// `.md-block::-webkit-scrollbar` in the only shape this window has for one: a
 /// two-pixel rule along the block's own bottom edge, and the visible share of it
 /// filled in.
+///
+/// # It is a scrollbar, so it is draggable (user report, 2026-08-12)
+///
+/// The first version of this was an *indicator*: it said "there is more this
+/// way" and answered nothing when a hand went for it. The report is that
+/// somebody went for it — which is not a surprising thing for somebody to do,
+/// because a proportional bar riding a track under a scrolling region is the
+/// picture of a scrollbar in every application on the desk. Something that
+/// looks like a control and is not is worse than no control, so it became one:
+/// the geometry moved to [`preview::block_scroll_bar`], where the hit test and
+/// the drag read the same rectangle this paints.
+///
+/// The three inks are the divider's three, which is this app's only existing
+/// family for a bar a hand can hold: quiet at rest, the brighter row ink under
+/// the pointer, and the accent — the one saturated colour the chrome spends —
+/// while it is being dragged.
 fn push_block_scroll_indicator(
     block: &mut bt_render::PreviewBlock,
-    (offset, content): (f32, f32),
+    (index, offset, content): (usize, f32, f32),
+    lit: Option<(usize, bool)>,
+    scale: f32,
     palette: &bt_render::ChromePalette,
 ) {
-    const THICKNESS: f32 = 2.0;
-    let [left, _, right, bottom] = block.clip;
-    let page = (right - left).max(1.0);
-    let top = bottom - THICKNESS;
+    let Some(bar) = preview::block_scroll_bar(block.clip, offset, content, scale) else {
+        return;
+    };
     // Drawn in the block's *own* coordinates rather than the scrolled ones, so
-    // the indicator stays where it is while the content moves under it. That is
-    // why it is pushed after the offset has been applied to everything else.
+    // the bar stays where it is while the content moves under it. That is why
+    // it is pushed after the offset has been applied to everything else.
     block.quads.push(bt_render::PreviewQuad {
-        rect: [left, top, right, bottom],
+        rect: bar.track,
         color: palette.preview_grid_line,
     });
-    let share = (page / content.max(1.0)).clamp(0.0, 1.0);
-    let travel = (page - page * share).max(0.0);
-    let start = left + travel * (offset / (content - page).max(1.0)).clamp(0.0, 1.0);
     block.quads.push(bt_render::PreviewQuad {
-        rect: [start, top, start + page * share, bottom],
-        color: palette.files_row_muted,
+        rect: bar.thumb,
+        color: match lit {
+            Some((lit, true)) if lit == index => palette.divider_active,
+            Some((lit, false)) if lit == index => palette.files_row_text,
+            _ => palette.files_row_muted,
+        },
     });
+}
+
+/// Every wide block that is on screen this frame, with the rectangle it owns
+/// and the width it wants.
+///
+/// The painter's own walk, lifted out so the wheel, the hover and the drag ask
+/// *it* instead of each re-deriving `origin + placed.top` for themselves. Three
+/// copies of that sum are three chances for a bar to be tested where it is not
+/// drawn, and a scrollbar that misses the pointer by a pixel is a scrollbar
+/// nobody can use — which is the class of bug this whole seam exists to close.
+fn preview_wide_blocks<'a>(
+    body: [f32; 4],
+    metrics: seats::PreviewMarkdownMetrics,
+    scroll: [f32; 2],
+    (blocks, layout): (&'a [preview::MarkdownBlock], &'a [MarkdownBlockLayout]),
+) -> impl Iterator<Item = (usize, [f32; 4], f32)> + 'a {
+    let left = body[0] + metrics.padding_x;
+    let right = left + (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+    let origin = body[1] + metrics.padding_y - scroll[1];
+    blocks
+        .iter()
+        .zip(layout)
+        .enumerate()
+        .filter_map(move |(index, (_, placed))| {
+            let top = origin + placed.top;
+            let bottom = top + placed.height;
+            (placed.width > right - left && bottom > body[1] && top < body[3]).then_some((
+                index,
+                [left, top, right, bottom],
+                placed.width,
+            ))
+        })
+}
+
+/// The block whose scroll thumb the pointer is on, and that thumb's bar.
+///
+/// A free function taking the same answers the painter takes, so a test can ask
+/// it exactly what a pointer asks it.
+fn preview_block_bar_at(
+    body: [f32; 4],
+    metrics: seats::PreviewMarkdownMetrics,
+    scroll: [f32; 2],
+    block_scroll: &[f32],
+    document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
+    scale: f32,
+    at: [f32; 2],
+) -> Option<(usize, preview::BlockScrollBar)> {
+    preview_wide_blocks(body, metrics, scroll, document).find_map(|(index, clip, content)| {
+        let offset = block_scroll.get(index).copied().unwrap_or(0.0);
+        let bar = preview::block_scroll_bar(clip, offset, content, scale)?;
+        (at[0] >= bar.grab[0]
+            && at[0] <= bar.grab[2]
+            && at[1] >= bar.grab[1]
+            && at[1] <= bar.grab[3])
+            .then_some((index, bar))
+    })
 }
 
 /// How wide a code fence insists on being: its longest line, plus its border
@@ -2491,6 +2646,15 @@ struct TabState {
     /// because the index is the block's identity, which is the same identity the
     /// layout beside it is walked by.
     preview_md_block_scroll: Vec<f32>,
+    /// A block's scroll thumb in hand (user report, 2026-08-12).
+    ///
+    /// Only the block's identity and where in the thumb the hand took hold: the
+    /// bar's geometry is re-read from the current frame on every move, which is
+    /// [`DividerDrag`]'s discipline and its reason — the answer to "where is
+    /// this thumb" must not be a second copy of the layout.
+    preview_block_drag: Option<PreviewBlockDrag>,
+    /// The block whose thumb is lit because the pointer is over it.
+    preview_block_hover: Option<usize>,
     /// Where the caret is in the buffer on the seat, and what it has selected.
     ///
     /// Beside the scroll offset and for the same reason: both are the *view's*,
@@ -3848,6 +4012,24 @@ impl DerefMut for TabState {
     }
 }
 
+/// A markdown block's scroll thumb in hand (user report, 2026-08-12).
+///
+/// [`DividerDrag`]'s shape, one surface over: the block's identity and the
+/// grab point, and nothing else. The bar itself is re-read from the current
+/// frame on every move, because a document that reflowed mid-drag — a pane
+/// resized, a save, a picture that finished loading above — has moved every
+/// block on the page, and a remembered track would be scrolling a rectangle
+/// that is no longer there.
+#[derive(Clone, Copy, Debug)]
+struct PreviewBlockDrag {
+    /// Which block of the parsed document, the same index its offset is stored
+    /// under.
+    index: usize,
+    /// How far into the thumb's own width the hand took hold, so the thumb
+    /// stays under the pointer rather than jumping its centre there.
+    grab: f32,
+}
+
 /// A divider drag in flight. Holds only the split's identity: the geometry is
 /// re-read from the current solve on every pointer move, because the answer to
 /// "where is this divider" must not be a second copy of the layout.
@@ -3953,12 +4135,68 @@ struct PreviewHeadFrame {
 /// in it" is a property rather than a screenshot.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct KeyboardOwner {
-    /// A modal, a rename editor, or any open popup.
+    /// The tab-name editor. Split out from the modals below it because it is the
+    /// one owner in this list that *takes text* without being a terminal, which
+    /// only the IME's ladder needs to know.
+    rename: bool,
+    /// A modal or any open popup.
     menu_or_dialog: bool,
     /// A files column holds it (`InputOwner::FilesTree`).
     files_tree: bool,
     /// A preview holds it — editing, or browsing a read-only body.
     preview: bool,
+}
+
+/// Where a **composition** goes — [`KeyboardOwner`] resolved to a destination.
+///
+/// # The bug this exists to close (user report, 2026-08-12)
+///
+/// `keyboard_input` has had this ladder since M0: a dozen rungs of "this surface
+/// owns the key", with the PTY encoder at the bottom where nothing else claimed
+/// it. `ime_input` had two rungs — the settings sheet and the rename editor —
+/// and then wrote **every** commit to the PTY. So a user who clicked into the
+/// preview's edit surface, where `preview_key` routes every physical keystroke
+/// into the buffer, and then typed Chinese, watched the candidate list float
+/// over the document while `ni'hao` appeared at the shell prompt underneath.
+/// The screenshot is unambiguous and the cause is one missing ladder.
+///
+/// The rungs are `keyboard_input`'s own, in its order, and the reason each
+/// surface swallows rather than passes through is the reason it already gives
+/// there: a files column has 「nothing to type into」 and answers every key
+/// itself (`files_tree_key` returns `true` unconditionally), a focused read-only
+/// preview does the same (`preview_browse_key`'s `_ => Ok(true)`), and a popup
+/// swallows character keys outright. A composition is a keystroke that took a
+/// longer road; it may not arrive somewhere the keystroke could not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImeOwner {
+    /// The tab-name editor, which has taken commits since it was written.
+    Rename,
+    /// A modal or a popup: no text goes anywhere while one is up.
+    Modal,
+    /// A files column. Nothing to type into — and, above all, nothing to type
+    /// *through*.
+    FilesTree,
+    /// A preview seat. The edit surface takes the text; a read-only body has
+    /// none to take and swallows it, which is what its keys already do.
+    Preview,
+    /// The shell — the only owner that has a PTY, and the only one that gets it.
+    Shell,
+}
+
+/// The ladder, as a function of who holds the keyboard.
+#[must_use]
+fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
+    if owner.rename {
+        ImeOwner::Rename
+    } else if owner.menu_or_dialog {
+        ImeOwner::Modal
+    } else if owner.files_tree {
+        ImeOwner::FilesTree
+    } else if owner.preview {
+        ImeOwner::Preview
+    } else {
+        ImeOwner::Shell
+    }
 }
 
 /// Whether a shell has the keyboard — `InputOwner == Terminal`.
@@ -3971,7 +4209,7 @@ struct KeyboardOwner {
 /// shell at once, and against all of them the window's one lit caret was claiming
 /// a keystroke it would not receive.
 fn keyboard_owner_is_a_shell(owner: KeyboardOwner) -> bool {
-    !owner.menu_or_dialog && !owner.files_tree && !owner.preview
+    matches!(ime_owner(owner), ImeOwner::Shell)
 }
 
 /// A foot that is confirming a reveal.
@@ -9363,6 +9601,8 @@ fn assemble_tab_state(
         preview_views: PreviewViewStore::default(),
         preview_notice: None,
         preview_selecting: false,
+        preview_block_drag: None,
+        preview_block_hover: None,
     };
     debug_assert!(
         tab.sessions_match_terminals(),
@@ -13426,6 +13666,11 @@ impl Runtime {
         self.preview_scroll = [0.0, 0.0];
         self.preview_edit_focused = false;
         self.preview_selecting = false;
+        // The block indices this document was scrolled by mean nothing to the
+        // next one, and a thumb held over the swap would be dragging a block
+        // that is not there any more.
+        self.preview_block_drag = None;
+        self.preview_block_hover = None;
         self.preview_notice = None;
     }
 
@@ -13695,39 +13940,144 @@ impl Runtime {
             return Ok(false);
         }
         let metrics = seats::preview_markdown_metrics(scale);
-        let page = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
-        let origin = body[1] + metrics.padding_y - self.preview_scroll[1];
-        let hit = blocks
-            .iter()
-            .zip(layout)
-            .enumerate()
-            .find(|(_, (_, placed))| {
-                placed.width > page
-                    && y >= origin + placed.top
-                    && y < origin + placed.top + placed.height
-            });
-        let Some((index, (_, placed))) = hit else {
+        let hit = preview_wide_blocks(body, metrics, self.preview_scroll, (blocks, layout))
+            .find(|(_, clip, _)| y >= clip[1] && y < clip[3]);
+        let Some((index, clip, width)) = hit else {
             return Ok(false);
         };
-        let overflow = placed.width - page;
+        let overflow = width - (clip[2] - clip[0]);
+        let current = self
+            .preview_md_block_scroll
+            .get(index)
+            .copied()
+            .unwrap_or(0.0);
+        // Still the block's notch either way: a table at its own end does not
+        // hand the wheel back to a page that has nowhere to go either.
+        self.set_preview_block_scroll(index, (current - travel).clamp(0.0, overflow))?;
+        Ok(true)
+    }
+
+    /// Where a block's own offset is written — the wheel's answer and the
+    /// thumb's, through one door.
+    ///
+    /// Reports whether anything moved. The caller does the clamping, because the
+    /// two gestures clamp against the same numbers by different arithmetic and
+    /// this is not the place to guess which one is asking.
+    fn set_preview_block_scroll(&mut self, index: usize, offset: f32) -> Result<bool> {
         // Grown here rather than at the rebuild, because a document is parsed far
         // more often than a block is scrolled and a vector of zeros per parse is
         // a cost paid for a case that usually does not arise.
         if self.preview_md_block_scroll.len() <= index {
             self.preview_md_block_scroll.resize(index + 1, 0.0);
         }
-        let current = self.preview_md_block_scroll[index];
-        let wanted = (current - travel).clamp(0.0, overflow);
-        if wanted == current {
-            // Still the block's notch: a table at its own end does not hand the
-            // wheel back to a page that has nowhere to go either.
-            return Ok(true);
+        if self.preview_md_block_scroll[index] == offset {
+            return Ok(false);
         }
-        self.preview_md_block_scroll[index] = wanted;
-        self.refresh_preview_body();
-        self.refresh_chrome();
-        self.present_chrome_change()?;
+        self.preview_md_block_scroll[index] = offset;
+        self.repaint_preview()?;
         Ok(true)
+    }
+
+    /// The bar the pointer is on, asked of the frame as it stands.
+    fn preview_block_bar_under(
+        &self,
+        position: PhysicalPosition<f64>,
+        scale: f32,
+    ) -> Option<(usize, preview::BlockScrollBar)> {
+        let body = self.preview_content_body_rect(scale)?;
+        let PreviewDocument::Markdown { blocks, layout, .. } = &self.preview_doc else {
+            return None;
+        };
+        preview_block_bar_at(
+            body,
+            seats::preview_markdown_metrics(scale),
+            self.preview_scroll,
+            &self.preview_md_block_scroll,
+            (blocks, layout),
+            scale,
+            [position.x as f32, position.y as f32],
+        )
+    }
+
+    /// Which thumb is lit this frame, and whether it is in a hand.
+    fn preview_block_lit(&self) -> Option<(usize, bool)> {
+        self.preview_block_drag
+            .map(|drag| (drag.index, true))
+            .or(self.preview_block_hover.map(|index| (index, false)))
+    }
+
+    /// A press on a block's scroll thumb takes hold of it.
+    ///
+    /// Returns whether the press was the thumb's. Asked before the edit surface
+    /// claims the press, because the bar stands *over* the block it scrolls: a
+    /// press there means the bar, the same way a press on a scrollbar in a text
+    /// editor is never a press in the text.
+    fn press_preview_block_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some((index, bar)) = self.preview_block_bar_under(position, scale) else {
+            return Ok(false);
+        };
+        self.preview_block_drag = Some(PreviewBlockDrag {
+            index,
+            grab: (position.x as f32 - bar.thumb[0]).clamp(0.0, bar.thumb[2] - bar.thumb[0]),
+        });
+        self.preview_block_hover = Some(index);
+        self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// The pointer travelling with a thumb in hand.
+    ///
+    /// It keeps the pointer *outside* the block's own rectangle too, which is
+    /// [`Self::drag_preview_selection`]'s rule and every scrollbar's: a drag
+    /// that stopped tracking the moment it left a two-pixel band would be no
+    /// better than the indicator it replaced.
+    fn drag_preview_block_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.preview_block_drag else {
+            return Ok(false);
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = self.preview_content_body_rect(scale) else {
+            return Ok(true);
+        };
+        let offset = self
+            .preview_md_block_scroll
+            .get(drag.index)
+            .copied()
+            .unwrap_or(0.0);
+        let PreviewDocument::Markdown { blocks, layout, .. } = &self.preview_doc else {
+            return Ok(true);
+        };
+        let found = preview_wide_blocks(
+            body,
+            seats::preview_markdown_metrics(scale),
+            self.preview_scroll,
+            (blocks, layout),
+        )
+        .find(|(index, _, _)| *index == drag.index)
+        .and_then(|(_, clip, content)| preview::block_scroll_bar(clip, offset, content, scale));
+        // The block stopped being wide — the pane grew, the document changed.
+        // The gesture still owns the pointer until the button comes up; there is
+        // simply nothing left for it to move.
+        let Some(bar) = found else {
+            return Ok(true);
+        };
+        let wanted = preview::block_scroll_dragged_to(&bar, position.x as f32, drag.grab);
+        self.set_preview_block_scroll(drag.index, wanted)?;
+        Ok(true)
+    }
+
+    /// Light the thumb under the pointer, or put the last one out.
+    fn note_preview_block_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let over = position
+            .and_then(|position| self.preview_block_bar_under(position, scale))
+            .map(|(index, _)| index);
+        if over == self.preview_block_hover {
+            return Ok(());
+        }
+        self.preview_block_hover = over;
+        self.repaint_preview()
     }
 
     /// The stored offset, put back inside what the document actually has.
@@ -13877,13 +14227,23 @@ impl Runtime {
     /// over a dimmed window, and `Focused(false)` has already stopped the blink
     /// whenever the window itself lost focus.
     fn keyboard_owner_is_a_shell(&self) -> bool {
-        keyboard_owner_is_a_shell(KeyboardOwner {
+        keyboard_owner_is_a_shell(self.keyboard_owner())
+    }
+
+    /// Who holds the keyboard, read off the window as it stands.
+    ///
+    /// One reading for the two questions asked of it — whether a caret may blink
+    /// ([`keyboard_owner_is_a_shell`]) and where a composition goes
+    /// ([`ime_owner`]) — because the day those two disagree is the day a caret
+    /// blinks in a shell that is not receiving the characters.
+    fn keyboard_owner(&self) -> KeyboardOwner {
+        KeyboardOwner {
+            rename: self.rename.is_some(),
             // `Menu` and `Dialog`, which own the keyboard outright while they are
             // up (§7.1.5, and the mock-up's "an open menu owns the keyboard" at
             // 6188).
             menu_or_dialog: self.dirty_gate.is_open()
                 || self.settings.is_open()
-                || self.rename.is_some()
                 || self.file_menu.is_some()
                 || self.profile_menu.is_open()
                 || self.root_menu.seat().is_some()
@@ -13893,7 +14253,7 @@ impl Runtime {
             // same owner wearing its other state: the arrows scroll the document,
             // so they are not the shell's either.
             preview: self.preview_edit_focus() || self.preview_seat_focused(),
-        })
+        }
     }
 
     /// One key, with the quick edit holding the keyboard.
@@ -14034,6 +14394,94 @@ impl Runtime {
         self.preview_scroll = scrolled;
         self.repaint_preview()?;
         Ok(true)
+    }
+
+    /// A composition landing in the preview (user report, 2026-08-12).
+    ///
+    /// The commit goes through [`Self::insert_into_preview`] — the *same* door a
+    /// typed character uses — so the dirty bit, the caret reveal, the notice and
+    /// the read-only refusal all answer exactly as they do for the keyboard.
+    /// One insert path per surface, not one per input method.
+    fn preview_ime(&mut self, event: Ime) -> Result<()> {
+        match event {
+            Ime::Preedit(text, cursor_range) => {
+                // Spike 04 found all three Chinese IMEs report a collapsed
+                // caret; the target clause stays out until one reports it.
+                self.preedit = (!text.is_empty()).then_some(Preedit {
+                    text,
+                    cursor_byte: cursor_range.map(|(start, _)| start),
+                });
+                self.repaint_preview()
+            }
+            Ime::Commit(text) => {
+                self.preedit = None;
+                self.insert_into_preview(&text)
+            }
+            // Reached only for `Preedit`/`Commit`; the window's own bookkeeping
+            // is nobody's surface and stays in `ime_input`.
+            Ime::Enabled | Ime::Disabled => Ok(()),
+        }
+    }
+
+    /// The composition the **terminal** is entitled to draw.
+    ///
+    /// One `preedit` field for the window, because there is one composition, and
+    /// one owner for it: letters being composed belong wherever the keyboard is,
+    /// so a composition made in the preview must not also be overlaid on the
+    /// grid behind it. Held as one field rather than two so that the rung which
+    /// leaves the editing keys to the IME mid-composition
+    /// (`input::is_ime_owned_key`) keeps working for both owners without being
+    /// told which one is composing.
+    fn shell_preedit(&self) -> Option<&Preedit> {
+        matches!(ime_owner(self.keyboard_owner()), ImeOwner::Shell)
+            .then_some(self.preedit.as_ref())
+            .flatten()
+    }
+
+    /// Where the IME should hang its candidate list while the preview is being
+    /// typed into — the edit caret's box, in window pixels.
+    ///
+    /// Win32's caret is thread-level and IMM32 asks the focused window, so there
+    /// is nothing to switch but the rectangle: the same two calls
+    /// ([`Self::apply_ime_cursor_area`]) serve whichever surface is composing.
+    fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {
+        if !self.preview_edit_focus() {
+            return None;
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let body = self.preview_content_body_rect(scale)?;
+        let (line, column) = self.preview_caret_position()?;
+        let advance = self.preview_mono_advance;
+        let (rows_height, columns) = self.preview_content_extent(scale);
+        let geometry = self.preview_doc_text_geometry(body, scale, rows_height, columns, advance);
+        let (row, column) = self
+            .preview_wrap()
+            .map_or((line, column), |wrap| preview_caret_row(wrap, line, column));
+        let box_of_row = geometry.line_rect(row);
+        // Clamped into the body, for `ime_cursor_area_for_metrics`'s reason: a
+        // caret scrolled out of sight would put the candidate list somewhere the
+        // user is not looking, or off the window entirely.
+        let x = (box_of_row[0] + advance * column as f32).clamp(body[0], body[2]);
+        let y = box_of_row[1].clamp(body[1], body[3]);
+        Some(ImeCursorArea {
+            x: x.round() as i32,
+            y: y.round() as i32,
+            width: advance.round().max(1.0) as u32,
+            height: (box_of_row[3] - box_of_row[1]).round().max(1.0) as u32,
+        })
+    }
+
+    /// Offer the preview's caret to the IME, if the preview is the one composing.
+    fn offer_preview_ime_caret(&mut self) {
+        if !self.ime_active {
+            return;
+        }
+        let Some(area) = self.preview_ime_cursor_area() else {
+            return;
+        };
+        if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
+            self.apply_ime_cursor_area(area);
+        }
     }
 
     /// Type into the buffer on the seat.
@@ -14421,6 +14869,11 @@ impl Runtime {
     fn repaint_preview(&mut self) -> Result<()> {
         self.refresh_preview_body();
         self.refresh_chrome();
+        // The caret has very likely just moved, and the candidate list has to
+        // follow it. Here rather than in the IME handler because *every* way the
+        // caret moves — a click, an arrow, a commit, a scroll — comes through
+        // this door, which is the same argument `reveal_preview_caret` makes.
+        self.offer_preview_ime_caret();
         self.present_chrome_change()
     }
 
@@ -14824,6 +15277,7 @@ impl Runtime {
         let palette = bt_render::chrome_palette();
         let scroll = self.preview_scroll;
         let advance = self.preview_mono_advance;
+        let lit = self.preview_block_lit();
         let (rows_height, columns) = self.preview_content_extent(scale);
         let mut built = match &self.preview_doc {
             PreviewDocument::Text { lines, wrap } => {
@@ -14860,7 +15314,11 @@ impl Runtime {
                 body,
                 seats::preview_markdown_metrics(scale),
                 scroll,
-                &self.preview_md_block_scroll,
+                BlockScrollPaint {
+                    offsets: &self.preview_md_block_scroll,
+                    lit,
+                    scale,
+                },
                 (blocks, layout),
                 &palette,
             ),
@@ -14941,12 +15399,28 @@ impl Runtime {
             .then(|| self.preview_caret_position())
             .flatten()
             .map(|(line, column)| preview_caret_row(wrap, line, column));
+        // The window's one composition, drawn here because this is where the
+        // keyboard is — see [`Self::shell_preedit`] for the other half of that
+        // single ownership.
+        let preedit = caret
+            .zip(self.preedit.as_ref())
+            .map(|((row, column), preedit)| PreviewPreedit {
+                row,
+                column,
+                columns: preview_edit::line_columns(&preedit.text),
+                caret_columns: preedit.cursor_byte.map_or_else(
+                    || preview_edit::line_columns(&preedit.text),
+                    |byte| preview_edit::column_of(&preedit.text, byte),
+                ),
+                text: preedit.text.clone(),
+            });
         Some(PreviewEditPaint {
             bands,
             caret,
             caret_width: (bt_render::CURSOR_BAR_WIDTH_LOGICAL_PX * scale)
                 .round()
                 .max(1.0),
+            preedit,
         })
     }
 
@@ -15467,7 +15941,7 @@ impl Runtime {
         {
             terminal_frame.status_text = Some(notice.to_owned());
         }
-        let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
+        let composed = compose_preedit(&terminal_frame, self.shell_preedit())
             .context("reject non-rectangular frame before IME composition")?;
         if skip_unchanged
             && pty_frame_is_unchanged(
@@ -15491,8 +15965,16 @@ impl Runtime {
             }
             return Ok(false);
         }
-        if self.ime_active {
-            let area = self.renderer.ime_cursor_area(&composed.frame);
+        // Only while the shell is the one composing. A terminal that keeps
+        // printing behind a preview being typed into still publishes frames, and
+        // each of them used to drag the candidate window back to the grid's
+        // caret — under the pointer's own reading, the candidate list would sit
+        // over the shell while the letters went into the file.
+        if self.ime_active && matches!(ime_owner(self.keyboard_owner()), ImeOwner::Shell) {
+            let area = window_ime_cursor_area(
+                self.renderer.seat_viewport(),
+                self.renderer.ime_cursor_area(&composed.frame),
+            );
             if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
                 self.apply_ime_cursor_area(area);
             }
@@ -17067,20 +17549,16 @@ impl Runtime {
                     viewport,
                     scale,
                 );
-                let origin = match win.anchor {
+                let grown = match win.anchor {
                     Some(anchor) => float::float_placement(anchor, size, viewport, scale),
-                    None => [win.frame[0], win.frame[1]],
-                };
-                let frame = float::clamp_pinned(
-                    [
-                        origin[0],
-                        origin[1],
-                        origin[0] + size[0],
-                        origin[1] + size[1],
+                    None => [
+                        win.frame[0],
+                        win.frame[1],
+                        win.frame[0] + size[0],
+                        win.frame[1] + size[1],
                     ],
-                    viewport,
-                    scale,
-                );
+                };
+                let frame = float::clamp_pinned(grown, viewport, scale);
                 (frame != win.frame).then_some((win.epoch, frame))
             })
             .collect();
@@ -17553,26 +18031,18 @@ impl Runtime {
         let body = seats::files_tree_content_height(rows, scale);
         let size =
             float::float_opening_size(float::float_height_for_body(body, scale), viewport, scale);
-        let origin_point = match anchor {
+        let placed = match anchor {
             Some(anchor) => float::float_placement(anchor, size, viewport, scale),
             // No anchor is the pop-out case with a head that has already gone;
             // the middle of the content area is the honest place for a window
             // that has no particular place to be.
-            None => [
-                ((viewport[0] + viewport[2]) / 2.0 - size[0] / 2.0).round(),
-                ((viewport[1] + viewport[3]) / 2.0 - size[1] / 2.0).round(),
-            ],
+            None => {
+                let left = ((viewport[0] + viewport[2]) / 2.0 - size[0] / 2.0).round();
+                let top = ((viewport[1] + viewport[3]) / 2.0 - size[1] / 2.0).round();
+                [left, top, left + size[0], top + size[1]]
+            }
         };
-        let frame = float::clamp_pinned(
-            [
-                origin_point[0],
-                origin_point[1],
-                origin_point[0] + size[0],
-                origin_point[1] + size[1],
-            ],
-            viewport,
-            scale,
-        );
+        let frame = float::clamp_pinned(placed, viewport, scale);
         self.float.open(
             mode,
             origin,
@@ -18255,16 +18725,20 @@ impl Runtime {
         self.resize_trace_logged_events = trace.len();
     }
 
+    /// Hang the candidate window off `area`, which is in **window** pixels.
+    ///
+    /// Renderer pixels, winit `PhysicalPosition`, and a per-monitor-aware Win32
+    /// client area all share the client-origin device-pixel axis. No
+    /// screen-origin translation belongs here.
+    ///
+    /// A seat-origin one does — and it belongs to the *caller* now that there is
+    /// more than one caller. The terminal's caret is computed by the frame
+    /// machinery in the seat's own coordinates and is translated by
+    /// [`window_ime_cursor_area`] where it is read (§4.1, one translation); the
+    /// preview's is measured off the pane rectangle and is already the window's.
+    /// Translating here would have applied the seat's origin to a rectangle that
+    /// never had one.
     fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) {
-        // Renderer pixels, winit PhysicalPosition, and a per-monitor-aware Win32 client area all
-        // share the client-origin device-pixel axis. No screen-origin translation belongs here.
-        //
-        // A seat-origin one does. The caret rectangle is computed by the same
-        // frame machinery as every other content pixel, so it is expressed in
-        // the terminal seat's own coordinates; winit and IMM32 both want the
-        // window's. This is the inverse of `terminal_pointer`'s correction and
-        // the only place it runs in this direction (§4.1, one translation).
-        let area = window_ime_cursor_area(self.renderer.seat_viewport(), area);
         self.window.set_ime_cursor_area(
             PhysicalPosition::new(area.x, area.y),
             PhysicalSize::new(area.width, area.height),
@@ -20012,6 +20486,19 @@ impl Runtime {
         if self.drag_preview_selection(position)? {
             return Ok(());
         }
+        // A thumb in hand owns the pointer for the same reason, and outside its
+        // own band for the same reason.
+        if self.drag_preview_block_thumb(position)? {
+            return Ok(());
+        }
+        // The thumb under the pointer lights up. Asked here rather than among
+        // the hovers below because it belongs to the same surface the two
+        // gestures above do — and answered `None` while an overlay owns the
+        // pointer, so a scrim never leaves a bar lit behind it.
+        let free = self.settings_layout().is_none()
+            && self.dirty_gate_layout().is_none()
+            && self.chrome_target_at(position).is_none();
+        self.note_preview_block_hover(free.then_some(position))?;
         // The overlay owns the pointer the way it owns the next click: no chrome
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
         if let Some(layout) = self.settings_layout() {
@@ -21683,6 +22170,14 @@ impl Runtime {
             return Ok(false);
         }
         if state == ElementState::Released {
+            // A thumb is let go wherever the hand lets go of it — the offset it
+            // wrote on the way is already the answer, so this only puts the
+            // accent out.
+            if self.preview_block_drag.take().is_some() {
+                self.note_preview_block_hover(Some(position))?;
+                self.repaint_preview()?;
+                return Ok(true);
+            }
             // A selection drawn across the edit surface ends wherever the button
             // comes up. The release is consumed because the press was: a gesture
             // belongs to the surface it began on, whatever it is let go over.
@@ -21772,6 +22267,12 @@ impl Runtime {
             // every terminal leaf answers for itself; see [`press_reaches_no_grid`]
             // for the primary-seat version this replaced and what it cost.
             self.tab_clicks.interrupt();
+            // The bar under a wide block is a scrollbar and answers first: it
+            // stands over the block it scrolls, so a press on it was never a
+            // press in the content beneath.
+            if self.press_preview_block_thumb(position)? {
+                return Ok(true);
+            }
             // A press inside the edit surface puts the caret where the pointer
             // is and takes the keyboard, which is what a `<textarea>` does and
             // the only way into `InputOwner::PreviewEdit` that does not need a
@@ -23505,38 +24006,53 @@ impl Runtime {
         })
     }
 
+    /// A composition event, routed by [`ime_owner`].
+    ///
+    /// `Enabled`/`Disabled` are the IME's own bookkeeping and belong to the
+    /// window rather than to any surface in it, so they pass every rung: the
+    /// state they set has to stay consistent for whoever owns the keyboard when
+    /// the composition next starts. `Preedit` and `Commit` are text, and text
+    /// goes exactly where [`Self::keyboard_owner`] says the keyboard is.
     fn ime_input(&mut self, event: Ime) -> Result<()> {
-        // The same rule the keyboard follows: with a modal up the terminal is
-        // not who is being typed at, and a commit is a keystroke that took a
-        // longer road. Enable/disable still pass, so the IME's own bookkeeping
-        // stays consistent for when the dialog closes.
-        if self.settings_layout().is_some() && matches!(event, Ime::Preedit(..) | Ime::Commit(_)) {
-            return Ok(());
-        }
-        // The name editor takes composed text through the same door typed
-        // characters use, so "typing over the opening selection replaces it" is
-        // one rule rather than one rule per input method.
-        //
-        // The pre-edit itself is deliberately *not* drawn in the tab: the
-        // ticket scopes the editor to the composition's committed text ("含 IME
-        // 组合的落字"), and the candidate window is placed from the terminal's
-        // caret, which is not where these letters are going. What must not
-        // happen is the pre-edit reaching the terminal underneath, and it does
-        // not — the branch returns before `self.preedit` is touched.
-        if self.rename.is_some() {
-            if let Ime::Commit(text) = &event {
-                let mut editor = self.rename.take().expect("the editor is open");
-                editor.insert(text);
-                self.rename = Some(editor);
-                self.rename_blink.reset(Instant::now());
-                self.refresh_chrome();
-                self.present_chrome_change()?;
+        let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
+        if composing {
+            match ime_owner(self.keyboard_owner()) {
+                // The name editor takes composed text through the same door typed
+                // characters use, so "typing over the opening selection replaces
+                // it" is one rule rather than one rule per input method.
+                //
+                // The pre-edit itself is deliberately *not* drawn in the tab: the
+                // ticket scopes the editor to the composition's committed text
+                // ("含 IME 组合的落字"), and the candidate window is placed from
+                // the terminal's caret, which is not where these letters are
+                // going. What must not happen is the pre-edit reaching the
+                // terminal underneath, and it does not — this returns before
+                // `self.preedit` is touched.
+                ImeOwner::Rename => {
+                    if let Ime::Commit(text) = &event {
+                        let mut editor = self.rename.take().expect("the editor is open");
+                        editor.insert(text);
+                        self.rename = Some(editor);
+                        self.rename_blink.reset(Instant::now());
+                        self.refresh_chrome();
+                        self.present_chrome_change()?;
+                    }
+                    return Ok(());
+                }
+                // With a modal or a popup up the terminal is not who is being
+                // typed at, and a commit is a keystroke that took a longer road.
+                ImeOwner::Modal => return Ok(()),
+                // **Swallowed, and that is the point.** A column has nothing to
+                // type into — but the reason this rung exists is not what it
+                // gains, it is what it stops: without it a composition made over
+                // a file tree lands in whatever shell is behind the tree.
+                ImeOwner::FilesTree => return Ok(()),
+                ImeOwner::Preview => {
+                    self.preview_ime(event)?;
+                    return Ok(());
+                }
+                ImeOwner::Shell => {}
             }
-            if matches!(event, Ime::Preedit(..) | Ime::Commit(_)) {
-                return Ok(());
-            }
-        }
-        if matches!(&event, Ime::Preedit(..) | Ime::Commit(_)) {
             self.reset_cursor_blink(Instant::now());
         }
         match event {
@@ -23576,10 +24092,20 @@ impl Runtime {
                 })
             }
             Ime::Disabled => {
+                let drawn_in_the_preview = self.preedit.is_some() && self.preview_edit_focus();
                 self.preedit = None;
                 self.ime_active = false;
                 self.ime_cursor_throttle.reset();
                 self.ime_system_caret.destroy();
+                // A composition taken away must stop being *drawn* where it was
+                // drawn. The grid is repainted by the frame below, but the
+                // preview paints from the same field on its own pass and would
+                // otherwise keep the letters on screen until something else
+                // moved. Asked, rather than done unconditionally, because this
+                // arrives on every blur and a chrome rebuild is not free.
+                if drawn_in_the_preview {
+                    self.repaint_preview()?;
+                }
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Expose,
@@ -36665,7 +37191,7 @@ mod tests {
             body,
             metrics,
             [0.0, 0.0],
-            &[],
+            rested_bars(&[]),
             (&blocks, &layout),
             &palette,
         );
@@ -36715,7 +37241,7 @@ mod tests {
             body,
             metrics,
             [0.0, 0.0],
-            &[],
+            rested_bars(&[]),
             (&quoted, &quote_layout),
             &palette,
         );
@@ -37032,7 +37558,7 @@ mod tests {
                 body,
                 metrics,
                 [0.0, 0.0],
-                offsets,
+                rested_bars(offsets),
                 (&blocks, &layout),
                 &palette,
             );
@@ -37048,7 +37574,7 @@ mod tests {
                 body,
                 metrics,
                 [0.0, 0.0],
-                offsets,
+                rested_bars(offsets),
                 (&blocks, &layout),
                 &palette,
             );
@@ -37092,7 +37618,7 @@ mod tests {
             body,
             metrics,
             [0.0, 1000.0],
-            &[0.0, overflow],
+            rested_bars(&[0.0, overflow]),
             (&blocks, &tall),
             &palette,
         );
@@ -37105,6 +37631,112 @@ mod tests {
 
         // ③ **The prose does not move**, at any offset the block can hold.
         assert_eq!(prose_left(&[0.0, 0.0]), prose_left(&[0.0, overflow]));
+    }
+
+    /// PIN (user report, 2026-08-12) — **what looks like a scrollbar is one**.
+    ///
+    /// The report is that the bar under a wide table could not be dragged. It
+    /// was an *indicator*: a proportional thumb on a track, drawn in exactly the
+    /// shape every application on the desk uses for a control, and wired to
+    /// nothing. This asks the three questions a scrollbar has to answer — can a
+    /// hand find it, does dragging it move the content in proportion, and does
+    /// it stop where the wheel stops — and it asks the first of them against the
+    /// rectangle the *painter* produced, because a thumb hit-tested anywhere
+    /// other than where it was drawn is the same defect wearing a fix.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① have `block_scroll_dragged_to` return the offset it was given instead
+    ///    of reading the pointer — the drag writes nothing, which is the bug;
+    /// ② drop the `grab` widening in `block_scroll_bar` — the second question
+    ///    goes red and two drawn pixels are the whole target again;
+    /// ③ paint the thumb from any arithmetic other than `block_scroll_bar` —
+    ///    the first assertion goes red.
+    #[test]
+    fn the_bar_under_a_wide_block_is_a_thumb_a_hand_can_take_and_drag() {
+        const SCALE: f32 = 1.0;
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(SCALE);
+        let body = [0.0, 0.0, 300.0, 400.0];
+        let page = body[2] - body[0] - metrics.padding_x * 2.0;
+        let wide = page + 400.0;
+        let blocks = [
+            preview::MarkdownBlock::Paragraph(vec![preview::Span::plain("prose")]),
+            preview::MarkdownBlock::Code {
+                lang: None,
+                text: "a very long line".to_owned(),
+            },
+        ];
+        let layout = [
+            MarkdownBlockLayout::solid(metrics.line_height),
+            MarkdownBlockLayout {
+                width: wide,
+                top: metrics.line_height + metrics.paragraph_gap,
+                ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
+            },
+        ];
+        let overflow = wide - page;
+        let offsets = [0.0, 0.0];
+        let document = (&blocks[..], &layout[..]);
+        let bar_at = |at: [f32; 2]| {
+            preview_block_bar_at(body, metrics, [0.0, 0.0], &offsets, document, SCALE, at)
+        };
+
+        // ① The thumb a hand finds is the thumb the painter drew.
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&offsets),
+            document,
+            &palette,
+        );
+        let drawn = built
+            .blocks
+            .first()
+            .expect("a block wider than its page scrolls inside itself")
+            .quads
+            .last()
+            .expect("and wears a thumb")
+            .rect;
+        let on_thumb = [drawn[0] + 2.0, (drawn[1] + drawn[3]) / 2.0];
+        let (index, bar) = bar_at(on_thumb).expect("the pointer on the drawn thumb finds one");
+        assert_eq!(index, 1, "and it belongs to the wide block");
+        assert_eq!(bar.thumb, drawn, "hit and paint are one geometry");
+
+        // ② The band is wider than the rule — two drawn pixels are not a target.
+        let above = [on_thumb[0], bar.thumb[1] - 2.0];
+        assert!(
+            bar.thumb[1] - 2.0 < bar.thumb[1] && bar_at(above).is_some(),
+            "a hand landing just above the rule still has it"
+        );
+        assert!(
+            bar_at([on_thumb[0], bar.grab[1] - 4.0]).is_none(),
+            "and the tolerance is a tolerance, not the whole block"
+        );
+
+        // ③ Dragging maps the track onto the overflow, linearly, and stops
+        //    where the wheel stops.
+        let grab = on_thumb[0] - bar.thumb[0];
+        let dragged_to = |x: f32| preview::block_scroll_dragged_to(&bar, x, grab);
+        assert_eq!(dragged_to(on_thumb[0]), 0.0, "at rest it has not moved");
+        assert!(
+            (dragged_to(on_thumb[0] + bar.travel / 2.0) - overflow / 2.0).abs() < 0.5,
+            "half the track is half the overflow"
+        );
+        assert!(
+            (dragged_to(on_thumb[0] + bar.travel) - overflow).abs() < 0.5,
+            "the whole track is the whole overflow"
+        );
+        assert_eq!(
+            dragged_to(on_thumb[0] + bar.travel * 4.0),
+            overflow,
+            "and it stops at the block's own end"
+        );
+        assert_eq!(
+            dragged_to(on_thumb[0] - 400.0),
+            0.0,
+            "and at its own start — the wheel's two clamps, exactly"
+        );
     }
 
     /// PIN (user report, 2026-08-13 — **the escape**) — nothing a preview body
@@ -37233,7 +37865,7 @@ mod tests {
                     body,
                     metrics,
                     [0.0, y],
-                    &offsets,
+                    rested_bars(&offsets),
                     (&blocks, &layout),
                     &palette,
                 );
@@ -37531,10 +38163,186 @@ mod tests {
         // And the moment the owner hands it back, it is the shell's again — the
         // predicate is read per frame, so there is no state to un-set.
         assert!(keyboard_owner_is_a_shell(KeyboardOwner {
+            rename: false,
             files_tree: false,
             preview: false,
             menu_or_dialog: false,
         }));
+    }
+
+    /// PIN (user report, 2026-08-12) — **a composition goes where the keyboard
+    /// is, and only the shell has a PTY.**
+    ///
+    /// The report, with a screenshot: click into the preview's edit surface,
+    /// type Chinese, and the candidate list floats over the document while
+    /// `ni'hao` arrives at the shell prompt underneath. `keyboard_input` had a
+    /// twelve-rung ladder deciding who owns a keystroke; `ime_input` had two
+    /// rungs and then wrote every commit to the PTY, so composed text was the
+    /// one kind of typing that ignored `InputOwner` entirely.
+    ///
+    /// The last loop is the load-bearing one. "Zero PTY writes when the preview
+    /// or the tree owns the keyboard" cannot be asserted without a window, but
+    /// it has an exact structural twin that can: the owner that gets the
+    /// composition must be the same owner whose caret is allowed to blink,
+    /// because a blink *means* "typing lands here" (2026-08-13's ruling). One
+    /// predicate, both questions — so the two can never drift into a window
+    /// where a caret blinks in a shell that is not receiving the characters.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① answer `Shell` for `preview` — the reported bug, exactly;
+    /// ② answer `Shell` for `files_tree` — the same bug one surface over;
+    /// ③ put `preview` above `files_tree` — the ladder stops being
+    ///    `keyboard_input`'s and the two disagree about a focused tree in a
+    ///    preview's tab.
+    #[test]
+    fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
+        assert_eq!(ime_owner(KeyboardOwner::default()), ImeOwner::Shell);
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                preview: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::Preview,
+            "the edit surface takes what is typed into it"
+        );
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                files_tree: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::FilesTree,
+            "a column has nothing to type into — and nothing to type through"
+        );
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                menu_or_dialog: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::Modal
+        );
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                rename: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::Rename
+        );
+
+        // The order is `keyboard_input`'s order, rung for rung.
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                files_tree: true,
+                preview: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::FilesTree,
+            "the tree's rung stands above the preview's, as it does for keys"
+        );
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                rename: true,
+                menu_or_dialog: true,
+                files_tree: true,
+                preview: true,
+            }),
+            ImeOwner::Rename,
+            "and the editor is the topmost of all of them"
+        );
+
+        // **The whole of "zero PTY writes", stated as a property.**
+        for bits in 0..16u8 {
+            let owner = KeyboardOwner {
+                rename: bits & 1 != 0,
+                menu_or_dialog: bits & 2 != 0,
+                files_tree: bits & 4 != 0,
+                preview: bits & 8 != 0,
+            };
+            assert_eq!(
+                matches!(ime_owner(owner), ImeOwner::Shell),
+                keyboard_owner_is_a_shell(owner),
+                "{owner:?}: a composition reaches the PTY exactly when a caret \
+                 may blink, and never on any other terms"
+            );
+        }
+    }
+
+    /// PIN (user report, 2026-08-12) — the composition is **drawn where it will
+    /// land**, over an opaque ground, with the IME's caret inside it.
+    ///
+    /// The terminal's machine writes preedit into grid cells; this surface has
+    /// none, so the form is copied and the mechanism is not — which is exactly
+    /// the thing that has to be pinned, because "the letters are somewhere" and
+    /// "the letters are at the caret, and the document is not showing through
+    /// them" are two different pictures and only one of them is usable.
+    ///
+    /// MUTATIONS: drop the ground quad and the first assertion goes red; leave
+    /// the caret at the document's column and the last one does.
+    #[test]
+    fn a_composition_in_the_preview_stands_at_the_caret_over_its_own_ground() {
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 200.0];
+        let metrics = seats::preview_text_metrics(1.0);
+        let lines = vec!["one".to_owned(), "two".to_owned()];
+        let advance = 8.0;
+        let geometry = seats::preview_mono_geometry(
+            body,
+            metrics,
+            metrics.line_height * 2.0,
+            5,
+            advance,
+            [0.0, 0.0],
+        );
+        let wrap = preview_edit::WrapLayout::unwrapped(&lines);
+        let paint = PreviewEditPaint {
+            bands: Vec::new(),
+            caret: Some((1, 2)),
+            caret_width: 1.0,
+            preedit: Some(PreviewPreedit {
+                row: 1,
+                column: 2,
+                text: "ni".to_owned(),
+                columns: 2,
+                caret_columns: 1,
+            }),
+        };
+        let built =
+            build_preview_text_body(&geometry, &lines, &wrap, advance, Some(&paint), &palette);
+        let row = geometry.line_rect(1);
+
+        let ground = built
+            .quads
+            .iter()
+            .find(|quad| quad.color == palette.seat_body)
+            .expect("the composition lays its own ground — this is not a cell grid");
+        assert_eq!(
+            [ground.rect[0], ground.rect[2]],
+            [row[0] + advance * 2.0, row[0] + advance * 4.0],
+            "spanning its own columns from the caret"
+        );
+        let rule = built
+            .quads
+            .iter()
+            .find(|quad| quad.color == palette.preview_body_text)
+            .expect("underlined, which is the terminal's own form for a preedit");
+        assert_eq!(rule.rect[3], row[3], "along the bottom of its line");
+
+        let letters = built
+            .paragraphs
+            .iter()
+            .find(|paragraph| paragraph.runs.iter().any(|run| run.text == "ni"))
+            .expect("and the letters themselves, where they will land");
+        assert_eq!(letters.rect[0], row[0] + advance * 2.0);
+
+        let caret = built
+            .quads
+            .iter()
+            .find(|quad| quad.color == palette.preview_caret)
+            .expect("the caret is drawn");
+        assert_eq!(
+            caret.rect[0],
+            row[0] + advance * 3.0,
+            "inside the composition, where the IME says it is — not before it"
+        );
     }
 
     /// PIN (P123) — **gate ① is about the LAST preview pane and nothing else.**
@@ -37561,6 +38369,16 @@ mod tests {
         assert!(!closing_this_pane_strands_the_pool(false, 0));
     }
 
+    /// The bars at rest: the offsets under test, nothing lit, one device pixel
+    /// to the logical one.
+    fn rested_bars(offsets: &[f32]) -> BlockScrollPaint<'_> {
+        BlockScrollPaint {
+            offsets,
+            lit: None,
+            scale: 1.0,
+        }
+    }
+
     /// Whether one rectangle is wholly inside another.
     fn inside(rect: [f32; 4], outer: [f32; 4]) -> bool {
         rect[0] >= outer[0] && rect[1] >= outer[1] && rect[2] <= outer[2] && rect[3] <= outer[3]
@@ -37582,7 +38400,7 @@ mod tests {
             body,
             metrics,
             [0.0, 0.0],
-            &[],
+            rested_bars(&[]),
             (
                 &blocks,
                 &[MarkdownBlockLayout {
@@ -38138,6 +38956,7 @@ mod tests {
             bands: vec![(0, 1, 4), (1, 0, 4)],
             caret: Some((1, 3)),
             caret_width: 1.0,
+            preedit: None,
         };
         let wrap = preview_edit::WrapLayout::unwrapped(&lines);
         let built = build_preview_text_body(&geometry, &lines, &wrap, 8.0, Some(&paint), &palette);
