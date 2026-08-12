@@ -458,7 +458,6 @@ pub enum EditCommand {
     Copy,
     Cut,
     Paste,
-    Save,
     /// Esc — the keyboard goes back to the terminal.
     Release,
     /// The editor's key, with nothing for it to do.
@@ -482,7 +481,13 @@ pub fn command(key: &Key, modifiers: ModifiersState) -> EditCommand {
     if ctrl && !alt {
         if let Key::Character(text) = key {
             return match text.to_ascii_lowercase().as_str() {
-                "s" => EditCommand::Save,
+                // **Not the editor's** (ruling 9, 2026-08-12): `Ctrl+S` is a
+                // scoped row of `shortcuts::BINDINGS` and is resolved above this
+                // surface, so a save is one verb reached through one table
+                // rather than a chord two layers both claim. It is still
+                // *swallowed* here rather than typed, which is what keeps the
+                // rule true if the registry is ever asked later than it is now.
+                "s" => EditCommand::Ignore,
                 "c" => EditCommand::Copy,
                 "x" => EditCommand::Cut,
                 "v" => EditCommand::Paste,
@@ -997,9 +1002,12 @@ mod tests {
             EditCommand::Insert("a".to_owned()),
             "a letter is typed, never encoded"
         );
+        // The save chord belongs to the registry's scoped row and is swallowed
+        // here rather than typed — a `Ctrl+S` that inserted an `s` into the file
+        // would be the worst of both readings.
         assert_eq!(
             command(&ch("s"), ModifiersState::CONTROL),
-            EditCommand::Save
+            EditCommand::Ignore
         );
         assert_eq!(
             command(&ch("v"), ModifiersState::CONTROL),

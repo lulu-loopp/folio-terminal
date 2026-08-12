@@ -4921,7 +4921,15 @@
      tables (`|---|` separator required), heading levels 4-6 on a size ladder,
      ordered lists, `>` blockquotes, `---`/`***` rules and `[text](url)` links
      rendering the label only. This function stays as written: it is the record
-     of what the prototype drew. */
+     of what the prototype drew.
+     SETTLED 2026-08-13 (二): **一行一段是原型的错,不是规格。** 下面的循环对每
+     个源行 push 一个 <p>,在未折行的样例文本上看不出来;对着按八十列硬折写的真
+     文档(docs/DESIGN.md),每段都变成五个段落、段间还多出段距——用户报的「一
+     段被切成几截」就是这里。原生渲染器按 CommonMark §4.8 并段:连续非空行合成
+     一段、空行分段、行内解析在**并完之后**跑(所以 **强调** 可以跨源行折点),
+     列表项的续行并入该项(§5.2 lazy continuation),引用块内同法。围栏/表格/标
+     题/规则/引用/列表标记仍各自以首行打断散文。此函数照旧不动:它是原型画过什
+     么的记录,不是规格。 */
   function renderMarkdownMock(src) {
     const inline = (t) => esc(t)
       .replace(/`([^`]+)`/g, "<code>$1</code>")

@@ -299,6 +299,25 @@ impl LayoutNode {
         }
     }
 
+    /// Turn a preview seat's pin over, reporting whether it moved.
+    ///
+    /// A method on the tree rather than a caller reaching in with
+    /// `find_seat_mut`, because that door is `pub(crate)`: the pin is durable
+    /// state (§5) and the one gesture that writes it is the header's button, so
+    /// it gets a named verb the way every other durable change does. The kind is
+    /// checked here, not at the call site — nothing but a preview has a pin, and
+    /// a terminal quietly acquiring one would persist and come back.
+    #[must_use]
+    pub fn toggle_preview_pin(&mut self, id: SeatId) -> bool {
+        match self.find_seat_mut(id) {
+            Some(seat) if seat.kind == SeatKind::Preview => {
+                seat.pinned = !seat.pinned;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn find_seat_mut(&mut self, id: SeatId) -> Option<&mut Seat> {
         match self {
             LayoutNode::Seat(s) => (s.id == id).then_some(s),

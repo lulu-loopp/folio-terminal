@@ -1653,6 +1653,7 @@ pub fn build(
                 } else {
                     Some(hint(UNAVAILABLE_HINT_TEXT.to_owned()))
                 },
+                hint_ink: None,
                 hovered: hover == Some(MenuRow::Profile(index)),
                 available,
             },
@@ -1680,6 +1681,7 @@ pub fn build(
             mark: ChromeMark::Folder,
             name: FILES_PANE_TEXT,
             hint: Some(hint(FILES_PANE_HINT_TEXT.to_owned())),
+            hint_ink: None,
             hovered: hover == Some(MenuRow::FilesPane),
             // A files column needs no program behind it, so there is nothing
             // this machine could be missing and no greyed state to reach.
@@ -1715,6 +1717,7 @@ pub fn build(
                 // "can you", and losing the timestamp would cost the row the
                 // only thing that orders it against its neighbours.
                 hint: Some(hint(ago_label(entry.at, now))),
+                hint_ink: None,
                 hovered: hover == Some(MenuRow::Recent(index)),
                 available: recent_is_available(&entry.seed, programs),
             },
@@ -1780,6 +1783,13 @@ struct Row<'a> {
     /// once: the hint is right-aligned into it and the name's box ends where it
     /// begins.
     hint: Option<(String, f32)>,
+    /// What the hint is set in, when it is not the menu's own quiet report ink.
+    ///
+    /// One caller: the preview switcher's dirty dot, which is `--accent` because
+    /// it is the same dot the header wears (mock-up 580-582). Everything else
+    /// leaves it alone and gets `--ink3` — a hint that *reports* rather than
+    /// *warns*, which is why the ink is a parameter and not a rule.
+    hint_ink: Option<[u8; 3]>,
     hovered: bool,
     /// Whether this row can do what it says. A row that cannot is drawn and not
     /// offered — see [`hit`], which is where "not offered" is actually enforced.
@@ -1878,7 +1888,7 @@ fn push_row(
             // which is the same ink over `--win` — the settings dialog's
             // surface, not this one. Identical in the light theme, six levels
             // adrift in the dark.
-            color: palette.menu_item_hint_text,
+            color: row.hint_ink.unwrap_or(palette.menu_item_hint_text),
             align_right: true,
             align_center: false,
             letter_spacing_em: 0.0,
@@ -2303,6 +2313,7 @@ pub fn root_menu_build(
                 },
                 name: &cwd_leaf_or_path(&choice.path),
                 hint: Some((note, width)),
+                hint_ink: None,
                 hovered: hover == Some(RootMenuRow::Choice(index)),
                 available: true,
             },
@@ -2333,6 +2344,7 @@ pub fn root_menu_build(
             // offered because nothing else was, and a hint saying so would be the
             // menu apologising for itself.
             hint: None,
+            hint_ink: None,
             hovered: hover == Some(RootMenuRow::Browse),
             // The system always has a folder picker; there is no machine on which
             // this row is a promise the window cannot keep.
@@ -2580,6 +2592,7 @@ pub fn file_menu_build(
                     FileMenuRow::InsertPath => INSERT_PATH_TEXT,
                 },
                 hint: None,
+                hint_ink: None,
                 hovered: hover == Some(*row),
                 // All three verbs act on a path this process enumerated. There
                 // is no machine on which one of them is a promise that cannot be
@@ -2602,6 +2615,244 @@ pub fn file_menu_build(
                 alpha: separator_alpha(palette.menu_border),
             });
         }
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
+// ── the preview pane's buffer switcher (`#pv-menu`, mock-up 5085-5138) ───────
+//
+// "Every live buffer, dirty dots and all — **the dropdown IS the honest
+// inventory of hidden state**" (P130, `DESIGN.md` §7.1.3). It wears `.term-menu`'s
+// skin like `#file-menu` does, and it is built out of the same `push_row` every
+// other menu in this module is: the block's own instruction was to reuse the
+// context-menu family rather than mint a second popup, and a menu that looked
+// like its neighbours but was drawn by different code would be a second popup
+// wearing the first one's clothes.
+
+/// The dot a dirty buffer wears in the switcher — `.pvm-dot` (mock-up 581).
+pub const PREVIEW_MENU_DIRTY_DOT: &str = "\u{25cf}";
+
+/// One row of the switcher: a live buffer in the tab's pool.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewMenuItem {
+    pub name: String,
+    /// Unsaved edits — the dot on the right of the row.
+    pub dirty: bool,
+    /// Whether this is the buffer the pane is showing (`.tm-item.cur`).
+    pub current: bool,
+}
+
+/// Which preview pane's switcher is up, and which row the pointer is on.
+///
+/// The seat is *in* the state, exactly as [`RootMenu`]'s is, and for the reason
+/// that one spells out at length: it is what makes "one close path so the chevron
+/// never gets stranded flipped" (P133, "the root menu's lesson, applied on day
+/// one this time") true by construction. The chevron is re-derived from this on
+/// the next frame; there is no second place holding an "open" flag to forget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreviewMenu {
+    open: Option<bt_layout::SeatId>,
+    hover: Option<usize>,
+}
+
+impl PreviewMenu {
+    pub fn seat(self) -> Option<bt_layout::SeatId> {
+        self.open
+    }
+
+    /// The name button: open here, or shut if this very pane already has it open
+    /// (P136 — "同一个 `data-leaf` 再点 → 收").
+    pub fn toggle(&mut self, seat: bt_layout::SeatId) {
+        self.open = (self.open != Some(seat)).then_some(seat);
+        self.hover = None;
+    }
+
+    pub fn close(&mut self) -> bool {
+        let was_open = self.open.is_some();
+        self.open = None;
+        self.hover = None;
+        was_open
+    }
+
+    pub fn set_hover(&mut self, hover: Option<usize>) -> bool {
+        let hover = self.open.and(hover);
+        let changed = self.hover != hover;
+        self.hover = hover;
+        changed
+    }
+
+    pub fn hover(self) -> Option<usize> {
+        self.hover
+    }
+}
+
+/// Every rectangle the switcher draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewMenuLayout {
+    scale: f32,
+    frame: [f32; 4],
+    items: Vec<[f32; 4]>,
+}
+
+/// The switcher hung under the head's file name.
+///
+/// `top = anchor.bottom + 4`, `left = clamp(anchor.left, 6, width - menu - 8)` —
+/// mock-up 5109-5113, which is [`root_menu_layout`]'s pair of lines because it is
+/// the same gesture with a different list under it.
+#[must_use]
+pub fn preview_menu_layout(
+    anchor: [f32; 4],
+    surface: (f32, f32),
+    scale: f32,
+    items: &[PreviewMenuItem],
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> PreviewMenuLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let padding = px(MENU_PADDING_LOGICAL_PX);
+    let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+
+    // The dot's column is reserved on **every** row, dirty or not, for the rule
+    // the root menu's note already states: a menu that changed width because a
+    // buffer was edited would move under the pointer. It is the same reservation
+    // the header's own `.pv-dirty { width: 12px }` makes, for the same reason.
+    let dot = measure(PREVIEW_MENU_DIRTY_DOT, px(HINT_FONT_LOGICAL_PX)) + px(ITEM_GAP_LOGICAL_PX);
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    let content = items
+        .iter()
+        .map(|item| {
+            px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                + px(ITEM_GAP_LOGICAL_PX)
+                + measure(&item.name, px(ITEM_FONT_LOGICAL_PX))
+                + dot
+        })
+        .fold(0.0_f32, f32::max);
+    // A file name is arbitrary and chosen by nobody here, so the widest one does
+    // not get to stretch the popup across the window — the clamp the root menu
+    // puts on its directory names, for the identical reason.
+    let width = (chrome + content)
+        .clamp(
+            px(FILE_MENU_MIN_WIDTH_LOGICAL_PX),
+            px(FILE_MENU_MIN_WIDTH_LOGICAL_PX + RECENT_ITEM_MAX_WIDTH_LOGICAL_PX),
+        )
+        .round();
+    let height = (2.0 * (border + padding) + item_height * items.len() as f32).round();
+
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    let left = anchor[0]
+        .min(surface_width - width - edge)
+        .max(edge)
+        .round();
+    // Both axes clamped, unlike the root menu's one: a preview pane can be the
+    // bottom half of a split, and a pool of eight buffers hung under a head down
+    // there would put its last rows below the window.
+    let top = (anchor[3] + px(MENU_OFFSET_LOGICAL_PX))
+        .min(surface_height - height - edge)
+        .max(edge)
+        .round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+    let items = items
+        .iter()
+        .map(|_| {
+            let rect = [content_left, cursor, content_right, cursor + item_height];
+            cursor += item_height;
+            rect
+        })
+        .collect();
+    PreviewMenuLayout {
+        scale,
+        frame,
+        items,
+    }
+}
+
+/// What a point is over, with the same three answers every other menu gives:
+/// `None` for "not this menu at all", `Some(None)` for "the menu but no row".
+#[must_use]
+pub fn preview_menu_hit(layout: &PreviewMenuLayout, x: f64, y: f64) -> Option<Option<usize>> {
+    let (x, y) = (x as f32, y as f32);
+    for (index, item) in layout.items.iter().enumerate() {
+        if contains(*item, x, y) {
+            return Some(Some(index));
+        }
+    }
+    contains(layout.frame, x, y).then_some(None)
+}
+
+/// The switcher as one overlay layer.
+#[must_use]
+pub fn preview_menu_build(
+    layout: &PreviewMenuLayout,
+    items: &[PreviewMenuItem],
+    hover: Option<usize>,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+
+    let dot_width = measure(PREVIEW_MENU_DIRTY_DOT, px(HINT_FONT_LOGICAL_PX));
+    for (index, (item, rect)) in items.iter().zip(&layout.items).enumerate() {
+        push_row(
+            &Row {
+                rect: *rect,
+                mark: ChromeMark::File,
+                name: &item.name,
+                // Reserved on every row and inked on the dirty ones. Drawn as an
+                // empty string rather than omitted so the name's box ends in the
+                // same place down the whole list — see the reservation in
+                // [`preview_menu_layout`].
+                hint: Some((
+                    if item.dirty {
+                        PREVIEW_MENU_DIRTY_DOT.to_owned()
+                    } else {
+                        String::new()
+                    },
+                    dot_width,
+                )),
+                hint_ink: Some(palette.accent),
+                // `.tm-item.cur { background: var(--hover) }` is the same fill
+                // the pointer draws, which is what the mock-up asks for: the row
+                // you are on and the row you are pointing at look alike, and when
+                // they are the same row there is nothing to reconcile.
+                hovered: hover == Some(index) || item.current,
+                available: true,
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
     }
     vec![OverlayLayer {
         quads,
@@ -2659,6 +2910,128 @@ mod tests {
     /// a 180px menu.
     fn fake_measure(text: &str, font_px: f32) -> f32 {
         text.chars().count() as f32 * font_px * 0.6
+    }
+
+    // ── P130-P137: the preview's filename switcher ──────────────────────────
+
+    fn pool(names: &[(&str, bool, bool)]) -> Vec<PreviewMenuItem> {
+        names
+            .iter()
+            .map(|(name, dirty, current)| PreviewMenuItem {
+                name: (*name).to_owned(),
+                dirty: *dirty,
+                current: *current,
+            })
+            .collect()
+    }
+
+    /// PIN (P130-P133) — **the switcher is the honest inventory of hidden
+    /// state**: every live buffer, in the pool's order, each with its own dirty
+    /// dot, and the current one marked.
+    ///
+    /// MUTATIONS:
+    /// ① list only the clean buffers — the dirty rows vanish and the dropdown
+    ///    stops being the one place unsaved work is visible;
+    /// ② draw the dot only where it is dirty *and* size the row to it — the
+    ///    layout's width changes with the dirty bit and the menu moves under the
+    ///    pointer when a buffer is edited;
+    /// ③ ink the dot from `menu_item_hint_text` — it stops being the header's own
+    ///    dot and starts looking like a note.
+    #[test]
+    fn the_switcher_lists_every_buffer_with_its_own_dot() {
+        let items = pool(&[
+            ("a.txt", true, false),
+            ("notes.md", false, true),
+            ("main.rs", false, false),
+        ]);
+        let layout = preview_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &items,
+            &mut fake_measure,
+        );
+        let layer = one_layer(preview_menu_build(&layout, &items, None, &mut fake_measure));
+        for (name, _, _) in [("a.txt", 0, 0), ("notes.md", 0, 0), ("main.rs", 0, 0)] {
+            assert!(
+                layer.labels.iter().any(|label| label.text == name),
+                "{name} is in the inventory"
+            );
+        }
+        let palette = chrome_palette();
+        let dots: Vec<_> = layer
+            .labels
+            .iter()
+            .filter(|label| label.text == PREVIEW_MENU_DIRTY_DOT)
+            .collect();
+        assert_eq!(dots.len(), 1, "one dot, for the one dirty buffer");
+        assert_eq!(dots[0].color, palette.accent);
+
+        // The width does not move with the dirty bit: the dot's column is
+        // reserved on every row.
+        let clean = pool(&[
+            ("a.txt", false, false),
+            ("notes.md", false, true),
+            ("main.rs", false, false),
+        ]);
+        let clean_layout = preview_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &clean,
+            &mut fake_measure,
+        );
+        assert_eq!(clean_layout.frame, layout.frame);
+
+        // Every row answers for its own rectangle, and the box answers for the
+        // rest of itself — a press on the menu's padding is the menu's.
+        for (index, item) in layout.items.iter().enumerate() {
+            let (x, y) = ((item[0] + item[2]) / 2.0, (item[1] + item[3]) / 2.0);
+            assert_eq!(
+                preview_menu_hit(&layout, f64::from(x), f64::from(y)),
+                Some(Some(index))
+            );
+        }
+        assert_eq!(
+            preview_menu_hit(
+                &layout,
+                f64::from(layout.frame[0] + 1.0),
+                f64::from(layout.frame[1] + 1.0)
+            ),
+            Some(None)
+        );
+        assert_eq!(preview_menu_hit(&layout, 1.0, 1.0), None);
+    }
+
+    /// PIN (P133/P136) — **one close path, and the button that opened it
+    /// collapses it.**
+    ///
+    /// The chevron's angle is derived from this state on the next frame, so there
+    /// is nothing to un-flip: shutting the menu *is* turning it back. That is the
+    /// mock-up's own note — "the root menu's lesson, applied on day one this
+    /// time".
+    ///
+    /// Mutation: make `toggle` always open, and a second press on the name leaves
+    /// the menu up with its chevron flipped for good.
+    #[test]
+    fn the_switcher_belongs_to_one_pane_and_its_own_button_shuts_it() {
+        let mut menu = PreviewMenu::default();
+        let one = bt_layout::SeatId(1);
+        let two = bt_layout::SeatId(2);
+        assert_eq!(menu.seat(), None);
+        menu.toggle(one);
+        assert_eq!(menu.seat(), Some(one));
+        menu.toggle(one);
+        assert_eq!(menu.seat(), None, "the same button shuts it");
+        menu.toggle(one);
+        menu.toggle(two);
+        assert_eq!(menu.seat(), Some(two), "and another pane's takes it over");
+        assert!(menu.set_hover(Some(1)));
+        assert_eq!(menu.hover(), Some(1));
+        assert!(menu.close());
+        assert_eq!(menu.hover(), None, "a shut menu is over nothing");
+        assert!(!menu.close(), "and closing it again is not a change");
+        assert!(!menu.set_hover(Some(0)));
     }
 
     // ── E53-E61: the root menu ─────────────────────────────────────────────

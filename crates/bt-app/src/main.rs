@@ -532,9 +532,38 @@ enum PreviewDocument {
     },
     Markdown {
         blocks: Vec<preview::MarkdownBlock>,
+        /// One entry per block, measured **once per content change** — see
+        /// [`MarkdownBlockIntrinsic`].
+        intrinsic: Vec<MarkdownBlockIntrinsic>,
         /// One entry per block, measured against the pane it will wrap in.
         layout: Vec<MarkdownBlockLayout>,
     },
+}
+
+/// What one markdown block is worth **whatever width the pane happens to be**
+/// (user report, 2026-08-13: "拖窗口边时 md 预览明显卡").
+///
+/// The reported stutter was one line of policy: the parsed document was cached
+/// against a key that included the pane's width, so every pixel of a live resize
+/// re-ran the whole pipeline — `parse_markdown` over 64KB of text, and then a
+/// shaping call for **every cell of every table** and every line of every fence.
+/// None of that depends on the width. A table's columns are its own widest cells
+/// and a fence's width is its longest line; those are facts about the document,
+/// and re-deriving them sixty times a second while a window edge moves is the
+/// whole of the cost.
+///
+/// So they are measured here, once, against the content — and the per-width pass
+/// that remains is the one thing that genuinely is per-width: how many lines the
+/// blocks that *do* reflow take.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MarkdownBlockIntrinsic {
+    /// One outer width per table column. Empty for everything else.
+    columns: Vec<f32>,
+    /// How wide this block insists on being, or zero when it reflows.
+    width: f32,
+    /// How many rows a block that does not wrap has: a table's rows, a fence's
+    /// lines. Zero for the blocks whose row count is a function of the width.
+    rows: usize,
 }
 
 /// Everything measuring one markdown block worked out that **drawing it must
@@ -630,10 +659,23 @@ struct DiffRow {
 /// went on drawing the text from before the keystroke.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreviewDocumentKey {
+    parse: PreviewParseKey,
+    body_width_px: u32,
+}
+
+/// The half of [`PreviewDocumentKey`] that has **nothing to do with the pane's
+/// width**.
+///
+/// Split out for the reason [`MarkdownBlockIntrinsic`] exists: a resize changes
+/// the width and nothing else, and a parse keyed on the width re-parsed 64KB of
+/// markdown for every pixel the window edge moved. The scale is on this side
+/// rather than the other because it is not a live-drag quantity — it changes when
+/// a window crosses monitors, which is exactly the moment a re-measure is owed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreviewParseKey {
     path: PathBuf,
     md_source: bool,
     revision: u64,
-    body_width_px: u32,
     scale_ppm: u32,
 }
 
@@ -693,11 +735,13 @@ fn preview_document_key(
     scale: f32,
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
-        path: buffer.path.clone(),
-        md_source: buffer.md_source,
-        revision: buffer.revision,
+        parse: PreviewParseKey {
+            path: buffer.path.clone(),
+            md_source: buffer.md_source,
+            revision: buffer.revision,
+            scale_ppm: (scale * 1_000_000.0).round() as u32,
+        },
         body_width_px: body_width_px.max(0.0).round() as u32,
-        scale_ppm: (scale * 1_000_000.0).round() as u32,
     }
 }
 
@@ -1073,6 +1117,7 @@ fn build_preview_text_body(
                 ))
             })
             .collect(),
+        blocks: Vec::new(),
         foot: None,
     }
 }
@@ -1118,6 +1163,7 @@ fn build_preview_diff_body(
         clip,
         quads,
         paragraphs,
+        blocks: Vec::new(),
         foot: None,
     }
 }
@@ -1218,6 +1264,7 @@ fn build_preview_table_body(
         clip,
         quads,
         paragraphs,
+        blocks: Vec::new(),
         foot: None,
     }
 }
@@ -1231,27 +1278,75 @@ fn build_preview_markdown_body(
     body: [f32; 4],
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
+    block_scroll: &[f32],
     document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
     palette: &bt_render::ChromePalette,
 ) -> bt_render::PreviewBody {
     let (blocks, layout) = document;
-    // **The whole page travels with the horizontal scroll**, prose included:
-    // scrolling right to read the far end of a table while the paragraphs stay
-    // nailed to the left margin is not a page, it is two pages sharing a pane.
-    // What does *not* change is the width prose wraps into — that is the pane's,
-    // measured against the pane, which is why `right` is derived from `left`
-    // rather than from the body's own far edge.
-    let left = body[0] + metrics.padding_x - scroll[0];
+    // **The page has no horizontal axis; the wide blocks have their own** (user
+    // ruling, 2026-08-13, overturning the same day's earlier "the whole page
+    // travels").
+    //
+    // Moving the page sideways to reach the far end of a table pushes the folded
+    // prose off the screen — the paragraphs wrapped to the *pane*, so there is
+    // nothing out there for them to reveal — and the earlier reading of the fold
+    // ruling had already clamped this axis to zero, which left the table's own
+    // width in the extent with no way to spend it: a wide table simply could not
+    // be scrolled at all. Both are the same mistake, and the answer both times is
+    // that the scrolling region is the block. It is what GitHub and Typora do.
+    let left = body[0] + metrics.padding_x;
     let right = left + (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
     let origin = body[1] + metrics.padding_y - scroll[1];
     let mut quads = Vec::new();
     let mut paragraphs = Vec::new();
-    for (block, placed) in blocks.iter().zip(layout) {
+    // Each region carries the offset and the content width its indicator is
+    // drawn from, taken at the moment it is pushed. Recomputing the list a second
+    // time and zipping the two would be one list of *visible* wide blocks against
+    // one list of *all* of them — and a document scrolled past its first table
+    // would draw every indicator against the wrong block.
+    let mut scrollers: Vec<(bt_render::PreviewBlock, (f32, f32))> = Vec::new();
+    for (index, (block, placed)) in blocks.iter().zip(layout).enumerate() {
         let top = origin + placed.top;
         let height = placed.height;
         if top + height <= body[1] || top >= body[3] {
             continue;
         }
+        // A block wider than the page it stands on is drawn into a region of its
+        // own, at its own offset, cropped to its own rectangle — and it earns an
+        // indicator, because a region that scrolls and does not say so is a
+        // region nobody scrolls.
+        let overflow = (placed.width - (right - left)).max(0.0);
+        let offset = if overflow > 0.0 {
+            block_scroll
+                .get(index)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, overflow)
+        } else {
+            0.0
+        };
+        let (left, right, into) = if overflow > 0.0 {
+            scrollers.push((
+                bt_render::PreviewBlock {
+                    clip: [left, top, right, top + height],
+                    quads: Vec::new(),
+                    paragraphs: Vec::new(),
+                },
+                (offset, placed.width),
+            ));
+            (left - offset, right - offset, scrollers.len())
+        } else {
+            (left, right, 0)
+        };
+        // `into` is one-based so that zero can mean "the page itself", which is
+        // the common case and must not pay for the rare one.
+        let (quads, paragraphs) = match into {
+            0 => (&mut quads, &mut paragraphs),
+            index => {
+                let (block, _) = &mut scrollers[index - 1];
+                (&mut block.quads, &mut block.paragraphs)
+            }
+        };
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
                 paragraphs.push(bt_render::PreviewParagraph {
@@ -1347,8 +1442,8 @@ fn build_preview_markdown_body(
             }
             preview::MarkdownBlock::Table { rows } => {
                 push_markdown_table(
-                    &mut quads,
-                    &mut paragraphs,
+                    quads,
+                    paragraphs,
                     rows,
                     placed,
                     [left, top],
@@ -1413,12 +1508,50 @@ fn build_preview_markdown_body(
             }
         }
     }
+    // The indicators, after the blocks so they stand over their own contents.
+    // Two flat rules — the block's bottom edge as a track and the visible share
+    // of it as a thumb — in the inks a grid line and a quiet caption already use,
+    // because the smallest honest thing that says "there is more this way" is a
+    // proportion, and this surface has no scrollbar family to borrow a shape
+    // from.
+    for (block, indicator) in &mut scrollers {
+        push_block_scroll_indicator(block, *indicator, palette);
+    }
     bt_render::PreviewBody {
         clip: body,
         quads,
         paragraphs,
+        blocks: scrollers.into_iter().map(|(block, _)| block).collect(),
         foot: None,
     }
+}
+
+/// `.md-block::-webkit-scrollbar` in the only shape this window has for one: a
+/// two-pixel rule along the block's own bottom edge, and the visible share of it
+/// filled in.
+fn push_block_scroll_indicator(
+    block: &mut bt_render::PreviewBlock,
+    (offset, content): (f32, f32),
+    palette: &bt_render::ChromePalette,
+) {
+    const THICKNESS: f32 = 2.0;
+    let [left, _, right, bottom] = block.clip;
+    let page = (right - left).max(1.0);
+    let top = bottom - THICKNESS;
+    // Drawn in the block's *own* coordinates rather than the scrolled ones, so
+    // the indicator stays where it is while the content moves under it. That is
+    // why it is pushed after the offset has been applied to everything else.
+    block.quads.push(bt_render::PreviewQuad {
+        rect: [left, top, right, bottom],
+        color: palette.preview_grid_line,
+    });
+    let share = (page / content.max(1.0)).clamp(0.0, 1.0);
+    let travel = (page - page * share).max(0.0);
+    let start = left + travel * (offset / (content - page).max(1.0)).clamp(0.0, 1.0);
+    block.quads.push(bt_render::PreviewQuad {
+        rect: [start, top, start + page * share, bottom],
+        color: palette.files_row_muted,
+    });
 }
 
 /// How wide a code fence insists on being: its longest line, plus its border
@@ -1618,21 +1751,12 @@ fn preview_document_max_scroll(
             let metrics = seats::preview_markdown_metrics(scale);
             let height =
                 metrics.padding_y * 2.0 + layout.last().map_or(0.0, |last| last.top + last.height);
-            // **The widest block that refuses to reflow** (user rulings,
-            // 2026-08-13): a fence and a table each answer their own width and
-            // everything else answers zero, so a document of nothing but prose —
-            // however long its unbreakable tokens — has no horizontal axis at
-            // all, and one holding a twelve-column table has exactly enough to
-            // reach its last column.
-            let width = metrics.padding_x * 2.0
-                + layout
-                    .iter()
-                    .map(|block| block.width)
-                    .fold(0.0_f32, f32::max);
-            [
-                (width - (body[2] - body[0])).max(0.0),
-                (height - (body[3] - body[1])).max(0.0),
-            ]
+            // **The page has no horizontal axis at all** (user ruling,
+            // 2026-08-13). The blocks that refuse to reflow — a fence, a table —
+            // each carry their own offset now, so what used to be the widest of
+            // them is no longer the *page's* extent: it is a fact about one block
+            // and is spent inside it. See `build_preview_markdown_body`.
+            [0.0, (height - (body[3] - body[1])).max(0.0)]
         }
         PreviewDocument::Diff(_) => {
             seats::preview_mono_geometry(
@@ -2358,6 +2482,15 @@ struct TabState {
     /// edge, and a body that can only be scrolled downward would leave the end
     /// of every long line permanently out of reach.
     preview_scroll: [f32; 2],
+    /// How far each markdown block that is wider than the page has been scrolled
+    /// inside itself (user ruling, 2026-08-13).
+    ///
+    /// One entry per block of the parsed document, by index, and **kept across a
+    /// rebuild**: a pane that got narrower does not forget where you were reading
+    /// in a table, it clamps you back into what is left. A `Vec` and not a map
+    /// because the index is the block's identity, which is the same identity the
+    /// layout beside it is walked by.
+    preview_md_block_scroll: Vec<f32>,
     /// Where the caret is in the buffer on the seat, and what it has selected.
     ///
     /// Beside the scroll offset and for the same reason: both are the *view's*,
@@ -2856,6 +2989,28 @@ struct Runtime {
     files_row_clicks: FilesRowClicks,
     /// Which files column has its root menu up (E53-E61).
     root_menu: profiles::RootMenu,
+    /// The dirty-buffer gate, when one of the three doors has stopped to ask
+    /// (P123-P125).
+    dirty_gate: restore::DirtyGate,
+    /// Whether the gate's `Discard` has asked for the window to go.
+    ///
+    /// A flag rather than a call, because the shut belongs to the event loop:
+    /// `CloseRequested` is what performs it, and the gate re-requests it rather
+    /// than performing half of it here (see [`Runtime::answer_dirty_gate`]).
+    window_close_requested: bool,
+    /// Which preview pane has its filename switcher up (P130-P137).
+    ///
+    /// `RootMenu`'s twin down to the seat living inside it, which is the whole
+    /// of P133: one close path, so the chevron can never be stranded flipped.
+    preview_menu: profiles::PreviewMenu,
+    /// How wide each preview head's file name was last *drawn*.
+    ///
+    /// Beside [`Self::files_name_widths`] and for the identical reason: the hit
+    /// test has to agree with the paint about where the switcher's pill ends,
+    /// and only something holding a font can say.
+    preview_name_width: f32,
+    /// And how wide the pool-count badge's digits were drawn.
+    preview_count_width: f32,
     /// The file row's context menu, and the row it was raised on (K143).
     ///
     /// It holds the *path*, not the row — an index into a list the tree may
@@ -3777,6 +3932,48 @@ const PREVIEW_OPEN_EXTERNALLY_LABEL: &str = "Open in default app";
 /// the one that was reasoned about: `revealFolderFeedback`'s.
 const PREVIEW_OPENED_LABEL: &str = "Opened \u{2713}";
 
+/// The preview head's two measured strings and the state they were measured for.
+///
+/// One value rather than two returns, because a name and the tools it was
+/// measured with cannot be allowed to disagree — the same argument
+/// `restore::RestoreLayout` makes about carrying its own text.
+struct PreviewHeadFrame {
+    name: String,
+    /// `pool.length` as digits, or empty when the pool holds one buffer and there
+    /// is no badge.
+    count: String,
+    content: seats::PreviewHeadContent<'static>,
+}
+
+/// Who has the keyboard, as the three facts the caret's own question turns on.
+///
+/// A value rather than three bools at a call site, so `InputOwner` (§7.1.5) is a
+/// thing that can be *stated* — and so the rule below can be asserted without a
+/// window, which is the only way "a caret blinks exactly when typing would land
+/// in it" is a property rather than a screenshot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct KeyboardOwner {
+    /// A modal, a rename editor, or any open popup.
+    menu_or_dialog: bool,
+    /// A files column holds it (`InputOwner::FilesTree`).
+    files_tree: bool,
+    /// A preview holds it — editing, or browsing a read-only body.
+    preview: bool,
+}
+
+/// Whether a shell has the keyboard — `InputOwner == Terminal`.
+///
+/// **A blink means "typing lands here", and nothing else** (user report + ruling,
+/// 2026-08-13). The split block had already ruled that an unfocused pane's caret
+/// freezes and fades, but it was written when the only way to lose the keyboard
+/// was to focus *another terminal*: it answered "which pane" and never "which
+/// kind of thing". Every owner above is a way for the keyboard to leave every
+/// shell at once, and against all of them the window's one lit caret was claiming
+/// a keystroke it would not receive.
+fn keyboard_owner_is_a_shell(owner: KeyboardOwner) -> bool {
+    !owner.menu_or_dialog && !owner.files_tree && !owner.preview
+}
+
 /// A foot that is confirming a reveal.
 ///
 /// Two chassis wear the same strip — `.float-win .fly-foot` and
@@ -3790,6 +3987,10 @@ enum RevealedFoot {
     Float(float::FloatId),
     /// One docked column's.
     Column(SeatId),
+    /// One preview pane's, which wears the same strip by the same rule (P33) and
+    /// flashes two words in it rather than one — "Revealed" for the folder, and
+    /// "Saved" for the write (P34, ruling 6: both stand 1300ms).
+    Preview(SeatId),
 }
 
 /// A pinned float being moved or resized (G92).
@@ -7954,6 +8155,20 @@ fn settle_pin_partition(tabs: &mut [TabState], active_tab: &mut usize) {
 /// a preview trips neither, one terminal and a preview trips only the second, and
 /// a lone files column — a tab this build cannot make today — trips only the
 /// first.
+/// Whether closing this pane would leave the tab's preview pool unreachable —
+/// which is the only case gate ① asks about (P123).
+///
+/// "The pool outlives any ONE pane; only the LAST preview pane's close would
+/// strand it." So closing one of two previews asks nothing at all, and closing a
+/// terminal beside a preview asks nothing either: the buffers are still on
+/// screen and still reachable.
+///
+/// A free function because it is a *ruling*, and a ruling stated inside a method
+/// that needs a window is a ruling nobody can assert.
+fn closing_this_pane_strands_the_pool(closing_a_preview: bool, previews_in_tab: usize) -> bool {
+    closing_a_preview && previews_in_tab == 1
+}
+
 fn closing_this_pane_closes_the_tab(
     panes: usize,
     kind: bt_layout::SeatKind,
@@ -9142,6 +9357,7 @@ fn assemble_tab_state(
         preview_doc_key: None,
         preview_mono_advance: 0.0,
         preview_scroll: [0.0, 0.0],
+        preview_md_block_scroll: Vec::new(),
         preview_caret: preview_edit::EditCaret::default(),
         preview_edit_focused: false,
         preview_views: PreviewViewStore::default(),
@@ -9887,6 +10103,11 @@ impl Runtime {
             tab_clicks: TabClicks::default(),
             files_row_clicks: FilesRowClicks::default(),
             root_menu: profiles::RootMenu::default(),
+            dirty_gate: restore::DirtyGate::default(),
+            window_close_requested: false,
+            preview_menu: profiles::PreviewMenu::default(),
+            preview_name_width: 0.0,
+            preview_count_width: 0.0,
             file_menu: None,
             float: float::FloatHost::default(),
             float_drag: None,
@@ -10314,6 +10535,12 @@ impl Runtime {
         if index >= self.tabs.len() {
             return Ok(());
         }
+        // **Gate ② (P124)** — "the tab owns its buffer pool; the pool dies with
+        // it", and the mock-up's note beside it records that this hole predates
+        // the pool: closing a tab used to discard a dirty preview without a word.
+        if self.raise_dirty_gate(restore::GateRequest::CloseTab(index))? {
+            return Ok(());
+        }
         // Item 6, asked on the way *in* rather than on the way out. There is no
         // tab left afterwards to ask, and the fact worth catching is that the tab
         // being taken apart was whole when it got here — `shutdown_all_shells`
@@ -10726,6 +10953,12 @@ impl Runtime {
             .and_then(preview::PreviewBuffer::refusal)
             .map(preview::PreviewRefusal::notice);
         let preview_open_label = self.preview_open_button_label(now);
+        // The head's own run and the strip along the bottom, both measured here
+        // beside the card and for the card's reason: only something holding a
+        // font can say how wide a name is drawn, and the hit test reads the
+        // number this frame stored rather than measuring for itself.
+        let preview_head = self.dress_preview_head(scale);
+        let preview_foot = self.dress_preview_foot(scale, now);
         self.preview_button_width = self.renderer.measure_chrome_text(
             preview_open_label,
             seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
@@ -10787,6 +11020,17 @@ impl Runtime {
                 files_root_open: self.root_menu.seat(),
                 files_trees: &files_trees,
                 preview_message: preview_message.as_deref(),
+                preview_foot: preview_foot
+                    .as_ref()
+                    .map(|(path, revealed)| seats::FootStrip {
+                        path,
+                        revealed: *revealed,
+                    }),
+                preview_head: preview_head.as_ref().map(|head| seats::PreviewHeadContent {
+                    name: &head.name,
+                    count: &head.count,
+                    ..head.content
+                }),
                 preview_card,
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
@@ -11654,7 +11898,18 @@ impl Runtime {
             ground: ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now)),
             ..OverlayStack::default()
         };
-        stack.modal = if let Some(layout) = self.settings_layout() {
+        // **The gate is above the settings dialog**, and that is the one ordering
+        // it could have: it is the only surface in this window that stands in
+        // front of something already happening, so nothing may cover it. Every
+        // other member of the chain below floats over a window that still works.
+        stack.modal = if let Some(layout) = self.dirty_gate_layout() {
+            let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+            restore::gate_build(
+                &layout,
+                (width as f32, height as f32),
+                self.dirty_gate.hover(),
+            )
+        } else if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font
             // knows where the cut falls. Same division, and same hoist, as the
@@ -11703,6 +11958,15 @@ impl Runtime {
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
+        } else if let Some(layout) = self.preview_menu_layout() {
+            // The fourth arm of the same chain, and it is in the chain for E61's
+            // reason: one popup is up at a time, and a chain cannot draw two
+            // however the flags are set.
+            let items = self.preview_menu_items();
+            let hover = self.preview_menu.hover();
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            profiles::preview_menu_build(&layout, &items, hover, &mut measure)
         } else {
             Vec::new()
         };
@@ -12732,16 +12996,25 @@ impl Runtime {
     /// that branch is taken is [`closing_this_pane_closes_the_tab`], and it is
     /// not only about the pane count.
     ///
-    /// **No confirmation, and that is I103's own second half.** A terminal pane's
-    /// `×` kills its shell outright. Only a *preview* pane confirms in the
-    /// mock-up, and only about unsaved buffers — a thing this build has none of —
-    /// so there is nothing here to ask about and nothing here that asks.
+    /// **One confirmation, and only one pane earns it** (I103's second half, now
+    /// that there are unsaved buffers for it to be about). A terminal pane's `×`
+    /// kills its shell outright; a preview pane's asks — and only when it is the
+    /// *last* preview pane in the tab, because the pool outlives any one pane and
+    /// only the last one's closing would strand it (P123).
     fn close_pane(&mut self, seat: bt_layout::SeatId) -> Result<()> {
         let kind = self
             .seat_layout
             .get(seat)
             .map(|placement| placement.kind)
             .unwrap_or(bt_layout::SeatKind::Terminal);
+        // **Gate ① (P123).** Asked before the pane-count branch below, so the
+        // question is put once however the close resolves — a preview pane that
+        // is also the tab's last pane would otherwise fall through to `close_tab`
+        // and be asked by gate ②, which is the same question with a different
+        // subject.
+        if self.raise_dirty_gate(restore::GateRequest::ClosePane(seat))? {
+            return Ok(());
+        }
         if closing_this_pane_closes_the_tab(self.seats.pane_count(), kind, self.sessions.len()) {
             return self.close_tab(self.active_tab);
         }
@@ -12855,6 +13128,9 @@ impl Runtime {
             // so neither can drift into meaning something the other does not.
             shortcuts::Action::FilesPane => self.toggle_files_pane(),
             shortcuts::Action::OpenSettings => self.toggle_settings_panel(),
+            // Ruling 9's row, dispatched like every other: the same verb the
+            // header's save button and the editor's own `Ctrl+S` reach.
+            shortcuts::Action::SavePreview => self.save_preview(),
         }
     }
 
@@ -13094,6 +13370,23 @@ impl Runtime {
         {
             self.disable_preview_worker();
         }
+        // **The reuse target is `preview()` and not `landing_preview()`, and that
+        // is a stated limit rather than an oversight.**
+        //
+        // P95 rules that a pinned pane stops being the reuse target and the next
+        // file "opens a fresh preview beside it". The seat layer can already say
+        // which pane that is ([`seats::Seats::landing_preview`]) and the tree can
+        // already hold two Preview leaves. What cannot yet serve two is *this*
+        // module: the buffer on screen, its parsed document, its caret, its
+        // scroll and its notice are one set of fields, and `bt_render` takes one
+        // preview body. Landing a second preview leaf today would draw two heads
+        // with one file's name in them and one body between them, which is worse
+        // than the pin doing less than it says.
+        //
+        // So the pin lands here as durable state, as the header's own two-state
+        // control, and as the seat-level rule that `landing_preview` states and
+        // is tested on; the second *content plane* is the next slice's, and this
+        // is the line it changes.
         if self.seats.preview().is_none() {
             return self.toggle_preview_seat();
         }
@@ -13136,6 +13429,204 @@ impl Runtime {
         self.preview_notice = None;
     }
 
+    // ── the head's furniture (P11-P31) ──────────────────────────────────────
+
+    /// What the preview head is showing this frame, with both of its strings
+    /// measured.
+    ///
+    /// **The measurement is stored, not returned twice.** The hit test has to
+    /// agree with the paint about where the switcher's pill ends, and it is
+    /// `&self` by construction — a pointer moving is not a reason to touch a
+    /// renderer — so the two widths land in the runtime here, exactly as the
+    /// files heads' do.
+    fn dress_preview_head(&mut self, scale: f32) -> Option<PreviewHeadFrame> {
+        let seat = self.seats.preview()?;
+        // A picture has a name and no buffer, and it still gets a head: the two
+        // doors into this seat fill the same caption (P36's contract), and a head
+        // that appeared only for documents would blink out every time you looked
+        // at a `.png`.
+        let (name, tools, dirty, flip_to_source) = match self.current_preview_buffer() {
+            Some(buffer) => (
+                buffer.name.clone(),
+                seats::PreviewHeadTools {
+                    save: buffer.is_editable(),
+                    flip: buffer.ftype == preview::PreviewFtype::Markdown,
+                    ..seats::PreviewHeadTools::default()
+                },
+                buffer.dirty,
+                !buffer.md_source,
+            ),
+            None => (
+                self.preview_image
+                    .as_ref()
+                    .map(PreviewImageState::title)
+                    .unwrap_or_default(),
+                seats::PreviewHeadTools::default(),
+                false,
+                false,
+            ),
+        };
+        let pool = self.preview_pool.len();
+        // `othersDirty` (P19): the pane's own dot already speaks for the buffer on
+        // screen, so the badge is the only thing that can speak for the rest.
+        let shown = self.preview_buffer.clone();
+        let others_dirty = self
+            .preview_pool
+            .dirty_names(shown.as_deref())
+            .next()
+            .is_some();
+        let count = if pool > 1 {
+            pool.to_string()
+        } else {
+            String::new()
+        };
+        let tools = seats::PreviewHeadTools {
+            switcher: pool > 1,
+            name_width: self
+                .renderer
+                .measure_chrome_text(&name, seats::PREVIEW_NAME_FONT_LOGICAL_PX * scale),
+            count_width: self
+                .renderer
+                .measure_chrome_text(&count, seats::PREVIEW_COUNT_FONT_LOGICAL_PX * scale),
+            ..tools
+        };
+        self.preview_name_width = tools.name_width;
+        self.preview_count_width = tools.count_width;
+        Some(PreviewHeadFrame {
+            name,
+            count,
+            content: seats::PreviewHeadContent {
+                tools,
+                dirty,
+                others_dirty,
+                flip_to_source,
+                pinned: self.seats.preview_is_pinned(seat),
+                menu_open: self.preview_menu.seat() == Some(seat),
+                ..seats::PreviewHeadContent::default()
+            },
+        })
+    }
+
+    /// The tools the hit test must lay the head out with — **this frame's**, off
+    /// the widths the paint stored.
+    fn preview_head_tools(&self) -> seats::PreviewHeadTools {
+        let pool = self.preview_pool.len();
+        let buffer = self.current_preview_buffer();
+        seats::PreviewHeadTools {
+            save: buffer.is_some_and(preview::PreviewBuffer::is_editable),
+            flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
+            switcher: pool > 1,
+            name_width: self.preview_name_width,
+            count_width: self.preview_count_width,
+        }
+    }
+
+    // ── the foot (P32-P35) ──────────────────────────────────────────────────
+
+    /// The path along the bottom of the preview pane, cut to the room it has —
+    /// or the word it is flashing instead.
+    ///
+    /// **One strip, two confirmations, one duration** (P34, and ruling 6): the
+    /// foot flashes "Saved" the same way it flashes "Revealed", and both stand
+    /// for [`FOOT_REVEAL_FEEDBACK`]. The save's *refusals* do not come here —
+    /// a conflict is a sentence, not a word, and it does not expire — so they
+    /// keep the body's own notice strip.
+    fn dress_preview_foot(&mut self, scale: f32, now: Instant) -> Option<(String, bool)> {
+        let seat = self.seats.preview()?;
+        let path = match self.current_preview_buffer() {
+            Some(buffer) => buffer.path.clone(),
+            None => self.preview_image.as_ref()?.path.clone(),
+        };
+        let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
+        let saved = self.preview_save_notice(now) == Some(preview::PREVIEW_SAVED_NOTICE);
+        let text = if revealed {
+            FOOT_REVEALED_LABEL.to_owned()
+        } else if saved {
+            preview::PREVIEW_SAVED_NOTICE.to_owned()
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+            return Some((text, revealed || saved));
+        };
+        let box_ = seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
+        let room = box_[2] - box_[0];
+        let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        // **Left-truncated** (P35): the ellipsis goes at the head so the file
+        // name — the part you actually care about — survives.
+        let cut = settings::ellipsized_left(&text, room, font, &mut measure);
+        Some((cut, revealed || saved))
+    }
+
+    /// Show the file on the seat in File Explorer — `.preview-pane .files-foot`
+    /// (P32), the same verb and the same confirmation a files column's foot has.
+    fn reveal_preview_file(&mut self, seat: SeatId) -> Result<()> {
+        let Some(path) = self
+            .current_preview_buffer()
+            .map(|buffer| buffer.path.clone())
+            .or_else(|| self.preview_image.as_ref().map(|image| image.path.clone()))
+        else {
+            return Ok(());
+        };
+        // The *folder*, because that is what "reveal" means: Explorer opening on
+        // a text file would run it, and the one door out already refuses that —
+        // so this asks for the directory and lets the file be found in it.
+        let folder = path.parent().unwrap_or(&path).to_path_buf();
+        if !self.open_local_path(&folder) {
+            return Ok(());
+        }
+        self.revealed_foot = Some((RevealedFoot::Preview(seat), Instant::now()));
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Turn a markdown buffer over — rendered view ⇄ source (P28).
+    ///
+    /// The flip is a property of the **buffer**, not of the pane, and that is the
+    /// same ruling the dirty bit follows: a file open in two panes is one buffer
+    /// (§7.1.3), so which face it is showing travels with it.
+    fn flip_preview_source(&mut self) -> Result<()> {
+        let Some(path) = self.preview_buffer.clone() else {
+            return Ok(());
+        };
+        let Some(buffer) = self.preview_pool.get_mut(&path) else {
+            return Ok(());
+        };
+        if buffer.ftype != preview::PreviewFtype::Markdown {
+            return Ok(());
+        }
+        buffer.md_source = !buffer.md_source;
+        // The keyboard cannot stay in an editor that is no longer on screen. The
+        // flag is healed at the read (`preview_edit_focus`), so this is belt and
+        // braces — but the caret it would otherwise leave behind is not, and a
+        // caret parked in a rendered document is a caret in nothing.
+        self.preview_edit_focused = false;
+        self.repaint_preview()
+    }
+
+    /// Pin or unpin the preview pane (P30/P95).
+    ///
+    /// **The pin is the only route to a second preview pane** — "this pane keeps
+    /// its buffers and stops being the reuse target; the NEXT file opens a fresh
+    /// preview beside it" — and it is deliberately the only one: editing does not
+    /// promote (`DESIGN.md` §7.1.3, user ruling 2026-07-17, which overturned the
+    /// same day's earlier "编辑即转正"). The state is durable, because it is a
+    /// fact about the pane and not about this session's pointer.
+    fn toggle_preview_pin(&mut self, seat: SeatId) -> Result<()> {
+        if !self.seats.toggle_preview_pin(seat) {
+            return Ok(());
+        }
+        self.mark_session_dirty(Instant::now());
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// The buffer the preview seat is showing, if it is showing one.
     fn current_preview_buffer(&self) -> Option<&preview::PreviewBuffer> {
         let path = self.preview_buffer.as_deref()?;
@@ -13165,6 +13656,13 @@ impl Runtime {
             body[3] - body[1]
         };
         let travel = self.vertical_wheel_travel(delta, extent);
+        // **Sideways over a wide block scrolls the block** (user ruling,
+        // 2026-08-13). Asked first, because the page has no horizontal axis of
+        // its own on this surface and a notch spent on nothing is a notch the
+        // user has to spend again.
+        if sideways && self.scroll_preview_block(body, scale, travel)? {
+            return Ok(());
+        }
         let mut wanted = self.preview_scroll;
         wanted[usize::from(!sideways)] -= travel;
         let scrolled = self.clamped_preview_scroll(body, scale, wanted);
@@ -13175,6 +13673,61 @@ impl Runtime {
         self.refresh_preview_body();
         self.refresh_chrome();
         self.present_chrome_change()
+    }
+
+    /// A sideways notch spent on the wide block under the pointer, if there is
+    /// one.
+    ///
+    /// Returns whether a block took it. **The pointer decides which block**, not
+    /// the focus and not the caret: a page may hold several wide tables, they are
+    /// separate scrolling regions, and the one you are pointing at is the one you
+    /// mean — which is what every browser does with a `overflow-x: auto` div and
+    /// the only rule that needs no second control to disambiguate.
+    fn scroll_preview_block(&mut self, body: [f32; 4], scale: f32, travel: f32) -> Result<bool> {
+        let PreviewDocument::Markdown { blocks, layout, .. } = &self.preview_doc else {
+            return Ok(false);
+        };
+        let Some(pointer) = self.pointer_position else {
+            return Ok(false);
+        };
+        let (x, y) = (pointer.x as f32, pointer.y as f32);
+        if x < body[0] || x > body[2] || y < body[1] || y > body[3] {
+            return Ok(false);
+        }
+        let metrics = seats::preview_markdown_metrics(scale);
+        let page = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+        let origin = body[1] + metrics.padding_y - self.preview_scroll[1];
+        let hit = blocks
+            .iter()
+            .zip(layout)
+            .enumerate()
+            .find(|(_, (_, placed))| {
+                placed.width > page
+                    && y >= origin + placed.top
+                    && y < origin + placed.top + placed.height
+            });
+        let Some((index, (_, placed))) = hit else {
+            return Ok(false);
+        };
+        let overflow = placed.width - page;
+        // Grown here rather than at the rebuild, because a document is parsed far
+        // more often than a block is scrolled and a vector of zeros per parse is
+        // a cost paid for a case that usually does not arise.
+        if self.preview_md_block_scroll.len() <= index {
+            self.preview_md_block_scroll.resize(index + 1, 0.0);
+        }
+        let current = self.preview_md_block_scroll[index];
+        let wanted = (current - travel).clamp(0.0, overflow);
+        if wanted == current {
+            // Still the block's notch: a table at its own end does not hand the
+            // wheel back to a page that has nowhere to go either.
+            return Ok(true);
+        }
+        self.preview_md_block_scroll[index] = wanted;
+        self.refresh_preview_body();
+        self.refresh_chrome();
+        self.present_chrome_change()?;
+        Ok(true)
     }
 
     /// The stored offset, put back inside what the document actually has.
@@ -13289,50 +13842,86 @@ impl Runtime {
         self.seats.preview() == Some(self.seats.focus())
     }
 
+    /// What the window's focus looks like to the shortcut table.
+    ///
+    /// The quick edit is counted as well as the seat, and the `||` is not
+    /// belt-and-braces: the two are set by different gestures — a click in the
+    /// body takes the keyboard, a click on the head takes the focus — and a
+    /// `Ctrl+S` that worked from one of them and not the other would be exactly
+    /// the "from any focus state" the mock-up's own comment rules out.
+    fn shortcut_focus(&self) -> shortcuts::Focus {
+        shortcuts::Focus {
+            preview: self.preview_seat_focused() || self.preview_edit_focus(),
+        }
+    }
+
+    /// **Whether a shell is the one holding the keyboard** — `InputOwner ==
+    /// Terminal` (`docs/DESIGN.md` §7.1.5), asked as one question.
+    ///
+    /// User report, 2026-08-13: click a files tree or a preview and the
+    /// terminal's caret goes on blinking behind you. The split block had already
+    /// ruled that an unfocused pane's caret freezes and fades — its argument is
+    /// on [`bt_render::seat_caret`] — but it was written when the only way to
+    /// lose the keyboard was to focus *another terminal*, so it answered "which
+    /// pane" and never "which kind of thing". Every owner below is a way for the
+    /// keyboard to leave every shell at once, and against all of them the
+    /// window's one lit caret was claiming a keystroke it would not receive.
+    ///
+    /// **A blink means "typing lands here", and nothing else** (ruling
+    /// 2026-08-13). So the answer is the owner, not the focus: the moment the
+    /// owner is anything but a terminal, every caret on screen wears the standing
+    /// it already had for the pane beside it — steady, and in the faded ink —
+    /// and it comes straight back when the owner does.
+    ///
+    /// The modal is not in the list and does not need to be: a dialog is drawn
+    /// over a dimmed window, and `Focused(false)` has already stopped the blink
+    /// whenever the window itself lost focus.
+    fn keyboard_owner_is_a_shell(&self) -> bool {
+        keyboard_owner_is_a_shell(KeyboardOwner {
+            // `Menu` and `Dialog`, which own the keyboard outright while they are
+            // up (§7.1.5, and the mock-up's "an open menu owns the keyboard" at
+            // 6188).
+            menu_or_dialog: self.dirty_gate.is_open()
+                || self.settings.is_open()
+                || self.rename.is_some()
+                || self.file_menu.is_some()
+                || self.profile_menu.is_open()
+                || self.root_menu.seat().is_some()
+                || self.preview_menu.seat().is_some(),
+            files_tree: self.files_keyboard_seat().is_some(),
+            // `PreviewEdit` — and the preview's read-only browsing, which is the
+            // same owner wearing its other state: the arrows scroll the document,
+            // so they are not the shell's either.
+            preview: self.preview_edit_focus() || self.preview_seat_focused(),
+        })
+    }
+
     /// One key, with the quick edit holding the keyboard.
     ///
     /// Returns whether the key was the editor's at all. **Everything is**, once
     /// it has the focus (P139: "editor keys are the editor's — the terminal must
     /// not hear them"), which is why [`preview_edit::command`] is total and this
-    /// returns `true` for every branch below it. Without the focus exactly one
-    /// chord is still taken, and only when the preview seat is the focused leaf:
-    /// the mock-up's global save, which exists precisely for "you flipped to the
-    /// rendered view / clicked elsewhere in the pane".
+    /// returns `true` for every branch below it.
+    ///
+    /// **The save is not here** (ruling 9, 2026-08-12). It used to be, twice: in
+    /// the editor's own vocabulary and again in a branch above this one that
+    /// caught `Ctrl+S` when the seat was focused but the editor was not. Both are
+    /// now the one scoped row of `shortcuts::BINDINGS`, resolved before this
+    /// surface is asked — which is what "from any focus state" (mock-up
+    /// 6139-6150) means when the condition is data rather than two call sites
+    /// agreeing.
     fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {
         if !self.preview_edit_focus() {
-            eprintln!(
-                "BT_PVDBG unfocused flag={} seat={:?} editable={:?} key={:?}",
-                self.preview_edit_focused,
-                self.seats.preview(),
-                self.current_preview_buffer()
-                    .map(preview::PreviewBuffer::is_editable),
-                event.logical_key
-            );
-            if !event.repeat
-                && self.preview_seat_focused()
-                && matches!(
-                    preview_edit::command(&event.logical_key, self.modifiers),
-                    preview_edit::EditCommand::Save
-                )
-            {
-                self.save_preview()?;
-                return Ok(true);
-            }
-            return Ok(false);
+            return self.preview_browse_key(event);
         }
         let command = preview_edit::command(&event.logical_key, self.modifiers);
-        eprintln!(
-            "BT_PVDBG key={:?} mods={:?} -> {command:?}",
-            event.logical_key, self.modifiers
-        );
-        // Repeats travel and type; they do not save, copy, paste or blur. Held
-        // Enter is one continuous "again" and held Ctrl+S is not — the same line
-        // the files tree draws between its travel keys and its verbs.
+        // Repeats travel and type; they do not copy, paste or blur. Held Enter is
+        // one continuous "again" and a held verb is not — the same line the files
+        // tree draws between its travel keys and its verbs.
         if event.repeat
             && matches!(
                 command,
-                preview_edit::EditCommand::Save
-                    | preview_edit::EditCommand::Copy
+                preview_edit::EditCommand::Copy
                     | preview_edit::EditCommand::Cut
                     | preview_edit::EditCommand::Paste
                     | preview_edit::EditCommand::SelectAll
@@ -13382,7 +13971,6 @@ impl Runtime {
                 })?;
             }
             preview_edit::EditCommand::Paste => self.paste_into_preview()?,
-            preview_edit::EditCommand::Save => self.save_preview()?,
             // Esc gives the keyboard back. Answered here rather than encoded,
             // which is exactly what §7.1.5's layering says: Esc reaches the child
             // only when the owner is the terminal.
@@ -13392,6 +13980,59 @@ impl Runtime {
             }
             preview_edit::EditCommand::Ignore => {}
         }
+        Ok(true)
+    }
+
+    /// One key with the preview seat focused and **nothing to type into** —
+    /// a picture, a table, a diff, a rendered markdown, a "no preview" card.
+    ///
+    /// **The keyboard has still left the shell** (ruling 2026-08-13, closing the
+    /// gap the caret report opened). §7.1.5 lets characters into a PTY only while
+    /// the owner is `Terminal`, and a focused preview is not one — so every key
+    /// is answered here, and the ones that mean something answer by scrolling the
+    /// document. It is the files column's `/* nothing to type into */` (mock-up
+    /// 6199) applied to the other leaf that is not a shell, and it is what makes
+    /// the three things the report asked to line up — the lit pane, the keyboard,
+    /// and the caret — one fact instead of three.
+    ///
+    /// Travel keys honour repeats and nothing else does, which is the same line
+    /// the tree draws: holding an arrow is one continuous "further".
+    fn preview_browse_key(&mut self, event: &KeyEvent) -> Result<bool> {
+        if !self.preview_seat_focused() {
+            return Ok(false);
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = self.preview_content_body_rect(scale) else {
+            // A seat with no body to scroll still owns the key: there is no
+            // terminal under it either way.
+            return Ok(true);
+        };
+        let page = (body[3] - body[1]).max(1.0);
+        let line = seats::preview_text_metrics(scale).line_height;
+        let step = match &event.logical_key {
+            Key::Named(NamedKey::ArrowDown) => [0.0, line],
+            Key::Named(NamedKey::ArrowUp) => [0.0, -line],
+            Key::Named(NamedKey::ArrowRight) => [line, 0.0],
+            Key::Named(NamedKey::ArrowLeft) => [-line, 0.0],
+            Key::Named(NamedKey::PageDown) | Key::Named(NamedKey::Space) => [0.0, page],
+            Key::Named(NamedKey::PageUp) => [0.0, -page],
+            // Home and End are the document's ends, expressed as an offset the
+            // clamp will cut to size — one door for every write of the stored
+            // scroll, which is `clamped_preview_scroll`'s whole rule.
+            Key::Named(NamedKey::Home) => [0.0, f32::MIN],
+            Key::Named(NamedKey::End) => [0.0, f32::MAX],
+            _ => return Ok(true),
+        };
+        let wanted = [
+            self.preview_scroll[0] + step[0],
+            self.preview_scroll[1] + step[1],
+        ];
+        let scrolled = self.clamped_preview_scroll(body, scale, wanted);
+        if scrolled == self.preview_scroll {
+            return Ok(true);
+        }
+        self.preview_scroll = scrolled;
+        self.repaint_preview()?;
         Ok(true)
     }
 
@@ -13810,7 +14451,33 @@ impl Runtime {
         if key == self.preview_doc_key {
             return;
         }
+        // **A resize re-flows; it does not re-parse** (user report, 2026-08-13).
+        // The parse and every measurement that does not depend on the pane's
+        // width are keyed on the content alone, so dragging a window edge pays
+        // for the one pass that is genuinely per-width — how many lines the
+        // wrapping blocks take — instead of re-parsing 64KB and re-shaping every
+        // table cell sixty times a second. See [`MarkdownBlockIntrinsic`].
+        let reflow_only = key.as_ref().map(|key| &key.parse)
+            == self.preview_doc_key.as_ref().map(|key| &key.parse);
         self.preview_doc_key = key;
+        if reflow_only
+            && let PreviewDocument::Markdown {
+                blocks,
+                intrinsic,
+                layout,
+            } = std::mem::take(&mut self.preview_doc)
+        {
+            let metrics = seats::preview_markdown_metrics(scale);
+            let width = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+            let _ = layout;
+            let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics);
+            self.preview_doc = PreviewDocument::Markdown {
+                blocks,
+                intrinsic,
+                layout,
+            };
+            return;
+        }
         let Some((view, content)) = self
             .current_preview_buffer()
             .map(|buffer| (buffer.view(), buffer.content.clone().unwrap_or_default()))
@@ -13877,54 +14544,158 @@ impl Runtime {
                 let metrics = seats::preview_markdown_metrics(scale);
                 let blocks = preview::parse_markdown(&content);
                 let width = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
-                let mut layout = Vec::with_capacity(blocks.len());
-                let mut top = 0.0_f32;
-                let mut previous_margin = 0.0_f32;
-                for block in &blocks {
-                    let mut measured = self.measure_markdown_block(block, width, metrics);
-                    let margin = markdown_block_margin(block, metrics);
-                    // **Adjacent margins collapse**, which is the rule the
-                    // prototype gets free from a browser and this window has to
-                    // keep on purpose. Without it a list's bottom margin and a
-                    // heading's top margin add up, and — worse in practice —
-                    // whichever of the two is omitted leaves the heading sitting
-                    // on the last bullet.
-                    top += previous_margin.max(margin);
-                    measured.top = top;
-                    top += measured.height;
-                    previous_margin = margin;
-                    layout.push(measured);
+                let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics);
+                let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics);
+                PreviewDocument::Markdown {
+                    blocks,
+                    intrinsic,
+                    layout,
                 }
-                PreviewDocument::Markdown { blocks, layout }
             }
             preview::PreviewView::Image | preview::PreviewView::None => PreviewDocument::Empty,
         };
     }
 
-    /// How tall one markdown block's own content is, and how tall each of its
-    /// rows — margins excluded, because margins collapse between neighbours and
-    /// a height that had swallowed one could not be collapsed with anything.
+    /// Everything about a document that a pane's width cannot change.
     ///
-    /// **Every row a drawing pass will walk is measured here and written down.**
-    /// See [`MarkdownBlockLayout`]: a block whose total is measured with the
-    /// shaper and whose rows are then *assumed* by the painter is the bug that
-    /// put a screenful of nothing in the middle of `docs/DESIGN.md`.
-    fn measure_markdown_block(
+    /// **The expensive pass, run once per content change.** Every shaping call in
+    /// here is a fact about the document — a table column is its own widest cell,
+    /// a fence is its longest line — and running it per width is what the resize
+    /// report was about.
+    fn measure_markdown_intrinsics(
         &mut self,
-        block: &preview::MarkdownBlock,
+        blocks: &[preview::MarkdownBlock],
+        metrics: seats::PreviewMarkdownMetrics,
+    ) -> Vec<MarkdownBlockIntrinsic> {
+        let palette = bt_render::chrome_palette();
+        blocks
+            .iter()
+            .map(|block| match block {
+                preview::MarkdownBlock::Table { rows } => {
+                    let count = rows.iter().map(Vec::len).max().unwrap_or(0);
+                    if count == 0 {
+                        return MarkdownBlockIntrinsic::default();
+                    }
+                    let columns = markdown_table_columns(rows, metrics, |cell, heading| {
+                        let runs = markdown_runs(cell, &palette, heading);
+                        self.renderer.measure_preview_paragraph_width(
+                            &runs,
+                            metrics.font_size,
+                            metrics.line_height,
+                        )
+                    });
+                    // Plus the hairline that closes the last row and the one down
+                    // the far edge: `border-collapse` draws one between
+                    // neighbours and one at each end.
+                    let width = columns.iter().sum::<f32>() + metrics.table_border;
+                    MarkdownBlockIntrinsic {
+                        columns,
+                        width,
+                        rows: rows.len(),
+                    }
+                }
+                preview::MarkdownBlock::Code { text, .. } => MarkdownBlockIntrinsic {
+                    width: markdown_fence_width(text, metrics, |runs| {
+                        self.renderer.measure_preview_paragraph_width(
+                            runs,
+                            metrics.font_size,
+                            metrics.line_height,
+                        )
+                    }),
+                    rows: text.lines().count().max(1),
+                    ..MarkdownBlockIntrinsic::default()
+                },
+                _ => MarkdownBlockIntrinsic::default(),
+            })
+            .collect()
+    }
+
+    /// Stack the blocks down the page at this width, collapsing their margins.
+    ///
+    /// **The per-width pass, and all of it.** What it still asks the shaper is
+    /// only the question that genuinely has a different answer at every width:
+    /// how many lines a block that reflows takes.
+    fn lay_markdown_out(
+        &mut self,
+        blocks: &[preview::MarkdownBlock],
+        intrinsic: &[MarkdownBlockIntrinsic],
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
-    ) -> MarkdownBlockLayout {
+    ) -> Vec<MarkdownBlockLayout> {
+        let renderer = &mut self.renderer;
+        let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
+            renderer.measure_preview_paragraph(runs, width, font, line)
+        };
+        lay_markdown_out(blocks, intrinsic, width, metrics, &mut wrapped)
+    }
+}
+
+/// How many pixels tall a run of styled text is when wrapped into a width.
+///
+/// The one question the per-width pass still asks the shaper — see
+/// [`MarkdownBlockIntrinsic`] for the ones it stopped asking. Named so that the
+/// two functions taking it read as taking *a shaper*, which is what makes the
+/// call-count test possible: the measurer is injected, so a test can own it.
+type WrapMeasure<'a> = dyn FnMut(&[bt_render::PreviewRun], f32, f32, f32) -> f32 + 'a;
+
+/// Stack the blocks down the page at this width, with the shaper injected.
+///
+/// A free function so that "a resize re-flows and does not re-measure" is
+/// assertable **by counting the calls** rather than by timing a window: the
+/// measurer is the expensive thing, and a test that owns it can say exactly how
+/// often it was asked and about what.
+fn lay_markdown_out(
+    blocks: &[preview::MarkdownBlock],
+    intrinsic: &[MarkdownBlockIntrinsic],
+    width: f32,
+    metrics: seats::PreviewMarkdownMetrics,
+    measure: &mut WrapMeasure<'_>,
+) -> Vec<MarkdownBlockLayout> {
+    {
+        let mut layout = Vec::with_capacity(blocks.len());
+        let mut top = 0.0_f32;
+        let mut previous_margin = 0.0_f32;
+        for (block, intrinsic) in blocks.iter().zip(intrinsic) {
+            let mut measured = measure_markdown_block(block, intrinsic, width, metrics, measure);
+            let margin = markdown_block_margin(block, metrics);
+            // **Adjacent margins collapse**, which is the rule the prototype gets
+            // free from a browser and this window has to keep on purpose. Without
+            // it a list's bottom margin and a heading's top margin add up, and —
+            // worse in practice — whichever of the two is omitted leaves the
+            // heading sitting on the last bullet.
+            top += previous_margin.max(margin);
+            measured.top = top;
+            top += measured.height;
+            previous_margin = margin;
+            layout.push(measured);
+        }
+        layout
+    }
+}
+
+/// How tall one markdown block's own content is, and how tall each of its rows —
+/// margins excluded, because margins collapse between neighbours and a height
+/// that had swallowed one could not be collapsed with anything.
+///
+/// **Every row a drawing pass will walk is measured here and written down.**
+/// See [`MarkdownBlockLayout`]: a block whose total is measured with the shaper
+/// and whose rows are then *assumed* by the painter is the bug that put a
+/// screenful of nothing in the middle of `docs/DESIGN.md`.
+fn measure_markdown_block(
+    block: &preview::MarkdownBlock,
+    intrinsic: &MarkdownBlockIntrinsic,
+    width: f32,
+    metrics: seats::PreviewMarkdownMetrics,
+    measure: &mut WrapMeasure<'_>,
+) -> MarkdownBlockLayout {
+    {
         let palette = bt_render::chrome_palette();
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
                 let runs = markdown_runs(spans, &palette, true);
                 let font = metrics.heading_font(*level);
                 let line = metrics.heading_line_height(*level);
-                MarkdownBlockLayout::solid(
-                    self.renderer
-                        .measure_preview_paragraph(&runs, width, font, line),
-                )
+                MarkdownBlockLayout::solid(measure(&runs, width, font, line))
             }
             preview::MarkdownBlock::List { ordered, items } => {
                 let inner = (width - metrics.list_indent).max(1.0);
@@ -13933,12 +14704,7 @@ impl Runtime {
                     .enumerate()
                     .map(|(index, spans)| {
                         let runs = markdown_item_runs(spans, *ordered, index, &palette);
-                        self.renderer.measure_preview_paragraph(
-                            &runs,
-                            inner,
-                            metrics.font_size,
-                            metrics.line_height,
-                        )
+                        measure(&runs, inner, metrics.font_size, metrics.line_height)
                     })
                     .collect();
                 MarkdownBlockLayout::rows(rows, 0.0)
@@ -13949,49 +14715,52 @@ impl Runtime {
                     .iter()
                     .map(|spans| {
                         let runs = markdown_runs(spans, &palette, false);
-                        self.renderer.measure_preview_paragraph(
-                            &runs,
-                            inner,
-                            metrics.font_size,
-                            metrics.line_height,
-                        )
+                        measure(&runs, inner, metrics.font_size, metrics.line_height)
                     })
                     .collect();
                 // The quote's own top and bottom padding, inside the bar.
                 MarkdownBlockLayout::rows(rows, metrics.quote_padding_y * 2.0)
             }
-            preview::MarkdownBlock::Table { rows } => {
-                self.measure_markdown_table(rows, metrics, &palette)
+            // **Neither of the two blocks below asks the shaper anything here.**
+            // Their geometry is the document's, not the pane's, and it arrives
+            // already measured — which is the whole of the resize fix.
+            preview::MarkdownBlock::Table { .. } => {
+                if intrinsic.columns.is_empty() {
+                    return MarkdownBlockLayout::default();
+                }
+                // No cell wraps, so every row is one line box tall — which is
+                // also why the row heights are uniform and still written down per
+                // row: the painter walks `rows` and must not go back to
+                // arithmetic of its own.
+                let row_height =
+                    metrics.line_height + metrics.table_border + metrics.table_padding_y * 2.0;
+                MarkdownBlockLayout {
+                    columns: intrinsic.columns.clone(),
+                    width: intrinsic.width,
+                    ..MarkdownBlockLayout::rows(
+                        vec![row_height; intrinsic.rows],
+                        metrics.table_border,
+                    )
+                }
             }
             preview::MarkdownBlock::Rule => MarkdownBlockLayout::solid(metrics.rule_thickness),
-            preview::MarkdownBlock::Code { text, .. } => {
+            preview::MarkdownBlock::Code { .. } => {
                 // **A fence does not wrap and scrolls sideways instead** (user
                 // ruling, 2026-08-13). It is a block of code, and code that
                 // reflows is code that lies about its own indentation — the same
-                // argument that keeps a `.diff` unwrapped. So the fence's
-                // longest line is measured here and enters the document's
-                // horizontal extent; without that the line would be drawn and
-                // then be unreachable, which is the worst of both rulings.
-                let lines = text.lines().count().max(1) as f32;
-                let width = markdown_fence_width(text, metrics, |runs| {
-                    self.renderer.measure_preview_paragraph_width(
-                        runs,
-                        metrics.font_size,
-                        metrics.line_height,
-                    )
-                });
+                // argument that keeps a `.diff` unwrapped.
                 MarkdownBlockLayout {
-                    width,
+                    width: intrinsic.width,
                     ..MarkdownBlockLayout::solid(
                         metrics.code_border * 2.0
                             + metrics.code_padding_y * 2.0
-                            + metrics.line_height * lines,
+                            + metrics.line_height * intrinsic.rows as f32,
                     )
                 }
             }
             preview::MarkdownBlock::Paragraph(spans) => {
                 let runs = markdown_runs(spans, &palette, false);
-                MarkdownBlockLayout::solid(self.renderer.measure_preview_paragraph(
+                MarkdownBlockLayout::solid(measure(
                     &runs,
                     width,
                     metrics.font_size,
@@ -14000,55 +14769,9 @@ impl Runtime {
             }
         }
     }
+}
 
-    /// A markdown table's columns and rows, measured from **its own contents**.
-    ///
-    /// **The table is as wide as it is, and the pane scrolls to it** (user
-    /// ruling, 2026-08-13). Each column is its own widest cell, no cell wraps,
-    /// and a table wider than the pane is reached by scrolling sideways — the
-    /// same answer the `.csv` grid beside it has always given, which is the
-    /// point: two tables in one product that behave differently is a defect
-    /// visible in one screenshot. The first draft divided the pane's width among
-    /// the columns in proportion to their content and wrapped inside the cells;
-    /// that is a column-compression algorithm, it was overruled before it
-    /// shipped, and the version that is here is the one with no policy in it.
-    ///
-    /// The chrome — heading fill, collapsed hairlines, cell padding — is the csv
-    /// grid's for the same reason.
-    fn measure_markdown_table(
-        &mut self,
-        rows: &[preview::TableRow],
-        metrics: seats::PreviewMarkdownMetrics,
-        palette: &bt_render::ChromePalette,
-    ) -> MarkdownBlockLayout {
-        let count = rows.iter().map(Vec::len).max().unwrap_or(0);
-        if count == 0 {
-            return MarkdownBlockLayout::default();
-        }
-        let columns = markdown_table_columns(rows, metrics, |cell, heading| {
-            let runs = markdown_runs(cell, palette, heading);
-            self.renderer.measure_preview_paragraph_width(
-                &runs,
-                metrics.font_size,
-                metrics.line_height,
-            )
-        });
-        // No cell wraps, so every row is one line box tall — which is also why
-        // the row heights are uniform and still written down per row: the
-        // painter walks `rows` and must not go back to arithmetic of its own.
-        let row_height = metrics.line_height + metrics.table_border + metrics.table_padding_y * 2.0;
-        let row_heights = vec![row_height; rows.len()];
-        // Plus the hairline that closes the last row and the one down the far
-        // edge: `border-collapse` draws one between neighbours and one at each
-        // end.
-        let width = columns.iter().sum::<f32>() + metrics.table_border;
-        MarkdownBlockLayout {
-            columns,
-            width,
-            ..MarkdownBlockLayout::rows(row_heights, metrics.table_border)
-        }
-    }
-
+impl Runtime {
     /// How tall the parsed document is, and how wide, in the units the scroller
     /// is clamped in.
     fn preview_content_extent(&self, scale: f32) -> (f32, usize) {
@@ -14133,10 +14856,11 @@ impl Runtime {
                 rows,
                 &palette,
             ),
-            PreviewDocument::Markdown { blocks, layout } => build_preview_markdown_body(
+            PreviewDocument::Markdown { blocks, layout, .. } => build_preview_markdown_body(
                 body,
                 seats::preview_markdown_metrics(scale),
                 scroll,
+                &self.preview_md_block_scroll,
                 (blocks, layout),
                 &palette,
             ),
@@ -14144,21 +14868,36 @@ impl Runtime {
                 clip: body,
                 quads: Vec::new(),
                 paragraphs: Vec::new(),
+                blocks: Vec::new(),
                 foot: None,
             },
         };
-        // **Two notices, two shapes, and they cannot both be owed.** Truncation
-        // is a standing fact about the file, so it gets a bar with height that
-        // the document was already made shorter for — `body` above is the pane's
-        // body *minus* that bar. A save is news about a keystroke, so it keeps
-        // the floating strip: it is gone in 1300ms and reserving height for it
-        // would reflow the document twice for every Ctrl+S. A truncated buffer
-        // is read-only and has no save to report, so no frame ever owes both.
+        // **Three notices, three homes, and no frame owes two of them.**
+        //
+        // * Truncation is a standing fact about the file, so it gets a bar with
+        //   height that the document was already made shorter for — `body` above
+        //   is the pane's body *minus* that bar, and minus the path strip below
+        //   it (bottom to top: the path, the read-only bar, the document).
+        // * A *successful* save is one word and it expires, so it goes where the
+        //   mock-up puts it: the pane's own foot, flashed exactly as "Revealed"
+        //   is (P34, ruling 6). It reserves nothing, because the strip it borrows
+        //   is already there.
+        // * A save's **refusals** stay here, on the floating strip. A conflict is
+        //   a sentence rather than a word, it does not expire (a warning that
+        //   fades is a warning you are entitled to have missed), and it would not
+        //   fit a 28px foot cut to a path's width.
+        //
+        // A truncated buffer is read-only and has no save to report, so the first
+        // two can never both be owed.
         if let Some(notice) = self.preview_foot_notice() {
             let bar =
                 seats::preview_body_rect(&self.seats, &self.seat_layout, scale).unwrap_or(body);
             built.foot = Some(preview_foot(bar, scale, notice, &palette));
-        } else if let Some(notice) = self.preview_save_notice(Instant::now()).map(str::to_owned) {
+        } else if let Some(notice) = self
+            .preview_save_notice(Instant::now())
+            .filter(|notice| *notice != preview::PREVIEW_SAVED_NOTICE)
+            .map(str::to_owned)
+        {
             push_preview_truncation_notice(&mut built, body, scale, &notice, &palette);
         }
         self.renderer.set_preview_body(Some(built));
@@ -14273,6 +15012,7 @@ impl Runtime {
         Some(bt_render::PreviewBody {
             clip: body,
             quads: Vec::new(),
+            blocks: Vec::new(),
             paragraphs: vec![bt_render::PreviewParagraph {
                 runs: vec![bt_render::PreviewRun {
                     text: fields.join(" \u{b7} "),
@@ -15345,6 +16085,253 @@ impl Runtime {
         Ok(true)
     }
 
+    // ── the three dirty gates (P123-P125, `DESIGN.md` §7.1.3) ───────────────
+
+    /// The dirty buffers one gate is about, by name and in the pool's own order.
+    ///
+    /// Three questions, one list-maker. What differs between them is only *which*
+    /// pools are at risk: a pane and a tab put one tab's pool at risk, and a shut
+    /// puts every tab's — and the mock-up's own `state.tabs.flatMap(poolDirtyNames)`
+    /// says the third in as many words (P125).
+    fn gate_dirty_names(&self, request: &restore::GateRequest) -> Vec<String> {
+        let one_tab = |tab: &TabState| {
+            tab.preview_pool
+                .dirty_names(None)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        match request {
+            // **Only the tab's LAST preview pane.** "The pool outlives any ONE
+            // pane — only the LAST preview pane's close would strand it" (P123),
+            // so closing one of two asks nothing at all.
+            restore::GateRequest::ClosePane(seat) => {
+                let tab = &self.tabs[self.active_tab];
+                let previews = tab
+                    .seats
+                    .tree()
+                    .seats_in_order()
+                    .into_iter()
+                    .filter(|found| found.kind == bt_layout::SeatKind::Preview)
+                    .count();
+                let closing_a_preview = tab
+                    .seats
+                    .tree()
+                    .find_seat(*seat)
+                    .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
+                if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
+                    one_tab(tab)
+                } else {
+                    Vec::new()
+                }
+            }
+            restore::GateRequest::CloseTab(index) => {
+                self.tabs.get(*index).map(one_tab).unwrap_or_default()
+            }
+            restore::GateRequest::Shut => self.tabs.iter().flat_map(one_tab).collect(),
+        }
+    }
+
+    /// Put the question, and report whether it was worth putting.
+    ///
+    /// Returns `true` when the gate is now up and the caller must stop — which is
+    /// the whole protocol: a gate is not a callback, it is a *pause*, and the
+    /// verb that was interrupted is re-run from the top once it is answered.
+    fn raise_dirty_gate(&mut self, request: restore::GateRequest) -> Result<bool> {
+        // A gate that is already up is the answer to this question: the verb
+        // below it is re-run when it is answered, and that re-run must not raise
+        // a second one.
+        if self.dirty_gate.is_open() {
+            return Ok(false);
+        }
+        if self.gate_dirty_names(&request).is_empty() {
+            return Ok(false);
+        }
+        self.dirty_gate.open(request);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Spend the answer.
+    ///
+    /// **Discard empties the pool first and then re-runs the verb**, in that
+    /// order and never the other: the gate raises itself off the pool, so a
+    /// re-run against a pool still holding dirty buffers would put the same
+    /// question again forever.
+    fn answer_dirty_gate(&mut self, answer: restore::GateAnswer) -> Result<()> {
+        let Some(request) = self.dirty_gate.take() else {
+            return Ok(());
+        };
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        if answer == restore::GateAnswer::Cancel {
+            // "取消不关" — nothing happens, and nothing is lost. The one answer a
+            // gate must be able to give.
+            return Ok(());
+        }
+        match request {
+            restore::GateRequest::ClosePane(seat) => {
+                self.preview_pool.clear();
+                self.clear_preview_view();
+                self.close_pane(seat)
+            }
+            restore::GateRequest::CloseTab(index) => {
+                if let Some(tab) = self.tabs.get_mut(index) {
+                    tab.preview_pool.clear();
+                }
+                self.close_tab(index)
+            }
+            restore::GateRequest::Shut => {
+                for tab in &mut self.tabs {
+                    tab.preview_pool.clear();
+                }
+                // The shut is the one verb this does not own: it is the event
+                // loop's, and it is re-requested rather than performed here so
+                // that everything else `CloseRequested` does still happens in the
+                // order it always did.
+                self.window_close_requested = true;
+                Ok(())
+            }
+        }
+    }
+
+    /// The gate's box this frame, or `None` when nothing is being asked.
+    fn dirty_gate_layout(&mut self) -> Option<restore::GateLayout> {
+        let request = self.dirty_gate.request()?.clone();
+        let names = self.gate_dirty_names(&request);
+        if names.is_empty() {
+            return None;
+        }
+        let message = restore::gate_message(&names);
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let room = restore::content_width(width, scale);
+        let renderer = &mut self.renderer;
+        let content = restore::GateContent {
+            message_lines: restore::wrap(&message, room, |line| {
+                renderer.measure_chrome_text(line, restore::SUB_FONT_LOGICAL_PX * scale)
+            }),
+            cancel_text_width: renderer.measure_chrome_text(
+                restore::GATE_CANCEL_TEXT,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            discard_text_width: renderer.measure_chrome_text(
+                restore::GATE_DISCARD_TEXT,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+        };
+        Some(restore::gate_layout(&content, width, height, scale))
+    }
+
+    // ── the preview's filename switcher (P130-P137) ─────────────────────────
+
+    /// Every live buffer in this tab's pool, as the switcher lists them.
+    ///
+    /// **The dropdown is the honest inventory of hidden state** (P130,
+    /// `DESIGN.md` §7.1.3): the pool's own order, every buffer in it, and each
+    /// one's dirty bit — a list that showed only the clean ones, or only the
+    /// recent ones, would be the window deciding which unsaved edits you are
+    /// allowed to know about.
+    fn preview_menu_items(&self) -> Vec<profiles::PreviewMenuItem> {
+        let current = self.preview_buffer.as_deref();
+        self.preview_pool
+            .buffers()
+            .map(|buffer| profiles::PreviewMenuItem {
+                name: buffer.name.clone(),
+                dirty: buffer.dirty,
+                current: Some(buffer.path.as_path()) == current,
+            })
+            .collect()
+    }
+
+    /// The switcher's box this frame, or `None` when it is shut.
+    ///
+    /// **Laid out against the live head, every frame** — E59/E60's rule, and
+    /// P136 records the same bug arriving a *third* time in the prototype: "a
+    /// detached anchor measures (0,0), which is the 'opens in the top-left
+    /// corner' bug". Re-deriving from the current layout is what makes that
+    /// impossible rather than unlikely, and it makes the other half free: an
+    /// anchor that has gone folds the menu instead of measuring a rectangle that
+    /// is no longer anywhere.
+    fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {
+        let seat = self.preview_menu.seat()?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+        let anchor = seats::preview_head_geometry(&head, scale, self.preview_head_tools()).pill?;
+        let items = self.preview_menu_items();
+        if items.is_empty() {
+            return None;
+        }
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        Some(profiles::preview_menu_layout(
+            anchor,
+            (width as f32, height as f32),
+            scale,
+            &items,
+            &mut measure,
+        ))
+    }
+
+    /// The name button: open the switcher here, or shut it if it is already here
+    /// (P136 — the second press on the same pane collapses it).
+    fn toggle_preview_menu(&mut self, seat: SeatId) -> Result<()> {
+        // A popup opening closes whatever else was up, and it is the opener that
+        // does it (E61): mutual exclusion cannot be left to a press falling
+        // through, because every opener stops its own press from travelling.
+        self.profile_menu.close();
+        self.root_menu.close();
+        self.close_file_menu()?;
+        self.preview_menu.toggle(seat);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **The one close path** (P133 — "so the chevron never gets stranded
+    /// flipped; the root menu's lesson, applied on day one this time").
+    ///
+    /// There is nothing to un-flip because there is nothing holding a flipped
+    /// state: the chevron's angle is derived from `preview_menu.seat()` on the
+    /// next frame, so shutting the menu *is* turning it back.
+    fn close_preview_menu(&mut self) -> Result<bool> {
+        if !self.preview_menu.close() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Show a different buffer from the pool in this pane (P131).
+    ///
+    /// **The pool is the only source**, so switching is a change of *view* and
+    /// nothing else: the buffer keeps its edits, its dirty bit and — through
+    /// `open_preview_file`'s own filing — its caret and scroll, which is why
+    /// §7.1.3 promises the switch costs "零提示零打断".
+    fn choose_preview_buffer(&mut self, index: usize) -> Result<()> {
+        self.close_preview_menu()?;
+        let Some(path) = self
+            .preview_pool
+            .buffers()
+            .nth(index)
+            .map(|buffer| buffer.path.clone())
+        else {
+            return Ok(());
+        };
+        if self.preview_buffer.as_deref() == Some(path.as_path()) {
+            return Ok(());
+        }
+        self.open_preview_file(path)
+    }
+
     // ── the file row's context menu (K143-K146) ─────────────────────────────
 
     /// Where the file menu is, if one is up.
@@ -15699,7 +16686,7 @@ impl Runtime {
         self.revealed_foot = None;
         let changed = match foot {
             RevealedFoot::Float(_) => self.refresh_overlay(),
-            RevealedFoot::Column(_) => self.refresh_chrome(),
+            RevealedFoot::Column(_) | RevealedFoot::Preview(_) => self.refresh_chrome(),
         };
         if changed {
             self.present_chrome_change()?;
@@ -17401,6 +18388,19 @@ impl Runtime {
     }
 
     fn advance_cursor_blink_if_due(&mut self, now: Instant) -> Result<()> {
+        // **A caret that is not the keyboard's does not blink** (ruling
+        // 2026-08-13). There is no phase to advance and therefore no frame owed
+        // for one — which is also the literal "冻结" the report asked for, and
+        // why this is a freeze rather than a paint: the loop stops waking twice
+        // a second to redraw a caret nobody is typing at. Parked at its lit
+        // phase, so the instant a shell has the keyboard back the caret is
+        // *there* rather than half a beat away.
+        if !self.keyboard_owner_is_a_shell() {
+            self.cursor_blink.reset(now);
+            self.renderer
+                .set_cursor_blink_visible(self.cursor_blink.visible());
+            return Ok(());
+        }
         if !self.cursor_blink.advance(now) {
             return Ok(());
         }
@@ -19021,6 +20021,16 @@ impl Runtime {
             }
             return Ok(());
         }
+        // The gate takes the pointer outright, on its scrim as well as on its box.
+        if let Some(layout) = self.dirty_gate_layout() {
+            let over = restore::gate_hit(&layout, position.x, position.y);
+            if self.dirty_gate.set_hover(Some(over)) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         // The prompt is not modal either. Over its own box the buttons light up;
         // everywhere else the window carries on, because the terminal behind it
         // is still yours to use while the question stands.
@@ -19080,6 +20090,19 @@ impl Runtime {
                     .tooltip_anchor_at(position)
                     .filter(|anchor| matches!(anchor, tooltip::TooltipAnchorId::RootRow(_)));
                 self.note_tooltip(anchor)?;
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
+        }
+        // And the preview's switcher, on the same terms as the root menu beside
+        // it: it is the same popup with a different list in it.
+        if let Some(layout) = self.preview_menu_layout() {
+            let over = profiles::preview_menu_hit(&layout, position.x, position.y);
+            if self.preview_menu.set_hover(over.flatten()) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            if over.is_some() {
+                self.note_tooltip(None)?;
                 self.update_chrome_hover_target(None)?;
                 return Ok(());
             }
@@ -19445,6 +20468,18 @@ impl Runtime {
                 &self.seat_layout,
                 &self.files_name_widths,
                 scale,
+                position.x,
+                position.y,
+            )
+        })
+        // And before them for the same reason: the preview head's four controls
+        // live inside the drag handle too, and three of them are dead zones in it
+        // (the mock-up's `.pane-close, .pane-files, .pv-tool` exclusion, 5874).
+        .or_else(|| {
+            seats::hit_preview_head(
+                &self.seat_layout,
+                scale,
+                self.preview_head_tools(),
                 position.x,
                 position.y,
             )
@@ -20897,6 +21932,46 @@ impl Runtime {
                 self.files_row_clicks.interrupt();
                 self.open_preview_externally()?;
             }
+            // The three tools. Each breaks a click chain for `.files-foot`'s
+            // reason — a chain of clicks on a button is a chain of button
+            // presses — and none of them arms the head as a drag handle: the
+            // mock-up returns out of `pointerdown` on `.pv-tool` (5874) exactly
+            // as it does on `.pane-files`, and here that is expressed by simply
+            // not arming.
+            seats::ChromeTarget::PreviewSave(_) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.save_preview()?;
+            }
+            seats::ChromeTarget::PreviewFlip(_) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.flip_preview_source()?;
+            }
+            seats::ChromeTarget::PreviewPin(seat) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.toggle_preview_pin(seat)?;
+            }
+            seats::ChromeTarget::PreviewFoot(seat) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.reveal_preview_file(seat)?;
+            }
+            // The name is a button **and** part of the drag handle, which is
+            // `FilesRoot`'s own arrangement and the mock-up's: `.pv-name` is not
+            // on the exclusion list at 5874. Arming costs the click nothing, and
+            // not arming would make the one pane in the window whose head cannot
+            // be grabbed by its name.
+            seats::ChromeTarget::PreviewName(seat) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.pane_press = Some(PanePress {
+                    seat,
+                    latch: DragLatch::new(position),
+                });
+                self.toggle_preview_menu(seat)?;
+            }
             seats::ChromeTarget::FilesRoot(seat) => {
                 self.tab_clicks.interrupt();
                 self.files_row_clicks.interrupt();
@@ -20971,6 +22046,18 @@ impl Runtime {
             // L135 sends the peek the same way and for the same reason: it is a
             // glance, and pressing is you saying you are done glancing.
             self.hide_layout_peek()?;
+        }
+        // The gate first, and it is the strictest modal in the window: every
+        // press is swallowed, including the ones that land on its own scrim,
+        // because the action it is standing in front of is already under way.
+        if let (Some(layout), Some(position)) = (self.dirty_gate_layout(), self.pointer_position) {
+            if state == ElementState::Pressed && button == MouseButton::Left {
+                let target = restore::gate_hit(&layout, position.x, position.y);
+                if let Some(answer) = restore::gate_answer(target) {
+                    self.answer_dirty_gate(answer)?;
+                }
+            }
+            return Ok(());
         }
         // A modal means MODAL. Ahead of the chrome router, so the caption run —
         // the gear included — is behind the scrim like everything else, and no
@@ -21159,6 +22246,36 @@ impl Runtime {
                         )
                     {
                         self.close_root_menu()?;
+                    }
+                }
+            }
+        }
+        // The preview's switcher, on exactly the terms the two menus above take
+        // their press. Its "except the button that opened it" is the name, which
+        // toggles for itself (P136) and would otherwise be shut here and
+        // re-opened one line later.
+        if let (Some(layout), Some(position)) = (self.preview_menu_layout(), self.pointer_position)
+        {
+            match profiles::preview_menu_hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        match row {
+                            Some(index) => self.choose_preview_buffer(index)?,
+                            None => {
+                                self.close_preview_menu()?;
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                None => {
+                    if state == ElementState::Pressed
+                        && !matches!(
+                            self.chrome_target_at(position),
+                            Some(seats::ChromeTarget::PreviewName(_))
+                        )
+                    {
+                        self.close_preview_menu()?;
                     }
                 }
             }
@@ -22031,6 +23148,25 @@ impl Runtime {
         {
             return Ok(());
         }
+        // **The gate owns the keyboard outright**, above the settings dialog for
+        // the reason it is drawn above it. Enter answers with the focused button,
+        // which is `Cancel` — the answer that changes nothing — and Esc answers
+        // the same way, because dismissing a question about losing work can only
+        // ever mean "not that". Every other key is swallowed.
+        if self.dirty_gate.is_open() {
+            if !event.repeat {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Enter) => {
+                        self.answer_dirty_gate(restore::GATE_FOCUSED_ANSWER)?;
+                    }
+                    Key::Named(NamedKey::Escape) => {
+                        self.answer_dirty_gate(restore::GateAnswer::Cancel)?;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(());
+        }
         // A modal owns the keyboard. Esc unwinds one layer per press (§7.1.5:
         // the open menu first, then the dialog); every other key is swallowed
         // rather than typed into a terminal the user cannot see. This sits above
@@ -22124,9 +23260,16 @@ impl Runtime {
         }
         // A popup is not a modal, so it owns exactly one key: the one that puts
         // it away. Everything else is still the terminal's.
+        // The preview's switcher is asked **before** the file menu's own rung
+        // above and before these two, which is P66's layering read off the
+        // mock-up's Esc chain: `#pv-menu` sits at position four, above
+        // `#term-menu`, `#file-menu` and `#root-menu`. One press unwinds one
+        // layer, and the topmost menu is the one that goes.
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
             && !event.repeat
-            && (self.close_profile_menu()? || self.close_root_menu()?)
+            && (self.close_preview_menu()?
+                || self.close_profile_menu()?
+                || self.close_root_menu()?)
         {
             return Ok(());
         }
@@ -22200,6 +23343,7 @@ impl Runtime {
             &event.logical_key,
             &event.key_without_modifiers(),
             self.modifiers,
+            self.shortcut_focus(),
         ) {
             if !event.repeat {
                 self.run_shortcut(action)?;
@@ -22277,6 +23421,12 @@ impl Runtime {
         //
         // Esc has already been answered above, where it puts the picker away.
         if self.profile_menu.is_open() {
+            return Ok(());
+        }
+        // And the preview's switcher, on the identical terms (P137: "`#pv-menu`
+        // 打开时吞掉所有字符键"). A keystroke aimed at a menu you can see must not
+        // reach a shell you cannot — the same sentence, one popup along.
+        if self.preview_menu.seat().is_some() {
             return Ok(());
         }
         // **`InputOwner::FilesTree`** (§7.1.5, D47) — the last layer above the
@@ -22826,7 +23976,12 @@ impl Runtime {
             seat: focused_body.viewport,
             clip: focused_body.clip,
             frame: &frame,
-            focused: true,
+            // **The owner, not the focus** (user report + ruling, 2026-08-13).
+            // This flag is read by `seat_caret` alone, and what it is asked
+            // there is "is this the caret typing would land in" — see
+            // [`Self::keyboard_owner_is_a_shell`] for why the answer stopped
+            // being "yes, it is the focused pane".
+            focused: self.keyboard_owner_is_a_shell(),
         });
         for (pane, projected) in &unfocused_frames {
             seat_frames.push(bt_render::SeatFrame {
@@ -23035,10 +24190,22 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         }
         let result = match event {
             WindowEvent::CloseRequested => {
-                let result = runtime.shutdown();
-                self.runtime = None;
-                event_loop.exit();
-                result
+                // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
+                // — plans carry paths, never content — so shutting asks, the same
+                // honesty as closing a tab." It is the one gate that has to be
+                // able to *stop* the event, which is why it is answered here
+                // rather than inside `shutdown`: past this line the window is
+                // gone, and a question asked after the answer is worthless.
+                match runtime.raise_dirty_gate(restore::GateRequest::Shut) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        let result = runtime.shutdown();
+                        self.runtime = None;
+                        event_loop.exit();
+                        result
+                    }
+                    Err(error) => Err(error),
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => runtime.keyboard_input(&event),
             WindowEvent::Ime(event) => runtime.ime_input(event),
@@ -23104,6 +24271,21 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             }),
             _ => Ok(()),
         };
+        // The gate's own `Discard`, spent here rather than inside the answer: the
+        // shut belongs to the event loop, and re-requesting it means closing goes
+        // through the one door it always went through instead of a second one
+        // opened for the gate.
+        if let Some(runtime) = self.runtime.as_mut()
+            && std::mem::take(&mut runtime.window_close_requested)
+        {
+            let shut = runtime.shutdown();
+            self.runtime = None;
+            event_loop.exit();
+            if let Err(error) = result.and(shut) {
+                self.fail(event_loop, error);
+            }
+            return;
+        }
         if let Err(error) = result {
             self.fail(event_loop, error);
         }
@@ -23233,7 +24415,12 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         let wake_deadline = earliest_deadline([
             startup_deadline,
             runtime.ime_cursor_throttle.deadline(),
-            runtime.cursor_blink.deadline(),
+            // Only while a shell holds the keyboard: a frozen caret owes no
+            // wake-up at all (ruling 2026-08-13).
+            runtime
+                .keyboard_owner_is_a_shell()
+                .then(|| runtime.cursor_blink.deadline())
+                .flatten(),
             // The press's own 180ms, and only while it still owes one — a press
             // that has been paid or has slipped reports nothing, so a held
             // button costs no wake-ups at all.
@@ -35474,8 +36661,14 @@ mod tests {
         let blocks = preview::parse_markdown("- one\n- two\n- three\n");
         let heights = vec![line, line * 3.0, line * 2.0];
         let layout = vec![MarkdownBlockLayout::rows(heights.clone(), 0.0)];
-        let built =
-            build_preview_markdown_body(body, metrics, [0.0, 0.0], (&blocks, &layout), &palette);
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            &[],
+            (&blocks, &layout),
+            &palette,
+        );
         let items: Vec<_> = built
             .paragraphs
             .iter()
@@ -35508,7 +36701,11 @@ mod tests {
         // The same property for a quote, whose rows sit inside the block's own
         // padding, and whose accent bar spans the whole of it rather than one
         // bar per line.
-        let quoted = preview::parse_markdown("> a\n> b\n");
+        // A bare `>` between them, because two *source* lines of a quote are one
+        // quoted paragraph since the CommonMark ruling of 2026-08-13 — what this
+        // assertion is about is a quote with two entries, and that is how one is
+        // now written.
+        let quoted = preview::parse_markdown("> a\n>\n> b\n");
         let quote_rows = vec![line * 2.0, line];
         let quote_layout = vec![MarkdownBlockLayout::rows(
             quote_rows.clone(),
@@ -35518,6 +36715,7 @@ mod tests {
             body,
             metrics,
             [0.0, 0.0],
+            &[],
             (&quoted, &quote_layout),
             &palette,
         );
@@ -35752,6 +36950,7 @@ mod tests {
             MarkdownBlockLayout::solid(metrics.line_height * 3.0),
         ];
         let document = PreviewDocument::Markdown {
+            intrinsic: Vec::new(),
             blocks: Vec::new(),
             layout: prose_only,
         };
@@ -35761,8 +36960,16 @@ mod tests {
             "③ a page of prose has no horizontal axis, whatever it is made of"
         );
 
+        // **And neither does a page holding a block that refuses to reflow**
+        // (user ruling, 2026-08-13, overturning the same day's earlier reading).
+        // The fence and the table still insist on their widths — the two
+        // assertions above are about exactly that — but the width is spent
+        // *inside the block*, not by sliding the whole page under the pane. The
+        // page's own axis is zero either way, and this is the assertion that
+        // says the ruling changed rather than the measurement.
         let wide = 900.0_f32;
         let with_a_fence = PreviewDocument::Markdown {
+            intrinsic: Vec::new(),
             blocks: Vec::new(),
             layout: vec![
                 MarkdownBlockLayout::solid(metrics.line_height),
@@ -35774,11 +36981,130 @@ mod tests {
         };
         let max = preview_document_max_scroll(&with_a_fence, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
-            max[0],
-            wide + metrics.padding_x * 2.0 - (pane[2] - pane[0]),
-            "①/② the widest insisting block, plus the page's own padding, is \
-             exactly how far sideways there is to go"
+            max[0], 0.0,
+            "①/② a wide block scrolls inside itself; the page it stands on does not move"
         );
+    }
+
+    /// PIN (user ruling, 2026-08-13) — **a wide block is its own scrolling
+    /// region: it clamps at both ends, it takes the offset, and the prose beside
+    /// it does not move.**
+    ///
+    /// The third assertion is the one the ruling is really about. The reported
+    /// symptom was two defects wearing one shape: a table that could not be
+    /// scrolled at all (the page's axis had been clamped to zero while the
+    /// table's width was still in the extent), and — before that — prose sliding
+    /// out of the pane to reach it.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `clamp(0.0, overflow)` in `build_preview_markdown_body` — the
+    ///    first assertion goes red and a table can be pushed past its own end;
+    /// ② apply the offset to `left` for every block rather than the wide one —
+    ///    the third assertion goes red, which is exactly the page-slide the
+    ///    ruling overturned;
+    /// ③ stop pushing the block into `blocks` — the second assertion goes red and
+    ///    the table prints over the paragraph beside it, unclipped.
+    #[test]
+    fn a_wide_markdown_block_scrolls_inside_itself_and_the_prose_stays_put() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 300.0, 400.0];
+        let page = body[2] - body[0] - metrics.padding_x * 2.0;
+        let wide = page + 400.0;
+        let blocks = vec![
+            preview::MarkdownBlock::Paragraph(vec![preview::Span::plain("prose")]),
+            preview::MarkdownBlock::Code {
+                lang: None,
+                text: "a very long line".to_owned(),
+            },
+        ];
+        let layout = vec![
+            MarkdownBlockLayout::solid(metrics.line_height),
+            MarkdownBlockLayout {
+                width: wide,
+                top: metrics.line_height + metrics.paragraph_gap,
+                ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
+            },
+        ];
+        let overflow = wide - page;
+        let prose_left = |offsets: &[f32]| {
+            let built = build_preview_markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                offsets,
+                (&blocks, &layout),
+                &palette,
+            );
+            built
+                .paragraphs
+                .iter()
+                .find(|paragraph| paragraph.runs.iter().any(|run| run.text == "prose"))
+                .expect("the prose is drawn on the page itself")
+                .rect[0]
+        };
+        let fence_left = |offsets: &[f32]| {
+            let built = build_preview_markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                offsets,
+                (&blocks, &layout),
+                &palette,
+            );
+            let block = built
+                .blocks
+                .first()
+                .expect("a block wider than its page scrolls inside itself")
+                .clone();
+            // The fence's own ground, which is the second quad it draws.
+            (block.quads[0].rect[0], block.clip)
+        };
+
+        // ① Clamped at both ends, in the block's own units.
+        let (at_rest, clip) = fence_left(&[0.0, 0.0]);
+        let (at_end, _) = fence_left(&[0.0, overflow]);
+        let (past_end, _) = fence_left(&[0.0, overflow * 10.0]);
+        let (before_start, _) = fence_left(&[0.0, -50.0]);
+        assert_eq!(at_rest - at_end, overflow, "the block travels its overflow");
+        assert_eq!(past_end, at_end, "and stops at its own end");
+        assert_eq!(before_start, at_rest, "and at its own start");
+
+        // ② The region is cropped to the block's rectangle, so what it scrolls
+        //    cannot print over the page.
+        assert_eq!(clip[0], body[0] + metrics.padding_x);
+        assert_eq!(clip[2], clip[0] + page);
+
+        // ②(b) **The indicator belongs to the block it was pushed with.** A page
+        //    scrolled past its first wide block still has one region and one
+        //    indicator, and the pair must be the same pair — the version that
+        //    re-derived the list and zipped it drew every indicator one block out
+        //    as soon as anything above had scrolled off the top.
+        let tall = vec![
+            MarkdownBlockLayout::solid(1000.0),
+            MarkdownBlockLayout {
+                width: wide,
+                top: 1000.0,
+                ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
+            },
+        ];
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 1000.0],
+            &[0.0, overflow],
+            (&blocks, &tall),
+            &palette,
+        );
+        let block = built.blocks.first().expect("the wide block is on screen");
+        let thumb = block.quads.last().expect("an indicator has a thumb");
+        assert!(
+            thumb.rect[0] > block.clip[0],
+            "the thumb of a block scrolled to its end sits away from the left edge"
+        );
+
+        // ③ **The prose does not move**, at any offset the block can hold.
+        assert_eq!(prose_left(&[0.0, 0.0]), prose_left(&[0.0, overflow]));
     }
 
     /// PIN (user report, 2026-08-13 — **the escape**) — nothing a preview body
@@ -35888,20 +37214,26 @@ mod tests {
         );
 
         let document = PreviewDocument::Markdown {
+            intrinsic: Vec::new(),
             blocks: blocks.clone(),
             layout: layout.clone(),
         };
         let max = preview_document_max_scroll(&document, body, 1.0, cell, 0.0, 0);
-        assert!(max[0] > 0.0 && max[1] > 0.0, "the page overruns both ways");
-
-        // Every corner of the scroll space, plus the middle: the horizontal
-        // offset is what pushes a wide block's rectangle negative.
-        for x in [0.0, max[0] / 2.0, max[0]] {
+        assert_eq!(max[0], 0.0, "the page has no horizontal axis of its own");
+        assert!(max[1] > 0.0, "and it certainly overruns downwards");
+        // The horizontal offset that could push a rectangle negative now belongs
+        // to the *block*, so it is the axis this sweeps — every block gets the
+        // page's own width as an offset, which is far past any of their ends and
+        // is exactly the arithmetic the crop has to survive.
+        let overrun = widest;
+        for x in [0.0, overrun / 2.0, overrun] {
+            let offsets = vec![x; layout.len()];
             for y in [0.0, max[1] / 2.0, max[1]] {
                 let built = build_preview_markdown_body(
                     body,
                     metrics,
-                    [x, y],
+                    [0.0, y],
+                    &offsets,
                     (&blocks, &layout),
                     &palette,
                 );
@@ -35945,8 +37277,288 @@ mod tests {
                         paragraph.rect
                     );
                 }
+                // And the same three questions of every scrolling block, whose
+                // rectangles are the ones the offset actually moves. Their gate
+                // is the block's clip intersected with the body's, which is what
+                // `bt_render` crops them to.
+                for block in &built.blocks {
+                    assert!(finite(block.clip));
+                    assert!(block.clip[2] >= block.clip[0] && block.clip[3] >= block.clip[1]);
+                    let window = bt_render::crop_to(block.clip, built.clip);
+                    for quad in &block.quads {
+                        assert!(
+                            finite(quad.rect)
+                                && quad.rect[2] >= quad.rect[0]
+                                && quad.rect[3] >= quad.rect[1],
+                            "a block fill at offset {x}: {:?}",
+                            quad.rect
+                        );
+                        assert!(
+                            window
+                                .and_then(|window| bt_render::crop_to(quad.rect, window))
+                                .is_none_or(|drawn| inside(drawn, built.clip)),
+                            "a block fill that survives the crop outside the pane: {:?}",
+                            quad.rect
+                        );
+                    }
+                    for paragraph in &block.paragraphs {
+                        assert!(
+                            finite(paragraph.rect)
+                                && paragraph.rect[2] >= paragraph.rect[0]
+                                && paragraph.rect[3] >= paragraph.rect[1],
+                            "a block paragraph at offset {x}: {:?}",
+                            paragraph.rect
+                        );
+                        assert!(
+                            window
+                                .and_then(|window| bt_render::crop_to(paragraph.rect, window))
+                                .is_none_or(|drawn| inside(drawn, built.clip)),
+                            "a block paragraph that survives the crop outside the pane: {:?}",
+                            paragraph.rect
+                        );
+                    }
+                }
             }
         }
+    }
+
+    /// PIN (user report, 2026-08-13: "拖窗口边时 md 预览明显卡") — **a resize
+    /// re-flows and does not re-measure.**
+    ///
+    /// Asserted by counting the shaper's calls, which is the honest unit: the
+    /// measurement *is* the cost, and a wall clock would be measuring this
+    /// machine. Against `docs/UI-UX.md` — the document the report was made with —
+    /// at every width a drag passes through.
+    ///
+    /// The two halves the fix rests on:
+    ///
+    /// ① the parse key does not contain the width, so a resize does not re-parse
+    ///    the file at all;
+    /// ② the width-independent measurements — a table's columns, a fence's
+    ///    longest line — are not asked again, so the per-width pass touches only
+    ///    the blocks that genuinely reflow. On this document that is the
+    ///    difference between thousands of shaping calls per pixel of drag and
+    ///    hundreds.
+    ///
+    /// MUTATIONS:
+    /// ① put `body_width_px` back into `PreviewParseKey` — the first assertion
+    ///    goes red, and the whole pipeline runs per pixel again;
+    /// ② have the `Table`/`Code` arms of `measure_markdown_block` re-derive their
+    ///    widths instead of reading the intrinsic — the second assertion goes
+    ///    red, and it is the one that dominates the profile.
+    #[test]
+    fn a_resize_reflows_the_markdown_without_re_measuring_it() {
+        let source = include_str!("../../../docs/UI-UX.md");
+        let blocks = preview::parse_markdown(source);
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let cell = 8.0_f32;
+
+        // ① The parse survives every width; only the layout key moves.
+        let mut buffer =
+            preview::PreviewBuffer::new(PathBuf::from(r"C:\w\UI-UX.md"), "UI-UX.md".to_owned());
+        buffer.accept(preview::HeadOutcome::Read {
+            text: source.to_owned(),
+            truncated: false,
+            mtime: None,
+        });
+        let wide = preview_document_key(&buffer, 1200.0, 1.0);
+        let narrow = preview_document_key(&buffer, 400.0, 1.0);
+        assert_ne!(wide, narrow, "a width change is still a layout change");
+        assert_eq!(
+            wide.parse, narrow.parse,
+            "① but not a parse change: the width is not in the parse key"
+        );
+        // And an edit is, so the cache cannot go stale.
+        buffer.edit_content(|content| {
+            content.insert(0, 'x');
+            true
+        });
+        assert_ne!(
+            preview_document_key(&buffer, 1200.0, 1.0).parse,
+            wide.parse,
+            "an edit re-parses"
+        );
+
+        // ② The intrinsics are measured once; the per-width pass never asks about
+        //    a table cell or a fence line again.
+        let intrinsic_calls = std::cell::Cell::new(0usize);
+        let intrinsic: Vec<MarkdownBlockIntrinsic> = blocks
+            .iter()
+            .map(|block| match block {
+                preview::MarkdownBlock::Table { rows } => {
+                    let columns = markdown_table_columns(rows, metrics, |cell_spans, _| {
+                        intrinsic_calls.set(intrinsic_calls.get() + 1);
+                        cell_spans
+                            .iter()
+                            .map(|span| span.text.chars().count())
+                            .sum::<usize>() as f32
+                            * cell
+                    });
+                    MarkdownBlockIntrinsic {
+                        width: columns.iter().sum::<f32>() + metrics.table_border,
+                        columns,
+                        rows: rows.len(),
+                    }
+                }
+                preview::MarkdownBlock::Code { text, .. } => MarkdownBlockIntrinsic {
+                    width: markdown_fence_width(text, metrics, |runs| {
+                        intrinsic_calls.set(intrinsic_calls.get() + 1);
+                        runs.iter()
+                            .map(|run| run.text.chars().count())
+                            .sum::<usize>() as f32
+                            * cell
+                    }),
+                    rows: text.lines().count().max(1),
+                    ..MarkdownBlockIntrinsic::default()
+                },
+                _ => MarkdownBlockIntrinsic::default(),
+            })
+            .collect();
+        assert!(
+            intrinsic_calls.get() > 100,
+            "the fixture's tables and fences really are a measurable share              ({} shaping calls), or this proves nothing",
+            intrinsic_calls.get()
+        );
+
+        let reflow_calls = std::cell::Cell::new(0usize);
+        let mut measure = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
+            reflow_calls.set(reflow_calls.get() + 1);
+            let columns = runs
+                .iter()
+                .map(|run| run.text.chars().count())
+                .sum::<usize>() as f32
+                * cell;
+            (columns / width.max(1.0)).ceil().max(1.0) * line
+        };
+
+        // **The sharp statement**: a document made of nothing but the two blocks
+        // whose geometry is intrinsic re-flows without asking the shaper a single
+        // question. That is the whole of what a drag stops paying for.
+        let heavy: Vec<preview::MarkdownBlock> = blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block,
+                    preview::MarkdownBlock::Table { .. } | preview::MarkdownBlock::Code { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        let heavy_intrinsic: Vec<MarkdownBlockIntrinsic> = blocks
+            .iter()
+            .zip(&intrinsic)
+            .filter(|(block, _)| {
+                matches!(
+                    block,
+                    preview::MarkdownBlock::Table { .. } | preview::MarkdownBlock::Code { .. }
+                )
+            })
+            .map(|(_, intrinsic)| intrinsic.clone())
+            .collect();
+        assert!(
+            heavy.len() > 5,
+            "the fixture carries enough of them to matter"
+        );
+        let before = reflow_calls.get();
+        let heavy_layout = lay_markdown_out(&heavy, &heavy_intrinsic, 400.0, metrics, &mut measure);
+        assert_eq!(
+            reflow_calls.get(),
+            before,
+            "② a table and a fence are laid out from what was already measured"
+        );
+        assert!(
+            heavy_layout.iter().all(|block| block.height > 0.0),
+            "and they are laid out, not skipped"
+        );
+
+        // And the pass that remains is a real re-flow: a narrower pane is a
+        // taller page, at a cost that does not grow with the document's tables.
+        let mut heights = Vec::new();
+        for width in [1200.0, 900.0, 700.0, 500.0, 380.0] {
+            let layout = lay_markdown_out(&blocks, &intrinsic, width, metrics, &mut measure);
+            heights.push(layout.last().map_or(0.0, |last| last.top + last.height));
+        }
+        for pair in heights.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "a narrower pane wraps to more lines: {pair:?}"
+            );
+        }
+    }
+
+    /// PIN (user report + ruling, 2026-08-13) — **the caret blinks exactly when
+    /// typing would land in it.**
+    ///
+    /// The report: click a files tree or a preview and the terminal's caret goes
+    /// on blinking behind you. `bt_render::seat_caret` already had the right
+    /// *shape* for it — a caret that is not the keyboard's is steady and faded,
+    /// which is what an unfocused pane's has always been — and the wrong
+    /// *question*: it was handed "is this the focused pane" rather than "is this
+    /// where the next keystroke goes".
+    ///
+    /// MUTATIONS, one per owner:
+    /// ① drop the `files_tree` clause — clicking a tree leaves the shell blinking,
+    ///    which is the report verbatim;
+    /// ② drop the `preview` clause — the same, one leaf along, and it also covers
+    ///    read-only browsing, where the arrows scroll the document;
+    /// ③ drop `menu_or_dialog` — a menu that swallows every character key stands
+    ///    over a caret still claiming them.
+    #[test]
+    fn only_a_shell_with_the_keyboard_gets_a_blinking_caret() {
+        assert!(
+            keyboard_owner_is_a_shell(KeyboardOwner::default()),
+            "with nothing else holding it, the shell has the keyboard"
+        );
+        for owner in [
+            KeyboardOwner {
+                files_tree: true,
+                ..KeyboardOwner::default()
+            },
+            KeyboardOwner {
+                preview: true,
+                ..KeyboardOwner::default()
+            },
+            KeyboardOwner {
+                menu_or_dialog: true,
+                ..KeyboardOwner::default()
+            },
+        ] {
+            assert!(
+                !keyboard_owner_is_a_shell(owner),
+                "{owner:?} owns the keyboard, so no caret may claim it"
+            );
+        }
+        // And the moment the owner hands it back, it is the shell's again — the
+        // predicate is read per frame, so there is no state to un-set.
+        assert!(keyboard_owner_is_a_shell(KeyboardOwner {
+            files_tree: false,
+            preview: false,
+            menu_or_dialog: false,
+        }));
+    }
+
+    /// PIN (P123) — **gate ① is about the LAST preview pane and nothing else.**
+    ///
+    /// "The pool outlives any ONE pane; only the LAST preview pane's close would
+    /// strand it." A window that asked every time a pane closed would be asking
+    /// about buffers still on screen, and a question you can answer by looking is
+    /// a question that trains you to dismiss the ones you cannot.
+    ///
+    /// Mutation: drop the `previews_in_tab == 1` clause and the second assertion
+    /// goes red — every closed pane raises the gate; drop `closing_a_preview` and
+    /// the third does, and closing a *terminal* asks about a preview.
+    #[test]
+    fn only_the_last_preview_pane_strands_the_pool() {
+        assert!(closing_this_pane_strands_the_pool(true, 1));
+        assert!(
+            !closing_this_pane_strands_the_pool(true, 2),
+            "one of two previews leaves the pool on screen"
+        );
+        assert!(
+            !closing_this_pane_strands_the_pool(false, 1),
+            "a terminal closing beside a preview strands nothing"
+        );
+        assert!(!closing_this_pane_strands_the_pool(false, 0));
     }
 
     /// Whether one rectangle is wholly inside another.
@@ -35970,6 +37582,7 @@ mod tests {
             body,
             metrics,
             [0.0, 0.0],
+            &[],
             (
                 &blocks,
                 &[MarkdownBlockLayout {
@@ -36026,6 +37639,7 @@ mod tests {
         let palette = bt_render::chrome_palette();
         let body = [40.0, 100.0, 440.0, 400.0];
         let mut built = bt_render::PreviewBody {
+            blocks: Vec::new(),
             clip: body,
             quads: Vec::new(),
             paragraphs: Vec::new(),
@@ -36126,6 +37740,7 @@ mod tests {
             clip: content,
             quads: Vec::new(),
             paragraphs: Vec::new(),
+            blocks: Vec::new(),
             foot: Some(foot),
         };
         assert!(
@@ -36270,7 +37885,11 @@ mod tests {
         }
         let last = layout.last().unwrap();
         let expected = last.top + last.height + metrics.padding_y * 2.0 - (body[3] - body[1]);
-        let markdown = PreviewDocument::Markdown { blocks, layout };
+        let markdown = PreviewDocument::Markdown {
+            blocks,
+            intrinsic: Vec::new(),
+            layout,
+        };
         let max = preview_document_max_scroll(&markdown, body, scale, 8.0, 0.0, 0);
         assert!(max[1] > 0.0, "a document taller than its pane can scroll");
         assert_eq!(max[1], expected, "and stops exactly at its own last line");

@@ -206,6 +206,24 @@ pub enum ChromeMark {
     /// keys on `ChromeMark::id`: sharing an id would share a cache slot, and
     /// the second pin on screen would silently wear the first one's pixels.
     Pin { filled: bool },
+    /// `#i-save` — the preview header's explicit save (mock-up 2252, P27).
+    ///
+    /// The floppy, which is the one idiom in this whole interface that names a
+    /// medium nobody has used in twenty years and is still the only drawing every
+    /// user reads instantly. The mock-up keeps it and so does this.
+    Save,
+    /// `#i-eye` — "show me the rendered view", the markdown flip's *other* face
+    /// (mock-up 2171, P28).
+    ///
+    /// The pair is one control with two states and two drawings, unlike the pin
+    /// beside it: an eye and a pair of angle brackets say opposite things and
+    /// neither is a fill of the other. Which one is shown is which view you are
+    /// going *to*, not which one you are in — the mock-up's own title strings
+    /// ("Rendered view" / "Edit source") say the destination.
+    Eye,
+    /// `#i-code` — "show me the source", the markdown flip's first face (mock-up
+    /// 2170, P28).
+    Code,
     /// The active tab's silhouette: `--tabr` top corners and the two outward
     /// skirt corners that join it to the content plane. `radius_px` is `--tabr`
     /// in physical pixels, so the shape is generated at the size it is drawn.
@@ -342,6 +360,9 @@ impl ChromeMark {
             Self::Check => "i-check",
             Self::Pin { filled: false } => "i-pin",
             Self::Pin { filled: true } => "i-pinned",
+            Self::Save => "i-save",
+            Self::Eye => "i-eye",
+            Self::Code => "i-code",
             Self::ActiveTab { .. } => "tab",
             Self::TabBody { .. } => "tab-body",
             Self::TabBodyRing { .. } => "tab-body-ring",
@@ -1062,6 +1083,9 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Check => 20,
         ChromeMark::Copy => 21,
         ChromeMark::Paste => 22,
+        ChromeMark::Save => 23,
+        ChromeMark::Eye => 24,
+        ChromeMark::Code => 25,
         // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
@@ -1075,7 +1099,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 23] = [
+const SYMBOL_VIEW_BOX: [&str; 26] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1110,11 +1134,16 @@ const SYMBOL_VIEW_BOX: [&str; 23] = [
     // `#i-copy` and `#i-paste`, the house sixteen a third and fourth time.
     "0 0 16 16",
     "0 0 16 16",
+    // `#i-save`, `#i-eye`, `#i-code` — the preview header's three tools, all
+    // sixteen.
+    "0 0 16 16",
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 23] = [
+const SYMBOL_BODY: [&str; 26] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1238,6 +1267,19 @@ const SYMBOL_BODY: [&str; 23] = [
         r#"<rect x="5.6" y="1.4" width="4.8" height="2.8" rx=".9" fill="currentColor"/>"#,
         r#"<path d="M5.4 7.2h5.2M5.4 9.6h5.2M5.4 12h3.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>"#,
     ),
+    // #i-save — the body with its cut corner, the shutter above and the label
+    // below. Quoted from the sheet at line 2252.
+    concat!(
+        r#"<path d="M3.2 2.6h7.9l2.3 2.3v8c0 .3-.3.6-.6.6H3.2c-.3 0-.6-.3-.6-.6V3.2c0-.3.3-.6.6-.6z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
+        r#"<path d="M5.3 2.8v2.9h5.2V2.8M5.1 13.4V9.3h5.8v4.1" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+    ),
+    // #i-eye — mock-up 2171.
+    concat!(
+        r#"<path d="M1.4 8S3.8 3.9 8 3.9 14.6 8 14.6 8 12.2 12.1 8 12.1 1.4 8 1.4 8z" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
+        r#"<circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" stroke-width="1.3"/>"#,
+    ),
+    // #i-code — mock-up 2170.
+    r#"<path d="M5.8 4.4L2.2 8l3.6 3.6M10.2 4.4L13.8 8l-3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#,
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the

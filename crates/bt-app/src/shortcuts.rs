@@ -1,9 +1,10 @@
 //! The keyboard shortcut registry (P2-7 audit, user ruling 2026-08-10 "plan A").
 //!
-//! One constant table maps every bindable [`Action`] to its default [`Chord`]. Event dispatch is a
-//! lookup into this table, never a scattered chain of modifier `if`s: the future shortcut-editing
-//! panel edits exactly this data, so a binding that is not expressible here is a binding the panel
-//! could never show.
+//! One constant table maps every bindable [`Action`] to its default [`Chord`] and the [`Scope`] it
+//! is in force in. Event dispatch is a lookup into this table, never a scattered chain of modifier
+//! `if`s: the future shortcut-editing panel edits exactly this data, so a binding that is not
+//! expressible here is a binding the panel could never show — which is why the preview's `Ctrl+S`
+//! arrived as a third column (ruling 9, 2026-08-12) rather than as an `if` at the dispatch site.
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -30,6 +31,55 @@ pub(crate) enum Action {
     /// Open this tab's files column, or close the one it already has.
     FilesPane,
     OpenSettings,
+    /// Write the preview seat's buffer back to its file (mock-up 6139-6150).
+    ///
+    /// The one row in the table that is not the window's everywhere. See
+    /// [`Scope`].
+    SavePreview,
+}
+
+/// Where a row is in force.
+///
+/// **A third column, not a second table** (ruling 9, 2026-08-12). `Ctrl+S` is the
+/// binding every editor on this platform has and the one the mock-up asks for
+/// (6139-6150), and it is also a bare `Ctrl+letter` — precisely the family the
+/// P2-7 audit refused to take from the shell, because `^S` is the terminal's own
+/// flow-control stop. Both are true, and what reconciles them is that the chord
+/// is only claimed where there is something to save: with the keyboard anywhere
+/// but a preview, `^S` still reaches the child untouched.
+///
+/// It is a column of the data table rather than an `if` at the dispatch site so
+/// that the shortcut-editing panel this table exists for can *show* the
+/// condition. A binding whose applicability lives in a function body is a
+/// binding the panel could only describe by guessing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Scope {
+    /// Every focus state — the window's own verbs.
+    Window,
+    /// Only while the preview seat holds the keyboard focus.
+    Preview,
+}
+
+/// What the window's focus looks like to the table.
+///
+/// A struct rather than a bare `bool` because [`Scope`] is expected to grow rows
+/// — a files column and a terminal both have chords of their own waiting on the
+/// same panel — and a second bool parameter at every call site is how the two
+/// would eventually be passed the wrong way round.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Focus {
+    /// Whether the focused leaf is a preview seat, its quick edit included.
+    pub(crate) preview: bool,
+}
+
+impl Scope {
+    /// Whether a row in this scope is in force with the window focused like this.
+    const fn holds(self, focus: Focus) -> bool {
+        match self {
+            Self::Window => true,
+            Self::Preview => focus.preview,
+        }
+    }
 }
 
 /// The key half of a chord.
@@ -59,46 +109,76 @@ const CTRL: ModifiersState = ModifiersState::CONTROL;
 const CTRL_SHIFT: ModifiersState = ModifiersState::CONTROL.union(ModifiersState::SHIFT);
 const ALT_SHIFT: ModifiersState = ModifiersState::ALT.union(ModifiersState::SHIFT);
 
+/// One row of the table: what it does, what it is pressed with, and where it is
+/// in force.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Binding {
+    pub(crate) action: Action,
+    pub(crate) chord: Chord,
+    pub(crate) scope: Scope,
+}
+
+impl Binding {
+    /// A row in force everywhere.
+    const fn window(action: Action, chord: Chord) -> Self {
+        Self {
+            action,
+            chord,
+            scope: Scope::Window,
+        }
+    }
+
+    /// A row in force only while the preview seat holds the focus.
+    const fn preview(action: Action, chord: Chord) -> Self {
+        Self {
+            action,
+            chord,
+            scope: Scope::Preview,
+        }
+    }
+}
+
 /// The default binding table. This is the single source of truth for shortcut keys.
 ///
-/// Every window action wears Shift alongside Ctrl because bare `Ctrl+letter` is the shell's
+/// Every **window** action wears Shift alongside Ctrl because bare `Ctrl+letter` is the shell's
 /// control-code alphabet, and no row uses `Ctrl+Alt`: Windows reports AltGr as exactly that pair,
-/// so binding it would steal a character from every layout that composes with AltGr.
-pub(crate) const BINDINGS: &[(Action, Chord)] = &[
-    (Action::NewTab, Chord::new(CTRL_SHIFT, character("n"))),
-    (Action::ClosePane, Chord::new(CTRL_SHIFT, character("w"))),
-    (
+/// so binding it would steal a character from every layout that composes with AltGr. The one bare
+/// `Ctrl+letter` in the table is scoped instead of shifted — see [`Scope`].
+pub(crate) const BINDINGS: &[Binding] = &[
+    Binding::window(Action::NewTab, Chord::new(CTRL_SHIFT, character("n"))),
+    Binding::window(Action::ClosePane, Chord::new(CTRL_SHIFT, character("w"))),
+    Binding::window(
         Action::NextTab,
         Chord::new(CTRL, ChordKey::Named(NamedKey::Tab)),
     ),
-    (
+    Binding::window(
         Action::PrevTab,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::Tab)),
     ),
-    (Action::GotoTab(1), Chord::new(CTRL_SHIFT, character("1"))),
-    (Action::GotoTab(2), Chord::new(CTRL_SHIFT, character("2"))),
-    (Action::GotoTab(3), Chord::new(CTRL_SHIFT, character("3"))),
-    (Action::GotoTab(4), Chord::new(CTRL_SHIFT, character("4"))),
-    (Action::GotoTab(5), Chord::new(CTRL_SHIFT, character("5"))),
-    (Action::GotoTab(6), Chord::new(CTRL_SHIFT, character("6"))),
-    (Action::GotoTab(7), Chord::new(CTRL_SHIFT, character("7"))),
-    (Action::GotoTab(8), Chord::new(CTRL_SHIFT, character("8"))),
-    (Action::GotoTab(9), Chord::new(CTRL_SHIFT, character("9"))),
-    (Action::ReopenClosed, Chord::new(CTRL_SHIFT, character("t"))),
-    (
+    Binding::window(Action::GotoTab(1), Chord::new(CTRL_SHIFT, character("1"))),
+    Binding::window(Action::GotoTab(2), Chord::new(CTRL_SHIFT, character("2"))),
+    Binding::window(Action::GotoTab(3), Chord::new(CTRL_SHIFT, character("3"))),
+    Binding::window(Action::GotoTab(4), Chord::new(CTRL_SHIFT, character("4"))),
+    Binding::window(Action::GotoTab(5), Chord::new(CTRL_SHIFT, character("5"))),
+    Binding::window(Action::GotoTab(6), Chord::new(CTRL_SHIFT, character("6"))),
+    Binding::window(Action::GotoTab(7), Chord::new(CTRL_SHIFT, character("7"))),
+    Binding::window(Action::GotoTab(8), Chord::new(CTRL_SHIFT, character("8"))),
+    Binding::window(Action::GotoTab(9), Chord::new(CTRL_SHIFT, character("9"))),
+    Binding::window(Action::ReopenClosed, Chord::new(CTRL_SHIFT, character("t"))),
+    Binding::window(
         Action::JumpAttention,
         Chord::new(CTRL_SHIFT, character("a")),
     ),
-    (
+    Binding::window(
         Action::CommandPalette,
         Chord::new(CTRL_SHIFT, character("p")),
     ),
-    (
+    Binding::window(
         Action::SplitHorizontal,
         Chord::new(ALT_SHIFT, character("-")),
     ),
-    (Action::SplitVertical, Chord::new(ALT_SHIFT, character("="))),
-    (
+    Binding::window(Action::SplitVertical, Chord::new(ALT_SHIFT, character("="))),
+    Binding::window(
         Action::DuplicatePaneSplit,
         Chord::new(CTRL_SHIFT, character("d")),
     ),
@@ -116,8 +196,16 @@ pub(crate) const BINDINGS: &[(Action, Chord)] = &[
     // leaves `^B` where it belongs and puts this beside `Ctrl+Shift+W` and
     // friends. A toggle, not an opener, matching both the mock-up's own
     // behaviour and VS Code's `Ctrl+B`.
-    (Action::FilesPane, Chord::new(CTRL_SHIFT, character("b"))),
-    (Action::OpenSettings, Chord::new(CTRL, character(","))),
+    Binding::window(Action::FilesPane, Chord::new(CTRL_SHIFT, character("b"))),
+    Binding::window(Action::OpenSettings, Chord::new(CTRL, character(","))),
+    // **The one scoped row** (ruling 9, 2026-08-12). It is the mock-up's chord
+    // verbatim — bare `Ctrl+S`, from any focus state *inside the preview*, so a
+    // buffer can be saved after flipping to the rendered view or clicking
+    // elsewhere in the pane — and it is claimed nowhere else, which is what
+    // leaves `^S` with the shell. The audit's ① discipline forbids taking a bare
+    // control letter *from the terminal*; it does not forbid a chord in a place
+    // where there is no terminal to take it from.
+    Binding::preview(Action::SavePreview, Chord::new(CTRL, character("s"))),
 ];
 
 const fn character(text: &'static str) -> ChordKey {
@@ -128,15 +216,21 @@ const fn character(text: &'static str) -> ChordKey {
 ///
 /// `logical` is the key winit produced (Shift already applied); `base` is the same physical key
 /// with every modifier stripped, from `KeyEventExtModifierSupplement::key_without_modifiers`.
+/// `focus` is what the window's keyboard focus looks like, which is what decides whether a scoped
+/// row is in force at all — a row out of scope is not "found and ignored", it is not in the table
+/// for this press, so the key falls through to the encoder exactly as an unbound one does.
 pub(crate) fn lookup_action(
     logical: &Key,
     base: &Key,
     modifiers: ModifiersState,
+    focus: Focus,
 ) -> Option<Action> {
     BINDINGS
         .iter()
-        .find(|(_, chord)| chord.matches(logical, base, modifiers))
-        .map(|(action, _)| *action)
+        .find(|binding| {
+            binding.scope.holds(focus) && binding.chord.matches(logical, base, modifiers)
+        })
+        .map(|binding| binding.action)
 }
 
 impl Chord {
@@ -167,8 +261,17 @@ mod tests {
     use super::*;
 
     /// Shorthand for the common case where Shift does not change the produced character.
+    ///
+    /// Pressed with the keyboard **on a terminal**, which is the focus every
+    /// assertion in this module was written against before scopes existed and
+    /// the one that has to keep answering the same way.
     fn press(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        lookup_action(&key, &key, modifiers)
+        lookup_action(&key, &key, modifiers, Focus::default())
+    }
+
+    /// The same press with the preview seat holding the focus.
+    fn press_in_preview(key: Key, modifiers: ModifiersState) -> Option<Action> {
+        lookup_action(&key, &key, modifiers, Focus { preview: true })
     }
 
     fn character(text: &str) -> Key {
@@ -242,6 +345,41 @@ mod tests {
         assert_eq!(press(character("b"), CTRL_SHIFT), Some(Action::FilesPane));
     }
 
+    /// PIN (ruling 9, 2026-08-12) — **`Ctrl+S` is the preview's and nobody
+    /// else's.**
+    ///
+    /// The two halves of the ruling, one assertion each: the chord reaches the
+    /// action when the preview holds the focus, and it is not in the table at all
+    /// when it does not — so `^S`, the terminal's flow-control stop, still goes
+    /// to the shell.
+    ///
+    /// MUTATIONS:
+    /// ① give the row `Scope::Window` — the second assertion goes red, and so
+    ///    does `bare_control_letters_stay_with_the_terminal`;
+    /// ② make `Scope::holds` return `true` for everything — the same two;
+    /// ③ shift the row to `CTRL_SHIFT` "for consistency" — the first assertion
+    ///    goes red, which is the ruling refusing to be quietly renegotiated.
+    #[test]
+    fn control_s_saves_inside_a_preview_and_reaches_the_shell_everywhere_else() {
+        assert_eq!(
+            press_in_preview(character("s"), CTRL),
+            Some(Action::SavePreview)
+        );
+        assert_eq!(
+            press(character("s"), CTRL),
+            None,
+            "^S is the terminal's flow-control stop wherever there is a terminal"
+        );
+        // Scoping a row does not make the *window's* rows conditional: they keep
+        // answering with the preview focused, because a preview is not a modal.
+        assert_eq!(
+            press_in_preview(character("n"), CTRL_SHIFT),
+            Some(Action::NewTab)
+        );
+        // And the scope does not smuggle in a shifted variant of its own.
+        assert_eq!(press_in_preview(character("s"), CTRL_SHIFT), None);
+    }
+
     #[test]
     fn goto_tab_covers_one_through_nine_and_stops_there() {
         for ordinal in 1..=9u8 {
@@ -259,23 +397,24 @@ mod tests {
     /// difference instead of depending on which of the two a keyboard happens to produce.
     #[test]
     fn shift_folded_keys_resolve_from_either_the_glyph_or_the_bare_key() {
+        let terminal = Focus::default();
         // US layout: Shift+1 produces "!", the bare key is "1".
         assert_eq!(
-            lookup_action(&character("!"), &character("1"), CTRL_SHIFT),
+            lookup_action(&character("!"), &character("1"), CTRL_SHIFT, terminal),
             Some(Action::GotoTab(1))
         );
         // A layout that reaches the digit through Shift produces "1" with a different bare key.
         assert_eq!(
-            lookup_action(&character("1"), &character("&"), CTRL_SHIFT),
+            lookup_action(&character("1"), &character("&"), CTRL_SHIFT, terminal),
             Some(Action::GotoTab(1))
         );
         // US layout: Shift+- produces "_", Shift+= produces "+".
         assert_eq!(
-            lookup_action(&character("_"), &character("-"), ALT_SHIFT),
+            lookup_action(&character("_"), &character("-"), ALT_SHIFT, terminal),
             Some(Action::SplitHorizontal)
         );
         assert_eq!(
-            lookup_action(&character("+"), &character("="), ALT_SHIFT),
+            lookup_action(&character("+"), &character("="), ALT_SHIFT, terminal),
             Some(Action::SplitVertical)
         );
     }
@@ -317,13 +456,20 @@ mod tests {
         let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
         let ctrl_alt_shift = ctrl_alt.union(ModifiersState::SHIFT);
         for text in [
-            "a", "b", "d", "e", "n", "p", "t", "w", "-", "=", ",", "1", "9",
+            "a", "b", "d", "e", "n", "p", "s", "t", "w", "-", "=", ",", "1", "9",
         ] {
             assert_eq!(press(character(text), ctrl_alt), None, "AltGr+{text}");
             assert_eq!(
                 press(character(text), ctrl_alt_shift),
                 None,
                 "AltGr+Shift+{text}"
+            );
+            // The scoped row is held to the same discipline: AltGr must not
+            // reach it either, wherever the keyboard is.
+            assert_eq!(
+                press_in_preview(character(text), ctrl_alt),
+                None,
+                "AltGr+{text} in a preview"
             );
         }
     }
@@ -342,9 +488,16 @@ mod tests {
     /// Bare and plain-Shift typing belongs to the shell; the table must never intercept it.
     #[test]
     fn unmodified_typing_is_never_intercepted() {
-        for text in ["a", "b", "n", "w", "t", "d", "p", "-", "=", ",", "1", "9"] {
+        for text in [
+            "a", "b", "n", "w", "t", "d", "p", "s", "-", "=", ",", "1", "9",
+        ] {
             assert_eq!(press(character(text), ModifiersState::empty()), None);
             assert_eq!(press(character(text), ModifiersState::SHIFT), None);
+            assert_eq!(
+                press_in_preview(character(text), ModifiersState::empty()),
+                None,
+                "typing into a preview is typing"
+            );
         }
         assert_eq!(
             press(Key::Named(NamedKey::Enter), ModifiersState::empty()),
@@ -358,6 +511,11 @@ mod tests {
 
     /// Bare `Ctrl+letter` is the shell's control-code alphabet and stays untouched, which is the
     /// reason every window action above wears Shift.
+    ///
+    /// Asserted with the keyboard on a terminal, which is the only focus the
+    /// sentence is about: `Ctrl+S` inside a preview is a scoped row and there is
+    /// no shell there to take it from (see
+    /// `control_s_saves_inside_a_preview_and_reaches_the_shell_everywhere_else`).
     #[test]
     fn bare_control_letters_stay_with_the_terminal() {
         for letter in 'a'..='z' {
@@ -371,21 +529,28 @@ mod tests {
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 12 single actions plus GotoTab(1..=9).
-        assert_eq!(BINDINGS.len(), 21);
+        // 13 single actions plus GotoTab(1..=9).
+        assert_eq!(BINDINGS.len(), 22);
 
-        for (index, (_, chord)) in BINDINGS.iter().enumerate() {
-            for (other_action, other_chord) in BINDINGS.iter().skip(index + 1) {
-                assert_ne!(
-                    chord, other_chord,
-                    "{other_action:?} reuses a chord already claimed above it"
+        // Two rows may share a chord only if no focus state has both in force —
+        // which is what a scope is *for*, and also the one way scopes could
+        // quietly reintroduce the ambiguity the flat table forbade.
+        for (index, binding) in BINDINGS.iter().enumerate() {
+            for other in BINDINGS.iter().skip(index + 1) {
+                let overlap = [Focus { preview: false }, Focus { preview: true }]
+                    .into_iter()
+                    .any(|focus| binding.scope.holds(focus) && other.scope.holds(focus));
+                assert!(
+                    binding.chord != other.chord || !overlap,
+                    "{:?} reuses a chord already claimed above it in the same focus",
+                    other.action
                 );
             }
         }
 
-        for (action, _) in BINDINGS {
+        for binding in BINDINGS {
             assert!(
-                !matches!(action, Action::GotoTab(ordinal) if !(1..=9).contains(ordinal)),
+                !matches!(binding.action, Action::GotoTab(ordinal) if !(1..=9).contains(&ordinal)),
                 "GotoTab rows are limited to 1..=9"
             );
         }
@@ -407,29 +572,37 @@ mod tests {
             Action::DuplicatePaneSplit,
             Action::FilesPane,
             Action::OpenSettings,
+            Action::SavePreview,
         ];
         expected.extend((1..=9u8).map(Action::GotoTab));
 
         for action in expected {
             assert!(
-                BINDINGS.iter().any(|(bound, _)| *bound == action),
+                BINDINGS.iter().any(|binding| binding.action == action),
                 "{action:?} has no default chord"
             );
         }
     }
 
-    /// Each table row must be reachable through the same lookup dispatch uses.
+    /// Each table row must be reachable through the same lookup dispatch uses —
+    /// **inside its own scope**, which is the only place a scoped row claims to
+    /// be reachable at all.
     #[test]
     fn every_table_row_round_trips_through_lookup() {
-        for (action, chord) in BINDINGS {
-            let key = match chord.key {
+        for binding in BINDINGS {
+            let key = match binding.chord.key {
                 ChordKey::Character(text) => Key::Character(text.into()),
                 ChordKey::Named(named) => Key::Named(named),
             };
+            let focus = match binding.scope {
+                Scope::Window => Focus::default(),
+                Scope::Preview => Focus { preview: true },
+            };
             assert_eq!(
-                lookup_action(&key, &key, chord.modifiers),
-                Some(*action),
-                "{action:?} is in the table but unreachable"
+                lookup_action(&key, &key, binding.chord.modifiers, focus),
+                Some(binding.action),
+                "{:?} is in the table but unreachable",
+                binding.action
             );
         }
     }

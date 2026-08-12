@@ -928,6 +928,332 @@ fn brightened(color: [u8; 3], factor: f32) -> [u8; 3] {
     color.map(|channel| (f32::from(channel) * factor).round().clamp(0.0, 255.0) as u8)
 }
 
+// ── the dirty-buffer gate (P123-P125, `DESIGN.md` §7.1.3) ───────────────────
+//
+// "Hidden dirty state never evaporates silently: closing the LAST preview pane,
+// closing the tab, or shutting the app all confirm every dirty buffer by name"
+// (P117). The mock-up asks all three with the browser's own `confirm()`, which is
+// a modal with two buttons and a sentence — so this is that, drawn in the
+// restore prompt's own craft rather than as a fourth kind of window: the same
+// [`push_float_window`] face, the same `.btn` pair, the same padding, the same
+// wrap. What differs is what the two surfaces *are*, and the difference is one
+// field: this one is a **gate**, so it dims and it owns the keyboard, and the
+// prompt above is not, so it does neither.
+
+/// What a press on the gate answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GateAnswer {
+    /// Throw the unsaved edits away and carry on with what was asked.
+    Discard,
+    /// Change nothing. **The default**, and Esc's answer: a gate that took
+    /// silence for consent would be the thing §7.1.3 exists to forbid.
+    Cancel,
+}
+
+/// Something on the gate the pointer can be over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GateTarget {
+    /// The dialog itself, away from either button. A press here does nothing.
+    Panel,
+    Cancel,
+    Discard,
+}
+
+/// `Discard` — the destructive answer, and therefore **not** the focused one.
+pub const GATE_DISCARD_TEXT: &str = "Discard";
+pub const GATE_CANCEL_TEXT: &str = "Cancel";
+/// The button Enter answers, which is the one that changes nothing.
+pub const GATE_FOCUSED_ANSWER: GateAnswer = GateAnswer::Cancel;
+pub const GATE_TITLE_TEXT: &str = "Discard unsaved changes?";
+
+/// The gate's own sentence — the mock-up's `Discard unsaved changes to a.txt,
+/// b.md?` (3600), split into a title and a list because a `confirm()` string has
+/// nowhere else to put either.
+///
+/// **By name, always** (§7.1.3). A gate that said "some files have unsaved
+/// changes" would be asking you to guess what you are about to lose, which is the
+/// same silence it exists to break, one sentence further on.
+#[must_use]
+pub fn gate_message(names: &[String]) -> String {
+    format!("Discard unsaved changes to {}?", names.join(", "))
+}
+
+/// What the gate is asking about, and which control the pointer is on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirtyGate {
+    open: Option<GateRequest>,
+    hover: Option<GateTarget>,
+}
+
+/// What the window was in the middle of doing when the gate stopped it.
+///
+/// The gate carries the *intention*, not a callback, so the answer is spent by
+/// re-running one of three verbs that already exist. A closure would put the same
+/// three verbs behind a type nothing can print, and a gate is exactly the place a
+/// wrong verb must be impossible to reach.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GateRequest {
+    /// Closing the tab's last preview pane (P123).
+    ClosePane(bt_layout::SeatId),
+    /// Closing a tab (P124), by index in the strip.
+    CloseTab(usize),
+    /// Shutting the window (P125).
+    Shut,
+}
+
+impl DirtyGate {
+    pub fn request(&self) -> Option<&GateRequest> {
+        self.open.as_ref()
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    pub fn open(&mut self, request: GateRequest) {
+        self.open = Some(request);
+        self.hover = None;
+    }
+
+    /// Put it away and hand back what it was asking about.
+    pub fn take(&mut self) -> Option<GateRequest> {
+        self.hover = None;
+        self.open.take()
+    }
+
+    pub fn set_hover(&mut self, hover: Option<GateTarget>) -> bool {
+        let hover = self.open.is_some().then_some(hover).flatten();
+        let changed = self.hover != hover;
+        self.hover = hover;
+        changed
+    }
+
+    pub fn hover(&self) -> Option<GateTarget> {
+        self.hover
+    }
+}
+
+/// The answer a press on `target` gives, if it gives one at all.
+#[must_use]
+pub fn gate_answer(target: GateTarget) -> Option<GateAnswer> {
+    match target {
+        GateTarget::Discard => Some(GateAnswer::Discard),
+        GateTarget::Cancel => Some(GateAnswer::Cancel),
+        GateTarget::Panel => None,
+    }
+}
+
+/// Everything the gate draws that had to be measured with a real font.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GateContent {
+    /// [`gate_message`], already broken to lines that fit [`content_width`].
+    pub message_lines: Vec<String>,
+    pub cancel_text_width: f32,
+    pub discard_text_width: f32,
+}
+
+/// Every rectangle the gate draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GateLayout {
+    scale: f32,
+    frame: [f32; 4],
+    title: [f32; 4],
+    message: Vec<(String, [f32; 4])>,
+    cancel: [f32; 4],
+    discard: [f32; 4],
+}
+
+/// Where every part of the gate lands in a window this size.
+#[must_use]
+pub fn gate_layout(
+    content: &GateContent,
+    surface_width: f32,
+    surface_height: f32,
+    scale: f32,
+) -> GateLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let width = dialog_width(surface_width, scale);
+    let button_height =
+        2.0 * border + px(2.0 * BUTTON_PADDING_Y_LOGICAL_PX + BUTTON_LINE_LOGICAL_PX);
+    let height = (2.0 * border
+        + px(DIALOG_PADDING_TOP_LOGICAL_PX)
+        + px(TITLE_LINE_LOGICAL_PX + TITLE_MARGIN_BOTTOM_LOGICAL_PX)
+        + content.message_lines.len() as f32 * px(SUB_LINE_LOGICAL_PX)
+        + px(SUB_MARGIN_BOTTOM_LOGICAL_PX)
+        + button_height
+        + px(DIALOG_PADDING_BOTTOM_LOGICAL_PX))
+    .round();
+
+    let left = ((surface_width - width) / 2.0).round();
+    let top = ((surface_height - height) / 2.0).round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + px(DIALOG_PADDING_X_LOGICAL_PX);
+    let content_right = frame[2] - border - px(DIALOG_PADDING_X_LOGICAL_PX);
+    let mut cursor = frame[1] + border + px(DIALOG_PADDING_TOP_LOGICAL_PX);
+    let title = [
+        content_left,
+        cursor,
+        content_right,
+        cursor + px(TITLE_LINE_LOGICAL_PX),
+    ];
+    cursor = title[3] + px(TITLE_MARGIN_BOTTOM_LOGICAL_PX);
+    let message = content
+        .message_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line_top = cursor + index as f32 * px(SUB_LINE_LOGICAL_PX);
+            (
+                line.clone(),
+                [
+                    content_left,
+                    line_top,
+                    content_right,
+                    line_top + px(SUB_LINE_LOGICAL_PX),
+                ],
+            )
+        })
+        .collect();
+    cursor += content.message_lines.len() as f32 * px(SUB_LINE_LOGICAL_PX)
+        + px(SUB_MARGIN_BOTTOM_LOGICAL_PX);
+
+    // `justify-content: flex-end`, and **the destructive answer is the one on
+    // the right without being the primary one**: it is where the eye goes last,
+    // it is not the button Enter presses, and it is not painted in the accent —
+    // an accent-filled `Discard` would be the window recommending the one action
+    // it cannot undo.
+    let button_width =
+        |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
+    let discard = [
+        content_right - button_width(content.discard_text_width),
+        cursor,
+        content_right,
+        cursor + button_height,
+    ];
+    let cancel = [
+        discard[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.cancel_text_width),
+        cursor,
+        discard[0] - px(ACTIONS_GAP_LOGICAL_PX),
+        cursor + button_height,
+    ];
+    GateLayout {
+        scale,
+        frame,
+        title,
+        message,
+        cancel,
+        discard,
+    }
+}
+
+/// What a point is over. **Always an answer**, unlike the restore prompt's: this
+/// one is modal, so a press outside it is still the gate's and is swallowed.
+#[must_use]
+pub fn gate_hit(layout: &GateLayout, x: f64, y: f64) -> GateTarget {
+    let (x, y) = (x as f32, y as f32);
+    if contains(layout.cancel, x, y) {
+        return GateTarget::Cancel;
+    }
+    if contains(layout.discard, x, y) {
+        return GateTarget::Discard;
+    }
+    GateTarget::Panel
+}
+
+/// The gate as one overlay layer, **scrim and all**.
+///
+/// The scrim is the difference between this and the prompt above it, and it is
+/// the honest one: a restore prompt floats over a window that already works, and
+/// a gate stands in front of an action that is about to happen. Everything else
+/// on this surface is that module's craft, unchanged.
+#[must_use]
+pub fn gate_build(
+    layout: &GateLayout,
+    surface: (f32, f32),
+    hover: Option<GateTarget>,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = vec![OverlayQuad {
+        rect: [0.0, 0.0, surface.0, surface.1],
+        color: palette.modal_scrim,
+        alpha: alpha(palette.modal_scrim_alpha),
+    }];
+    let mut labels = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(FLOAT_WINDOW_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.dialog_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_shadow_inner_alpha),
+        alpha(palette.menu_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    labels.push(ChromeLabel {
+        text: GATE_TITLE_TEXT.to_owned(),
+        rect: layout.title,
+        font_size_px: px(TITLE_FONT_LOGICAL_PX),
+        color: palette.dialog_title_text,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: None,
+    });
+    for (text, rect) in &layout.message {
+        labels.push(ChromeLabel {
+            text: text.clone(),
+            rect: *rect,
+            font_size_px: px(SUB_FONT_LOGICAL_PX),
+            color: palette.dialog_secondary_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+    push_button(
+        &mut quads,
+        &mut labels,
+        layout.cancel,
+        GATE_CANCEL_TEXT,
+        false,
+        hover == Some(GateTarget::Cancel),
+        scale,
+        border,
+        palette,
+    );
+    push_button(
+        &mut quads,
+        &mut labels,
+        layout.discard,
+        GATE_DISCARD_TEXT,
+        false,
+        hover == Some(GateTarget::Discard),
+        scale,
+        border,
+        palette,
+    );
+    vec![OverlayLayer {
+        quads,
+        labels,
+        ..Default::default()
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,6 +1261,105 @@ mod tests {
     /// The window the mock-up was measured in, and the shape every geometry
     /// claim below is stated against.
     const SURFACE: (f32, f32) = (1440.0, 756.0);
+
+    /// PIN (P123-P125, `DESIGN.md` §7.1.3) — **the gate names every buffer it is
+    /// about, and its default answer changes nothing.**
+    ///
+    /// Two rulings, one surface. The sentence is the mock-up's own
+    /// `Discard unsaved changes to a.txt, b.md?`, and it is by name because a
+    /// gate that said "some files" would be asking you to guess what you are
+    /// about to lose — the same silence it exists to break, one sentence on. And
+    /// the focused button is `Cancel`, which is what makes Enter and Esc safe: on
+    /// a question about losing work, the answer that is easiest to give by
+    /// accident must be the one that costs nothing.
+    ///
+    /// MUTATIONS:
+    /// ① make `GATE_FOCUSED_ANSWER` `Discard` — the second assertion goes red,
+    ///    and a stray Enter throws the buffers away;
+    /// ② give `Discard` the accent fill `push_button`'s `primary` draws — the
+    ///    last assertion goes red, which is the window recommending the one
+    ///    action it cannot undo;
+    /// ③ have `gate_hit` return `None` off the dialog — the gate stops being
+    ///    modal, and a press behind the scrim reaches the thing it is guarding.
+    #[test]
+    fn the_dirty_gate_names_what_it_is_about_and_defaults_to_keeping_it() {
+        assert_eq!(
+            gate_message(&["a.txt".to_owned(), "b.md".to_owned()]),
+            "Discard unsaved changes to a.txt, b.md?"
+        );
+        assert_eq!(
+            gate_message(&["only.rs".to_owned()]),
+            "Discard unsaved changes to only.rs?"
+        );
+        assert_eq!(GATE_FOCUSED_ANSWER, GateAnswer::Cancel);
+        assert_eq!(gate_answer(GateTarget::Cancel), Some(GateAnswer::Cancel));
+        assert_eq!(gate_answer(GateTarget::Discard), Some(GateAnswer::Discard));
+        assert_eq!(
+            gate_answer(GateTarget::Panel),
+            None,
+            "the dialog's own body answers nothing"
+        );
+
+        let content = GateContent {
+            message_lines: vec!["Discard unsaved changes to a.txt?".to_owned()],
+            cancel_text_width: 40.0,
+            discard_text_width: 48.0,
+        };
+        let layout = gate_layout(&content, SURFACE.0, SURFACE.1, 1.0);
+        let centre = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        let (x, y) = centre(layout.cancel);
+        assert_eq!(
+            gate_hit(&layout, f64::from(x), f64::from(y)),
+            GateTarget::Cancel
+        );
+        let (x, y) = centre(layout.discard);
+        assert_eq!(
+            gate_hit(&layout, f64::from(x), f64::from(y)),
+            GateTarget::Discard
+        );
+        // **Modal**: a press anywhere else is still the gate's.
+        assert_eq!(gate_hit(&layout, 1.0, 1.0), GateTarget::Panel);
+        // `Discard` sits to the right of `Cancel` and is not the primary button —
+        // it is where the eye goes last, and it wears no accent.
+        assert!(layout.cancel[2] <= layout.discard[0]);
+        let palette = chrome_palette();
+        let layers = gate_build(&layout, SURFACE, None);
+        assert!(
+            !layers[0]
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.accent),
+            "nothing on this dialog recommends the destructive answer"
+        );
+        assert!(
+            layers[0]
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.modal_scrim && quad.rect[2] >= SURFACE.0),
+            "and it dims, because it stands in front of something already happening"
+        );
+    }
+
+    /// PIN — the gate holds one question at a time and hands it back whole.
+    ///
+    /// Mutation: make `take` clone rather than take, and the verb it interrupted
+    /// re-raises the gate it just answered — forever.
+    #[test]
+    fn the_gate_holds_one_question_and_gives_it_up_when_answered() {
+        let mut gate = DirtyGate::default();
+        assert!(!gate.is_open());
+        assert_eq!(gate.take(), None);
+        gate.open(GateRequest::CloseTab(2));
+        assert!(gate.is_open());
+        assert_eq!(gate.request(), Some(&GateRequest::CloseTab(2)));
+        assert!(gate.set_hover(Some(GateTarget::Discard)));
+        assert_eq!(gate.hover(), Some(GateTarget::Discard));
+        assert_eq!(gate.take(), Some(GateRequest::CloseTab(2)));
+        assert!(!gate.is_open());
+        assert_eq!(gate.hover(), None, "a shut gate is over nothing");
+        // A hover cannot be set on a gate that is not up.
+        assert!(!gate.set_hover(Some(GateTarget::Cancel)));
+    }
 
     /// PIN — **a restore row is named by its own profile**, not by the default
     /// one, whenever nothing else named it.

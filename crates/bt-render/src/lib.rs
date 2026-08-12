@@ -971,6 +971,20 @@ pub struct PreviewBody {
     pub clip: [f32; 4],
     pub quads: Vec<PreviewQuad>,
     pub paragraphs: Vec<PreviewParagraph>,
+    /// Runs of the body that **scroll inside themselves** (user ruling,
+    /// 2026-08-13).
+    ///
+    /// A rendered markdown page has no horizontal axis of its own: prose folds to
+    /// the pane, so moving the whole page sideways pushes the folded text off the
+    /// screen to reach a table nobody was reading. What is wider than the pane is
+    /// always one *block* — a table, a fence — and a block is what carries the
+    /// offset, exactly as GitHub and Typora do it.
+    ///
+    /// A slot of its own rather than a `clip` on every quad and paragraph,
+    /// because the thing being expressed is not "this rectangle is cropped": it
+    /// is "these rectangles are one scrolling region", which is what makes the
+    /// crop, the offset and the indicator one fact instead of three.
+    pub blocks: Vec<PreviewBlock>,
     /// A bar standing at the bottom of the body, **outside [`Self::clip`]**.
     ///
     /// The one thing in this structure that is not the document: furniture the
@@ -980,6 +994,19 @@ pub struct PreviewBody {
     /// what makes "nothing scrolls under it" true by construction rather than
     /// by the fill being drawn late enough.
     pub foot: Option<PreviewFoot>,
+}
+
+/// One block of a preview body that owns a horizontal offset.
+///
+/// Its contents are already placed at that offset; what this carries is the
+/// window they may be seen through, which is the block's own rectangle rather
+/// than the body's. Everything is cropped to *both* — a block scrolled sideways
+/// still cannot be seen through the pane head.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewBlock {
+    pub clip: [f32; 4],
+    pub quads: Vec<PreviewQuad>,
+    pub paragraphs: Vec<PreviewParagraph>,
 }
 
 /// The bar at the foot of a preview body: an opaque ground, a hairline along
@@ -3793,6 +3820,24 @@ impl Renderer {
                         ))
                     })
                     .collect();
+                // A scrolling block's fills are cropped to the block **and** to
+                // the body: the offset moves them sideways out of their own
+                // rectangle, and the body's clip still ends where the pane head
+                // begins.
+                for block in &body.blocks {
+                    let Some(window) = crop_to(block.clip, body.clip) else {
+                        continue;
+                    };
+                    rects.extend(block.quads.iter().filter_map(|quad| {
+                        let rect = crop_to(quad.rect, window)?;
+                        Some(surface_pixel_rect(
+                            rect,
+                            quad.color,
+                            self.config.width,
+                            self.config.height,
+                        ))
+                    }));
+                }
                 // The foot stands *below* the content's clip and is cropped to
                 // its own bar, which is the whole of why it is a slot rather
                 // than two more entries in `quads`.
@@ -5671,10 +5716,21 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
         .paragraphs
         .iter()
         .map(|paragraph| (paragraph, body.clip));
+    // A scrolling block's text is cropped to the block, so a table shifted
+    // sideways is cut at its own edge rather than printing over the prose beside
+    // it. Intersected with the body's clip for the reason the fills are.
+    let blocks = body.blocks.iter().flat_map(|block| {
+        let window = crop_to(block.clip, body.clip).unwrap_or(block.clip);
+        block
+            .paragraphs
+            .iter()
+            .map(move |paragraph| (paragraph, window))
+    });
     // The foot's sentence is cropped to the foot's own bar: the content's clip
     // stops above it, and a label cut to that clip would never be drawn at all.
     let furniture = body.foot.iter().map(|foot| (&foot.label, foot.bar));
     content
+        .chain(blocks)
         .chain(furniture)
         .filter(|(paragraph, _)| paragraph.runs.iter().any(|run| !run.text.is_empty()))
         // A paragraph wholly above or below its own clip is not drawn at all,

@@ -365,13 +365,54 @@ impl Seats {
         self.tree.seats_in_order().len()
     }
 
-    /// The unpinned preview seat, if the tree has one.
+    /// The preview seat, if the tree has one.
+    ///
+    /// **N7's correction, and it is the doc that was wrong.** This said "the
+    /// unpinned preview seat" from the day the kind existed, and never filtered:
+    /// there was one preview seat per tab, nothing could pin it, and the two
+    /// readings named the same thing. Now that the pin exists the two come apart,
+    /// and they are two questions with two answers — [`Self::landing_preview`] is
+    /// the one about reuse, and this is the one every other caller asks, which is
+    /// "which seat is the preview".
     pub fn preview(&self) -> Option<SeatId> {
         self.tree
             .seats_in_order()
             .into_iter()
             .find(|seat| seat.kind == SeatKind::Preview)
             .map(|seat| seat.id)
+    }
+
+    /// The preview seat a newly opened file would *replace* — the un-pinned one
+    /// (P69, `DESIGN.md` §7.1.3).
+    ///
+    /// The whole of what a pin does: "this pane keeps its buffers and stops being
+    /// the reuse target — the NEXT file opens a fresh preview beside it" (P95).
+    ///
+    /// `#[allow(dead_code)]`, on the precedent [`crate::preview::is_diff_name`]
+    /// sets: the *rule* is written and pinned by test now, and the one call site
+    /// that would consume it — `Runtime::open_preview_file` — cannot, because
+    /// this window still has a single preview content plane. Landing a second
+    /// preview leaf today would draw two heads with one file's name in them; the
+    /// note on that function says so, and this is the answer waiting for it.
+    #[allow(dead_code)]
+    pub fn landing_preview(&self) -> Option<SeatId> {
+        self.tree
+            .seats_in_order()
+            .into_iter()
+            .find(|seat| seat.kind == SeatKind::Preview && !seat.pinned)
+            .map(|seat| seat.id)
+    }
+
+    /// Whether this seat is a pinned preview.
+    pub fn preview_is_pinned(&self, seat: SeatId) -> bool {
+        self.tree
+            .find_seat(seat)
+            .is_some_and(|found| found.kind == SeatKind::Preview && found.pinned)
+    }
+
+    /// Turn the pin over. Returns whether anything changed.
+    pub fn toggle_preview_pin(&mut self, seat: SeatId) -> bool {
+        self.tree.toggle_preview_pin(seat)
     }
 
     /// Move layout focus. Focus is the solver's only input to W2 ("the focus
@@ -1620,14 +1661,30 @@ pub fn pane_body_viewport(
     Some(viewport)
 }
 
-/// The drawable body of a preview seat, excluding its existing title bar.
+/// The drawable body of a preview seat: its rectangle, less its head **and less
+/// its path strip**.
+///
+/// The second subtraction arrived with the foot (P32-P35) and it is the same one
+/// [`FilesPaneGeometry`]'s own note is about: the day a foot appears, every
+/// reader of "the seat less its head" is wrong by 28 pixels at once — the picture
+/// would be fitted over the strip, the wheel would scroll a taller body than
+/// exists, and a click at the bottom would land on a document the foot is
+/// covering. There is one derivation of the leftover and everything asks it here.
 pub fn preview_body_viewport(
     seats: &Seats,
     layout: &SeatLayout,
     seat: SeatId,
     scale: f32,
 ) -> Option<SeatViewport> {
-    pane_body_viewport(seats, layout, seat, scale)
+    let mut viewport = pane_body_viewport(seats, layout, seat, scale)?;
+    let bar = (FILES_FOOT_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
+    // The foot keeps its whole height and the body is what gives way, down to a
+    // single row — the rule a files column already follows, and for its reason: a
+    // pane squeezed to a sliver is more use with a path in it than with two lines
+    // of a document and no way to reach the file.
+    let consumed = bar.min(viewport.height.saturating_sub(1));
+    viewport.height = viewport.height.saturating_sub(consumed).max(1);
+    Some(viewport)
 }
 
 /// Something in the chrome the pointer can be over.
@@ -1690,6 +1747,24 @@ pub enum ChromeTarget {
     /// that launched a program would be the one thing worse than a card that
     /// does nothing.
     PreviewOpenButton(SeatId),
+    /// `.pv-name.switch` — the file name, which is a control whenever the tab's
+    /// pool holds more than one buffer (P18/P23). Its own target inside the head
+    /// for [`Self::FilesRoot`]'s reason, and it arms the head as a drag handle
+    /// underneath exactly as that one does: the mock-up's own exclusion list
+    /// (5874) names `.pane-close`, `.pane-files` and `.pv-tool`, and pointedly
+    /// not the name.
+    PreviewName(SeatId),
+    /// `.pv-tool.pv-save` — the explicit save (P27). The chord is reachable from
+    /// the keyboard; this is the button that says saving *exists*.
+    PreviewSave(SeatId),
+    /// `.pv-tool.pv-md-flip` — rendered view ⇄ source (P28).
+    PreviewFlip(SeatId),
+    /// `.pv-tool.pv-pin` — "keep this pane; the next file opens a new preview"
+    /// (P30/P95), the one route to a second preview pane.
+    PreviewPin(SeatId),
+    /// `.preview-pane .files-foot` — the full path along the bottom of a preview
+    /// pane, whose whole strip reveals the file in Explorer (P32-P35).
+    PreviewFoot(SeatId),
     Settings,
     Minimize,
     Maximize,
@@ -3592,7 +3667,12 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
     let content_bottom = (head_bottom - edge).max(rect[1]);
     let head = [rect[0], rect[1], rect[2], head_bottom];
 
-    let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
+    // `.preview-head` sets its own left inset — eleven where `.panehead` uses
+    // twelve (P13) — so the padding is read off the kind rather than shared.
+    let pad = match kind {
+        SeatKind::Preview => PREVIEW_HEAD_PADDING_LEFT_LOGICAL_PX,
+        _ => SEAT_TITLE_PADDING_LOGICAL_PX,
+    } * scale;
     let (_, mark_logical_px, _) = pane_mark(kind, None, chrome_palette());
     let mark_size = (mark_logical_px * scale).round().max(1.0);
     let mark_left = (rect[0] + pad).round();
@@ -4217,6 +4297,8 @@ pub fn build_chrome_with_preview(
             files_root_open: None,
             files_trees: &NO_FILES_TREES,
             preview_message,
+            preview_foot: None,
+            preview_head: None,
             preview_card: None,
             fit_overflow: None,
             profile_menu_open: false,
@@ -4521,6 +4603,15 @@ pub struct ChromeContent<'a> {
     /// directory on the event loop.
     pub files_trees: &'a BTreeMap<SeatId, FilesTreeContent>,
     pub preview_message: Option<&'a str>,
+    /// The preview pane's path strip — its foot (P32-P35).
+    pub preview_foot: Option<FootStrip<'a>>,
+    /// The preview head's own furniture, when a preview seat is on screen.
+    ///
+    /// Beside [`Self::preview_title`] rather than folded into it, because the two
+    /// are different questions with different owners: the title is a *caption*
+    /// and is asked of a collapsed bar and a drag ghost as well as of a head,
+    /// while this is the run of controls that only a full head has.
+    pub preview_head: Option<PreviewHeadContent<'a>>,
     /// The "no preview" card, when the preview seat is showing one.
     ///
     /// Beside [`Self::preview_message`] rather than instead of it, because the
@@ -4725,6 +4816,8 @@ pub fn build_chrome_for_tabs(
         files_root_open,
         files_trees,
         preview_message,
+        preview_foot,
+        preview_head,
         preview_card,
         fit_overflow,
         profile_menu_open,
@@ -5020,54 +5113,77 @@ pub fn build_chrome_for_tabs(
                         .with_opacity(FILES_ROOT_CHEVRON_OPACITY),
                     );
                 }
-                pane_labels.push(ChromeLabel {
-                    text: seat_caption(
-                        placement.kind,
-                        preview_title,
-                        terminal_name(placement.id),
-                        files_name(placement.id),
-                    )
-                    .to_owned(),
-                    // The name keeps its own box and the button is drawn around
-                    // it: the label starts where it always did, and what changed
-                    // is that it now has to stop before the chevron rather than
-                    // before the `×`.
-                    rect: match root_button {
-                        Some(button) => [
-                            head.title[0],
-                            head.title[1],
-                            (button[2]
-                                - FILES_ROOT_BUTTON_INSET_LOGICAL_PX * scale
-                                - (FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX * scale).round()
-                                - FILES_ROOT_BUTTON_GAP_LOGICAL_PX * scale)
-                                .max(head.title[0]),
-                            head.title[3],
-                        ],
-                        None => head.title,
-                    },
-                    font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                    // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
-                    // (mock-up line 1644) — one declaration with two halves, and
-                    // the mock-up's note beside it turns on having both: the
-                    // focused pane is marked by *hierarchy* rather than by a fill,
-                    // after tinting it with the accent was ruled out for colliding
-                    // with the unread dot in the same row.
-                    color: if focused {
-                        palette.pane_title_focus
-                    } else {
-                        palette.pane_title
-                    },
-                    align_right: false,
-                    align_center: false,
-                    letter_spacing_em: 0.0,
-                    weight: if focused {
-                        ChromeLabelWeight::Medium
-                    } else {
-                        ChromeLabelWeight::Regular
-                    },
-                    tabular_numerals: false,
-                    clip: None,
-                });
+                // A preview head's own furniture, drawn instead of the generic
+                // caption: its name is a different size, a different weight and
+                // sometimes a button, and the dot beside it is part of the same
+                // flex row. Everything to the right of the `×` — the head as a
+                // drag handle, the close, the body below — is untouched, which is
+                // P24's whole point about the head carrying both classes.
+                let preview_head = (placement.kind == SeatKind::Preview)
+                    .then_some(preview_head)
+                    .flatten();
+                if let Some(content) = preview_head {
+                    push_preview_head(
+                        &head,
+                        content,
+                        placement.id,
+                        pointer,
+                        focused,
+                        scale,
+                        &palette,
+                        (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+                    );
+                }
+                if preview_head.is_none() {
+                    pane_labels.push(ChromeLabel {
+                        text: seat_caption(
+                            placement.kind,
+                            preview_title,
+                            terminal_name(placement.id),
+                            files_name(placement.id),
+                        )
+                        .to_owned(),
+                        // The name keeps its own box and the button is drawn
+                        // around it: the label starts where it always did, and
+                        // what changed is that it now has to stop before the
+                        // chevron rather than before the `×`.
+                        rect: match root_button {
+                            Some(button) => [
+                                head.title[0],
+                                head.title[1],
+                                (button[2]
+                                    - FILES_ROOT_BUTTON_INSET_LOGICAL_PX * scale
+                                    - (FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX * scale).round()
+                                    - FILES_ROOT_BUTTON_GAP_LOGICAL_PX * scale)
+                                    .max(head.title[0]),
+                                head.title[3],
+                            ],
+                            None => head.title,
+                        },
+                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
+                        // (mock-up line 1644) — one declaration with two halves,
+                        // and the mock-up's note beside it turns on having both:
+                        // the focused pane is marked by *hierarchy* rather than by
+                        // a fill, after tinting it with the accent was ruled out
+                        // for colliding with the unread dot in the same row.
+                        color: if focused {
+                            palette.pane_title_focus
+                        } else {
+                            palette.pane_title
+                        },
+                        align_right: false,
+                        align_center: false,
+                        letter_spacing_em: 0.0,
+                        weight: if focused {
+                            ChromeLabelWeight::Medium
+                        } else {
+                            ChromeLabelWeight::Regular
+                        },
+                        tabular_numerals: false,
+                        clip: None,
+                    });
+                }
                 // `.panehead .pane-close { visibility: hidden }` with
                 // `.pane:hover .pane-close { visibility: visible }` (mock-up
                 // 1650-1657): the control is not there at all until the pointer
@@ -5198,8 +5314,14 @@ pub fn build_chrome_for_tabs(
                 // pass draws into: a pane mid-resize rides its card (F63/B22),
                 // and a foot pinned to the solved rectangle would stand outside
                 // the card its own pane had moved into.
-                let files_pane = (placement.kind == SeatKind::Files)
-                    .then(|| files_pane_geometry(head_box, scale));
+                // **Both kinds that wear a path strip**, from the one derivation
+                // (P33: the mock-up writes the two feet as a single rule). A
+                // preview pane joined the files column here, and the day it did,
+                // its body stopped being "the seat less its head" — which is what
+                // `preview_body_viewport` now says too, and what keeps the card
+                // and the notice below off the strip.
+                let files_pane = matches!(placement.kind, SeatKind::Files | SeatKind::Preview)
+                    .then(|| pane_foot_geometry(head_box, placement.kind, scale));
                 if let (Some(tree), Some(geometry)) = (files_tree, files_pane) {
                     match whole_tree_notice(&tree.rows) {
                         Some(message) => files_notice = Some(message.to_owned()),
@@ -5221,15 +5343,36 @@ pub fn build_chrome_for_tabs(
                         ),
                     }
                 }
-                // The foot, drawn for a files column whether or not it has rows:
-                // it is part of the pane's chassis like the head, not a footer on
-                // the list, and an unrooted column saying "No folder opened" in
-                // its body still owes the strip its hairline.
+                // The foot, drawn whether or not there is anything above it: it is
+                // part of the pane's chassis like the head, not a footer on the
+                // list, and an unrooted column saying "No folder opened" in its
+                // body still owes the strip its hairline.
+                //
+                // **The truncation bar and this one cannot collide, and the order
+                // is settled here**: this bar is chrome and stands on the pane's
+                // own floor, while the read-only notice is furniture *inside* the
+                // body and therefore lands above it (`preview_content_body`
+                // subtracts this bar's height before the notice is placed). Bottom
+                // to top: the path, then the truncation notice, then the document.
                 if let Some(geometry) = files_pane {
+                    let strip = match placement.kind {
+                        SeatKind::Preview => preview_foot.map(|foot| FootStrip {
+                            path: foot.path,
+                            revealed: foot.revealed,
+                        }),
+                        _ => files_tree.map(|tree| FootStrip {
+                            path: tree.foot_path.as_str(),
+                            revealed: tree.foot_revealed,
+                        }),
+                    };
+                    let target = match placement.kind {
+                        SeatKind::Preview => ChromeTarget::PreviewFoot(placement.id),
+                        _ => ChromeTarget::FilesFoot(placement.id),
+                    };
                     push_files_foot(
                         &geometry,
-                        files_tree,
-                        pointer.hover == Some(ChromeTarget::FilesFoot(placement.id)),
+                        strip,
+                        pointer.hover == Some(target),
                         scale,
                         &palette,
                         (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
@@ -5241,7 +5384,10 @@ pub fn build_chrome_for_tabs(
                 if placement.kind == SeatKind::Preview
                     && let Some(card) = preview_card
                 {
-                    let body = [head_box[0], head_bottom, head_box[2], head_box[3]];
+                    let body = files_pane.map_or(
+                        [head_box[0], head_bottom, head_box[2], head_box[3]],
+                        |geometry| geometry.body,
+                    );
                     let geometry = preview_card_geometry(body, card.button_text_px, scale);
                     // `.pv-unknown svg { opacity: .5 }` — the element's own
                     // opacity and not a paler ink, which is the distinction
@@ -8005,6 +8151,260 @@ pub fn files_root_box(head: &PaneHeadGeometry, scale: f32, name_width: f32) -> O
     ]))
 }
 
+// ── the preview head's furniture (mock-up 552-596, 5004-5016) ────────────────
+//
+// The head is the same 30px `.panehead` every pane wears — it carries both
+// classes and `data-leaf`, so dragging and closing are the identical wiring
+// (P24) — and what is its own is the run of controls inside it. All of it is laid
+// out by one function for `pane_head_geometry`'s reason: the button you can press
+// is the button you can see, and a second copy of `right - 6 - 17 - 7 - 22` is
+// how those two come apart at the one fractional scale nobody tested.
+
+/// `.preview-head { padding: 0 6px 0 11px }` — **eleven, not the `.panehead`'s
+/// twelve** (P13). One pixel, written down twice in the mock-up, and the sort of
+/// difference that is only ever noticed as a name that does not line up with the
+/// tree row above it.
+pub const PREVIEW_HEAD_PADDING_LEFT_LOGICAL_PX: f32 = 11.0;
+/// `.preview-head .pv-name { font-size: 12.5px }` — a step above the 11.5px every
+/// other pane title uses, because the file name *is* this pane's identity (P15).
+pub const PREVIEW_NAME_FONT_LOGICAL_PX: f32 = 12.5;
+/// `.pv-dirty { width: 12px }` — **reserved space, so appearing doesn't shove the
+/// name** (P16). The width is spent whether or not there is a dot to put in it.
+pub const PREVIEW_DIRTY_SLOT_LOGICAL_PX: f32 = 12.0;
+/// `.pv-dirty { font-size: 13px }`.
+pub const PREVIEW_DIRTY_FONT_LOGICAL_PX: f32 = 13.0;
+/// `●` — the dot itself, shared with the switcher's rows so the two cannot drift.
+pub const PREVIEW_DIRTY_DOT: &str = "\u{25cf}";
+/// `.pv-tool { width: 22px; height: 22px }` (P20) — larger than the `×`'s 17 and
+/// the files head's 19, and the mock-up means all three.
+pub const PREVIEW_TOOL_BOX_LOGICAL_PX: f32 = 22.0;
+/// `.pv-tool { border-radius: 5px }`.
+pub const PREVIEW_TOOL_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// `.pv-tool svg { width: 13px; height: 13px }`.
+pub const PREVIEW_TOOL_GLYPH_LOGICAL_PX: f32 = 13.0;
+/// `.pane:hover .pv-tool { opacity: .7 }` — the resting rung of the same reveal
+/// ladder `.pane-files` climbs (P21), and the reason it is a separate constant
+/// from [`PANE_HEAD_TRIGGER_REVEAL`] is only that the mock-up writes it twice.
+pub const PREVIEW_TOOL_REVEAL: f32 = PANE_HEAD_TRIGGER_REVEAL;
+/// `.pv-name.switch { padding: 2px 5px; margin: -2px -5px }` — the pill is the
+/// name's box grown five each way, and the negative margin is what keeps it from
+/// pushing the row wider (P18, the `.files-root` trick).
+pub const PREVIEW_SWITCH_INSET_X_LOGICAL_PX: f32 = 5.0;
+/// The pill's height: a 12.5px name's line box plus its `padding: 2px` top and
+/// bottom. The same nineteen the files head's root button lands on, and not a
+/// coincidence — both are "a name plus its padding" inside the same 30px head.
+pub const PREVIEW_SWITCH_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// `.pv-name.switch { border-radius: 5px }`.
+pub const PREVIEW_SWITCH_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// `.pv-name.switch { gap: 4px }`, between the name, the chevron and the badge.
+pub const PREVIEW_SWITCH_GAP_LOGICAL_PX: f32 = 4.0;
+/// `.pv-name .rootchev { width: 9px }`.
+pub const PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX: f32 = 9.0;
+/// And its drawn height. The CSS asks for a 9px square, but `#i-chev`'s own view
+/// box is `0 0 10 6` and an `<svg>` letterboxes rather than stretches
+/// (`preserveAspectRatio` defaults to `xMidYMid meet`), so nine wide is five and
+/// two fifths tall. Quoting the CSS square here would draw a chevron half again
+/// too deep.
+pub const PREVIEW_SWITCH_CHEVRON_HEIGHT_LOGICAL_PX: f32 =
+    PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX * 6.0 / 10.0;
+/// `.pv-count { line-height: 14px }` — the badge's height.
+pub const PREVIEW_COUNT_HEIGHT_LOGICAL_PX: f32 = 14.0;
+/// `.pv-count { padding: 0 5px }`, on each side of the digits.
+pub const PREVIEW_COUNT_PADDING_X_LOGICAL_PX: f32 = 5.0;
+/// `.pv-count { border-radius: 8px }`.
+pub const PREVIEW_COUNT_RADIUS_LOGICAL_PX: f32 = 8.0;
+/// `.pv-count { font-size: 10px; font-weight: 700 }`.
+pub const PREVIEW_COUNT_FONT_LOGICAL_PX: f32 = 10.0;
+
+/// What the preview head is showing this frame.
+///
+/// The state, measured where a font was available. It carries [`PreviewHeadTools`]
+/// rather than repeating its fields so that the layout and the paint are asked
+/// the same question — a head drawn with a save button its geometry did not
+/// reserve is the class of bug D4 exists to make impossible.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreviewHeadContent<'a> {
+    pub tools: PreviewHeadTools,
+    /// The file name, already cut to the room its box has.
+    pub name: &'a str,
+    /// Unsaved edits in **this pane's own** buffer — the header's dot.
+    pub dirty: bool,
+    /// `pool.length`, the badge's digits. Drawn only with the switcher.
+    pub count: &'a str,
+    /// Whether some *other* buffer in the pool is dirty, which is what turns the
+    /// badge accent (P19's `othersDirty`): the pane's own dot already speaks for
+    /// the buffer on screen, so the badge is what speaks for the ones that are
+    /// not.
+    pub others_dirty: bool,
+    /// Whether the flip would take you to the source (`#i-code`) rather than back
+    /// to the render (`#i-eye`) — the glyph names the *destination*.
+    pub flip_to_source: bool,
+    pub pinned: bool,
+    /// Whether this pane's switcher is open, which turns the chevron over.
+    pub menu_open: bool,
+}
+
+/// What the preview head has to lay out this frame.
+///
+/// The facts, not the pixels: which optional controls exist at all, and how wide
+/// the two measured strings came out. A head with a save button is a different
+/// *layout* from one without, so this cannot be derived from a [`SeatKind`] — it
+/// is a property of the buffer on the seat.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreviewHeadTools {
+    /// `editable` (P27) — the buffer is on a surface that actually edits.
+    pub save: bool,
+    /// `flippable` (P28) — the buffer is markdown.
+    pub flip: bool,
+    /// The pool holds more than one buffer, so the name is a control (P18/P23).
+    pub switcher: bool,
+    /// `.pv-name`'s drawn width, measured by the caller that holds a font.
+    pub name_width: f32,
+    /// `.pv-count`'s digits, likewise.
+    pub count_width: f32,
+}
+
+/// Where every part of one preview head stands, in physical pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreviewHeadGeometry {
+    /// The name's own text box — what the label is laid into and cropped to.
+    pub name: [f32; 4],
+    /// `.pv-name.switch`'s pill: the hover fill, and the whole of what answers a
+    /// press. `None` when the pool holds one buffer and the name is just a name.
+    pub pill: Option<[f32; 4]>,
+    pub chevron: Option<[f32; 4]>,
+    pub count: Option<[f32; 4]>,
+    /// The dot's reserved slot, occupied or not.
+    pub dirty: [f32; 4],
+    pub save: Option<[f32; 4]>,
+    pub flip: Option<[f32; 4]>,
+    pub pin: Option<[f32; 4]>,
+}
+
+/// Lay one preview head's contents out inside the common head it rides on.
+///
+/// The trailing run is taken off the right in the mock-up's own DOM order —
+/// `.pv-save`, `.pv-md-flip`, `.pv-pin`, `.pane-close` — so a head that has lost
+/// room drops controls from the *left* of that run, which is the order flexbox
+/// would drop them in and the order that keeps the `×` reachable longest. The
+/// pop-out sits between the flip and the pin in that list and is slice 5's; when
+/// it arrives it takes its box here, before the pin, and nothing else moves.
+#[must_use]
+pub fn preview_head_geometry(
+    head: &PaneHeadGeometry,
+    scale: f32,
+    tools: PreviewHeadTools,
+) -> PreviewHeadGeometry {
+    let gap = SEAT_TITLE_GAP_LOGICAL_PX * scale;
+    let box_ = (PREVIEW_TOOL_BOX_LOGICAL_PX * scale).round().max(1.0);
+    let middle = (head.title[1] + head.content_bottom) / 2.0;
+    let top = (middle - box_ / 2.0).round();
+    let floor = head.title[0];
+
+    // Right to left from the `×`. A control that would reach the name's own left
+    // edge has nowhere to stand, and half a control is worse than none — the rule
+    // `pane_head_geometry` already holds the `×` and the files trigger to.
+    let mut right = head.close.map_or(head.title[2], |close| close[0]);
+    let mut take = |wanted: bool| -> Option<[f32; 4]> {
+        if !wanted {
+            return None;
+        }
+        let edge = right - gap;
+        let left = edge - box_;
+        (left > floor).then(|| {
+            right = left;
+            pixel_snapped([left, top, edge, top + box_])
+        })
+    };
+    // The pin is always offered: it is the one control that is a *state* as well
+    // as an action, and P95 makes it the only route to a second preview pane.
+    let pin = take(true);
+    let flip = take(tools.flip);
+    let save = take(tools.save);
+
+    let run_left = [save, flip, pin]
+        .into_iter()
+        .flatten()
+        .map(|box_| box_[0])
+        .fold(head.title[2], f32::min);
+    let dirty_slot = (PREVIEW_DIRTY_SLOT_LOGICAL_PX * scale).round().max(1.0);
+    // What is left for the flexible half of the row: the name bits and the dot,
+    // with the spacer taking whatever neither of them wants.
+    let content_right = run_left - gap;
+    let chevron_width = (PREVIEW_SWITCH_CHEVRON_WIDTH_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let switch_gap = PREVIEW_SWITCH_GAP_LOGICAL_PX * scale;
+    let count_width = tools.switcher.then(|| {
+        (tools.count_width + PREVIEW_COUNT_PADDING_X_LOGICAL_PX * 2.0 * scale)
+            .round()
+            .max(1.0)
+    });
+    let trimmings =
+        count_width.map_or(0.0, |count| switch_gap + chevron_width + switch_gap + count);
+    let wanted = tools.name_width + trimmings;
+    // The flex answer for both cases at once: a short name leaves the slack to the
+    // spacer, and a long one is cropped so that the dot still lands beside it
+    // rather than under the save button.
+    let available = (content_right - floor - gap - dirty_slot).max(0.0);
+    let bits_right = floor + wanted.min(available);
+    let name = [
+        floor,
+        head.title[1],
+        (bits_right - trimmings).max(floor),
+        head.content_bottom,
+    ];
+    let chevron_height = (PREVIEW_SWITCH_CHEVRON_HEIGHT_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let count_height = (PREVIEW_COUNT_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let inset = PREVIEW_SWITCH_INSET_X_LOGICAL_PX * scale;
+    let pill_height = (PREVIEW_SWITCH_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let (pill, chevron, count) = match count_width {
+        Some(count_width) => {
+            let chevron_left = (name[2] + switch_gap).round();
+            let count_left = chevron_left + chevron_width + switch_gap;
+            (
+                Some(pixel_snapped([
+                    name[0] - inset,
+                    middle - pill_height / 2.0,
+                    bits_right + inset,
+                    middle + pill_height / 2.0,
+                ])),
+                Some(pixel_snapped([
+                    chevron_left,
+                    middle - chevron_height / 2.0,
+                    chevron_left + chevron_width,
+                    middle + chevron_height / 2.0,
+                ])),
+                Some(pixel_snapped([
+                    count_left,
+                    middle - count_height / 2.0,
+                    count_left + count_width,
+                    middle + count_height / 2.0,
+                ])),
+            )
+        }
+        None => (None, None, None),
+    };
+    let dirty_left = (bits_right + gap).round();
+    PreviewHeadGeometry {
+        name,
+        pill,
+        chevron,
+        count,
+        dirty: [
+            dirty_left,
+            head.title[1],
+            dirty_left + dirty_slot,
+            head.content_bottom,
+        ],
+        save,
+        flip,
+        pin,
+    }
+}
+
 /// Which files column's root button the pointer is on.
 ///
 /// Its own entry beside [`hit_files_tree`] and for the identical reason: it
@@ -8332,7 +8732,19 @@ pub struct FilesPaneGeometry {
 /// of tree and no way to reach the folder.
 #[must_use]
 pub fn files_pane_geometry(rect: [f32; 4], scale: f32) -> FilesPaneGeometry {
-    let head = pane_head_geometry(rect, SeatKind::Files, scale);
+    pane_foot_geometry(rect, SeatKind::Files, scale)
+}
+
+/// The same subtraction for **any** pane that wears a path strip.
+///
+/// The mock-up writes the two feet as one rule — `.files-pane .files-foot,
+/// .preview-pane .files-foot` share every declaration (P33) — because they are
+/// one control: a full path along the bottom whose whole width reveals it in
+/// Explorer. So they are one derivation here too, and the only thing the kind
+/// decides is the head above it, whose left inset differs by a pixel.
+#[must_use]
+pub fn pane_foot_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> FilesPaneGeometry {
+    let head = pane_head_geometry(rect, kind, scale);
     let bar = (FILES_FOOT_BAR_LOGICAL_PX * scale).round();
     let edge = (FILES_FOOT_EDGE_LOGICAL_PX * scale).max(1.0);
     let foot_top = (rect[3] - bar).max(head.head[3]);
@@ -8403,18 +8815,89 @@ pub fn files_body_rect(layout: &SeatLayout, seat: SeatId, scale: f32) -> Option<
 pub fn hit_files_foot(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
     for placement in &layout.rects {
-        if placement.kind != SeatKind::Files {
-            continue;
-        }
-        let Some(rect) = files_pane_rect(layout, placement.id) else {
+        // Both kinds that wear one (P33). Answered from the same geometry the
+        // paint used, so the strip you can press is the strip you can see.
+        let target = match placement.kind {
+            SeatKind::Files => ChromeTarget::FilesFoot(placement.id),
+            SeatKind::Preview => ChromeTarget::PreviewFoot(placement.id),
+            SeatKind::Terminal | SeatKind::Placeholder => continue,
+        };
+        let Some(rect) = full_pane_rect(layout, placement.id) else {
             continue;
         };
-        let foot = files_pane_geometry(rect, scale).foot;
+        let foot = pane_foot_geometry(rect, placement.kind, scale).foot;
         if contains(foot, x, y) {
-            return Some(ChromeTarget::FilesFoot(placement.id));
+            return Some(target);
         }
     }
     None
+}
+
+/// Which of one preview head's own controls the pointer is on.
+///
+/// Its own entry beside [`hit_files_root`] and for the identical reason: it needs
+/// something [`hit_chrome`] is not given — how wide the name and the badge were
+/// *drawn* — and threading a measurement through the function every caller uses
+/// would make every caller carry a renderer it does not have.
+///
+/// Asked before `hit_chrome`, so the controls win over the drag handle they sit
+/// inside. That is B17's rule, and the mock-up's own exclusion list agrees about
+/// which of them are dead zones: `.pane-close, .pane-files, .pv-tool` (5874) stop
+/// a pane drag outright, while `.pv-name` is a button *and* part of the handle —
+/// six pixels of travel tell the two apart.
+#[must_use]
+pub fn hit_preview_head(
+    layout: &SeatLayout,
+    scale: f32,
+    tools: PreviewHeadTools,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Preview {
+            continue;
+        }
+        let Some(rect) = full_pane_rect(layout, placement.id) else {
+            continue;
+        };
+        let head = pane_head_geometry(rect, placement.kind, scale);
+        let geometry = preview_head_geometry(&head, scale, tools);
+        let hit = |box_: Option<[f32; 4]>| box_.is_some_and(|box_| contains(box_, x, y));
+        if hit(geometry.save) {
+            return Some(ChromeTarget::PreviewSave(placement.id));
+        }
+        if hit(geometry.flip) {
+            return Some(ChromeTarget::PreviewFlip(placement.id));
+        }
+        if hit(geometry.pin) {
+            return Some(ChromeTarget::PreviewPin(placement.id));
+        }
+        if hit(geometry.pill) {
+            return Some(ChromeTarget::PreviewName(placement.id));
+        }
+    }
+    None
+}
+
+/// The border box of one full pane of any kind, or `None` when it is collapsed
+/// or has no device rectangle this frame.
+///
+/// [`files_pane_rect`]'s generalisation, minted the day a second kind of pane
+/// grew a foot: the question "where is this pane" has nothing to do with what is
+/// inside it.
+#[must_use]
+pub fn full_pane_rect(layout: &SeatLayout, seat: SeatId) -> Option<[f32; 4]> {
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    Some([
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ])
 }
 
 /// Which files-tree row the pointer is on.
@@ -8678,6 +9161,210 @@ pub(crate) fn push_files_tree(
     }
 }
 
+/// Draw one preview head's own run: the name (a button when the pool has more
+/// than one buffer), the reserved dirty slot, and the tools.
+///
+/// **The reveal ladder is the pane's, not the control's** (P21, and the user
+/// report of 2026-07-17 that produced it): a tool is invisible at rest, `.7`
+/// while the pointer is anywhere in this pane, and full under the pointer
+/// itself. The one exception is written into the mock-up as a last rule that wins
+/// — `.pv-tool.pv-pin.on { opacity: 1 }` — because **a pinned pin is a state and
+/// not chrome**, and a state that vanished when you looked away would be a pane
+/// silently claiming to be reusable.
+#[allow(clippy::too_many_arguments)]
+fn push_preview_head(
+    head: &PaneHeadGeometry,
+    content: PreviewHeadContent<'_>,
+    seat: SeatId,
+    pointer: ChromePointer,
+    focused: bool,
+    scale: f32,
+    palette: &bt_render::ChromePalette,
+    out: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let (_quads, labels, sprites) = out;
+    let geometry = preview_head_geometry(head, scale, content.tools);
+    let pane_hovered = pointer.pane_hover == Some(seat);
+
+    // ── the name, and the pill it wears when it is a control ────────────────
+    if let Some(pill) = geometry.pill {
+        // The fill only appears under the pointer or while the menu it opens is
+        // up, so a head at rest is the same quiet line it was before the button
+        // existed — B15's rule for the files root, and the same one here.
+        if content.menu_open || pointer.hover == Some(ChromeTarget::PreviewName(seat)) {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: (PREVIEW_SWITCH_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+                },
+                pill,
+                palette.pane_close_pill,
+            ));
+        }
+    }
+    labels.push(ChromeLabel {
+        text: content.name.to_owned(),
+        rect: geometry.name,
+        font_size_px: PREVIEW_NAME_FONT_LOGICAL_PX * scale,
+        // `.pv-name { color: var(--ink2); font-weight: 600 }` — and the focused
+        // pane's own step up to `--ink`, which is the one hierarchy `.panehead`
+        // expresses and which a preview head inherits like every other.
+        color: if focused {
+            palette.pane_title_focus
+        } else {
+            palette.files_row_text
+        },
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Medium,
+        tabular_numerals: false,
+        clip: Some(geometry.name),
+    });
+    if let Some(chevron) = geometry.chevron {
+        sprites.push(
+            ChromeSprite::new(
+                // Turned over while the menu is up: the same rotating glyph the
+                // files root and the `+` already use, not a second arrow.
+                ChromeMark::chevron(f32::from(u8::from(content.menu_open))),
+                chevron,
+                palette.pane_title,
+            )
+            .with_opacity(FILES_ROOT_CHEVRON_OPACITY),
+        );
+    }
+    if let (Some(count), false) = (geometry.count, content.count.is_empty()) {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPill {
+                radius_px: (PREVIEW_COUNT_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+            },
+            count,
+            palette.pane_close_pill,
+        ));
+        labels.push(ChromeLabel {
+            text: content.count.to_owned(),
+            rect: count,
+            font_size_px: PREVIEW_COUNT_FONT_LOGICAL_PX * scale,
+            // `.pv-count.dirty { color: var(--accent) }`, and the judgement is
+            // **othersDirty** (P19): the pane's own dot already speaks for the
+            // buffer on screen, so this badge is the only thing that can speak
+            // for the ones that are not.
+            color: if content.others_dirty {
+                palette.accent
+            } else {
+                palette.pane_close_glyph
+            },
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Medium,
+            tabular_numerals: true,
+            clip: None,
+        });
+    }
+    // ── the dot, in the slot that was reserved whether or not it is there ────
+    if content.dirty {
+        labels.push(ChromeLabel {
+            text: PREVIEW_DIRTY_DOT.to_owned(),
+            rect: geometry.dirty,
+            font_size_px: PREVIEW_DIRTY_FONT_LOGICAL_PX * scale,
+            color: palette.accent,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+    // ── the tools ───────────────────────────────────────────────────────────
+    let mut tool = |box_: Option<[f32; 4]>, target: ChromeTarget, mark: ChromeMark, on: bool| {
+        let Some(box_) = box_ else {
+            return;
+        };
+        // `.pv-tool.pv-pin.on` is the last rule in the cascade and it wins: a
+        // pinned pin is drawn at rest, without the pane being hovered at all.
+        if !pane_hovered && !on {
+            return;
+        }
+        let lit = pointer.hover == Some(target);
+        if lit {
+            // `.pv-tool:hover { background: var(--hover); border-radius: 5px }` —
+            // a rounded fill and not a square, which is why it is a sprite and
+            // not one of the flat quads beside it.
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: (PREVIEW_TOOL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+                },
+                box_,
+                palette.pane_close_pill,
+            ));
+        }
+        let glyph = (PREVIEW_TOOL_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+        let left = ((box_[0] + box_[2] - glyph) / 2.0).round();
+        let top = ((box_[1] + box_[3] - glyph) / 2.0).round();
+        let mut sprite = ChromeSprite::new(
+            mark,
+            [left, top, left + glyph, top + glyph],
+            if on {
+                // `.preview-head .pv-tool.pv-pin.on { color: var(--accent) }`.
+                palette.accent
+            } else if lit {
+                palette.pane_close_glyph_on_pill
+            } else {
+                palette.pane_close_glyph
+            },
+        );
+        sprite.opacity = if lit || on { 1.0 } else { PREVIEW_TOOL_REVEAL };
+        sprites.push(sprite);
+    };
+    tool(
+        geometry.save,
+        ChromeTarget::PreviewSave(seat),
+        ChromeMark::Save,
+        false,
+    );
+    tool(
+        geometry.flip,
+        ChromeTarget::PreviewFlip(seat),
+        // The glyph names where the press takes you, not where you are.
+        if content.flip_to_source {
+            ChromeMark::Code
+        } else {
+            ChromeMark::Eye
+        },
+        false,
+    );
+    tool(
+        geometry.pin,
+        ChromeTarget::PreviewPin(seat),
+        ChromeMark::Pin {
+            // Fluent 2's fill axis: regular is the action, filled is the state.
+            filled: content.pinned,
+        },
+        content.pinned,
+    );
+}
+
+/// What a pane's path strip says this frame.
+///
+/// One shape for both kinds, because there is one strip: the mock-up gives
+/// `.files-pane .files-foot` and `.preview-pane .files-foot` a single rule (P33),
+/// and a files column and a preview differ only in *which* path they are naming.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FootStrip<'a> {
+    /// Already cut to the room it has, and already left-truncated — the
+    /// `direction: rtl` ellipsis that keeps the file name and drops the drive
+    /// (P35). Or the word it is flashing instead: "Revealed…", or "Saved".
+    pub path: &'a str,
+    /// Whether it is confirming rather than reporting, which takes the mark as
+    /// well as the words.
+    pub revealed: bool,
+}
+
 /// Draw one docked files column's foot — `.files-pane .files-foot`.
 ///
 /// **Not shared with the float's** (`float::build` draws that one), and the
@@ -8688,7 +9375,7 @@ pub(crate) fn push_files_tree(
 /// drawing either side of it is eight lines long.
 fn push_files_foot(
     geometry: &FilesPaneGeometry,
-    tree: Option<&FilesTreeContent>,
+    strip: Option<FootStrip<'_>>,
     hovered: bool,
     scale: f32,
     palette: &bt_render::ChromePalette,
@@ -8699,7 +9386,7 @@ fn push_files_foot(
     ),
 ) {
     let (quads, labels, sprites) = out;
-    let revealed = tree.is_some_and(|tree| tree.foot_revealed);
+    let revealed = strip.is_some_and(|strip| strip.revealed);
     // `.files-pane .files-foot:hover { background: var(--hover) }` — the row
     // fill, because it is the same `--hover` over the same `--termbg`, and one
     // pane cannot have two answers to "what does hovering look like here".
@@ -8713,10 +9400,11 @@ fn push_files_foot(
         rect: geometry.foot_edge,
         color: palette.pane_head_edge,
     });
-    // A path with nowhere to point — an unrooted column — draws the strip and
-    // stops. The mark is a verb ("open this folder") and there is no folder.
-    let Some(path) = tree
-        .map(|tree| tree.foot_path.as_str())
+    // A path with nowhere to point — an unrooted column, a preview showing
+    // nothing — draws the strip and stops. The mark is a verb ("open this
+    // folder") and there is nothing to open.
+    let Some(path) = strip
+        .map(|strip| strip.path)
         .filter(|path| !path.is_empty())
     else {
         return;
@@ -11069,6 +11757,423 @@ mod tests {
         assert!(!title.align_center);
     }
 
+    /// The preview head, dressed the way one frame of the runtime dresses it.
+    fn preview_chrome(
+        content: PreviewHeadContent<'_>,
+        pointer: ChromePointer,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let marks = all_powershell(&seats);
+        let tabs = [TabContent::default()];
+        let chrome = build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            pointer,
+            ChromeContent {
+                tabs: &tabs,
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                float_shown: &[],
+                tab_scroll: 0.0,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
+                preview_title: Some(content.name),
+                terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &marks,
+                files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
+                files_trees: &NO_FILES_TREES,
+                preview_message: None,
+                preview_foot: None,
+                preview_head: Some(content),
+                preview_card: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        );
+        let WindowChrome { seats, .. } = chrome;
+        (seats.quads, seats.labels, seats.sprites)
+    }
+
+    /// A head with one buffer, nothing dirty and nothing editable.
+    ///
+    /// The name is given a width, because a name is only ever drawn through a box
+    /// the caller measured: an unmeasured one is zero wide and `clip_pane_chrome`
+    /// drops it, which is the right answer for a frame that has not measured yet
+    /// and a useless fixture for a test about where things stand.
+    fn plain_preview_head(name: &str) -> PreviewHeadContent<'_> {
+        PreviewHeadContent {
+            name,
+            tools: PreviewHeadTools {
+                name_width: 60.0,
+                ..PreviewHeadTools::default()
+            },
+            ..PreviewHeadContent::default()
+        }
+    }
+
+    /// Every chevron drawn inside one preview head — the strip's own `˅` beside
+    /// the `+` is not one of them.
+    fn head_chevrons(sprites: &[ChromeSprite], head: [f32; 4]) -> Vec<ChromeSprite> {
+        sprites
+            .iter()
+            .filter(|sprite| {
+                matches!(sprite.mark, ChromeMark::Chevron { .. }) && box_contains(head, sprite.rect)
+            })
+            .copied()
+            .collect()
+    }
+
+    /// The preview seat's head box in the fixture every test above builds.
+    fn preview_head_box() -> [f32; 4] {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        pane_head_geometry(rect, SeatKind::Preview, 1.0).head
+    }
+
+    /// PIN (P11-P31) — **the preview head's whole run, and the reveal ladder it
+    /// climbs.**
+    ///
+    /// Three properties in one place because they are one rule with three faces:
+    /// a tool is not drawn at all until the pointer is in the pane, a *pinned*
+    /// pin is drawn regardless because it is a state and not chrome (the mock-up
+    /// writes it as the last rule in the cascade so that it wins), and the dot's
+    /// twelve pixels are spent whether or not there is a dot to put in them.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `!pane_hovered && !on` guard's `!on` half — the pinned pin
+    ///    disappears when the pointer leaves, which is the state going quiet;
+    /// ② drop the guard entirely — the first assertion goes red, and an idle
+    ///    split header grows three buttons;
+    /// ③ give the dirty dot its width only when it is shown — the name's box
+    ///    moves between two frames of the same file, which is the shove P16
+    ///    reserves the slot to prevent.
+    #[test]
+    fn the_preview_head_reveals_its_tools_with_the_pane_and_keeps_a_pinned_pin() {
+        let editable = |name| {
+            let plain = plain_preview_head(name);
+            PreviewHeadContent {
+                tools: PreviewHeadTools {
+                    save: true,
+                    flip: true,
+                    ..plain.tools
+                },
+                ..plain
+            }
+        };
+        // ① At rest: no tool at all, and the head is the quiet line it always was.
+        let (_, _, sprites) = preview_chrome(editable("notes.md"), ChromePointer::default());
+        for mark in [
+            ChromeMark::Save,
+            ChromeMark::Eye,
+            ChromeMark::Pin { filled: false },
+        ] {
+            assert!(
+                !sprites.iter().any(|sprite| sprite.mark == mark),
+                "{mark:?} is not drawn on a head nobody is pointing at"
+            );
+        }
+        // ② Pointer in the pane: all three, at the ladder's resting rung.
+        let seat = {
+            let metrics = seat_metrics(1_000);
+            let mut seats = Seats::lone_terminal();
+            seats.toggle_preview(&metrics);
+            seats.preview().expect("the preview seat")
+        };
+        let hovered = ChromePointer {
+            pane_hover: Some(seat),
+            ..ChromePointer::default()
+        };
+        let (_, _, sprites) = preview_chrome(editable("notes.md"), hovered);
+        for mark in [
+            ChromeMark::Save,
+            ChromeMark::Eye,
+            ChromeMark::Pin { filled: false },
+        ] {
+            let drawn = sprites
+                .iter()
+                .find(|sprite| sprite.mark == mark)
+                .unwrap_or_else(|| panic!("{mark:?} is revealed with the pane"));
+            assert_eq!(
+                drawn.opacity, PREVIEW_TOOL_REVEAL,
+                "`.pane:hover .pv-tool {{ opacity: .7 }}`"
+            );
+        }
+        // ③ A pinned pin stands at rest, in the accent, at full strength.
+        let (_, _, sprites) = preview_chrome(
+            PreviewHeadContent {
+                pinned: true,
+                ..plain_preview_head("notes.md")
+            },
+            ChromePointer::default(),
+        );
+        let pin = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::Pin { filled: true })
+            .expect("a pinned pin is a state, and a state does not hide");
+        assert_eq!(pin.opacity, 1.0);
+        assert_eq!(pin.color, chrome_palette().accent);
+    }
+
+    /// PIN (P16) — **the dot's slot is reserved, so appearing does not shove the
+    /// name.**
+    ///
+    /// Asserted as the property rather than as a number: the name's box is the
+    /// same rectangle with the dot and without it. Mutation: give the slot its
+    /// width only when `dirty`.
+    #[test]
+    fn the_dirty_dot_costs_the_same_room_whether_or_not_it_is_there() {
+        let clean = plain_preview_head("notes.md");
+        let dirty = PreviewHeadContent {
+            dirty: true,
+            ..clean
+        };
+        let name_box = |content| {
+            let (_, labels, _) = preview_chrome(content, ChromePointer::default());
+            labels
+                .iter()
+                .find(|label| label.text == "notes.md")
+                .expect("the head names its file")
+                .rect
+        };
+        assert_eq!(name_box(clean), name_box(dirty));
+        let (_, labels, _) = preview_chrome(dirty, ChromePointer::default());
+        let dot = labels
+            .iter()
+            .find(|label| label.text == PREVIEW_DIRTY_DOT)
+            .expect("a dirty buffer wears its dot");
+        assert_eq!(dot.color, chrome_palette().accent);
+        let (_, labels, _) = preview_chrome(clean, ChromePointer::default());
+        assert!(!labels.iter().any(|label| label.text == PREVIEW_DIRTY_DOT));
+    }
+
+    /// PIN (P18/P19/P23) — **the name becomes a control only when there is
+    /// something to switch to**, and the badge counts the pool.
+    ///
+    /// MUTATIONS:
+    /// ① build the pill unconditionally — a pool of one grows a chevron and a
+    ///    badge that say nothing;
+    /// ② colour the badge from the pane's own buffer instead of `others_dirty` —
+    ///    the accent assertion goes red, and the badge repeats the dot beside it.
+    #[test]
+    fn the_file_name_is_a_control_only_when_the_pool_holds_more_than_one() {
+        let head = preview_head_box();
+        let one = plain_preview_head("notes.md");
+        let (_, labels, sprites) = preview_chrome(one, ChromePointer::default());
+        assert!(
+            head_chevrons(&sprites, head).is_empty(),
+            "a pool of one has nothing to switch to"
+        );
+        assert!(labels.iter().any(|label| label.text == "notes.md"));
+
+        let many = PreviewHeadContent {
+            tools: PreviewHeadTools {
+                switcher: true,
+                count_width: 8.0,
+                ..one.tools
+            },
+            count: "3",
+            others_dirty: true,
+            ..one
+        };
+        let (_, labels, sprites) = preview_chrome(many, ChromePointer::default());
+        assert_eq!(
+            head_chevrons(&sprites, head)
+                .first()
+                .map(|sprite| sprite.mark),
+            Some(ChromeMark::Chevron { turned_degrees: 0 }),
+            "a shut switcher's chevron points down"
+        );
+        let badge = labels
+            .iter()
+            .find(|label| label.text == "3")
+            .expect("the badge counts the pool");
+        assert_eq!(
+            badge.color,
+            chrome_palette().accent,
+            "`.pv-count.dirty` is judged on the buffers this pane is NOT showing"
+        );
+        // And the open menu turns it over — from the menu's state, never from a
+        // flag on the seat (P135).
+        let (_, _, sprites) = preview_chrome(
+            PreviewHeadContent {
+                menu_open: true,
+                ..many
+            },
+            ChromePointer::default(),
+        );
+        assert!(
+            head_chevrons(&sprites, head).iter().any(
+                |sprite| matches!(sprite.mark, ChromeMark::Chevron { turned_degrees } if turned_degrees > 0)
+            ),
+            "an open switcher's chevron is turned over"
+        );
+    }
+
+    /// PIN (P95, and N7's correction) — **the pin is what stops a pane being the
+    /// reuse target**, and the two questions about a preview seat are two
+    /// questions.
+    ///
+    /// `preview()` answers "which seat is the preview" — what the head, the body
+    /// and the foot all ask — and `landing_preview()` answers "which one would a
+    /// newly opened file replace", which is the only one the pin changes. They
+    /// named the same thing for as long as nothing could pin, and the doc claimed
+    /// the filtered reading while the code did the unfiltered one (N7); the
+    /// answer is both, named apart.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `!seat.pinned` clause — the second assertion goes red and a pin
+    ///    stops meaning anything;
+    /// ② let `toggle_preview_pin` write a pin on any kind — the last assertion
+    ///    goes red, and a terminal acquires durable state it can never show.
+    #[test]
+    fn a_pinned_preview_stops_being_the_seat_a_new_file_would_replace() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let seat = seats.preview().expect("the preview seat");
+        assert_eq!(
+            seats.landing_preview(),
+            Some(seat),
+            "unpinned, it is the one"
+        );
+        assert!(!seats.preview_is_pinned(seat));
+
+        assert!(seats.toggle_preview_pin(seat));
+        assert!(seats.preview_is_pinned(seat));
+        assert_eq!(
+            seats.preview(),
+            Some(seat),
+            "it is still the preview seat — the head still has to name it"
+        );
+        assert_eq!(
+            seats.landing_preview(),
+            None,
+            "but nothing lands on it any more (P95)"
+        );
+
+        assert!(seats.toggle_preview_pin(seat));
+        assert_eq!(
+            seats.landing_preview(),
+            Some(seat),
+            "and unpinning gives it back"
+        );
+        // Nothing else has a pin to turn over.
+        assert!(!seats.toggle_preview_pin(seats.terminal()));
+        assert!(!seats.preview_is_pinned(seats.terminal()));
+    }
+
+    /// PIN (P32-P35) — **a preview pane wears the files column's own foot**, and
+    /// its body is shortened by exactly the strip's height.
+    ///
+    /// The second half is the assertion that matters: the day a foot appears,
+    /// every reader of "the seat less its head" is wrong by 28 pixels at once.
+    ///
+    /// Mutation: return `pane_body_viewport`'s answer unchanged from
+    /// `preview_body_viewport` and the reservation assertion goes red — which is
+    /// the picture of a document scrolling under its own path strip.
+    #[test]
+    fn a_preview_pane_reserves_its_path_strip_out_of_its_body() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let whole = pane_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
+        let document = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
+        assert_eq!(
+            whole.height - document.height,
+            FILES_FOOT_BAR_LOGICAL_PX as u32,
+            "the strip's height comes off the document, not out of it"
+        );
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let geometry = pane_foot_geometry(rect, SeatKind::Preview, 1.0);
+        assert_eq!(
+            geometry.foot[3] - geometry.foot[1],
+            FILES_FOOT_BAR_LOGICAL_PX
+        );
+        assert_eq!(
+            hit_files_foot(
+                &layout,
+                1.0,
+                f64::from((geometry.foot[0] + geometry.foot[2]) / 2.0),
+                f64::from((geometry.foot[1] + geometry.foot[3]) / 2.0),
+            ),
+            Some(ChromeTarget::PreviewFoot(seat)),
+            "the whole strip is one button (P32)"
+        );
+    }
+
+    /// PIN (P89, mock-up 5874) — **the three tools are dead zones in the drag
+    /// handle and the name is not.**
+    ///
+    /// The exclusion list is `.pane-close, .pane-files, .pv-tool`; `.pv-name` is
+    /// deliberately absent, because B17's judgement is that one element can be
+    /// both a handle and a button when six pixels of travel tell them apart.
+    /// Expressed here as the hit test's own answers, which is where the
+    /// difference actually lives: a target that is not `PaneHeader` never arms a
+    /// pane drag.
+    ///
+    /// Mutation: ask `hit_chrome` before `hit_preview_head` and every one of
+    /// these becomes `PaneHeader`.
+    #[test]
+    fn the_preview_tools_answer_before_the_drag_handle_they_sit_in() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let tools = PreviewHeadTools {
+            save: true,
+            flip: true,
+            switcher: true,
+            name_width: 60.0,
+            count_width: 8.0,
+        };
+        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let geometry = preview_head_geometry(&head, 1.0, tools);
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+        for (box_, expected) in [
+            (geometry.save, ChromeTarget::PreviewSave(seat)),
+            (geometry.flip, ChromeTarget::PreviewFlip(seat)),
+            (geometry.pin, ChromeTarget::PreviewPin(seat)),
+            (geometry.pill, ChromeTarget::PreviewName(seat)),
+        ] {
+            let (x, y) = centre(box_.expect("a head this wide seats every control"));
+            assert_eq!(
+                hit_preview_head(&layout, 1.0, tools, x, y),
+                Some(expected),
+                "{expected:?} answers for its own rectangle"
+            );
+        }
+        // The three tools stand in a row, right to left in the mock-up's DOM
+        // order, and none of them overlaps the name.
+        let save = geometry.save.expect("a save box");
+        let flip = geometry.flip.expect("a flip box");
+        let pin = geometry.pin.expect("a pin box");
+        assert!(save[2] <= flip[0] && flip[2] <= pin[0]);
+        assert!(geometry.pill.expect("a pill")[2] <= save[0]);
+    }
+
     /// Opening the preview narrows the terminal and closing it hands the pixels
     /// back — bit for bit, because closing promotes the sibling and rebalances
     /// the run it was left in, which for a run of one is the whole slot.
@@ -12170,6 +13275,8 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
+                    preview_foot: None,
+                    preview_head: None,
                     preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -12380,6 +13487,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open,
@@ -12473,6 +13582,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &trees,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -16126,6 +17237,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -16318,6 +17431,8 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
+                    preview_foot: None,
+                    preview_head: None,
                     preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -16419,6 +17534,8 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
+                    preview_foot: None,
+                    preview_head: None,
                     preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -16625,6 +17742,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -18397,6 +19516,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow,
                 profile_menu_open: false,
@@ -18452,6 +19573,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -19235,6 +20358,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -19474,6 +20599,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -19723,6 +20850,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -19875,6 +21004,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -21057,6 +22188,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_foot: None,
+                preview_head: None,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,

@@ -474,11 +474,27 @@ fn push_plain(text: &str, spans: &mut Vec<Span>) {
 /// What is not negotiable is the honesty this inherits from the prototype: it
 /// renders **the argument**, because the mock-up's first rendered view was a
 /// static mock that showed the same document whatever the buffer held (P103).
+///
+/// **A paragraph is a run of lines, not a line** (user ruling, 2026-08-13, and
+/// CommonMark §4.8). The prototype emitted one block per source line, which is
+/// invisible against a document written unwrapped and is the whole of the
+/// reported seam against one written wrapped: `docs/DESIGN.md` folds at eighty
+/// columns, so every paragraph in it arrived as five blocks with a paragraph gap
+/// between each pair. Consecutive non-blank lines are gathered here, joined with
+/// a single space, and handed to [`parse_inline`] **once** — which is also
+/// CommonMark's order, and the reason emphasis opened on one source line and
+/// closed on the next comes out as one run instead of two literal asterisk
+/// pairs. Every other block still interrupts prose on its own first line, so the
+/// gathering can never swallow a heading, a fence, a rule, a table, a quote or a
+/// list marker.
 pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
     let lines: Vec<&str> = src.lines().collect();
     let mut blocks = Vec::new();
-    let mut list: Vec<Vec<Span>> = Vec::new();
+    // Both accumulators hold **source text**, not spans, because both of them
+    // join across source lines and inline parsing has to see the joined text.
+    let mut list: Vec<String> = Vec::new();
     let mut ordered: Option<u64> = None;
+    let mut paragraph: Vec<&str> = Vec::new();
     let mut index = 0usize;
 
     while index < lines.len() {
@@ -486,6 +502,7 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
 
         // ── the fence, which swallows everything until it closes ────────────
         if let Some(rest) = line.strip_prefix("```") {
+            flush_paragraph(&mut paragraph, &mut blocks);
             flush_list(&mut list, &mut ordered, &mut blocks);
             let lang = rest.trim();
             let lang = (!lang.is_empty()).then(|| lang.to_owned());
@@ -512,6 +529,7 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
                 .get(index + 1)
                 .is_some_and(|next| is_table_separator(next))
         {
+            flush_paragraph(&mut paragraph, &mut blocks);
             flush_list(&mut list, &mut ordered, &mut blocks);
             let mut rows = vec![split_pipe_row(line)];
             // Past the separator, then every pipe row that follows without a
@@ -528,6 +546,7 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
         index += 1;
 
         if let Some(heading) = parse_heading(line) {
+            flush_paragraph(&mut paragraph, &mut blocks);
             flush_list(&mut list, &mut ordered, &mut blocks);
             blocks.push(heading);
             continue;
@@ -538,11 +557,13 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
         // consumed it), and a rule is three or more of one character with
         // nothing else on the line, which `- item` is not.
         if is_thematic_break(line) {
+            flush_paragraph(&mut paragraph, &mut blocks);
             flush_list(&mut list, &mut ordered, &mut blocks);
             blocks.push(MarkdownBlock::Rule);
             continue;
         }
         if let Some((number, item)) = parse_list_row(line) {
+            flush_paragraph(&mut paragraph, &mut blocks);
             // A bulleted list and a numbered one standing next to each other are
             // two lists, not one list that changes its mind halfway down.
             if !list.is_empty() && ordered.is_some() != number.is_some() {
@@ -551,26 +572,82 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
             if list.is_empty() {
                 ordered = number;
             }
-            list.push(parse_inline(item));
+            list.push(item.trim().to_owned());
             continue;
         }
         if let Some(first) = strip_quote(line) {
+            flush_paragraph(&mut paragraph, &mut blocks);
             flush_list(&mut list, &mut ordered, &mut blocks);
-            let mut quoted = vec![parse_inline(first)];
-            while let Some(more) = lines.get(index).and_then(|line| strip_quote(line)) {
-                quoted.push(parse_inline(more));
-                index += 1;
+            // A quote's own lines gather exactly as prose does — a wrapped quote
+            // is one quoted paragraph — and a bare `>` is the blank line that
+            // separates two of them.
+            let mut quoted = Vec::new();
+            let mut run: Vec<&str> = Vec::new();
+            let push_run = |run: &mut Vec<&str>, quoted: &mut Vec<Vec<Span>>| {
+                if !run.is_empty() {
+                    quoted.push(parse_inline(&join_source_lines(run)));
+                    run.clear();
+                }
+            };
+            let mut quoted_line = Some(first);
+            while let Some(text) = quoted_line {
+                if text.trim().is_empty() {
+                    push_run(&mut run, &mut quoted);
+                } else {
+                    run.push(text);
+                }
+                quoted_line = lines.get(index).and_then(|line| strip_quote(line));
+                index += usize::from(quoted_line.is_some());
             }
+            push_run(&mut run, &mut quoted);
             blocks.push(MarkdownBlock::Quote(quoted));
             continue;
         }
-        flush_list(&mut list, &mut ordered, &mut blocks);
-        if !line.trim().is_empty() {
-            blocks.push(MarkdownBlock::Paragraph(parse_inline(line)));
+        if line.trim().is_empty() {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            continue;
+        }
+        // **Lazy continuation** (CommonMark §5.2): a plain line under an open
+        // list belongs to the item above it, not to a paragraph of its own. A
+        // bullet that wraps in the source is one bullet, which is the same
+        // ruling the paragraph join is, applied where the text is indented under
+        // a marker instead of standing on its own.
+        match list.last_mut() {
+            Some(item) if paragraph.is_empty() => {
+                item.push(' ');
+                item.push_str(line.trim());
+            }
+            _ => paragraph.push(line),
         }
     }
+    flush_paragraph(&mut paragraph, &mut blocks);
     flush_list(&mut list, &mut ordered, &mut blocks);
     blocks
+}
+
+/// The source lines of one paragraph, as the single line CommonMark reads them
+/// as.
+///
+/// Joined with a space and each line trimmed, which is what a soft line break
+/// renders as. Trimming is what makes an indented continuation line join
+/// cleanly; joining rather than concatenating is what keeps the last word of one
+/// source line from running into the first word of the next.
+fn join_source_lines(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn flush_paragraph(paragraph: &mut Vec<&str>, blocks: &mut Vec<MarkdownBlock>) {
+    if paragraph.is_empty() {
+        return;
+    }
+    let text = join_source_lines(paragraph);
+    paragraph.clear();
+    blocks.push(MarkdownBlock::Paragraph(parse_inline(&text)));
 }
 
 /// `#` through `######` followed by a space.
@@ -670,15 +747,18 @@ fn split_pipe_row(line: &str) -> TableRow {
         .collect()
 }
 
-fn flush_list(
-    list: &mut Vec<Vec<Span>>,
-    ordered: &mut Option<u64>,
-    blocks: &mut Vec<MarkdownBlock>,
-) {
+fn flush_list(list: &mut Vec<String>, ordered: &mut Option<u64>, blocks: &mut Vec<MarkdownBlock>) {
     if !list.is_empty() {
         blocks.push(MarkdownBlock::List {
             ordered: *ordered,
-            items: std::mem::take(list),
+            // Parsed here rather than as each row arrives, because a row may
+            // still grow: an item's continuation lines are appended to its
+            // source, and inline runs cut before the last of them would split a
+            // code span or an emphasis pair across the fold.
+            items: std::mem::take(list)
+                .iter()
+                .map(|item| parse_inline(item))
+                .collect(),
         });
     }
     *ordered = None;
@@ -1162,6 +1242,35 @@ impl PreviewPool {
     fn index_of(&self, path: &Path) -> Option<usize> {
         self.buffers.iter().position(|buffer| buffer.path == path)
     }
+
+    /// Every buffer in the pool, in the order the switcher lists them.
+    ///
+    /// The order *is* the history (see the type's own note), so this is the one
+    /// door the switcher, the count badge and the dirty gates all read through.
+    pub fn buffers(&self) -> impl Iterator<Item = &PreviewBuffer> {
+        self.buffers.iter()
+    }
+
+    /// The names of every dirty buffer, **except the one a pane is showing**
+    /// when `shown` names it.
+    ///
+    /// Two readers with one question between them. The header's count badge asks
+    /// it with `shown = Some(the buffer on screen)`, because the pane's own dot
+    /// already speaks for that one and a badge that also lit for it would be the
+    /// same fact twice (P19's `othersDirty`); the three dirty gates ask it with
+    /// `None`, because a gate is about *everything* that would be lost (P120).
+    pub fn dirty_names(&self, shown: Option<&Path>) -> impl Iterator<Item = &str> {
+        self.buffers
+            .iter()
+            .filter(move |buffer| buffer.dirty && Some(buffer.path.as_path()) != shown)
+            .map(|buffer| buffer.name.as_str())
+    }
+
+    /// Forget everything. The gates call it once the user has said the edits may
+    /// go (P123).
+    pub fn clear(&mut self) {
+        self.buffers.clear();
+    }
 }
 
 /// What is being asked about a file.
@@ -1628,6 +1737,47 @@ mod tests {
         assert_eq!(pool.len(), PV_BUFFER_CAP + 1);
     }
 
+    /// PIN (P19/P120) — **the pool's two dirty questions, and the one answer
+    /// that must not be the other.**
+    ///
+    /// The header's count badge asks "is anything I am *not* showing dirty",
+    /// because the pane already wears its own dot; the three gates ask "what
+    /// would be lost", which includes the buffer on screen. Folding them would
+    /// light the badge for the file you are looking at (a fact already stated
+    /// beside it) or, far worse, leave the file you are looking at out of the
+    /// gate that is about to discard it.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `shown` filter — the badge assertion goes red;
+    /// ② apply the filter unconditionally — the gate assertion goes red, and it
+    ///    is the one that loses work.
+    #[test]
+    fn the_pool_answers_two_different_dirty_questions() {
+        let mut pool = PreviewPool::default();
+        for name in ["a.txt", "b.md", "c.rs"] {
+            let path = PathBuf::from(format!(r"C:\w\{name}"));
+            pool.open(path.clone(), name.to_owned(), &[]);
+            pool.get_mut(&path).unwrap().dirty = name != "c.rs";
+        }
+        let shown = PathBuf::from(r"C:\w\a.txt");
+        // The badge: everything dirty except the one on screen.
+        assert_eq!(
+            pool.dirty_names(Some(&shown)).collect::<Vec<_>>(),
+            vec!["b.md"]
+        );
+        // The gates: everything dirty, in the pool's own order, by name.
+        assert_eq!(
+            pool.dirty_names(None).collect::<Vec<_>>(),
+            vec!["a.txt", "b.md"]
+        );
+        // And a pool with nothing dirty asks nothing of anybody.
+        pool.get_mut(&shown).unwrap().dirty = false;
+        pool.get_mut(Path::new(r"C:\w\b.md")).unwrap().dirty = false;
+        assert_eq!(pool.dirty_names(None).count(), 0);
+        pool.clear();
+        assert_eq!(pool.len(), 0);
+    }
+
     /// ③ The extension table, class by class.
     ///
     /// Mutation: move `"svg"` out of [`IMAGE_EXTENSIONS`], or drop the
@@ -1920,6 +2070,10 @@ mod tests {
     /// ④ let `is_thematic_break` run before the table branch — the separator row
     ///    is eaten as a rule and the table loses its heading;
     /// ⑤ drop `strip_quote` — the quote arrives as two paragraphs with chevrons.
+    ///
+    /// The quote's own shape changed with the paragraph ruling of 2026-08-13 and
+    /// the expectation below moved with it: its two source lines are now one
+    /// quoted paragraph.
     #[test]
     fn the_five_blocks_the_prototype_could_not_draw() {
         let doc = parse_markdown(
@@ -1962,10 +2116,11 @@ mod tests {
                     ordered: None,
                     items: vec![vec![Span::plain("bullet")]],
                 },
-                MarkdownBlock::Quote(vec![
-                    vec![Span::plain("quoted")],
-                    vec![Span::plain("still quoted")],
-                ]),
+                // Two source lines, one quoted paragraph — the same join prose
+                // gets (user ruling, 2026-08-13). A bare `>` is what separates
+                // two of them; see
+                // `a_hard_wrapped_paragraph_is_one_paragraph`.
+                MarkdownBlock::Quote(vec![vec![Span::plain("quoted still quoted")]]),
                 MarkdownBlock::Rule,
                 MarkdownBlock::Table {
                     rows: vec![
@@ -2024,6 +2179,112 @@ mod tests {
             vec![Span::plain("a [TODO] note")]
         );
         assert_eq!(parse_inline("[unclosed"), vec![Span::plain("[unclosed")]);
+    }
+
+    /// PIN (user ruling, 2026-08-13) — **a hard-wrapped source paragraph is one
+    /// paragraph**, the way CommonMark says and every markdown reader draws it.
+    ///
+    /// The prototype made one block per *source line* (`renderMarkdownMock`,
+    /// 4914-4941), and against a real document that is the seam the report was
+    /// about: `docs/DESIGN.md` is written wrapped at eighty columns, so every
+    /// paragraph in it came out as five separately-wrapped blocks with a
+    /// paragraph gap between each pair — a page of prose printed as a page of
+    /// stanzas, with the last word of each source line stranded on a line of its
+    /// own whenever the pane was wide.
+    ///
+    /// Joining is done on the **source text, before the inline pass**, which is
+    /// also what CommonMark does and what makes the second assertion here
+    /// possible: emphasis opened on one source line and closed on the next is one
+    /// bold run, where a per-line parser produced two literal asterisk pairs.
+    ///
+    /// MUTATIONS:
+    /// ① go back to one block per line (`blocks.push(Paragraph(parse_inline(
+    ///    line)))` in the fall-through) — the first assertion sees three
+    ///    paragraphs instead of one;
+    /// ② join across the blank line as well (drop the blank-line flush) — the
+    ///    first assertion sees one paragraph where there must be two;
+    /// ③ let a heading, a fence or a list marker be swallowed as continuation
+    ///    text — the third assertion loses its block boundaries.
+    #[test]
+    fn a_hard_wrapped_paragraph_is_one_paragraph() {
+        assert_eq!(
+            parse_markdown(
+                "The rule is that consecutive non-blank lines\n\
+                 are one paragraph, and a blank line ends it.\n\
+                 This is the third source line.\n\
+                 \n\
+                 A second paragraph.\n",
+            ),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain(
+                    "The rule is that consecutive non-blank lines \
+                     are one paragraph, and a blank line ends it. \
+                     This is the third source line."
+                )]),
+                MarkdownBlock::Paragraph(vec![Span::plain("A second paragraph.")]),
+            ]
+        );
+        // Inline runs are parsed over the joined paragraph, so emphasis may
+        // straddle a source break.
+        assert_eq!(
+            parse_markdown("a **bold phrase\nspanning the fold** end\n"),
+            vec![MarkdownBlock::Paragraph(vec![
+                Span::plain("a "),
+                Span::bold("bold phrase spanning the fold"),
+                Span::plain(" end"),
+            ])]
+        );
+        // Every other block still interrupts prose on its own first line.
+        assert_eq!(
+            parse_markdown(
+                "prose\n\
+                 # heading\n\
+                 prose\n\
+                 - item\n\
+                 prose again\n\
+                 \n\
+                 prose\n\
+                 > quoted\n\
+                 prose\n\
+                 ---\n\
+                 prose\n\
+                 ```\n\
+                 fenced\n\
+                 ```\n",
+            ),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain("prose")]),
+                MarkdownBlock::Heading {
+                    level: 1,
+                    spans: vec![Span::plain("heading")],
+                },
+                MarkdownBlock::Paragraph(vec![Span::plain("prose")]),
+                // **The continuation line joins the item**, which is the other
+                // half of the ruling: a wrapped bullet is one bullet.
+                MarkdownBlock::List {
+                    ordered: None,
+                    items: vec![vec![Span::plain("item prose again")]],
+                },
+                MarkdownBlock::Paragraph(vec![Span::plain("prose")]),
+                MarkdownBlock::Quote(vec![vec![Span::plain("quoted")]]),
+                MarkdownBlock::Paragraph(vec![Span::plain("prose")]),
+                MarkdownBlock::Rule,
+                MarkdownBlock::Paragraph(vec![Span::plain("prose")]),
+                MarkdownBlock::Code {
+                    lang: None,
+                    text: "fenced".to_owned(),
+                },
+            ]
+        );
+        // A quote wrapped in the source is one quoted paragraph, for the same
+        // reason and by the same join; a bare `>` separates two of them.
+        assert_eq!(
+            parse_markdown("> one line\n> and its fold\n>\n> a second\n"),
+            vec![MarkdownBlock::Quote(vec![
+                vec![Span::plain("one line and its fold")],
+                vec![Span::plain("a second")],
+            ])]
+        );
     }
 
     /// PIN — the rendered view renders **the content**.
