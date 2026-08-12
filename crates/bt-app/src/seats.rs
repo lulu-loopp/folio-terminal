@@ -4195,7 +4195,7 @@ pub fn build_chrome_with_preview(
             active_tab: 0,
             grabbed: None,
             strip_preview: None,
-            float_shown: None,
+            float_shown: &[],
             tab_scroll: 0.0,
             // The horizontal layout every test in this module that does not say
             // otherwise is written against.
@@ -4425,14 +4425,18 @@ pub struct ChromeContent<'a> {
     /// different axes with different lengths.
     pub rail_scroll: f32,
     pub preview_title: Option<&'a str>,
-    /// Which tab's floating tree is on screen, if the float was summoned from a
+    /// Which tabs' floating trees are on screen, for the floats summoned from a
     /// tab's own trigger — `.vtab.shown` (Q173).
     ///
-    /// An index into [`Self::tabs`], resolved by the caller from the float's
+    /// Indices into [`Self::tabs`], resolved by the caller from each float's
     /// origin, because that origin is an identity and only `bt-app` holds the
     /// list that turns one into a position. A float torn out of a *pane* head
     /// lights no row: there is no tab whose folder opened it.
-    pub float_shown: Option<usize>,
+    ///
+    /// A **list** since 浮窗多开 (user ruling 2026-08-12): several windows can
+    /// stand at once, and one slot would have left every row but one dark while
+    /// the window it belongs to was still on screen.
+    pub float_shown: &'a [usize],
     /// What each Terminal seat's own shell is called — C28, per leaf.
     ///
     /// The per-leaf lookup the old single `terminal_cwd` promised to become, and
@@ -6709,13 +6713,13 @@ struct Rail<'a> {
     state: RailState,
     profile_menu_open: bool,
     chevron_turn: f32,
-    /// The row whose floating tree is on screen — `.vtab.shown` (Q173).
+    /// The rows whose floating trees are on screen — `.vtab.shown` (Q173).
     ///
     /// Its own field rather than being read off `hovered`, because the whole
     /// point of it is that the two have come apart: the pointer is free to be
-    /// anywhere once a window has been torn off, and this is the row that opened
-    /// it saying so.
-    shown: Option<usize>,
+    /// anywhere once a window has been torn off, and these are the rows that
+    /// opened those windows saying so.
+    shown: &'a [usize],
 }
 
 /// An ink faded to `opacity` over the ground it stands on.
@@ -6957,7 +6961,7 @@ fn rail_chrome(
             // `:not(.active)` is in the selector and therefore in the condition —
             // the active row already has a louder fill, and painting the quieter
             // one over it would be a downgrade.
-            let shown_here = shown == Some(index) && !active;
+            let shown_here = shown.contains(&index) && !active;
             if active || hovered || grabbed_here || shown_here {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
@@ -11515,7 +11519,7 @@ mod tests {
                     active_tab: 0,
                     grabbed: None,
                     strip_preview: None,
-                    float_shown: None,
+                    float_shown: &[],
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
@@ -11724,7 +11728,7 @@ mod tests {
                 active_tab,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -11816,7 +11820,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -15321,7 +15325,7 @@ mod tests {
                 active_tab,
                 grabbed,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -15512,7 +15516,7 @@ mod tests {
                     active_tab: 0,
                     grabbed: None,
                     strip_preview: None,
-                    float_shown: None,
+                    float_shown: &[],
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
@@ -15612,7 +15616,7 @@ mod tests {
                     active_tab: 2,
                     grabbed: None,
                     strip_preview,
-                    float_shown: None,
+                    float_shown: &[],
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
@@ -15817,7 +15821,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -17588,7 +17592,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -17642,7 +17646,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -18424,7 +18428,7 @@ mod tests {
                 active_tab,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
@@ -18662,7 +18666,7 @@ mod tests {
                 active_tab,
                 grabbed,
                 strip_preview: preview,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
@@ -18910,7 +18914,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
@@ -19061,7 +19065,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
@@ -20240,7 +20244,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
-                float_shown: None,
+                float_shown: &[],
                 tab_scroll: 0.0,
                 // Hovered fully open: this is the state that overlaps, and the
                 // state the report was made in.

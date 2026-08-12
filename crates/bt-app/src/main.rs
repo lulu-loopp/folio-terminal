@@ -1468,12 +1468,12 @@ struct Runtime {
     /// different question from "does this column have the keyboard", and holding
     /// the answers apart is what let the ring come up on a mouse click.
     files_focus: FilesKeyboardFocus,
-    /// The one floating window this window may have open (§7.1.2, G80/G96).
+    /// Every floating window this window has open (§7.1.2, G80/G96).
     ///
-    /// A window-level singleton for the same reason `rename` above is one: there
-    /// is one of it by ruling, and "two floating trees" is not a state this
-    /// window can be in. It is *not* on a tab, and that is the whole of what
-    /// 撕下 means — a pinned float survives switching tabs, closing unrelated
+    /// **No longer a singleton** (user ruling 2026-08-12) — see
+    /// [`float::FloatHost`] for the two stores and for the report that overturned
+    /// 全窗口单例. It is window-level and *not* on a tab, which is the whole of
+    /// what 撕下 means: a pinned float survives switching tabs, closing unrelated
     /// tabs and opening new ones, because it stopped belonging to the tab it was
     /// summoned from the moment it was torn off.
     float: float::FloatHost,
@@ -1495,13 +1495,17 @@ struct Runtime {
     /// found it. It becomes a `FloatDrag::Move` at the moment it stops being
     /// this, which is the one transition it exists to carry.
     float_head_press: Option<FloatHeadPress>,
-    /// What the pointer is over inside the float, or `None`.
+    /// Which float the pointer is over and what part of it, or `None`.
     ///
     /// Stored rather than recomputed at paint time because the float's boxes are
     /// derived from a frame this same pass may be about to move: a hover read
     /// after a drag step and a hover read before it are two different answers,
     /// and the one that matters is the one the pointer event produced.
-    float_hover: Option<float::FloatPart>,
+    ///
+    /// One pointer, so at most one window is hovered — but *which* one has to
+    /// ride along, or the hover fill would light the same part of every window on
+    /// screen.
+    float_hover: Option<(float::FloatId, float::FloatPart)>,
     /// Which foot last confirmed a reveal and when, or `None` (B24).
     ///
     /// **One clock for both feet.** A floating window's `.fly-foot` and a docked
@@ -2341,8 +2345,9 @@ const FOOT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
 /// can serve both without either being able to answer for the other's strip.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RevealedFoot {
-    /// The floating window's.
-    Float,
+    /// One floating window's, named — there may be several on screen, and a
+    /// confirmation is a thing you did to *one* of them.
+    Float(float::FloatId),
     /// One docked column's.
     Column(SeatId),
 }
@@ -2355,8 +2360,20 @@ enum RevealedFoot {
 /// so `×` and `DOCK` never received a click at all. A press on a button is not a
 /// drag and must not become one, so only a press on the *bare* header — or on the
 /// grip — produces one of these.
+/// **Which** window, and what is being done to it.
+///
+/// The identity is not decoration: with more than one float on screen (user
+/// ruling 2026-08-12) a drag that meant "the float" would follow whichever window
+/// happened to be frontmost, so a peek arriving mid-carry would steal the hand.
 #[derive(Clone, Copy, Debug)]
-enum FloatDrag {
+struct FloatDrag {
+    /// The window in hand.
+    win: float::FloatId,
+    kind: FloatDragKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FloatDragKind {
     /// Moving the whole window, keeping the point that was grabbed under the
     /// pointer. The offset is what makes it read as carrying rather than as the
     /// window jumping its own corner to the cursor.
@@ -2381,6 +2398,13 @@ enum FloatDrag {
 /// the window would jump on the frame it was picked up.
 #[derive(Clone, Copy, Debug)]
 struct FloatHeadPress {
+    /// The peek this press landed on.
+    ///
+    /// A peek is singular, so this can only ever name the one in the slot — but
+    /// naming it is what lets the promotion refuse to fire on a peek that has
+    /// since been *replaced* by another trigger's, which would otherwise be kept
+    /// by a gesture that was never aimed at it.
+    win: float::FloatId,
     /// The 6px, shared with every other press that can become a drag (J113).
     latch: DragLatch,
     /// Where inside the frame the press landed, in physical pixels.
@@ -2389,8 +2413,9 @@ struct FloatHeadPress {
 
 impl FloatHeadPress {
     /// Arm one for a press at `position` inside a window standing at `frame`.
-    fn armed(position: PhysicalPosition<f64>, frame: [f32; 4]) -> Self {
+    fn armed(win: float::FloatId, position: PhysicalPosition<f64>, frame: [f32; 4]) -> Self {
         Self {
+            win,
             latch: DragLatch::new(position),
             grab: [position.x as f32 - frame[0], position.y as f32 - frame[1]],
         }
@@ -2403,10 +2428,10 @@ impl FloatHeadPress {
     /// [`float::float_dragged_to`] with the pointer where it started, it
     /// reproduces the frame the window is already standing at, so the window
     /// moves exactly as far as the hand has and not a pixel further.
-    fn promoted(&mut self, position: PhysicalPosition<f64>, scale: f64) -> Option<FloatDrag> {
+    fn promoted(&mut self, position: PhysicalPosition<f64>, scale: f64) -> Option<FloatDragKind> {
         self.latch
             .travelled(position, scale)
-            .then_some(FloatDrag::Move { grab: self.grab })
+            .then_some(FloatDragKind::Move { grab: self.grab })
     }
 }
 
@@ -5750,6 +5775,23 @@ fn float_viewport_rect(width: u32, height: u32, scale: f32) -> [f32; 4] {
     [0.0, caption, width as f32, height]
 }
 
+/// Where a float actually stands this frame — its box displaced by however much
+/// of `flyIn`'s `translateY(-5px)` it has left to travel.
+///
+/// One displacement of one frame rather than of each box inside it, which is how
+/// a rising window stays internally consistent by construction. It is a free
+/// function because the hit test and the paint must agree on it exactly: a window
+/// hit-tested where it will be and drawn where it is would swallow clicks along a
+/// five-pixel seam for the whole of its entrance.
+fn risen_frame(frame: [f32; 4], fade: float::FloatFade) -> [f32; 4] {
+    [
+        frame[0],
+        frame[1] - fade.rise,
+        frame[2],
+        frame[3] - fade.rise,
+    ]
+}
+
 /// What the float asks of the pointer.
 ///
 /// The gesture already in flight before the part under the pointer, so a grip
@@ -5757,18 +5799,21 @@ fn float_viewport_rect(width: u32, height: u32, scale: f32) -> [f32; 4] {
 /// body — keeps the shape it was grabbed by (K113).
 ///
 /// `pinned` gates the hover alone, and gates it for the mock-up's selector:
-/// `.float-win.pinned .fly-head`. A peek cannot reach the grip branch anyway
-/// (it is drawn without one), and a drag cannot begin on one — `press_float`
-/// refuses to pick a moment up by its header.
+/// `.float-win.pinned .fly-head`. It is a fact about **the window under the
+/// pointer** and not about the window at large — with several floats on screen
+/// (2026-08-12) a peek standing over a pinned window would otherwise wear the
+/// pinned one's grab hand. A peek cannot reach the grip branch anyway (it is
+/// drawn without one), and a drag cannot begin on one — `press_float` refuses to
+/// pick a moment up by its header.
 fn float_grasp(
-    drag: Option<FloatDrag>,
+    drag: Option<FloatDragKind>,
     hover: Option<float::FloatPart>,
     pinned: bool,
 ) -> Option<FloatGrasp> {
     if let Some(drag) = drag {
         return Some(match drag {
-            FloatDrag::Resize => FloatGrasp::Grip,
-            FloatDrag::Move { .. } => FloatGrasp::Carrying,
+            FloatDragKind::Resize => FloatGrasp::Grip,
+            FloatDragKind::Move { .. } => FloatGrasp::Carrying,
         });
     }
     if !pinned {
@@ -9201,6 +9246,8 @@ impl Runtime {
         // hold one.
         let pane_transforms = self.pane_transforms(now);
         let resizing_cards = self.resizing_cards_frame(now);
+        // Q173, one row per window on screen — a list since 浮窗多开.
+        let float_shown = self.float_shown_tabs();
         // Measured into the runtime rather than into a local, because the hit
         // test needs the very same numbers and cannot measure: it is `&self` by
         // construction (a pointer moving is not a reason to touch a renderer).
@@ -9232,7 +9279,7 @@ impl Runtime {
                 rail: self.sampled_rail(now),
                 rail_scroll: self.rail_scroll,
                 preview_title: preview_title.as_deref(),
-                float_shown: self.float_shown_tab(),
+                float_shown: &float_shown,
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
                 files_names: &files_names,
@@ -12117,11 +12164,15 @@ impl Runtime {
                     // The float's version of the same cancellation: the window is
                     // gone, or it is showing a *different* view than the one that
                     // asked. The epoch is what tells those apart — without it a
-                    // peek redirected to another trigger would be handed the old
+                    // peek replaced by another trigger's would be handed the old
                     // root's directories under keys that now mean somewhere else.
+                    //
+                    // With several floats on screen (2026-08-12) it is also what
+                    // *addresses* the answer: `live_mut` searches every window for
+                    // the one that asked, so two trees never fill in with each
+                    // other's contents.
                     files::FilesHost::Float(epoch) => {
-                        let Some(win) = self.float.live_mut().filter(|win| win.epoch == epoch)
-                        else {
+                        let Some(win) = self.float.live_mut(epoch) else {
                             continue;
                         };
                         win.cache.accept(&response.key, response.outcome);
@@ -12493,8 +12544,8 @@ impl Runtime {
     /// really on. Both hosts re-derive their rows from the state rather than
     /// remembering the painted list, on [`Runtime::press_files_row`]'s reasoning.
     fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<RowActivation> {
-        if let Some(float::FloatPart::Row(index)) = self.float_part_at(position) {
-            let win = self.float.live()?;
+        if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
+            let win = self.float.live(id)?;
             let rows = files::tree_view(&win.files, &win.cache).rows;
             let row = rows.get(index)?;
             if !matches!(row.kind, files::RowKind::File) {
@@ -12654,29 +12705,45 @@ impl Runtime {
 
     // ── the floating window (§7.1.2) ────────────────────────────────────────
 
-    /// What the pointer is over inside the float, if it is over the float at all.
+    /// Which float the pointer is over and what part of it, if any.
+    ///
+    /// **Top to bottom**, and the first window to claim the point owns it: a
+    /// float is opaque, so the pointer never reaches what is behind one. That is
+    /// [`float::FloatHost::hit_order`]'s order, which is the reverse of the paint
+    /// order and stated once, there.
     ///
     /// A *dismissed* float answers nothing — `pointer-events: none` on
     /// `.closing`, which is what stops a window that is on its way out from
-    /// swallowing the click you aimed at what is behind it.
-    fn float_part_at(&mut self, position: PhysicalPosition<f64>) -> Option<float::FloatPart> {
-        self.float.live()?;
+    /// swallowing the click you aimed at what is behind it. `hit_order` filters
+    /// those out, so a closing window is transparent to this by construction.
+    fn float_hit_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(float::FloatId, float::FloatPart)> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let (geometry, _) = self.float_geometry_now()?;
-        let rows = self
-            .float
-            .live()
-            .map(|win| files::tree_view(&win.files, &win.cache).rows.len())
-            .unwrap_or_default();
-        let scroll = self
-            .float
-            .live()
-            .map(|win| win.cache.scroll_px)
-            .unwrap_or_default();
-        let tree = seats::files_tree_geometry(geometry.body, rows, scroll, scale);
-        float::float_hit(&geometry, position.x as f32, position.y as f32, |x, y| {
-            tree.row_at(x + geometry.body[0], y + geometry.body[1])
-        })
+        // Measured once for the whole sweep: the caption is the same width in
+        // every window, and asking the renderer inside the loop would borrow it
+        // against the host we are walking.
+        let dock_label = self.float_dock_label_width(scale);
+        let now = Instant::now();
+        let motion = self.motion;
+        let (x, y) = (position.x as f32, position.y as f32);
+        for win in self.float.hit_order() {
+            let geometry = float::float_geometry(
+                risen_frame(win.frame, win.fade(now, motion, scale)),
+                win.mode,
+                scale,
+                dock_label,
+            );
+            let rows = files::tree_view(&win.files, &win.cache).rows.len();
+            let tree = seats::files_tree_geometry(geometry.body, rows, win.cache.scroll_px, scale);
+            if let Some(part) = float::float_hit(&geometry, x, y, |x, y| {
+                tree.row_at(x + geometry.body[0], y + geometry.body[1])
+            }) {
+                return Some((win.epoch, part));
+            }
+        }
+        None
     }
 
     /// Drive the peek's two clocks from a pointer that has moved (G84/H112).
@@ -12685,19 +12752,19 @@ impl Runtime {
     /// `×`, Esc, Dock or its own trigger, and "the pointer went somewhere else"
     /// is not on that list.
     fn drive_float_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
-        let part = self.float_part_at(position);
-        if self.float_hover != part {
-            self.float_hover = part;
+        let hit = self.float_hit_at(position);
+        if self.float_hover != hit {
+            self.float_hover = hit;
             self.apply_pointer_cursor();
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
         }
-        if !self.float.peek_is_open() {
-            return Ok(());
-        }
+        // The clocks below are the *peek*'s alone, and it is asked for by name:
+        // with several windows on screen the frame that decides the grace has to
+        // be the transient one's, not whichever float is frontmost.
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(frame) = self.float.live().map(|win| win.frame) else {
+        let Some(frame) = self.float.peek().map(|win| win.frame) else {
             return Ok(());
         };
         let reach = float::peek_reach(frame, position.x as f32, position.y as f32, scale);
@@ -12739,7 +12806,7 @@ impl Runtime {
         }
         self.revealed_foot = None;
         let changed = match foot {
-            RevealedFoot::Float => self.refresh_overlay(),
+            RevealedFoot::Float(_) => self.refresh_overlay(),
             RevealedFoot::Column(_) => self.refresh_chrome(),
         };
         if changed {
@@ -12758,11 +12825,13 @@ impl Runtime {
         // subject died must not be left on screen. A **pinned** window is exempt
         // by ruling (§7.1.2): it was torn off, and the death of the header it came
         // from is not on its list of closers.
-        if self.float.peek_is_open()
-            && let Some(origin) = self.float.live().and_then(|win| win.origin)
+        if let Some((id, origin)) = self
+            .float
+            .peek()
+            .and_then(|win| Some((win.epoch, win.origin?)))
             && self.trigger_rect(origin).is_none()
         {
-            self.float.dismiss(now);
+            self.float.dismiss(id, now);
             changed = true;
         }
         if let Some(trigger) = self.float.take_due(now) {
@@ -12775,17 +12844,20 @@ impl Runtime {
             }
             changed = true;
         }
-        if self.float.grace_expired(now) {
-            self.dismiss_float()?;
+        if self.float.grace_expired(now)
+            && let Some(id) = self.float.peek_id()
+        {
+            self.dismiss_float(id)?;
             changed = true;
         }
         if self.float.sweep(now, self.motion, scale) {
+            self.forget_dead_float_gestures();
             changed = true;
         }
         // `height: auto` while nobody has taken hold of it: the window grows as
         // its rows arrive and stops at the cap, which is what the mock-up's CSS
         // does and what a tree read on a worker cannot get by measuring once.
-        if self.resize_float_to_content() {
+        if self.resize_floats_to_content() {
             changed = true;
         }
         // A float in the middle of its entrance owes a frame; one standing still
@@ -12793,7 +12865,7 @@ impl Runtime {
         let animating = self
             .float
             .drawn()
-            .is_some_and(|win| win.fade(now, self.motion, scale).moving);
+            .any(|win| win.fade(now, self.motion, scale).moving);
         if (changed || animating) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -12802,30 +12874,26 @@ impl Runtime {
         Ok(())
     }
 
-    /// The directories the float is showing but has never read.
+    /// The directories the floats are showing but have never read.
     ///
-    /// The docked columns' own walk, for the one tree that is not a column: the
-    /// view says what it wants, the cache is marked before the send so a second
-    /// walk on the same frame does not ask twice, and the epoch rides along so a
-    /// late answer can be matched to the view that asked.
+    /// The docked columns' own walk, for the trees that are not columns: each
+    /// view says what it wants, its cache is marked before the send so a second
+    /// walk on the same frame does not ask twice, and **each window's own** epoch
+    /// rides along, so a late answer is matched to the view that asked rather
+    /// than to whichever float is in front when it lands.
     fn ask_float_directories(&mut self) {
-        let Some(win) = self.float.live_mut() else {
-            return;
-        };
-        let epoch = win.epoch;
-        let root = win.files.root.clone();
-        let wanted = files::tree_view(&win.files, &win.cache).wanted;
-        if wanted.is_empty() {
-            return;
-        }
         let mut asks = Vec::new();
-        for key in wanted {
-            win.cache.mark_pending(&key);
-            asks.push(files::DirRequest {
-                host: files::FilesHost::Float(epoch),
-                path: files::full_path(&root, &key),
-                key,
-            });
+        for win in self.float.live_windows_mut() {
+            let epoch = win.epoch;
+            let root = win.files.root.clone();
+            for key in files::tree_view(&win.files, &win.cache).wanted {
+                win.cache.mark_pending(&key);
+                asks.push(files::DirRequest {
+                    host: files::FilesHost::Float(epoch),
+                    path: files::full_path(&root, &key),
+                    key,
+                });
+            }
         }
         for ask in asks {
             if !self.files_worker.request(ask) {
@@ -12843,23 +12911,35 @@ impl Runtime {
     /// pointer on every press inside the window and paid for it — the release was
     /// retargeted to the window, so `×` and `DOCK` never saw a click at all.
     fn press_float(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(part) = self.float_part_at(position) else {
+        let Some((id, part)) = self.float_hit_at(position) else {
             return Ok(false);
         };
+        // **A press anywhere inside a window brings it to the front** (user
+        // ruling 2026-08-12, rule ⑤), before the part is acted on and whatever
+        // that part turns out to be. It is what every stacking window manager
+        // does and the only thing that makes a buried window reachable — and the
+        // raise is a frame debt, so it is paid here rather than left for whatever
+        // the branch below happens to repaint.
+        if self.float.raise(id) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
         match part {
             float::FloatPart::Close => {
-                self.dismiss_float()?;
+                self.dismiss_float(id)?;
             }
-            float::FloatPart::Dock => self.dock_float()?,
-            float::FloatPart::Foot => self.reveal_float_root()?,
-            float::FloatPart::Row(index) => self.press_float_row(index)?,
+            float::FloatPart::Dock => self.dock_float(id)?,
+            float::FloatPart::Foot => self.reveal_float_root(id)?,
+            float::FloatPart::Row(index) => self.press_float_row(id, index)?,
             float::FloatPart::Head => {
-                let frame = self.float.live().map(|win| win.frame).unwrap_or_default();
+                let frame = self.float.live(id).map(|win| win.frame).unwrap_or_default();
                 let grab = [position.x as f32 - frame[0], position.y as f32 - frame[1]];
-                if self.float.pinned_is_open() {
+                if self.float.is_pinned(id) {
                     // A window that is already yours is picked up on the press:
                     // there is nothing left to decide.
-                    self.float_drag = Some(FloatDrag::Move { grab });
+                    self.float_drag = Some(FloatDrag {
+                        win: id,
+                        kind: FloatDragKind::Move { grab },
+                    });
                 } else {
                     // A peek is a moment, and a moment cannot be picked up — yet.
                     // **User ruling 2026-08-12**: dragging its header is how you
@@ -12872,12 +12952,15 @@ impl Runtime {
                     // The offset is taken here, at the press, so the promotion
                     // does not move the window under the hand — see
                     // [`FloatHeadPress`].
-                    self.float_head_press = Some(FloatHeadPress::armed(position, frame));
+                    self.float_head_press = Some(FloatHeadPress::armed(id, position, frame));
                 }
             }
             float::FloatPart::Grip => {
-                if self.float.pinned_is_open() {
-                    self.float_drag = Some(FloatDrag::Resize);
+                if self.float.is_pinned(id) {
+                    self.float_drag = Some(FloatDrag {
+                        win: id,
+                        kind: FloatDragKind::Resize,
+                    });
                 }
             }
             // The body away from any row: a press lands on the window and goes no
@@ -12897,9 +12980,9 @@ impl Runtime {
     /// the tree is redrawn; a file is merely selected, and **selecting must not
     /// rebuild the list** — a row node swapped between two clicks is how the
     /// double-click that opens a preview goes silently missing.
-    fn press_float_row(&mut self, index: usize) -> Result<()> {
+    fn press_float_row(&mut self, id: float::FloatId, index: usize) -> Result<()> {
         let motion = self.motion;
-        let Some(win) = self.float.live_mut() else {
+        let Some(win) = self.float.live_mut(id) else {
             return Ok(());
         };
         let rows = files::tree_view(&win.files, &win.cache).rows;
@@ -12945,8 +13028,8 @@ impl Runtime {
     /// launched process cannot — Explorer may open behind this window, or focus a
     /// window that was already open somewhere else, and without a word here the
     /// click reads as having done nothing.
-    fn reveal_float_root(&mut self) -> Result<()> {
-        let Some(root) = self.float.live().map(|win| win.files.root.clone()) else {
+    fn reveal_float_root(&mut self, id: float::FloatId) -> Result<()> {
+        let Some(root) = self.float.live(id).map(|win| win.files.root.clone()) else {
             return Ok(());
         };
         if root.is_empty() {
@@ -12961,7 +13044,7 @@ impl Runtime {
             .spawn()
             .is_ok()
         {
-            self.revealed_foot = Some((RevealedFoot::Float, Instant::now()));
+            self.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -13027,14 +13110,21 @@ impl Runtime {
         let Some(carry) = press.promoted(position, scale) else {
             return;
         };
+        let pressed = press.win;
         self.float_head_press = None;
         // A peek that stopped being live while the button was down — dismissed by
-        // Esc, wiped by a viewport change — has nothing to promote, and the press
-        // dies with it rather than resurrecting a window that was taken away.
-        if !self.float.promote() {
+        // Esc, wiped by a viewport change, *or replaced by another trigger's* —
+        // has nothing this gesture may promote, and the press dies with it rather
+        // than keeping a window it was never aimed at.
+        if self.float.peek_id() != Some(pressed) {
             return;
         }
-        self.float_drag = Some(carry);
+        let Some(win) = self.float.promote() else {
+            return;
+        };
+        // The window keeps its identity across the promotion, so the carry that
+        // follows is aimed at the very window the press began on.
+        self.float_drag = Some(FloatDrag { win, kind: carry });
         // The hand closes on it the instant it becomes carryable, rather than at
         // the next move: this *is* the move, and a frame of open palm over a
         // window already travelling would be the cursor disagreeing with the
@@ -13051,15 +13141,15 @@ impl Runtime {
         let scale = self.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         let pointer = [position.x as f32, position.y as f32];
-        let Some(win) = self.float.live_mut() else {
+        let Some(win) = self.float.live_mut(drag.win) else {
             self.float_drag = None;
             return Ok(false);
         };
-        win.frame = match drag {
-            FloatDrag::Move { grab } => {
+        win.frame = match drag.kind {
+            FloatDragKind::Move { grab } => {
                 float::float_dragged_to(win.frame, pointer, grab, viewport, scale)
             }
-            FloatDrag::Resize => float::float_resized_to(win.frame, pointer, viewport, scale),
+            FloatDragKind::Resize => float::float_resized_to(win.frame, pointer, viewport, scale),
         };
         // A hand on the window ends `height: auto`: from here the size and the
         // place are the user's answer, and rows arriving later do not get to
@@ -13071,46 +13161,57 @@ impl Runtime {
         Ok(true)
     }
 
-    /// Grow (or shrink) a self-sizing float to the rows it is now showing.
+    /// Grow (or shrink) every self-sizing float to the rows it is now showing.
     ///
     /// Returns whether anything moved. It re-runs the *placement* and not merely
     /// the height, because a window that opened above its trigger — flipped for
     /// want of room below — grows upward rather than down, and only the placement
     /// knows which of those this one is.
-    fn resize_float_to_content(&mut self) -> bool {
+    ///
+    /// Per window, because `height: auto` is a property of a box and not of the
+    /// host: two windows can be following their content at once, and a hand on
+    /// one of them ends it for that one alone.
+    fn resize_floats_to_content(&mut self) -> bool {
         let scale = self.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
-        let Some(win) = self.float.live() else {
-            return false;
-        };
-        if !win.self_sizing {
+        // Read every window's answer first, then write them: the read wants the
+        // whole host and each write wants one window of it.
+        let grown: Vec<(float::FloatId, [f32; 4])> = self
+            .float
+            .live_windows()
+            .filter(|win| win.self_sizing)
+            .filter_map(|win| {
+                let rows = files::tree_view(&win.files, &win.cache).rows.len();
+                let body = seats::files_tree_content_height(rows, scale);
+                let size = float::float_opening_size(
+                    float::float_height_for_body(body, scale),
+                    viewport,
+                    scale,
+                );
+                let origin = match win.anchor {
+                    Some(anchor) => float::float_placement(anchor, size, viewport, scale),
+                    None => [win.frame[0], win.frame[1]],
+                };
+                let frame = float::clamp_pinned(
+                    [
+                        origin[0],
+                        origin[1],
+                        origin[0] + size[0],
+                        origin[1] + size[1],
+                    ],
+                    viewport,
+                    scale,
+                );
+                (frame != win.frame).then_some((win.epoch, frame))
+            })
+            .collect();
+        if grown.is_empty() {
             return false;
         }
-        let rows = files::tree_view(&win.files, &win.cache).rows.len();
-        let anchor = win.anchor;
-        let was = win.frame;
-        let body = seats::files_tree_content_height(rows, scale);
-        let size =
-            float::float_opening_size(float::float_height_for_body(body, scale), viewport, scale);
-        let origin = match anchor {
-            Some(anchor) => float::float_placement(anchor, size, viewport, scale),
-            None => [was[0], was[1]],
-        };
-        let frame = float::clamp_pinned(
-            [
-                origin[0],
-                origin[1],
-                origin[0] + size[0],
-                origin[1] + size[1],
-            ],
-            viewport,
-            scale,
-        );
-        if frame == was {
-            return false;
-        }
-        if let Some(win) = self.float.live_mut() {
-            win.frame = frame;
+        for (id, frame) in grown {
+            if let Some(win) = self.float.live_mut(id) {
+                win.frame = frame;
+            }
         }
         true
     }
@@ -13122,21 +13223,45 @@ impl Runtime {
     /// keeps its size. The asymmetry is the promise: nobody was told the peek
     /// would stay, and the pinned window is there because somebody asked for it,
     /// so taking it away would be a silent undo of that choice.
+    /// Both halves run now, where the old shape ran one *or* the other: a peek
+    /// and pinned windows can be on screen together, so dissolving the transient
+    /// one is no longer a reason to leave the permanent ones un-clamped.
     fn reclamp_float(&mut self) {
-        if self.float.peek_is_open() {
-            self.float.wipe();
-            self.float_drag = None;
-            // Including a header press still waiting to become one: the window it
-            // was about to keep has just been taken away, and a latch that
-            // outlived its window would promote whatever opened next.
-            self.float_head_press = None;
-            self.float_hover = None;
-            return;
+        if self.float.wipe_peek().is_some() {
+            // Every gesture aimed at the window that just went dies with it —
+            // including a header press still waiting to become one, which if it
+            // outlived its peek would keep whatever opened next.
+            self.forget_dead_float_gestures();
         }
         let scale = self.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
-        if let Some(win) = self.float.live_mut() {
+        for win in self.float.live_windows_mut() {
             win.frame = float::clamp_pinned(win.frame, viewport, scale);
+        }
+    }
+
+    /// Drop every gesture and hover aimed at a window that is no longer live.
+    ///
+    /// One place for it rather than three lines after each of the four ways a
+    /// window can go (`×`, Esc, Dock, dissolve): with more than one float on
+    /// screen the old blanket `float_drag = None` would cancel a *drag of another
+    /// window* every time any window closed, which is the bug a list invites and
+    /// the reason this is asked by identity.
+    fn forget_dead_float_gestures(&mut self) {
+        if let Some(drag) = self.float_drag
+            && self.float.live(drag.win).is_none()
+        {
+            self.float_drag = None;
+        }
+        if let Some(press) = self.float_head_press
+            && self.float.peek_id() != Some(press.win)
+        {
+            self.float_head_press = None;
+        }
+        if let Some((id, _)) = self.float_hover
+            && self.float.live(id).is_none()
+        {
+            self.float_hover = None;
         }
     }
 
@@ -13147,41 +13272,51 @@ impl Runtime {
             .deadline(now, self.motion, scale, STRIP_ANIMATION_FRAME)
     }
 
-    /// The tab whose own trigger opened the float on screen — `.vtab.shown`'s
-    /// row (Q173), as a position in the strip.
+    /// The tabs whose own triggers opened the floats on screen — `.vtab.shown`'s
+    /// rows (Q173), as positions in the strip.
     ///
-    /// `None` for a float torn out of a *pane* head or popped out of a column:
-    /// neither has a tab-level trigger, so there is no row entitled to say "this
-    /// one is mine".
-    fn float_shown_tab(&self) -> Option<usize> {
-        match self.float.live()?.origin? {
-            float::FloatTrigger::Tab(id) => self.tabs.iter().position(|tab| tab.id == id),
-            float::FloatTrigger::Pane(_) => None,
-        }
+    /// A **list** since 2026-08-12, for the plain reason that there can now be
+    /// several windows and each of them came from somewhere: with one slot, two
+    /// pinned trees from two tabs would have left one of those rows dark while
+    /// the window it belongs to was still on screen, which is the very thing
+    /// Q173 exists to prevent.
+    ///
+    /// A float torn out of a *pane* head or popped out of a column contributes
+    /// nothing: neither has a tab-level trigger, so there is no row entitled to
+    /// say "this one is mine".
+    fn float_shown_tabs(&self) -> Vec<usize> {
+        let mut rows: Vec<usize> = self
+            .float
+            .live_windows()
+            .filter_map(|win| match win.origin? {
+                float::FloatTrigger::Tab(id) => self.tabs.iter().position(|tab| tab.id == id),
+                float::FloatTrigger::Pane(_) => None,
+            })
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows
     }
 
-    /// The float's chassis, laid out where it stands this frame.
+    /// One float's chassis, laid out where that window stands this frame.
     ///
-    /// `rise` is the entrance's `translateY(-5px)` on its way to nothing, applied
-    /// to the whole window here rather than to each box inside it — one
-    /// displacement of one geometry, which is how a rising window stays
-    /// internally consistent by construction.
-    fn float_geometry_now(&mut self) -> Option<(float::FloatGeometry, float::FloatFade)> {
+    /// The rise is [`risen_frame`]'s, shared with the hit test so the window is
+    /// asked about exactly where it is drawn.
+    fn float_geometry_of(
+        &mut self,
+        id: float::FloatId,
+    ) -> Option<(float::FloatGeometry, float::FloatFade)> {
         let now = Instant::now();
+        let scale = self.renderer.metrics().scale_factor as f32;
         let (mode, frame, fade) = {
-            let win = self.float.drawn()?;
-            let scale = self.renderer.metrics().scale_factor as f32;
+            let win = self.float.drawn().find(|win| win.epoch == id)?;
             (win.mode, win.frame, win.fade(now, self.motion, scale))
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
         let dock_label = self.float_dock_label_width(scale);
-        let risen = [
-            frame[0],
-            frame[1] - fade.rise,
-            frame[2],
-            frame[3] - fade.rise,
-        ];
-        Some((float::float_geometry(risen, mode, scale, dock_label), fade))
+        Some((
+            float::float_geometry(risen_frame(frame, fade), mode, scale, dock_label),
+            fade,
+        ))
     }
 
     /// How wide the `DOCK` caption is — only the font knows, so it is measured
@@ -13204,19 +13339,32 @@ impl Runtime {
         )
     }
 
-    /// The float's own layer of the overlay stack.
+    /// The floats' own level of the overlay stack — **one layer per window,
+    /// bottom to top**.
+    ///
+    /// The stack slot was always a `Vec`, so 浮窗多开 needed nothing of it: the
+    /// z-order inside the family is [`float::FloatHost::drawn`]'s order, stated
+    /// there and merely obeyed here.
     fn float_layer(&mut self, now: Instant) -> Vec<marks::OverlayLayer> {
-        let Some((geometry, fade)) = self.float_geometry_now() else {
-            return Vec::new();
-        };
+        let ids: Vec<float::FloatId> = self.float.drawn().map(|win| win.epoch).collect();
+        ids.into_iter()
+            .filter_map(|id| self.float_window_layer(id, now))
+            .collect()
+    }
+
+    /// One floating window, drawn.
+    fn float_window_layer(
+        &mut self,
+        id: float::FloatId,
+        now: Instant,
+    ) -> Option<marks::OverlayLayer> {
+        let (geometry, fade) = self.float_geometry_of(id)?;
         let scale = self.renderer.metrics().scale_factor as f32;
         let motion = self.motion;
         // Everything the drawing needs, taken in one borrow so the measuring
         // below — which wants the renderer — is not fighting the host for `self`.
         let (mode, root, content) = {
-            let Some(win) = self.float.drawn() else {
-                return Vec::new();
-            };
+            let win = self.float.drawn().find(|win| win.epoch == id)?;
             let view = files::tree_view(&win.files, &win.cache);
             let turns = view
                 .rows
@@ -13261,7 +13409,14 @@ impl Runtime {
         let mut quads = Vec::new();
         let mut labels = Vec::new();
         let mut sprites = Vec::new();
-        let hovered_row = match self.float_hover {
+        // **This window's hover, or nobody's.** One pointer means one hovered
+        // window, so a row index that forgot which window it belonged to would
+        // light the same row in every float on screen.
+        let hover = self
+            .float_hover
+            .filter(|(hovered, _)| *hovered == id)
+            .map(|(_, part)| part);
+        let hovered_row = match hover {
             Some(float::FloatPart::Row(index)) => Some(index),
             _ => None,
         };
@@ -13295,7 +13450,7 @@ impl Runtime {
         // shouts its ROOT, and the rule is the files head's alone because a
         // *filename* keeps its case (mock-up 698-699).
         let name = profiles::cwd_leaf(&root).to_uppercase();
-        let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float, now);
+        let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float(id), now);
         let root = if revealed {
             FOOT_REVEALED_LABEL.to_owned()
         } else {
@@ -13321,19 +13476,19 @@ impl Runtime {
                 ),
             )
         };
-        vec![float::build(
+        Some(float::build(
             &geometry,
             mode,
             &name,
             &path,
             FLOAT_DOCK_LABEL,
-            self.float_hover,
+            hover,
             revealed,
             body,
             scale,
             &palette,
             fade,
-        )]
+        ))
     }
 
     /// The rectangle a float is allowed to occupy, in physical pixels: **the
@@ -13445,15 +13600,34 @@ impl Runtime {
         .unwrap_or_default()
     }
 
-    /// Summon the float at a trigger, or redirect the one that is already up.
+    /// Summon a float at a trigger — or, when the tree it asks for is already in
+    /// a window, bring that window forward instead.
     ///
-    /// §7.1.2's 全窗口单例 in one line: there is no second window to open, so an
-    /// operation on another trigger moves this one.
+    /// **同根去重 (user ruling 2026-08-12, rule ③).** The old line here was
+    /// §7.1.2's 全窗口单例: there was no second window to open, so any trigger
+    /// moved the one window. Now there can be many, and the question a trigger
+    /// asks is "show me this tree" — so a tree already on screen is *shown*
+    /// (raised) rather than duplicated, which is what a browser does when you
+    /// open a page you already have open. Identity is the **root path**: two
+    /// triggers standing in one directory are two doors into one room.
+    ///
+    /// Both ways in come through here, so a hover and a click answer alike — and
+    /// a hover that raises a window still moves nothing of it, which is the
+    /// 「hover 永不劫持 pinned」 law kept whole.
     fn open_float(&mut self, trigger: float::FloatTrigger, mode: float::FloatMode) -> Result<()> {
         let Some(anchor) = self.trigger_rect(trigger) else {
             return Ok(());
         };
         let root = self.trigger_root(trigger);
+        if let Some(id) = self.float.pinned_at_root(&root) {
+            // A raise that changes nothing owes no frame, which is what makes
+            // resting on a trigger whose window is already frontmost free.
+            if self.float.raise(id) {
+                self.refresh_chrome();
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         let state = seats::FilesLeafState {
             root,
             ..seats::FilesLeafState::default()
@@ -13470,10 +13644,10 @@ impl Runtime {
 
     /// Put a float on screen, sized to its content and placed against `anchor`.
     ///
-    /// The one door every way of opening one goes through — hover, click,
-    /// redirect, and a column popping out — because the four differ only in what
-    /// they hand it, and four doors would be four places to forget the epoch or
-    /// the clamp.
+    /// The one door every way of opening one goes through — hover, click, a
+    /// second trigger, and a column popping out — because the four differ only in
+    /// what they hand it, and four doors would be four places to forget the epoch
+    /// or the clamp.
     fn place_float(
         &mut self,
         mode: float::FloatMode,
@@ -13525,8 +13699,10 @@ impl Runtime {
             anchor,
             Instant::now(),
         );
-        self.float_drag = None;
-        self.float_head_press = None;
+        // Only the gestures whose window this opening took away — a new peek
+        // replaces the old one, and a new pinned window dismisses a live peek —
+        // and not a carry of some *other* float that is still perfectly in hand.
+        self.forget_dead_float_gestures();
         // A window that opens under a stationary pointer inherits none of the
         // last one's shape.
         self.apply_pointer_cursor();
@@ -13539,21 +13715,28 @@ impl Runtime {
         self.present_chrome_change()
     }
 
-    /// A press on a trigger — the three-state ladder (G91).
+    /// A press on a trigger — the ladder (G91), one rung shorter than it was.
     ///
-    /// No float here → open one, pinned, because a click is a commitment. A peek
-    /// here → promote it *in place*, keeping the tree you have already unfolded.
-    /// Already pinned here → this is you asking for it to go.
+    /// A peek from *this* trigger → promote it **in place**, keeping the tree you
+    /// have already unfolded, because the gesture is called "keep this" and not
+    /// "start again". Anything else → [`Self::open_float`], which opens a window
+    /// or raises the one already showing that root.
+    ///
+    /// **改判 2026-08-12 — the third rung is gone.** It used to be "already pinned
+    /// here → this is you asking for it to go", which is the mock-up's
+    /// re-click-closes contract (3742-3751) and one of §7.1.2's four closers. With
+    /// several windows reachable at once the trigger's meaning changed under it:
+    /// it now says "show me this tree", and 同根去重 answers that by raising. A
+    /// control that means *raise the other one* when the root is elsewhere and
+    /// *close this one* when it is here is a control nobody can predict. The
+    /// ruling settles it in favour of raising; `×`, Esc and Dock are untouched,
+    /// so nothing has become unclosable.
     fn press_float_trigger(&mut self, trigger: float::FloatTrigger) -> Result<()> {
-        let here = self
+        if self
             .float
-            .live()
-            .is_some_and(|win| win.origin == Some(trigger));
-        if here {
-            if self.float.pinned_is_open() {
-                self.dismiss_float()?;
-                return Ok(());
-            }
+            .peek()
+            .is_some_and(|win| win.origin == Some(trigger))
+        {
             self.float.promote();
             self.refresh_chrome();
             return self.present_chrome_change();
@@ -13561,14 +13744,12 @@ impl Runtime {
         self.open_float(trigger, float::FloatMode::Pinned)
     }
 
-    /// Begin the float's exit (§7.1.2's four closers, and only those).
-    fn dismiss_float(&mut self) -> Result<bool> {
-        if !self.float.dismiss(Instant::now()) {
+    /// Begin one float's exit (§7.1.2's remaining closers, and only those).
+    fn dismiss_float(&mut self, id: float::FloatId) -> Result<bool> {
+        if !self.float.dismiss(id, Instant::now()) {
             return Ok(false);
         }
-        self.float_drag = None;
-        self.float_head_press = None;
-        self.float_hover = None;
+        self.forget_dead_float_gestures();
         // The window can go while the pointer stands still — Esc closes it from
         // the keyboard — so the hand it was shaping has to be given back here
         // rather than at the next move that may never come.
@@ -13578,6 +13759,19 @@ impl Runtime {
         self.refresh_chrome();
         self.present_chrome_change()?;
         Ok(true)
+    }
+
+    /// Esc's float rung: close the **frontmost** window and only that one.
+    ///
+    /// One press, one window, which is what a stack of windows makes Esc mean
+    /// everywhere else: it takes the thing in front of you, and pressing it again
+    /// takes the next. Closing them all would make one keystroke undo an
+    /// arbitrary amount of work the user asked for.
+    fn dismiss_top_float(&mut self) -> Result<bool> {
+        let Some(id) = self.float.top().map(|win| win.epoch) else {
+            return Ok(false);
+        };
+        self.dismiss_float(id)
     }
 
     /// `.pane-float` — a docked column pops back out into a pinned window (G95).
@@ -13632,12 +13826,14 @@ impl Runtime {
     /// where you meant to put it. It also erases the "the tab it came from has
     /// since died" special case, which is the sort of thing a rule earns its
     /// keep by deleting.
-    fn dock_float(&mut self) -> Result<()> {
-        let Some(win) = self.float.wipe() else {
+    /// **Only the window whose button was pressed is collected**, which is rule
+    /// ⑤ of the 2026-08-12 ruling at its plainest: DOCK is one window's control,
+    /// and the others stay exactly where they are.
+    fn dock_float(&mut self, id: float::FloatId) -> Result<()> {
+        let Some(win) = self.float.wipe(id) else {
             return Ok(());
         };
-        self.float_drag = None;
-        self.float_head_press = None;
+        self.forget_dead_float_gestures();
         // Same reason as dismissal: the window this shape belonged to is gone,
         // and Dock can be reached without the pointer moving afterwards.
         self.apply_pointer_cursor();
@@ -16401,9 +16597,14 @@ impl Runtime {
     /// grip it began on.
     fn apply_pointer_cursor(&mut self) {
         let grasp = float_grasp(
-            self.float_drag,
-            self.float_hover,
-            self.float.pinned_is_open(),
+            self.float_drag.map(|drag| drag.kind),
+            self.float_hover.map(|(_, part)| part),
+            // The window **under the pointer**, not "is any window pinned": a
+            // peek standing over a pinned one would otherwise borrow its grab
+            // hand, and a header that is not a handle would advertise itself as
+            // one (2026-08-12).
+            self.float_hover
+                .is_some_and(|(id, _)| self.float.is_pinned(id)),
         );
         let divider_axis = self.divider_drag.as_ref().map(|drag| drag.dir).or_else(|| {
             match self.seat_pointer.hover {
@@ -18950,7 +19151,7 @@ impl Runtime {
         // it reopen 180ms later under a pointer that never moved.
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
             && !event.repeat
-            && self.dismiss_float()?
+            && self.dismiss_top_float()?
         {
             return Ok(());
         }
@@ -21769,7 +21970,7 @@ mod tests {
         let frame = [200.0_f32, 120.0, 464.0, 420.0];
         let press = at(260.0, 132.0);
 
-        let mut held = FloatHeadPress::armed(press, frame);
+        let mut held = FloatHeadPress::armed(7, press, frame);
         assert_eq!(held.grab, [60.0, 12.0], "the offset inside the frame");
 
         // Still a press: a hand holding still is not a hand carrying anything.
@@ -21785,7 +21986,7 @@ mod tests {
         // this product is measured by, and it is not re-declared here.
         let travel = (DRAG_THRESHOLD_LOGICAL_PX, 2.0);
         let moved = at(press.x + travel.0, press.y + travel.1);
-        let Some(FloatDrag::Move { grab }) = held.promoted(moved, SCALE) else {
+        let Some(FloatDragKind::Move { grab }) = held.promoted(moved, SCALE) else {
             panic!("crossing the threshold turns the press into a carry");
         };
         assert_eq!(grab, [60.0, 12.0], "carrying the press's own offset");
@@ -21828,7 +22029,7 @@ mod tests {
         let press = at(260.0, 132.0);
         let just_over = DRAG_THRESHOLD_LOGICAL_PX;
 
-        let mut hidpi = FloatHeadPress::armed(press, frame);
+        let mut hidpi = FloatHeadPress::armed(7, press, frame);
         assert!(
             hidpi
                 .promoted(at(press.x + just_over, press.y), 2.0)
@@ -31449,11 +31650,11 @@ mod tests {
         // The pull survives the pointer leaving the grip it began on — the
         // corner stops at the 200×150 floor while the hand keeps going.
         assert_eq!(
-            float_grasp(Some(FloatDrag::Resize), Some(FloatPart::Body), true),
+            float_grasp(Some(FloatDragKind::Resize), Some(FloatPart::Body), true),
             Some(FloatGrasp::Grip)
         );
         assert_eq!(
-            float_grasp(Some(FloatDrag::Move { grab: [0.0, 0.0] }), None, true),
+            float_grasp(Some(FloatDragKind::Move { grab: [0.0, 0.0] }), None, true),
             Some(FloatGrasp::Carrying)
         );
         // A peek is not a window you were told you had: its header is not a
@@ -31467,7 +31668,7 @@ mod tests {
         // frame where the two disagreed would be answered by the drag.
         assert_eq!(
             float_grasp(
-                Some(FloatDrag::Move { grab: [60.0, 12.0] }),
+                Some(FloatDragKind::Move { grab: [60.0, 12.0] }),
                 Some(FloatPart::Head),
                 false
             ),

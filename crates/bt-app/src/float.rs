@@ -621,21 +621,60 @@ fn fade(elapsed: Duration, reverse: bool, motion: Motion, scale: f32) -> FloatFa
     }
 }
 
-// ── the singleton ───────────────────────────────────────────────────────────
+// ── the host ────────────────────────────────────────────────────────────────
 
-/// The one float this window may have open, and the two clocks around it.
+/// A window's identity, for the whole of its life.
 ///
-/// **A singleton by ruling** (§7.1.2「全窗口单例」): at most one float at a time,
-/// and operating another trigger *redirects* the existing one rather than
-/// opening a second. There is no list here because there is no list in the
-/// design — a second floating tree would be two answers to "where am I", and the
-/// whole reason this form exists is to give one.
+/// The same number the worker's traffic is tagged with — see [`FloatWin::epoch`]
+/// — because "which view asked for this directory" and "which window is being
+/// dragged" are the same question asked by two subsystems, and minting a second
+/// identifier for the second of them is how a window ends up being two things
+/// that can disagree. It survives promotion: a peek that becomes pinned is the
+/// same window, so a read in flight when the hand kept it still lands.
+pub type FloatId = u64;
+
+/// Every floating window this window has open, and the two clocks around the
+/// transient one.
+///
+/// # Two stores, because there are two kinds
+///
+/// **Overturns §7.1.2「全窗口单例」 (user ruling 2026-08-12).** The singleton was
+/// not merely a limit on how many trees you could see: paired with the (correct)
+/// law that a hover may never hijack a pinned window, it meant that *one* pinned
+/// float switched hovering off for the whole window — every other trigger went
+/// dead, and the peek that a hover is for could never be summoned again. The
+/// ruling is to fix that at the root rather than to carve an exception: a float
+/// is a place, and places do not exclude one another.
+///
+/// So the windows live in two stores, and the split is the two promises of
+/// §7.1.2 rather than a convenience:
+///
+/// * [`Self::pinned`] is a **list, and the list is the z-order** — the tail is
+///   the topmost. A pinned window was asked for, so it stays until an explicit
+///   verb takes it away, and "which of these two is in front" is a real question
+///   that only an order can answer.
+/// * [`Self::peek`] is an **option, because a peek is singular by nature** and
+///   not by ruling: it is the answer to "where is the pointer resting", there is
+///   one pointer, and a second peek would be an answer to a question nobody
+///   asked. It is always drawn on top — it is the newest thing on screen and the
+///   most temporary, and a transient window buried under a permanent one is a
+///   window you cannot see and cannot get rid of.
+///
+/// This is also the ground the preview float will stand on (§7.1's 小窗 is one
+/// form with many tenants): the second floating tenant does not need a second
+/// host, it needs a second entry in this list.
 #[derive(Debug, Default)]
 pub struct FloatHost {
     /// A trigger the pointer is resting on, and when its peek comes due.
     settling: Option<(FloatTrigger, Instant)>,
-    /// The float on screen, live or playing its exit.
-    open: Option<FloatWin>,
+    /// The pinned windows, **bottom to top** — the tail is the frontmost.
+    ///
+    /// Dismissed ones stay here until [`Self::sweep`] retires them, so their
+    /// exit can be seen; they answer nothing in the meantime, which is
+    /// [`FloatWin::is_live`]'s whole job.
+    pinned: Vec<FloatWin>,
+    /// The transient peek, live or playing its exit.
+    peek: Option<FloatWin>,
     /// When a transient peek's grace runs out.
     ///
     /// **Time, not space** (G84): the peek is not held open by a dead zone the
@@ -645,10 +684,13 @@ pub struct FloatHost {
     /// the only way focus lands in one is an incidental click on a row, and that
     /// must not wedge it open after the pointer has gone. A peek you want to
     /// keep is one you pin.
+    ///
+    /// One clock rather than one per window, because only the peek is ever on
+    /// it: a pinned window has no grace to run out.
     closing_at: Option<Instant>,
-    /// Bumped on every open, so an answer from the worker that was asked for a
-    /// float which has since been replaced can be recognised and dropped.
-    epoch: u64,
+    /// Bumped on every open, so every window carries a number no other window
+    /// has ever carried — see [`FloatId`].
+    epoch: FloatId,
 }
 
 /// The float itself: what it is showing, where it is, and how it got there.
@@ -731,28 +773,138 @@ impl FloatWin {
 }
 
 impl FloatHost {
-    /// The float on screen, if it is still live.
-    #[must_use]
-    pub fn live(&self) -> Option<&FloatWin> {
-        self.open.as_ref().filter(|win| win.is_live())
+    // ── reading the two stores ──────────────────────────────────────────────
+
+    /// Every window that should be drawn, **bottom to top** — dismissed ones
+    /// included, because an exit has to be seen.
+    ///
+    /// This iterator *is* the z-order, and it is the only place that order is
+    /// stated: the pinned list in its own order, then the peek over all of them.
+    pub fn drawn(&self) -> impl Iterator<Item = &FloatWin> {
+        self.pinned.iter().chain(self.peek.iter())
+    }
+
+    /// Every window that answers the pointer, **top to bottom** — the order a
+    /// hit test must ask them in, which is the reverse of the one they are
+    /// painted in.
+    pub fn hit_order(&self) -> impl Iterator<Item = &FloatWin> {
+        self.peek
+            .iter()
+            .chain(self.pinned.iter().rev())
+            .filter(|win| win.is_live())
+    }
+
+    /// Every live window, in paint order.
+    pub fn live_windows(&self) -> impl Iterator<Item = &FloatWin> {
+        self.drawn().filter(|win| win.is_live())
     }
 
     /// The same, mutably.
-    pub fn live_mut(&mut self) -> Option<&mut FloatWin> {
-        self.open.as_mut().filter(|win| win.is_live())
+    pub fn live_windows_mut(&mut self) -> impl Iterator<Item = &mut FloatWin> {
+        self.pinned
+            .iter_mut()
+            .chain(self.peek.iter_mut())
+            .filter(|win| win.is_live())
     }
 
-    /// Anything at all that should be drawn, dismissed ones included.
+    /// One live window by identity.
     #[must_use]
-    pub fn drawn(&self) -> Option<&FloatWin> {
-        self.open.as_ref()
+    pub fn live(&self, id: FloatId) -> Option<&FloatWin> {
+        self.live_windows().find(|win| win.epoch == id)
     }
 
-    /// Whether a *pinned* float is up — the state that lets the rail retract and
-    /// that a hover must not hijack.
+    /// The same, mutably — the worker's answer comes home through this.
+    pub fn live_mut(&mut self, id: FloatId) -> Option<&mut FloatWin> {
+        self.live_windows_mut().find(|win| win.epoch == id)
+    }
+
+    /// The live peek, if there is one.
     #[must_use]
-    pub fn pinned_is_open(&self) -> bool {
-        self.live().is_some_and(|win| win.mode == FloatMode::Pinned)
+    pub fn peek(&self) -> Option<&FloatWin> {
+        self.peek.as_ref().filter(|win| win.is_live())
+    }
+
+    /// The live peek's identity.
+    #[must_use]
+    pub fn peek_id(&self) -> Option<FloatId> {
+        self.peek().map(|win| win.epoch)
+    }
+
+    /// The frontmost live window — the peek if one is up, otherwise the top of
+    /// the pinned list. What Esc is aimed at.
+    #[must_use]
+    pub fn top(&self) -> Option<&FloatWin> {
+        self.hit_order().next()
+    }
+
+    /// Whether `id` names a live *pinned* window.
+    ///
+    /// The question every gesture asks before it starts: a peek has no grip, its
+    /// header is not a handle, and its window is not yours to carry — yet.
+    #[must_use]
+    pub fn is_pinned(&self, id: FloatId) -> bool {
+        self.live(id).is_some_and(|win| !win.mode.is_transient())
+    }
+
+    /// The topmost live pinned window showing `root`, if one is.
+    ///
+    /// **同根去重 (user ruling 2026-08-12).** Asking for a tree you already have
+    /// a window of is asking to be *shown* that window, not to be given a second
+    /// copy of it — Chrome's own answer when you open a page that is already
+    /// open. Identity is the root path and nothing else: two triggers standing
+    /// in the same directory are two doors into one room.
+    ///
+    /// The peek is deliberately not consulted. A peek is a question, it is
+    /// already on top, and re-asking it is what re-summoning a peek means.
+    #[must_use]
+    pub fn pinned_at_root(&self, root: &str) -> Option<FloatId> {
+        self.pinned
+            .iter()
+            .rev()
+            .find(|win| win.is_live() && win.files.root == root)
+            .map(|win| win.epoch)
+    }
+
+    /// Whether any live window was summoned from `trigger`.
+    #[must_use]
+    pub fn origin_is_live(&self, trigger: FloatTrigger) -> bool {
+        self.live_windows().any(|win| win.origin == Some(trigger))
+    }
+
+    /// Bring a pinned window to the front. Returns whether the order changed.
+    ///
+    /// A press anywhere inside a window raises it, which is what every stacking
+    /// window manager does and the only thing that makes a buried window
+    /// reachable. The return value is a **frame debt**: a raise that redraws
+    /// nothing is a click that visibly did nothing.
+    ///
+    /// The peek is not raisable because it is never anywhere else.
+    pub fn raise(&mut self, id: FloatId) -> bool {
+        let Some(index) = self
+            .pinned
+            .iter()
+            .position(|win| win.epoch == id && win.is_live())
+        else {
+            return false;
+        };
+        self.focus_only(id);
+        if index + 1 == self.pinned.len() {
+            return false;
+        }
+        let win = self.pinned.remove(index);
+        self.pinned.push(win);
+        true
+    }
+
+    /// Hand the keyboard bit to one window and take it from the others.
+    ///
+    /// Nothing reads it yet — a float's tree answers no keys (see `float_layer`'s
+    /// `focus_ring: false`) — but there is one keyboard, and a field that said
+    /// three windows had it would be a lie waiting for the reader that arrives.
+    fn focus_only(&mut self, id: FloatId) {
+        for win in self.pinned.iter_mut().chain(self.peek.iter_mut()) {
+            win.focused = win.epoch == id && win.mode == FloatMode::Pinned;
+        }
     }
 
     /// Whether a *transient* peek is up.
@@ -763,23 +915,31 @@ impl FloatHost {
     /// open — hence `!pinned`, spelled here as the mode test.
     #[must_use]
     pub fn peek_is_open(&self) -> bool {
-        self.live().is_some_and(|win| win.mode.is_transient())
+        self.peek().is_some()
     }
+
+    // ── the two clocks ──────────────────────────────────────────────────────
 
     /// Note the trigger under the pointer and arm the intent (G86/H112).
     ///
-    /// Resting on the trigger whose peek is already up re-arms nothing, for the
-    /// tooltip's reason: a trembling hand would otherwise close and reopen it
-    /// forever. A pinned window is never hijacked by a hover — it was asked for
-    /// explicitly, and a passing pointer does not get to replace it.
+    /// Resting on a trigger that already has a window on screen re-arms nothing,
+    /// for the tooltip's reason: a trembling hand would otherwise close and
+    /// reopen it forever. That one guard now covers both modes, and covering
+    /// both is what let the older, blunter one go.
+    ///
+    /// **改判 2026-08-12 — hover is no longer switched off by a pinned window.**
+    /// This used to begin `if self.pinned_is_open() { … return }`, which read as
+    /// the 「hover 永不劫持 pinned」 law but was a much larger claim: one pinned
+    /// window anywhere made *every* trigger in the product stop answering a
+    /// hover, so the peek could never be summoned again until it was closed
+    /// (user report). The law itself is untouched and in fact stronger now — a
+    /// hover cannot move, replace or close a pinned window, because a peek is a
+    /// window of its own in a slot of its own and never touches the pinned list.
+    /// See [`FloatHost`]'s own note.
     pub fn observe(&mut self, trigger: Option<FloatTrigger>, now: Instant) {
-        if self.pinned_is_open() {
-            self.settling = None;
-            return;
-        }
         match trigger {
             Some(trigger) => {
-                if self.live().is_some_and(|win| win.origin == Some(trigger)) {
+                if self.origin_is_live(trigger) {
                     self.settling = None;
                     return;
                 }
@@ -811,12 +971,23 @@ impl FloatHost {
         self.settling = None;
     }
 
-    /// Open (or redirect) the float.
+    /// Open a float.
     ///
     /// One entry point for all four ways a float comes to exist — hover, click,
-    /// re-click on another trigger, and a column popping out — because they
-    /// differ only in the two arguments and having four would mean four places to
-    /// forget the epoch.
+    /// a click on another trigger, and a column popping out — because they differ
+    /// only in the two arguments and having four would mean four places to forget
+    /// the epoch.
+    ///
+    /// Where it lands is the mode's own answer: a peek takes the peek slot,
+    /// replacing whatever was in it (there is one pointer, so there is one
+    /// question); a pinned window is **appended** to the list and is therefore
+    /// the frontmost, replacing nobody. That append is the whole of 浮窗多开.
+    ///
+    /// A pinned window opening also dismisses a live peek, and that is a
+    /// judgement rather than an accident: the peek was the question this click is
+    /// the answer to. Leaving it up would strand it — the pointer is on a trigger,
+    /// which `drive_float_hover` counts as "still dealing with the peek", so its
+    /// grace would never start and the question would sit over the answer.
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
@@ -828,11 +999,10 @@ impl FloatHost {
         frame: [f32; 4],
         anchor: Option<[f32; 4]>,
         now: Instant,
-    ) -> u64 {
+    ) -> FloatId {
         self.settling = None;
-        self.closing_at = None;
         self.epoch += 1;
-        self.open = Some(FloatWin {
+        let win = FloatWin {
             mode,
             origin,
             files,
@@ -845,7 +1015,23 @@ impl FloatHost {
             self_sizing: true,
             opened_at: now,
             dismissed_at: None,
-        });
+        };
+        match mode {
+            FloatMode::Peek => {
+                self.closing_at = None;
+                self.peek = Some(win);
+            }
+            FloatMode::Pinned => {
+                if let Some(peek) = self.peek.as_mut()
+                    && peek.dismissed_at.is_none()
+                {
+                    peek.dismissed_at = Some(now);
+                    self.closing_at = None;
+                }
+                self.pinned.push(win);
+                self.focus_only(self.epoch);
+            }
+        }
         self.epoch
     }
 
@@ -865,30 +1051,49 @@ impl FloatHost {
     /// the third door out of peek-hood — it was the one that only nulled one of
     /// them (2026-08-12, when the header drag made promotion reachable with an
     /// intent still in flight).
-    pub fn promote(&mut self) -> bool {
-        let Some(win) = self.live_mut() else {
-            return false;
-        };
-        if win.mode == FloatMode::Pinned {
-            return false;
-        }
+    ///
+    /// **It joins the pinned list, it does not replace it** (user ruling
+    /// 2026-08-12): the window is appended, so a promoted peek stands in front of
+    /// every window that was already there and takes none of them away. And it
+    /// keeps its [`FloatId`] across the move, which is what lets a directory read
+    /// that was in flight when the hand kept the window still find its way home.
+    ///
+    /// Returns the promoted window's identity, so the gesture that promoted it
+    /// can go on carrying *that* window and not merely "the float".
+    pub fn promote(&mut self) -> Option<FloatId> {
+        let mut win = self.peek.take().filter(FloatWin::is_live)?;
         win.mode = FloatMode::Pinned;
-        win.focused = true;
+        let id = win.epoch;
+        self.pinned.push(win);
+        self.focus_only(id);
         self.closing_at = None;
         self.disarm();
-        true
+        Some(id)
     }
 
-    /// Begin the exit (§7.1.2's four closers, and nothing else).
+    /// Begin one window's exit (§7.1.2's four closers, and nothing else).
     ///
     /// Returns whether there was anything to close. The window stays in hand
     /// until [`Self::sweep`] retires it, so the exit can be seen; the state it
     /// was showing is gone from that instant, which is what makes a closing float
     /// non-interactive without a second flag.
-    pub fn dismiss(&mut self, now: Instant) -> bool {
-        self.disarm();
-        self.closing_at = None;
-        let Some(win) = self.open.as_mut() else {
+    ///
+    /// A *peek*'s dismissal takes the pending intent with it (G87) and a pinned
+    /// window's does not: the intent belongs to the hover machinery, and an Esc
+    /// aimed at a window somebody tore off has no business cancelling a hover
+    /// that is maturing over somewhere else entirely.
+    pub fn dismiss(&mut self, id: FloatId, now: Instant) -> bool {
+        if self.peek.as_ref().is_some_and(|win| win.epoch == id) {
+            self.disarm();
+            self.closing_at = None;
+            let win = self.peek.as_mut().expect("just matched");
+            if win.dismissed_at.is_some() {
+                return false;
+            }
+            win.dismissed_at = Some(now);
+            return true;
+        }
+        let Some(win) = self.pinned.iter_mut().find(|win| win.epoch == id) else {
             return false;
         };
         if win.dismissed_at.is_some() {
@@ -898,25 +1103,45 @@ impl FloatHost {
         true
     }
 
-    /// Take the float away outright, without an exit — for the paths where the
+    /// Take one window away outright, without an exit — for the paths where the
     /// thing it was standing on has gone and there is nothing to play the
     /// animation against.
-    pub fn wipe(&mut self) -> Option<FloatWin> {
-        self.disarm();
-        self.closing_at = None;
-        self.open.take()
+    pub fn wipe(&mut self, id: FloatId) -> Option<FloatWin> {
+        if self.peek.as_ref().is_some_and(|win| win.epoch == id) {
+            self.disarm();
+            self.closing_at = None;
+            return self.peek.take();
+        }
+        let index = self.pinned.iter().position(|win| win.epoch == id)?;
+        Some(self.pinned.remove(index))
     }
 
-    /// Retire a float whose exit has finished. Returns whether one was retired.
+    /// Take the peek away outright, whatever it is — the geometry change's own
+    /// closer (§3.2: TRANSIENT dissolves).
+    ///
+    /// The two clocks are stopped **only when there was something to take**. This
+    /// is now called on every viewport change rather than only when a peek was
+    /// known to be up (a pinned window and a peek can be on screen together, so
+    /// the caller no longer branches), and a resize that happened to land while a
+    /// hover was maturing over an untouched trigger has no business cancelling it.
+    pub fn wipe_peek(&mut self) -> Option<FloatWin> {
+        let taken = self.peek.take()?;
+        self.disarm();
+        self.closing_at = None;
+        Some(taken)
+    }
+
+    /// Retire every float whose exit has finished. Returns whether any was.
     pub fn sweep(&mut self, now: Instant, motion: Motion, scale: f32) -> bool {
-        let finished = self
-            .open
-            .as_ref()
-            .is_some_and(|win| !win.is_live() && !win.fade(now, motion, scale).moving);
-        if finished {
-            self.open = None;
+        let done = |win: &FloatWin| !win.is_live() && !win.fade(now, motion, scale).moving;
+        let before = self.pinned.len();
+        self.pinned.retain(|win| !done(win));
+        let mut swept = self.pinned.len() != before;
+        if self.peek.as_ref().is_some_and(done) {
+            self.peek = None;
+            swept = true;
         }
-        finished
+        swept
     }
 
     /// The pointer is still dealing with the peek: cancel any pending dismissal.
@@ -961,9 +1186,8 @@ impl FloatHost {
         frame: Duration,
     ) -> Option<Instant> {
         let animating = self
-            .open
-            .as_ref()
-            .is_some_and(|win| win.fade(now, motion, scale).moving)
+            .drawn()
+            .any(|win| win.fade(now, motion, scale).moving)
             .then(|| now + frame);
         [
             self.settling.map(|(_, due)| due),
@@ -1618,21 +1842,55 @@ mod tests {
         }
     }
 
-    fn open_peek(host: &mut FloatHost, trigger: FloatTrigger, now: Instant) {
+    fn open_peek(host: &mut FloatHost, trigger: FloatTrigger, now: Instant) -> FloatId {
+        open_peek_at(host, trigger, "C:/x", now)
+    }
+
+    fn open_peek_at(
+        host: &mut FloatHost,
+        trigger: FloatTrigger,
+        root: &str,
+        now: Instant,
+    ) -> FloatId {
         host.open(
             FloatMode::Peek,
             Some(trigger),
-            state("C:/x"),
+            state(root),
             crate::files::DirCache::default(),
             bt_layout::LogicalPx::px(240),
             frame(100.0, 100.0, 264.0, 300.0),
             None,
             now,
-        );
+        )
+    }
+
+    fn open_pinned_at(
+        host: &mut FloatHost,
+        trigger: Option<FloatTrigger>,
+        root: &str,
+        box_: [f32; 4],
+        now: Instant,
+    ) -> FloatId {
+        host.open(
+            FloatMode::Pinned,
+            trigger,
+            state(root),
+            crate::files::DirCache::default(),
+            bt_layout::LogicalPx::px(240),
+            box_,
+            None,
+            now,
+        )
+    }
+
+    /// The z-order as a list of identities, bottom to top.
+    fn stack(host: &FloatHost) -> Vec<FloatId> {
+        host.drawn().map(|win| win.epoch).collect()
     }
 
     const TAB: FloatTrigger = FloatTrigger::Tab(TabId(1));
     const OTHER: FloatTrigger = FloatTrigger::Tab(TabId(2));
+    const THIRD: FloatTrigger = FloatTrigger::Tab(TabId(3));
 
     /// G82: the intent takes 180ms, and it is not due before then.
     #[test]
@@ -1645,26 +1903,347 @@ mod tests {
         assert_eq!(host.take_due(now + FLY_OPEN), None, "and only once");
     }
 
-    /// G86: a pinned window is not hijacked by a passing pointer.
+    // ── 浮窗多开 (user ruling 2026-08-12) ────────────────────────────────────
+
+    /// PIN ① — **a pinned window standing does not switch hover off.**
+    ///
+    /// The user's report, as arithmetic: with one pinned files window up,
+    /// hovering any *other* folder trigger produced nothing at all, ever again.
+    /// The cause was [`FloatHost::observe`]'s old opening line — `if
+    /// self.pinned_is_open() { … return }` — which was written as the 「hover
+    /// 永不劫持 pinned」 law but implemented a much larger one: hover was disabled
+    /// window-wide rather than merely kept off the pinned window.
+    ///
+    /// Red gate / mutation: put that guard back at the top of `observe` and this
+    /// returns `None` where it asks for `Some(OTHER)`.
     #[test]
-    fn a_hover_never_hijacks_a_pinned_window() {
+    fn a_hover_still_arms_an_intent_while_a_pinned_window_stands() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        host.open(
-            FloatMode::Pinned,
+        open_pinned_at(
+            &mut host,
             Some(TAB),
-            state("C:/x"),
-            crate::files::DirCache::default(),
-            bt_layout::LogicalPx::px(240),
+            "C:/x",
             frame(100.0, 100.0, 264.0, 300.0),
-            None,
             now,
         );
         host.observe(Some(OTHER), now);
         assert_eq!(
-            host.take_due(now + FLY_OPEN * 2),
-            None,
-            "the intent was never armed"
+            host.take_due(now + FLY_OPEN),
+            Some(OTHER),
+            "another trigger's peek is still summonable"
+        );
+    }
+
+    /// PIN ④ — **G86 restated and strengthened: a hover never touches a pinned
+    /// window.**
+    ///
+    /// This test replaces `a_hover_never_hijacks_a_pinned_window`, whose
+    /// assertion was "a pinned window makes hover do nothing" — which is the bug
+    /// above, not the law. The law was never about disabling hover: it is that a
+    /// passing pointer may not *move, replace or close* a window somebody asked
+    /// for. That is what is asserted here, and the new shape makes it true by
+    /// construction — a peek lives in its own slot and can no more reach into the
+    /// pinned list than a pinned window can reach into the peek's.
+    ///
+    /// Red gate / mutation: let a peek's `open` push onto `self.pinned` instead
+    /// of taking the peek slot, and the z-order and `peek_id` assertions fail.
+    #[test]
+    fn a_hover_never_moves_replaces_or_closes_a_pinned_window() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let boxes = [
+            frame(100.0, 100.0, 264.0, 300.0),
+            frame(500.0, 200.0, 264.0, 300.0),
+        ];
+        let first = open_pinned_at(&mut host, Some(TAB), "C:/x", boxes[0], now);
+        let second = open_pinned_at(&mut host, Some(OTHER), "C:/y", boxes[1], now);
+
+        // A hover matures over a third trigger and its peek arrives.
+        host.observe(Some(THIRD), now);
+        assert_eq!(host.take_due(now + FLY_OPEN), Some(THIRD));
+        let peek = open_peek_at(&mut host, THIRD, "C:/z", now);
+
+        assert_eq!(
+            stack(&host),
+            vec![first, second, peek],
+            "the peek joined on top and displaced nobody"
+        );
+        for (id, box_) in [(first, boxes[0]), (second, boxes[1])] {
+            let win = host.live(id).expect("still open");
+            assert_eq!(win.frame, box_, "a hover moved nothing");
+            assert_eq!(win.mode, FloatMode::Pinned, "and changed nobody's promise");
+        }
+        assert_eq!(host.peek_id(), Some(peek), "the peek is the peek");
+    }
+
+    /// PIN ② — **a promoted peek joins the list; it replaces nobody, and it
+    /// arrives in front.**
+    ///
+    /// Rule ④ of the ruling. The window that was already there keeps its place
+    /// in the world and loses only its position at the top, which is what
+    /// "another window opened" means everywhere else a person has used a
+    /// computer.
+    ///
+    /// It also pins the half that is easy to lose in a rewrite: **the identity
+    /// survives the promotion.** A peek that was renumbered on its way into the
+    /// list would orphan every directory read still in flight for it, and the
+    /// tree the user just decided to keep would stop filling in.
+    ///
+    /// Red gate / mutation: have `promote` mint a fresh epoch, or have it splice
+    /// the window in at `pinned[0]` instead of pushing — either fails here.
+    #[test]
+    fn a_promoted_peek_joins_the_pinned_list_on_top_of_it() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let standing = open_pinned_at(
+            &mut host,
+            Some(TAB),
+            "C:/x",
+            frame(100.0, 100.0, 264.0, 300.0),
+            now,
+        );
+        let peek = open_peek_at(&mut host, OTHER, "C:/y", now);
+        assert_eq!(
+            host.promote(),
+            Some(peek),
+            "and it is still the same window"
+        );
+        assert_eq!(
+            stack(&host),
+            vec![standing, peek],
+            "two windows stand, the newcomer in front"
+        );
+        assert!(host.is_pinned(standing), "the older one is untouched");
+        assert!(host.is_pinned(peek), "and the newer one has been kept");
+        assert_eq!(host.peek_id(), None, "the peek slot is free again");
+    }
+
+    /// PIN ③ — **a trigger whose root already has a window raises that window
+    /// rather than opening a second.**
+    ///
+    /// 同根去重, by root path and by nothing else: two triggers standing in one
+    /// directory are two doors into one room. It is Chrome's answer to opening a
+    /// page that is already open, and the ruling says so in as many words.
+    ///
+    /// **改判**: this overturns the mock-up's 「re-click 关闭」 contract for a
+    /// pinned window (3742-3751 — pressing the trigger again was one of §7.1.2's
+    /// four closers). Two windows are now reachable at once, so the trigger's job
+    /// changed from "toggle the one window" to "show me that tree", and a toggle
+    /// that sometimes means "raise the other one" and sometimes means "close this
+    /// one" is a control nobody can predict. The other three closers — `×`, Esc,
+    /// Dock — are untouched, so nothing has become unclosable.
+    ///
+    /// Red gate / mutation: have `pinned_at_root` return `None` always, and the
+    /// caller opens a duplicate — `stack` grows to three.
+    #[test]
+    fn a_second_ask_for_a_root_already_open_raises_that_window() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let same = open_pinned_at(
+            &mut host,
+            Some(TAB),
+            "C:/x",
+            frame(100.0, 100.0, 264.0, 300.0),
+            now,
+        );
+        let other = open_pinned_at(
+            &mut host,
+            Some(OTHER),
+            "C:/y",
+            frame(500.0, 200.0, 264.0, 300.0),
+            now,
+        );
+        assert_eq!(
+            host.pinned_at_root("C:/x"),
+            Some(same),
+            "the root is recognised however it is asked for"
+        );
+        assert_eq!(host.pinned_at_root("C:/nowhere"), None);
+        assert!(host.raise(same), "and asking again brings it forward");
+        assert_eq!(
+            stack(&host),
+            vec![other, same],
+            "no duplicate was opened; the order changed instead"
+        );
+    }
+
+    /// PIN ⑤ — **a press on a buried window brings it to the front, and says so.**
+    ///
+    /// The return value is the point as much as the reorder is: a raise is a
+    /// frame debt, and a click that reordered the world without redrawing it is a
+    /// click that visibly did nothing. It reports `false` when the window is
+    /// already on top precisely so the caller can *not* repaint then.
+    ///
+    /// Red gate / mutation: make `raise` return `true` unconditionally (a repaint
+    /// every press) or drop the `remove`/`push` (no reorder) — the first fails
+    /// the last assertion, the second the middle one.
+    #[test]
+    fn pressing_a_buried_window_brings_it_to_the_front() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let bottom = open_pinned_at(
+            &mut host,
+            Some(TAB),
+            "C:/x",
+            frame(100.0, 100.0, 264.0, 300.0),
+            now,
+        );
+        let middle = open_pinned_at(
+            &mut host,
+            Some(OTHER),
+            "C:/y",
+            frame(150.0, 150.0, 264.0, 300.0),
+            now,
+        );
+        let top = open_pinned_at(
+            &mut host,
+            Some(THIRD),
+            "C:/z",
+            frame(200.0, 200.0, 264.0, 300.0),
+            now,
+        );
+        assert_eq!(stack(&host), vec![bottom, middle, top]);
+        assert!(host.raise(bottom), "it was buried, so the order changed");
+        assert_eq!(stack(&host), vec![middle, top, bottom]);
+        assert!(
+            !host.raise(bottom),
+            "and raising the frontmost window owes no frame"
+        );
+        // Top to bottom is the order a hit test asks in, and it is the reverse.
+        assert_eq!(
+            host.hit_order().map(|win| win.epoch).collect::<Vec<_>>(),
+            vec![bottom, top, middle],
+            "the pointer meets the frontmost window first"
+        );
+    }
+
+    /// PIN ⑥ — **a worker's answer reaches the window that asked for it, and no
+    /// other.**
+    ///
+    /// The epoch was already the tag on `files::FilesHost::Float`; what changes
+    /// with more than one window is that it now has to *find* one among several
+    /// rather than confirm the only one. A lookup that answered "the float" would
+    /// deliver every directory to whichever window happened to be in hand, and
+    /// two trees would fill in with each other's contents.
+    ///
+    /// Red gate / mutation: make `live_mut` ignore its argument and return the
+    /// first live window — the second assertion delivers into the wrong tree.
+    #[test]
+    fn a_directory_read_comes_home_to_the_window_that_asked() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let first = open_pinned_at(
+            &mut host,
+            Some(TAB),
+            "C:/x",
+            frame(100.0, 100.0, 264.0, 300.0),
+            now,
+        );
+        let second = open_pinned_at(
+            &mut host,
+            Some(OTHER),
+            "C:/y",
+            frame(500.0, 200.0, 264.0, 300.0),
+            now,
+        );
+        let peek = open_peek_at(&mut host, THIRD, "C:/z", now);
+        assert_ne!(first, second);
+        assert_ne!(second, peek);
+        for id in [first, second, peek] {
+            assert_eq!(
+                host.live_mut(id).map(|win| win.epoch),
+                Some(id),
+                "every window answers to its own name and not to another's"
+            );
+        }
+        assert_eq!(
+            host.live_mut(first).map(|win| win.files.root.clone()),
+            Some("C:/x".to_owned()),
+        );
+        assert_eq!(
+            host.live_mut(second).map(|win| win.files.root.clone()),
+            Some("C:/y".to_owned()),
+        );
+        // A window that has gone takes its traffic with it — the cancellation,
+        // arriving as a dropped result.
+        host.wipe(second);
+        assert!(host.live_mut(second).is_none());
+        assert_eq!(stack(&host), vec![first, peek], "and nobody else moved");
+    }
+
+    /// PIN — **every window is closed, dragged and dissolved on its own.**
+    ///
+    /// Rule ⑤ of the ruling, in the two places a list can quietly become a
+    /// singleton again: `×` on one window, and the geometry change that dissolves
+    /// a transient peek. Neither is allowed to reach the others.
+    ///
+    /// Red gate / mutation: have `dismiss` ignore its `id` and close the topmost,
+    /// or have `wipe_peek` clear the pinned list too.
+    #[test]
+    fn closing_one_window_leaves_the_others_exactly_where_they_were() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let boxes = [
+            frame(100.0, 100.0, 264.0, 300.0),
+            frame(500.0, 200.0, 264.0, 300.0),
+        ];
+        let first = open_pinned_at(&mut host, Some(TAB), "C:/x", boxes[0], now);
+        let second = open_pinned_at(&mut host, Some(OTHER), "C:/y", boxes[1], now);
+        let peek = open_peek_at(&mut host, THIRD, "C:/z", now);
+
+        assert!(host.dismiss(first, now), "the buried window's own ×");
+        assert!(host.live(first).is_none(), "it stopped answering");
+        assert_eq!(
+            host.live(second).map(|win| win.frame),
+            Some(boxes[1]),
+            "and the window above it did not budge"
+        );
+        assert_eq!(host.peek_id(), Some(peek), "nor did the peek");
+        assert!(
+            host.drawn().any(|win| win.epoch == first),
+            "the closing window is still on screen for its exit"
+        );
+
+        // §3.2: a geometry change dissolves the TRANSIENT regime and re-clamps
+        // the PINNED one. The peek goes; nobody else does.
+        assert!(host.wipe_peek().is_some());
+        assert_eq!(host.peek_id(), None);
+        assert_eq!(
+            host.live(second).map(|win| win.frame),
+            Some(boxes[1]),
+            "dissolving the peek is not a closer for anything else"
+        );
+    }
+
+    /// PIN — **Esc is aimed at the frontmost window**, which is the peek while
+    /// one is up and the top of the list otherwise.
+    #[test]
+    fn the_top_of_the_stack_is_the_peek_and_then_the_newest_pinned_window() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        assert!(host.top().is_none(), "nothing open, nothing aimed at");
+        let first = open_pinned_at(
+            &mut host,
+            Some(TAB),
+            "C:/x",
+            frame(100.0, 100.0, 264.0, 300.0),
+            now,
+        );
+        assert_eq!(host.top().map(|win| win.epoch), Some(first));
+        let second = open_pinned_at(
+            &mut host,
+            Some(OTHER),
+            "C:/y",
+            frame(500.0, 200.0, 264.0, 300.0),
+            now,
+        );
+        assert_eq!(host.top().map(|win| win.epoch), Some(second));
+        let peek = open_peek_at(&mut host, THIRD, "C:/z", now);
+        assert_eq!(
+            host.top().map(|win| win.epoch),
+            Some(peek),
+            "a peek is the newest and the most temporary thing on screen"
         );
     }
 
@@ -1685,9 +2264,9 @@ mod tests {
     fn dismissing_takes_a_pending_intent_with_it() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
+        let peek = open_peek(&mut host, TAB, now);
         host.observe(Some(OTHER), now);
-        assert!(host.dismiss(now));
+        assert!(host.dismiss(peek, now));
         assert_eq!(
             host.take_due(now + FLY_OPEN * 2),
             None,
@@ -1751,11 +2330,11 @@ mod tests {
     fn a_pinned_window_is_never_put_on_the_grace_clock() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
-        assert!(host.promote());
+        let peek = open_peek(&mut host, TAB, now);
+        assert!(host.promote().is_some());
         host.release(false, now);
         assert!(!host.grace_expired(now + FLY_CLOSE_LEFT * 4));
-        assert!(host.pinned_is_open(), "and it is still there");
+        assert!(host.is_pinned(peek), "and it is still there");
     }
 
     /// PIN (user ruling 2026-08-12, rule ②) — **promotion stops both clocks.**
@@ -1776,14 +2355,14 @@ mod tests {
     fn promoting_stops_the_grace_and_the_intent_alike() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
+        let peek = open_peek(&mut host, TAB, now);
 
         // Both clocks running: the pointer has left (a grace is armed) and it has
         // since come to rest on another trigger (an intent is arming).
         host.release(false, now);
         host.observe(Some(OTHER), now);
 
-        assert!(host.promote(), "the header drag keeps it");
+        assert!(host.promote().is_some(), "the header drag keeps it");
         assert!(
             !host.grace_expired(now + FLY_CLOSE_LEFT * 4),
             "the grace is out: a window being carried is not one that times out"
@@ -1794,7 +2373,7 @@ mod tests {
             "and the intent is out: it would have opened a second float over this one"
         );
         assert!(
-            host.pinned_is_open(),
+            host.is_pinned(peek),
             "leaving exactly the window that was kept"
         );
     }
@@ -1807,7 +2386,7 @@ mod tests {
         let mut host = FloatHost::default();
         let mut opened = state("C:/x");
         opened.open.insert("/crates".to_owned());
-        host.open(
+        let peek = host.open(
             FloatMode::Peek,
             Some(TAB),
             opened,
@@ -1817,8 +2396,8 @@ mod tests {
             None,
             now,
         );
-        assert!(host.promote());
-        let win = host.live().expect("still open");
+        assert_eq!(host.promote(), Some(peek));
+        let win = host.live(peek).expect("still open");
         assert_eq!(win.mode, FloatMode::Pinned);
         assert_eq!(win.frame, frame(180.0, 90.0, 264.0, 300.0), "same box");
         assert!(win.files.open.contains("/crates"), "same unfolding");
@@ -1831,8 +2410,8 @@ mod tests {
     fn a_peek_never_holds_the_keyboard() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
-        assert!(!host.live().expect("open").focused);
+        let peek = open_peek(&mut host, TAB, now);
+        assert!(!host.live(peek).expect("open").focused);
     }
 
     /// G78: a dismissed float stays on screen for its exit but stops answering
@@ -1842,16 +2421,16 @@ mod tests {
     fn a_dismissed_float_is_still_drawn_but_no_longer_live() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
-        assert!(host.dismiss(now));
-        assert!(host.live().is_none(), "it answers nothing");
-        assert!(host.drawn().is_some(), "but it is still on screen");
+        let peek = open_peek(&mut host, TAB, now);
+        assert!(host.dismiss(peek, now));
+        assert!(host.live(peek).is_none(), "it answers nothing");
+        assert_eq!(stack(&host), vec![peek], "but it is still on screen");
         assert!(
             !host.sweep(now, Motion::Full, SCALE),
             "and it is not retired mid-animation"
         );
         assert!(host.sweep(now + FLOAT_ANIMATION, Motion::Full, SCALE));
-        assert!(host.drawn().is_none(), "then it is gone");
+        assert!(stack(&host).is_empty(), "then it is gone");
     }
 
     /// Reduced motion turns both keyframes off outright, so there is no exit to
@@ -1860,8 +2439,8 @@ mod tests {
     fn reduced_motion_retires_a_dismissed_float_at_once() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
-        host.dismiss(now);
+        let peek = open_peek(&mut host, TAB, now);
+        host.dismiss(peek, now);
         assert!(host.sweep(now, Motion::Reduced, SCALE));
         assert_eq!(
             host.deadline(now, Motion::Reduced, SCALE, FLOAT_ANIMATION),
@@ -1882,17 +2461,19 @@ mod tests {
     fn reduced_motion_gives_a_peek_no_entrance_to_play() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
+        let peek = open_peek(&mut host, TAB, now);
         let born = host
             .drawn()
+            .next()
             .expect("open")
             .fade(now, Motion::Reduced, SCALE);
         assert_eq!(born.opacity, 1.0, "it is simply there on the first frame");
         assert_eq!(born.rise, 0.0, "and it is there in its final place");
         assert!(!born.moving, "with nothing owed");
-        host.dismiss(now);
+        host.dismiss(peek, now);
         let leaving = host
             .drawn()
+            .next()
             .expect("closing")
             .fade(now, Motion::Reduced, SCALE);
         assert_eq!(leaving.opacity, 0.0, "and gone the same way");
@@ -1904,23 +2485,29 @@ mod tests {
     fn the_entrance_rises_and_the_exit_reverses_it() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
-        let born = host.drawn().expect("open").fade(now, Motion::Full, SCALE);
+        let peek = open_peek(&mut host, TAB, now);
+        let born = host
+            .drawn()
+            .next()
+            .expect("open")
+            .fade(now, Motion::Full, SCALE);
         assert_eq!(born.opacity, 0.0, "it starts invisible");
         assert_eq!(
             born.rise, FLOAT_WINDOW_RISE_LOGICAL_PX,
             "and five pixels high"
         );
-        let landed = host
-            .drawn()
-            .expect("open")
-            .fade(now + FLOAT_ANIMATION, Motion::Full, SCALE);
+        let landed =
+            host.drawn()
+                .next()
+                .expect("open")
+                .fade(now + FLOAT_ANIMATION, Motion::Full, SCALE);
         assert_eq!(landed.opacity, 1.0);
         assert_eq!(landed.rise, 0.0);
         assert!(!landed.moving);
-        host.dismiss(now + FLOAT_ANIMATION);
+        host.dismiss(peek, now + FLOAT_ANIMATION);
         let leaving =
             host.drawn()
+                .next()
                 .expect("closing")
                 .fade(now + FLOAT_ANIMATION, Motion::Full, SCALE);
         assert_eq!(
@@ -1936,10 +2523,13 @@ mod tests {
     fn every_opening_mints_a_new_epoch() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
-        let first = host.live().expect("open").epoch;
-        open_peek(&mut host, OTHER, now);
-        assert_ne!(host.live().expect("open").epoch, first);
+        let first = open_peek(&mut host, TAB, now);
+        let second = open_peek(&mut host, OTHER, now);
+        assert_ne!(second, first);
+        assert!(
+            host.live(first).is_none(),
+            "and the peek slot holds one question at a time"
+        );
     }
 
     /// A float opens still sizing itself, and **a hand is what ends that**.
@@ -1959,14 +2549,14 @@ mod tests {
     fn a_float_sizes_itself_until_a_hand_takes_hold_of_it() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
+        let peek = open_peek(&mut host, TAB, now);
         assert!(
-            host.live().expect("open").self_sizing,
+            host.live(peek).expect("open").self_sizing,
             "a fresh float is still following its content"
         );
-        host.live_mut().expect("open").self_sizing = false;
+        host.live_mut(peek).expect("open").self_sizing = false;
         assert!(
-            !host.live().expect("open").self_sizing,
+            !host.live(peek).expect("open").self_sizing,
             "and a hand on it ends that for good"
         );
     }
@@ -1977,10 +2567,10 @@ mod tests {
     fn only_a_transient_peek_holds_the_rail_open() {
         let now = Instant::now();
         let mut host = FloatHost::default();
-        open_peek(&mut host, TAB, now);
+        let peek = open_peek(&mut host, TAB, now);
         assert!(host.peek_is_open(), "a peek holds it");
-        assert!(host.promote());
+        assert!(host.promote().is_some());
         assert!(!host.peek_is_open(), "a pinned window lets it go");
-        assert!(host.pinned_is_open());
+        assert!(host.is_pinned(peek));
     }
 }
