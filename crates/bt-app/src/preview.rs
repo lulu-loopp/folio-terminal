@@ -30,6 +30,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::mpsc;
 use std::thread;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use winit::event_loop::EventLoopProxy;
@@ -156,7 +157,6 @@ pub fn is_diff_name(name: &str) -> bool {
 /// reading, so neither is editable however much its extension looks like text,
 /// and a rendered markdown view is not an editor until it has been flipped to
 /// source.
-#[allow(dead_code)]
 pub fn is_editable(name: &str, ftype: PreviewFtype, md_source: bool) -> bool {
     if is_diff_name(name) {
         return false;
@@ -649,11 +649,30 @@ pub struct PreviewBuffer {
     /// degradation §7.1.3 asks for hangs off this; slice 1 carries the fact and
     /// the view that says so is slice 2's.
     pub truncated: bool,
-    /// Unsaved edits. Nothing in this slice sets it — quick-edit is slice 3 —
-    /// but the pool's eviction law is written in terms of it today, because a
-    /// law that arrives after the state it protects has already shipped is a law
-    /// that arrives after the bug.
+    /// Unsaved edits.
+    ///
+    /// **Set by the first real change and cleared only by a save.** Editing a
+    /// file back to the words it started with does not clean it: the buffer has
+    /// been through a state the disk never saw, the undo history a real editor
+    /// would compare against does not exist here, and a dot that went out
+    /// because you happened to retype what you deleted is a dot that cannot be
+    /// trusted the one time it matters.
     pub dirty: bool,
+    /// How many times this body has changed.
+    ///
+    /// **A revision, not a length.** Everything derived from the content — the
+    /// parsed document, its measured blocks — is cached against this, and the
+    /// length it replaced was a counter that could not see a same-length edit:
+    /// swapping one letter for another left the cache convinced it was still
+    /// looking at the old text.
+    pub revision: u64,
+    /// When the file was last written, as of the read this body came from.
+    ///
+    /// The other half of ruling 8⑨'s minimum concurrent-edit story: a save
+    /// compares this against what the disk says *now*, and a disagreement means
+    /// somebody else wrote the file while it was open here. `None` for a buffer
+    /// that has no body yet — there is nothing to be stale.
+    pub disk_mtime: Option<SystemTime>,
     /// Whether a markdown buffer is showing its source rather than its render.
     pub md_source: bool,
     pub load: PreviewLoad,
@@ -691,6 +710,8 @@ impl PreviewBuffer {
             content: None,
             truncated: false,
             dirty: false,
+            revision: 0,
+            disk_mtime: None,
             md_source: false,
             load,
             max_columns: 0,
@@ -706,11 +727,71 @@ impl PreviewBuffer {
             )
     }
 
-    /// Whether this buffer would be shown on a surface that edits. Slice 3's
-    /// caller; see [`is_editable`] for why the rule is settled now.
-    #[allow(dead_code)]
+    /// Whether this buffer would be shown on a surface that edits.
+    ///
+    /// The name's judgement ([`is_editable`]) **and two facts only a body
+    /// knows**. A buffer with no body has nothing to put a caret in; a
+    /// *truncated* one has only the first 64KB of its file, and an edit surface
+    /// over the head of a file is a save button wired to `truncate`. §7.1.3's
+    /// "超大文件只读降级" is exactly this line — the degradation is read-only,
+    /// and read-only has to be enforced where the editing is, not where the
+    /// notice is printed.
     pub fn is_editable(&self) -> bool {
-        is_editable(&self.name, self.ftype, self.md_source)
+        self.load == PreviewLoad::Ready
+            && self.content.is_some()
+            && !self.truncated
+            && is_editable(&self.name, self.ftype, self.md_source)
+    }
+
+    /// Hand the body to an edit, and file everything one implies.
+    ///
+    /// **One door**, for the reason [`PreviewPool::open`] is one door: an edit
+    /// owes three things — the dirty bit, the revision every cache is keyed on,
+    /// and the widest line the horizontal scroller is derived from — and three
+    /// call sites each remembering all three is three chances to forget one.
+    /// The closure reports whether anything actually changed, so an insert of
+    /// nothing does not dirty a file.
+    pub fn edit_content(&mut self, edit: impl FnOnce(&mut String) -> bool) -> bool {
+        let Some(content) = self.content.as_mut() else {
+            return false;
+        };
+        if !edit(content) {
+            return false;
+        }
+        self.max_columns = widest_line_columns(self.content.as_deref().unwrap_or_default());
+        self.revision += 1;
+        self.dirty = true;
+        true
+    }
+
+    /// Write the body back to its file.
+    ///
+    /// Three refusals and one write, in this order and for this reason:
+    ///
+    /// * A buffer with no body has nothing to write, and writing "nothing"
+    ///   would empty the file a failed read was about.
+    /// * A body the disk has moved on from is [`SaveOutcome::Conflict`]
+    ///   (ruling 8⑨). **Not a prompt and not a blind write** — this slice's
+    ///   minimum is that the window says so and keeps the edits, because the
+    ///   one unrecoverable outcome is overwriting a change nobody has seen.
+    /// * The write itself is atomic ([`save_atomically`]).
+    ///
+    /// The mtime is re-read from the file that was just written rather than
+    /// remembered from the write, so the next save compares against what the
+    /// filesystem actually recorded.
+    pub fn save(&mut self) -> SaveOutcome {
+        let Some(content) = self.content.as_deref() else {
+            return SaveOutcome::Failed("there is nothing to save".to_owned());
+        };
+        if file_mtime(&self.path) != self.disk_mtime {
+            return SaveOutcome::Conflict;
+        }
+        if let Err(error) = save_atomically(&self.path, content) {
+            return SaveOutcome::Failed(error.to_string());
+        }
+        self.disk_mtime = file_mtime(&self.path);
+        self.dirty = false;
+        SaveOutcome::Saved
     }
 
     /// The sentence a body that was cut short owes its reader, if it was.
@@ -738,17 +819,24 @@ impl PreviewBuffer {
 
     /// File the worker's answer.
     pub fn accept(&mut self, outcome: HeadOutcome) {
+        self.revision += 1;
         match outcome {
-            HeadOutcome::Read { text, truncated } => {
+            HeadOutcome::Read {
+                text,
+                truncated,
+                mtime,
+            } => {
                 self.max_columns = widest_line_columns(&text);
                 self.content = Some(text);
                 self.truncated = truncated;
+                self.disk_mtime = mtime;
                 self.load = PreviewLoad::Ready;
             }
             HeadOutcome::Refused(refusal) => {
                 self.content = None;
                 self.truncated = false;
                 self.max_columns = 0;
+                self.disk_mtime = None;
                 self.load = PreviewLoad::Refused(refusal);
             }
         }
@@ -892,8 +980,98 @@ pub enum HeadOutcome {
         text: String,
         /// Whether [`PREVIEW_HEAD_BYTES`] cut it short.
         truncated: bool,
+        /// When the file said it was last written, **asked of the handle these
+        /// bytes came out of**. A second `metadata` call by path could answer
+        /// about a file that had already been replaced between the two, which
+        /// is precisely the race the answer exists to detect.
+        mtime: Option<SystemTime>,
     },
     Refused(PreviewRefusal),
+}
+
+/// How a save turned out.
+///
+/// Three outcomes rather than a `Result`, because the middle one is not a
+/// failure: the disk moved and the window is declining to guess, which is a
+/// sentence the user is owed and a state the buffer survives intact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SaveOutcome {
+    Saved,
+    /// The file on disk is not the file that was read (ruling 8⑨).
+    Conflict,
+    Failed(String),
+}
+
+/// The acknowledgement a save gets, and how long it stands.
+///
+/// Ruling 6 (2026-08-12): the mock-up's four feedback durations collapse to the
+/// one the foot's "Revealed" already used. The word belongs to the pane foot,
+/// which is slice 4's; until there is one it is printed on the same strip the
+/// truncation notice stands on, which is the body's existing channel for a
+/// sentence about the file rather than of it.
+pub const PREVIEW_SAVED_NOTICE: &str = "Saved";
+
+/// What the window says instead of overwriting somebody else's write.
+///
+/// It says what happened, what was *not* done, and what is still true — the
+/// edits are still here — because a conflict notice that only announces failure
+/// leaves the user believing their work is gone.
+pub const PREVIEW_CONFLICT_NOTICE: &str =
+    "Not saved — this file changed on disk since it was opened; your edits are still here";
+
+/// When a file was last written, or `None` if it will not say.
+pub fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+}
+
+/// Where a save stages its bytes before they become the file.
+///
+/// A sibling of the target and not a `%TEMP%` entry, for the one reason that
+/// decides it: [`save_atomically`]'s last step is a rename, and a rename is only
+/// atomic *within a volume*. A staging file on another drive would turn the
+/// whole guarantee into a copy — which is the non-atomic write this exists to
+/// avoid, wearing a temporary name.
+///
+/// Named from the process as well as the file so two windows saving the same
+/// path cannot stage over each other, and dot-prefixed so it is hidden by the
+/// same convention every tool on this platform already honours.
+pub fn preview_temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.bt-save-{}", std::process::id()))
+}
+
+/// Write a file so that it is either the old one or the new one, never half of
+/// either.
+///
+/// **Staged and renamed.** Opening the target and writing into it is the way
+/// every editor loses a file to a full disk: the truncate has already happened
+/// when the write fails, and what is left is neither version. Here the target is
+/// not touched at all until the bytes are on the disk and flushed, and the last
+/// step is a single rename the filesystem either performs or does not.
+pub fn save_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let temp = preview_temp_path(path);
+    let staged = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(contents.as_bytes())?;
+        // Flushed before the rename, so a crash between the two cannot leave the
+        // *name* switched over to a body that never reached the platter.
+        file.sync_all()
+    })();
+    if let Err(error) = staged {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Read at most [`PREVIEW_HEAD_BYTES`] of a file, and decide what it is.
@@ -922,6 +1100,10 @@ pub fn read_head(path: &Path) -> HeadOutcome {
     }
     let truncated = head.len() > PREVIEW_HEAD_BYTES;
     head.truncate(PREVIEW_HEAD_BYTES);
+    // Asked of the handle the bytes came out of, not of the path: between two
+    // calls by name a file can be replaced entirely, and a stamp belonging to a
+    // file other than the one that was read is worse than no stamp at all.
+    let mtime = file.metadata().ok().and_then(|meta| meta.modified().ok());
     // The one sniff §7.1.3 asks for, and the only one that is nearly free and
     // nearly never wrong: text does not hold a NUL, and every binary format
     // worth refusing holds one in its first few bytes.
@@ -931,6 +1113,7 @@ pub fn read_head(path: &Path) -> HeadOutcome {
     HeadOutcome::Read {
         text: decode_head(&head, truncated),
         truncated,
+        mtime,
     }
 }
 
@@ -1120,6 +1303,24 @@ mod tests {
         pool.get(Path::new(path)).expect("the pool holds this path")
     }
 
+    /// A worker answer for a body that never came off a disk.
+    fn read(text: &str, truncated: bool) -> HeadOutcome {
+        HeadOutcome::Read {
+            text: text.to_owned(),
+            truncated,
+            mtime: None,
+        }
+    }
+
+    /// A file on disk, with a buffer already reading from it.
+    fn opened(dir: &Path, name: &str, body: &str) -> PreviewBuffer {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut buffer = PreviewBuffer::new(path.clone(), name.to_owned());
+        buffer.accept(read_head(&path));
+        buffer
+    }
+
     /// ① One file, one buffer — a second open of the same path is the same
     /// buffer, edits and all.
     ///
@@ -1257,7 +1458,9 @@ mod tests {
         let big = dir.join("big.txt");
         std::fs::write(&big, "x".repeat(PREVIEW_HEAD_BYTES + 4096)).unwrap();
         match read_head(&big) {
-            HeadOutcome::Read { text, truncated } => {
+            HeadOutcome::Read {
+                text, truncated, ..
+            } => {
                 assert!(truncated);
                 assert_eq!(text.len(), PREVIEW_HEAD_BYTES);
             }
@@ -1269,7 +1472,8 @@ mod tests {
             read_head(&small),
             HeadOutcome::Read {
                 text: "one line\n".to_owned(),
-                truncated: false
+                truncated: false,
+                mtime: file_mtime(&small),
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1496,15 +1700,9 @@ mod tests {
     #[test]
     fn only_a_truncated_buffer_carries_the_read_only_notice() {
         let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
-        buffer.accept(HeadOutcome::Read {
-            text: "fn main() {}\n".to_owned(),
-            truncated: false,
-        });
+        buffer.accept(read("fn main() {}\n", false));
         assert_eq!(buffer.truncation_notice(), None);
-        buffer.accept(HeadOutcome::Read {
-            text: "fn main() {}\n".to_owned(),
-            truncated: true,
-        });
+        buffer.accept(read("fn main() {}\n", true));
         assert_eq!(buffer.truncation_notice(), Some(PREVIEW_TRUNCATED_NOTICE));
     }
 
@@ -1519,16 +1717,10 @@ mod tests {
     #[test]
     fn the_widest_line_is_measured_in_the_columns_it_will_draw_as() {
         let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
-        buffer.accept(HeadOutcome::Read {
-            text: "ab\n\t\tx\n\u{4f60}\u{597d}\n".to_owned(),
-            truncated: false,
-        });
+        buffer.accept(read("ab\n\t\tx\n\u{4f60}\u{597d}\n", false));
         // Two tabs are eight columns, plus the `x`.
         assert_eq!(buffer.max_columns, 9);
-        buffer.accept(HeadOutcome::Read {
-            text: "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{ff01}".to_owned(),
-            truncated: false,
-        });
+        buffer.accept(read("\u{4f60}\u{597d}\u{4e16}\u{754c}\u{ff01}", false));
         assert_eq!(
             buffer.max_columns, 10,
             "five wide characters are ten columns"
@@ -1598,6 +1790,197 @@ mod tests {
             asked,
             vec![PreviewWant::Head, PreviewWant::Size],
             "neither supersedes the other"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── slice 3: quick edit ─────────────────────────────────────────────────
+
+    /// ① The first real change dirties the buffer, and editing back to the
+    /// original does not clean it.
+    ///
+    /// The second half is the ruling and the reason the bit is monotonic: the
+    /// buffer has been through a state the disk never saw, and a dot that goes
+    /// out because you happened to retype what you deleted is a dot nobody can
+    /// trust the one time it matters. Only a save cleans it.
+    ///
+    /// Mutation: set `dirty` from `content != original` rather than from the
+    /// fact of an edit; or drop the `if !edit(content)` guard, which dirties a
+    /// file for a keystroke that changed nothing.
+    #[test]
+    fn the_first_real_change_dirties_the_buffer_and_nothing_cleans_it_but_a_save() {
+        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        buffer.accept(read("fn main() {}\n", false));
+        assert!(!buffer.dirty, "a freshly read buffer is clean");
+
+        // A no-op edit is not an edit.
+        assert!(!buffer.edit_content(|_| false));
+        assert!(!buffer.dirty);
+
+        assert!(buffer.edit_content(|content| {
+            content.insert_str(0, "// ");
+            true
+        }));
+        assert!(buffer.dirty);
+        assert_eq!(buffer.content.as_deref(), Some("// fn main() {}\n"));
+
+        // Back to the words it started with — still dirty.
+        assert!(buffer.edit_content(|content| {
+            content.replace_range(0..3, "");
+            true
+        }));
+        assert_eq!(buffer.content.as_deref(), Some("fn main() {}\n"));
+        assert!(buffer.dirty, "editing back to the original does not clean");
+    }
+
+    /// ⑥ An edit is counted, so a cache keyed on the count sees a change that
+    /// kept the length.
+    ///
+    /// The named bug: `content_len` was the revision counter until this slice,
+    /// and swapping one letter for another left every derived document
+    /// convinced it was still looking at the old text.
+    ///
+    /// Mutation: stop incrementing `revision` in [`PreviewBuffer::edit_content`].
+    #[test]
+    fn an_edit_that_keeps_the_length_still_counts() {
+        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        buffer.accept(read("abc", false));
+        let before = buffer.revision;
+        assert!(buffer.edit_content(|content| {
+            content.replace_range(2..3, "d");
+            true
+        }));
+        assert_eq!(buffer.content.as_deref(), Some("abd"));
+        assert_ne!(
+            buffer.revision, before,
+            "a same-length edit is still an edit"
+        );
+        // And the widest line follows the edit rather than the read.
+        assert!(buffer.edit_content(|content| {
+            content.push_str("\nlonger line");
+            true
+        }));
+        assert_eq!(buffer.max_columns, 11);
+    }
+
+    /// The read-only degradation is enforced where the editing is.
+    ///
+    /// §7.1.3's "超大文件只读降级": a truncated buffer holds the first 64KB of
+    /// its file, so an edit surface over it is a save button wired to
+    /// `truncate`.
+    ///
+    /// Mutation: drop the `!self.truncated` clause from
+    /// [`PreviewBuffer::is_editable`].
+    #[test]
+    fn a_truncated_buffer_is_read_only_however_editable_its_name_is() {
+        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        assert!(!buffer.is_editable(), "a buffer with no body has no caret");
+        buffer.accept(read("fn main() {}\n", false));
+        assert!(buffer.is_editable());
+        buffer.accept(read("fn main() {}\n", true));
+        assert!(!buffer.is_editable());
+    }
+
+    /// ② A save writes the body to the disk and cleans the buffer.
+    ///
+    /// Mutation: return [`SaveOutcome::Saved`] without calling
+    /// [`save_atomically`], or leave `dirty` set.
+    #[test]
+    fn a_save_writes_the_body_and_cleans_the_buffer() {
+        let dir = scratch("save");
+        let mut buffer = opened(&dir, "notes.txt", "one\ntwo\n");
+        buffer.edit_content(|content| {
+            content.push_str("three\n");
+            true
+        });
+        assert!(buffer.dirty);
+        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        assert!(!buffer.dirty, "a saved buffer is clean");
+        assert_eq!(
+            std::fs::read_to_string(&buffer.path).unwrap(),
+            "one\ntwo\nthree\n",
+            "the bytes on the disk are the bytes in the buffer"
+        );
+        // The stamp moved with the write, so the very next save is not a
+        // conflict with itself.
+        buffer.edit_content(|content| {
+            content.push_str("four\n");
+            true
+        });
+        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        // Nothing is left behind beside the file.
+        assert!(!preview_temp_path(&buffer.path).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ③ A write that fails leaves the file it was aimed at untouched.
+    ///
+    /// The failure is injected the only honest way a filesystem allows: the
+    /// staging path is occupied by a *directory*, so creating the staging file
+    /// cannot succeed. Under the mutation the target is opened directly, the
+    /// truncate has already happened when the failure arrives, and what is left
+    /// on the disk is neither version.
+    ///
+    /// Mutation: write straight to `path` in [`save_atomically`] instead of
+    /// staging and renaming.
+    #[test]
+    fn a_failed_write_leaves_the_original_file_whole() {
+        let dir = scratch("atomic");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "the original\n").unwrap();
+        std::fs::create_dir_all(preview_temp_path(&path)).unwrap();
+
+        let error = save_atomically(&path, "the replacement\n")
+            .expect_err("a staging file cannot be created over a directory");
+        assert!(!error.to_string().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "the original\n",
+            "the target was never opened"
+        );
+
+        // With the staging path free again the same call goes through.
+        std::fs::remove_dir_all(preview_temp_path(&path)).unwrap();
+        save_atomically(&path, "the replacement\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the replacement\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ④ A file the disk has moved on from is not overwritten.
+    ///
+    /// Ruling 8⑨'s minimum: the window says so and keeps the edits. The stamp
+    /// is set to a time no file has rather than raced against the clock, so the
+    /// test asserts the comparison and not the resolution of a filesystem's
+    /// timestamps.
+    ///
+    /// Mutation: drop the `file_mtime(&self.path) != self.disk_mtime` guard,
+    /// which is exactly the blind write the ruling forbids.
+    #[test]
+    fn a_file_that_changed_on_disk_is_not_blindly_overwritten() {
+        let dir = scratch("conflict");
+        let mut buffer = opened(&dir, "notes.txt", "as it was read\n");
+        buffer.edit_content(|content| {
+            content.push_str("and as it was edited\n");
+            true
+        });
+        // Somebody else wrote the file after this buffer read it.
+        buffer.disk_mtime = Some(SystemTime::UNIX_EPOCH);
+
+        assert_eq!(buffer.save(), SaveOutcome::Conflict);
+        assert_eq!(
+            std::fs::read_to_string(&buffer.path).unwrap(),
+            "as it was read\n",
+            "the other writer's file is still theirs"
+        );
+        assert!(buffer.dirty, "and the edits are still here");
+        assert!(!preview_temp_path(&buffer.path).exists());
+
+        // Re-reading the file settles the conflict, and the same save lands.
+        buffer.disk_mtime = file_mtime(&buffer.path);
+        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        assert_eq!(
+            std::fs::read_to_string(&buffer.path).unwrap(),
+            "as it was read\nand as it was edited\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

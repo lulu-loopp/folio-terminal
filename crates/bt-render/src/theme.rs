@@ -341,6 +341,19 @@ pub struct ChromePalette {
     /// `.pv-table th { color: var(--ink) }`, standing on the head row's own
     /// `--hover` fill rather than on the bare body.
     pub preview_table_head_text: [u8; 3],
+    /// What a quick edit's selection lies under.
+    ///
+    /// The terminal's own selection fill, and deliberately not a second one: a
+    /// preview body stands on `--termbg` exactly as the grid does, the mock-up
+    /// declares no `::selection` for either, and two blues on one screen for one
+    /// idea would be the window disagreeing with itself about what "selected"
+    /// looks like. Its value is therefore
+    /// [`DEFAULT_SELECTION_BACKGROUND_RGB`]/[`LIGHT_SELECTION_BACKGROUND_RGB`],
+    /// picked here at palette-build time rather than read from the atomic
+    /// snapshot because everything else in this struct is.
+    pub preview_selection: [u8; 3],
+    /// A quick edit's caret — the terminal's `--cursor`, for the same reason.
+    pub preview_caret: [u8; 3],
     // ── the file tree's rows, mixed over the one ground a files body has ──
     //
     // A files pane's body is `--termbg` and nothing else (B15/U11), so unlike
@@ -796,6 +809,8 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // `--ink` (white .87) over `--hover` over `--termbg`: 27 + 228×.055 = 39.5,
     // then 39.5 + 215.5×.87 = 227.0.
     preview_table_head_text: [0xe3, 0xe3, 0xe3],
+    preview_selection: DEFAULT_SELECTION_BACKGROUND_RGB,
+    preview_caret: DEFAULT_CURSOR_RGB,
     // The file tree's three grounds on `--termbg #1B1B1B`:
     //   `--hover`  white .055 → 27 + 228×.055 = 39.5
     //   `--active` white .09  → 27 + 228×.09  = 47.5
@@ -976,6 +991,8 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     preview_diff_hunk: [0x30, 0x59, 0xd8],
     // `--ink #37352F` is opaque on this canvas, so the head row's ink is itself.
     preview_table_head_text: [0x37, 0x35, 0x2f],
+    preview_selection: LIGHT_SELECTION_BACKGROUND_RGB,
+    preview_caret: LIGHT_CURSOR_RGB,
     // The file tree's three grounds on `--termbg #FFFFFF`. The inks here are
     // rgb(55,53,47), so each channel steps down by {200,202,208}×alpha:
     //   `--hover`  .055 → (244.0, 243.9, 243.6)

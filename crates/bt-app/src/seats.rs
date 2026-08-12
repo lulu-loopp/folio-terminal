@@ -8997,25 +8997,13 @@ pub fn preview_mono_geometry(
     }
 }
 
-/// The only scroll a monospace body is allowed to hold, on both axes.
-///
-/// [`clamp_files_scroll`]'s twin, with the same contract and now with two
-/// numbers: every write of the stored offset goes through here, so a buffer that
-/// got shorter — or *narrower*, which a switch to another file usually is —
-/// cannot leave the body parked past its own end on either axis.
-#[must_use]
-pub fn clamp_preview_scroll(
-    body: [f32; 4],
-    metrics: PreviewMonoMetrics,
-    rows_height: f32,
-    columns: usize,
-    advance: f32,
-    scroll: [f32; 2],
-) -> [f32; 2] {
-    let max =
-        preview_mono_geometry(body, metrics, rows_height, columns, advance, [0.0, 0.0]).max_scroll;
-    [scroll[0].clamp(0.0, max[0]), scroll[1].clamp(0.0, max[1])]
-}
+// The clamp itself is not here. [`clamp_files_scroll`]'s twin would have been,
+// until slice 3 gave the preview four bodies with three geometries between them
+// — a monospace grid, a collapsed table and a wrapped markdown — and a clamp
+// that only knew this one was exactly how a table and a rendered document came
+// to be un-scrollable. What every write of the stored offset now goes through is
+// `Runtime::clamped_preview_scroll`, which asks *each* body for the extent it
+// already computes; `max_scroll` above is this body's half of that answer.
 
 // ── the csv grid (mock-up 610-613) ──────────────────────────────────────────
 
@@ -12829,15 +12817,8 @@ mod tests {
         let long = preview_mono_geometry(body, metrics, 19.0 * 100.0, 120, 8.0, [0.0, 0.0]);
         assert_eq!(long.max_scroll[1], 20.0 + 19.0 * 100.0 - 200.0);
         assert_eq!(long.max_scroll[0], 24.0 + 960.0 - 400.0);
-        assert_eq!(
-            clamp_preview_scroll(body, metrics, 19.0 * 100.0, 120, 8.0, [-5.0, -30.0]),
-            [0.0, 0.0]
-        );
-        assert_eq!(
-            clamp_preview_scroll(body, metrics, 19.0 * 100.0, 120, 8.0, [1.0e6, 1.0e6]),
-            long.max_scroll,
-            "and never past the last line or the widest one"
-        );
+        // What is clamped *against* is pinned here; the clamp itself belongs to
+        // the runtime, which asks each of the four bodies for its own extent.
 
         let scrolled = preview_mono_geometry(body, metrics, 19.0 * 100.0, 120, 8.0, [40.0, 38.0]);
         assert_eq!(

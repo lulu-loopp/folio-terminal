@@ -1,6 +1,6 @@
 use std::{
     backtrace::Backtrace,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::OpenOptions,
     io::Write,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
@@ -19,6 +19,7 @@ mod marks;
 mod peek_strip;
 mod persist;
 mod preview;
+mod preview_edit;
 mod profiles;
 mod restore;
 mod seats;
@@ -549,16 +550,84 @@ struct DiffRow {
 ///
 /// Everything the parse or the measuring depends on, so that a change to any of
 /// them rebuilds and a change to none of them does not. The body width and the
-/// scale are in it because markdown wraps and a diff's margins are scaled; the
-/// content length stands in for the content itself, which is the cheapest
-/// honest revision counter until slice 3 gives a buffer edits to count.
+/// scale are in it because markdown wraps and a diff's margins are scaled.
+///
+/// **The revision is the content's own counter, and used to be its length.**
+/// That was written down as a stand-in "until slice 3 gives a buffer edits to
+/// count", and it was a stand-in that could not see the commonest edit there
+/// is: swapping one letter for another leaves the length alone, and the cache
+/// went on drawing the text from before the keystroke.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreviewDocumentKey {
     path: PathBuf,
     md_source: bool,
-    content_len: usize,
+    revision: u64,
     body_width_px: u32,
     scale_ppm: u32,
+}
+
+/// Everything a *pane* knows about a buffer, as opposed to everything the
+/// buffer knows about itself.
+///
+/// **Ruling 8⑧ (2026-08-12), and the line it draws.** A buffer belongs to a
+/// file; a caret, a selection and a scroll offset belong to the view looking at
+/// it — they are the one thing two panes on one buffer are allowed to disagree
+/// about, and the mock-up's own note says it in as many words: "content lives on
+/// the leaf, but focus/caret/scroll are DOM" (5721-5724). A DOM re-render
+/// destroys them and the prototype has to capture and put them back; this window
+/// does not rebuild anything, so what is left is the other half of the same
+/// contract — **switching to another file and back must not lose them either**.
+/// Hence a remembered one per path rather than a single live triple.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PreviewViewState {
+    caret: preview_edit::EditCaret,
+    /// `[x, y]`, physical pixels.
+    scroll: [f32; 2],
+}
+
+/// What each buffer looked like the last time a pane was on it.
+///
+/// Keyed by path, exactly as the pool is, so a buffer and the view of it are
+/// found by the same question. Bounded by nothing on purpose: an entry is three
+/// numbers, the pool that gives them meaning is capped at eight, and an entry
+/// for a buffer that has been evicted is the memory that makes re-opening a file
+/// feel like coming back to it.
+#[derive(Clone, Debug, Default)]
+struct PreviewViewStore {
+    views: HashMap<PathBuf, PreviewViewState>,
+}
+
+impl PreviewViewStore {
+    /// File what a pane is leaving behind.
+    fn remember(&mut self, path: &Path, view: PreviewViewState) {
+        self.views.insert(path.to_owned(), view);
+    }
+
+    /// What a pane arriving at this file already knows. A file never looked at
+    /// starts at the top with the caret at its head, which is
+    /// [`PreviewViewState::default`].
+    fn restore(&self, path: &Path) -> PreviewViewState {
+        self.views.get(path).copied().unwrap_or_default()
+    }
+}
+
+/// The key one buffer earns at one width and scale.
+///
+/// A free function rather than a method so the identity can be asserted without
+/// a window — which is the whole of test ⑥, and the only way to state "a
+/// same-length edit rebuilds" as a property rather than as a screenshot.
+fn preview_document_key(
+    buffer: &preview::PreviewBuffer,
+    body_width_px: f32,
+    scale: f32,
+) -> PreviewDocumentKey {
+    PreviewDocumentKey {
+        path: buffer.path.clone(),
+        md_source: buffer.md_source,
+        revision: buffer.revision,
+        body_width_px: body_width_px.max(0.0).round() as u32,
+        scale_ppm: (scale * 1_000_000.0).round() as u32,
+    }
 }
 
 // ── the read-only view family, built from a parsed document ─────────────────
@@ -680,10 +749,35 @@ fn visible_range(
     above.min(count)..below
 }
 
+/// What a quick edit adds to its own body: the band under the selection and the
+/// caret standing in it.
+///
+/// Columns rather than pixels, because the surface is a monospace grid and a
+/// column times an advance is exact — the same arithmetic the hit test reads
+/// backwards, which is what keeps the caret drawn where the click was made.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PreviewEditPaint {
+    /// `(line, from_column, to_column)`, one per visible line the selection
+    /// touches.
+    bands: Vec<(usize, usize, usize)>,
+    /// `(line, column)` — drawn only while the surface holds the keyboard.
+    caret: Option<(usize, usize)>,
+    caret_width: f32,
+}
+
 /// `.pv-edit`'s body: plain monospace lines, no wrapping.
+///
+/// **The selection's quads ride here rather than going out as seat chrome**, and
+/// that is the one structural thing about this surface: chrome is drawn a whole
+/// pass earlier and would sit under the *pane* instead of under the scrolled
+/// document, so a band painted there would stay put while its own text moved.
+/// [`bt_render::PreviewBody`] draws its fills and then its text, so a band is
+/// under the letters it is about by construction.
 fn build_preview_text_body(
     geometry: &seats::PreviewMonoGeometry,
     lines: &[String],
+    advance: f32,
+    edit: Option<&PreviewEditPaint>,
     palette: &bt_render::ChromePalette,
 ) -> bt_render::PreviewBody {
     let clip = geometry.viewport;
@@ -693,9 +787,32 @@ fn build_preview_text_body(
         lines.len(),
         clip,
     );
+    let mut quads = Vec::new();
+    if let Some(edit) = edit {
+        for (line, from, to) in &edit.bands {
+            let row = geometry.line_rect(*line);
+            quads.push(bt_render::PreviewQuad {
+                rect: [
+                    row[0] + advance * *from as f32,
+                    row[1],
+                    row[0] + advance * *to as f32,
+                    row[3],
+                ],
+                color: palette.preview_selection,
+            });
+        }
+        if let Some((line, column)) = edit.caret {
+            let row = geometry.line_rect(line);
+            let x = row[0] + advance * column as f32;
+            quads.push(bt_render::PreviewQuad {
+                rect: [x, row[1], x + edit.caret_width, row[3]],
+                color: palette.preview_caret,
+            });
+        }
+    }
     bt_render::PreviewBody {
         clip,
-        quads: Vec::new(),
+        quads,
         paragraphs: range
             .map(|index| {
                 mono_paragraph(
@@ -990,6 +1107,85 @@ fn build_preview_markdown_body(
         clip: body,
         quads,
         paragraphs,
+    }
+}
+
+/// How far each of the four bodies may be scrolled.
+///
+/// **Every body answers for itself, in its own geometry.** Slice 2 left two of
+/// them answering "not at all" — a table and a rendered markdown clamped to
+/// nothing — and wrote the debt down as an open account: a `.csv` with a hundred
+/// rows and a `README.md` longer than its pane were *drawn* past their own ends
+/// and could never be scrolled to. The account is settled by asking each
+/// geometry for the extent it already computes rather than by teaching the
+/// monospace path about two layouts that are not monospace grids.
+///
+/// Neither of the two scrolls sideways, and that is not an omission: a table's
+/// columns are derived from its own widest cells, and markdown *wraps* to the
+/// pane, so a horizontal offset would be an offset into nothing.
+fn preview_document_max_scroll(
+    document: &PreviewDocument,
+    body: [f32; 4],
+    scale: f32,
+    advance: f32,
+    rows_height: f32,
+    columns: usize,
+) -> [f32; 2] {
+    match document {
+        PreviewDocument::Table { rows, column_cells } => {
+            seats::preview_table_geometry(
+                body,
+                column_cells,
+                rows.len(),
+                advance,
+                scale,
+                [0.0, 0.0],
+            )
+            .max_scroll
+        }
+        PreviewDocument::Markdown { heights, tops, .. } => {
+            let metrics = seats::preview_markdown_metrics(scale);
+            let content = tops
+                .last()
+                .zip(heights.last())
+                .map_or(0.0, |(top, height)| top + height);
+            seats::preview_mono_geometry(
+                body,
+                seats::PreviewMonoMetrics {
+                    font_size: metrics.font_size,
+                    line_height: metrics.line_height,
+                    padding_x: metrics.padding_x,
+                    padding_y: metrics.padding_y,
+                },
+                content,
+                0,
+                advance,
+                [0.0, 0.0],
+            )
+            .max_scroll
+        }
+        PreviewDocument::Diff(_) => {
+            seats::preview_mono_geometry(
+                body,
+                seats::preview_diff_metrics(scale),
+                rows_height,
+                columns,
+                advance,
+                [0.0, 0.0],
+            )
+            .max_scroll
+        }
+        PreviewDocument::Text(_) | PreviewDocument::Empty => {
+            seats::preview_mono_geometry(
+                body,
+                seats::preview_text_metrics(scale),
+                rows_height,
+                columns,
+                advance,
+                [0.0, 0.0],
+            )
+            .max_scroll
+        }
     }
 }
 
@@ -1583,6 +1779,31 @@ struct TabState {
     /// edge, and a body that can only be scrolled downward would leave the end
     /// of every long line permanently out of reach.
     preview_scroll: [f32; 2],
+    /// Where the caret is in the buffer on the seat, and what it has selected.
+    ///
+    /// Beside the scroll offset and for the same reason: both are the *view's*,
+    /// not the buffer's (ruling 8⑧).
+    preview_caret: preview_edit::EditCaret,
+    /// Whether the quick edit holds the keyboard.
+    ///
+    /// **This is `InputOwner::PreviewEdit`** (`docs/DESIGN.md` §7.1.5), the
+    /// third member of that enum to get a body, and it is read through
+    /// [`Runtime::preview_edit_focus`] rather than directly so that every way it
+    /// can go stale — the seat closed, the buffer became a picture, the markdown
+    /// flipped back to its render — is healed at the read, exactly as
+    /// `files_keyboard_seat` heals its own.
+    preview_edit_focused: bool,
+    /// What every buffer looked like the last time a pane was on it.
+    preview_views: PreviewViewStore,
+    /// The sentence the body owes about the last save, and when it was said.
+    ///
+    /// `Saved` expires on its own after [`FOOT_REVEAL_FEEDBACK`] (ruling 6: all
+    /// four mock-up durations are 1300ms); a conflict does not, because it is
+    /// not an acknowledgement of something that happened but a report of
+    /// something that did *not*, and it stands until the next save answers it.
+    preview_notice: Option<(String, Instant)>,
+    /// Whether the pointer is drawing a selection across the edit surface.
+    preview_selecting: bool,
     /// The arc's easing toward the reading it is now showing, if it is moving.
     ring_tween: Option<SweepTween>,
     /// The sweep the ring is displaying, which is also what a state change
@@ -8325,6 +8546,11 @@ fn assemble_tab_state(
         preview_doc_key: None,
         preview_mono_advance: 0.0,
         preview_scroll: [0.0, 0.0],
+        preview_caret: preview_edit::EditCaret::default(),
+        preview_edit_focused: false,
+        preview_views: PreviewViewStore::default(),
+        preview_notice: None,
+        preview_selecting: false,
     };
     debug_assert!(
         tab.sessions_match_terminals(),
@@ -12199,9 +12425,8 @@ impl Runtime {
         self.renderer.set_preview_image(None);
         // The document the seat was showing is not what it is showing now. The
         // buffer itself stays in the pool — it belongs to the tab, not to the
-        // pane — so switching back finds it whole.
-        self.preview_buffer = None;
-        self.preview_scroll = [0.0, 0.0];
+        // pane — so switching back finds it whole, and so does the view of it.
+        self.leave_preview_buffer();
         self.renderer.set_preview_body(None);
         if self.seats.preview().is_none() {
             return self.toggle_preview_seat();
@@ -12233,8 +12458,14 @@ impl Runtime {
         let shown: Vec<PathBuf> = self.preview_buffer.iter().cloned().collect();
         let buffer = self.preview_pool.open(path.clone(), name, &shown);
         let wants_read = buffer.wants_head_read();
+        // The outgoing view is filed and the incoming one is found: a caret and
+        // a scroll are the pane's memory of a file, and a switch that reset them
+        // would make the switcher a thing you pay for using (ruling 8⑧).
+        self.leave_preview_buffer();
+        let view = self.preview_views.restore(&path);
         self.preview_buffer = Some(path.clone());
-        self.preview_scroll = [0.0, 0.0];
+        self.preview_caret = view.caret;
+        self.preview_scroll = view.scroll;
         if wants_read
             && !self.preview_worker.request(preview::PreviewRequest {
                 tab,
@@ -12260,9 +12491,30 @@ impl Runtime {
     /// slice 4's — and until edits exist there is nothing dirty for them to
     /// guard, so nothing here has anything to confirm.
     fn clear_preview_view(&mut self) {
-        self.preview_buffer = None;
-        self.preview_scroll = [0.0, 0.0];
+        self.leave_preview_buffer();
         self.renderer.set_preview_body(None);
+    }
+
+    /// The pane is about to stop showing whatever it is showing. **File the
+    /// view, keep the buffer.**
+    ///
+    /// One door for the three ways a pane leaves a document — another file, a
+    /// picture, the pane closing — because the thing that must not be forgotten
+    /// is the same in all three, and a caret remembered in two of them is a
+    /// caret that goes missing depending on how you left.
+    fn leave_preview_buffer(&mut self) {
+        if let Some(path) = self.preview_buffer.take() {
+            let view = PreviewViewState {
+                caret: self.preview_caret,
+                scroll: self.preview_scroll,
+            };
+            self.preview_views.remember(&path, view);
+        }
+        self.preview_caret = preview_edit::EditCaret::default();
+        self.preview_scroll = [0.0, 0.0];
+        self.preview_edit_focused = false;
+        self.preview_selecting = false;
+        self.preview_notice = None;
     }
 
     /// The buffer the preview seat is showing, if it is showing one.
@@ -12314,18 +12566,34 @@ impl Runtime {
     /// table and a rendered markdown, which fit their pane or overflow it in
     /// ways slice 2 does not scroll) clamp to nothing, which is the truth.
     fn clamped_preview_scroll(&self, body: [f32; 4], scale: f32, scroll: [f32; 2]) -> [f32; 2] {
+        let max = self.preview_max_scroll(body, scale);
+        [scroll[0].clamp(0.0, max[0]), scroll[1].clamp(0.0, max[1])]
+    }
+
+    /// How far each of the four bodies may be scrolled.
+    ///
+    /// **Every body answers for itself, in its own geometry.** Slice 2 left two
+    /// of them answering "not at all" — a table and a rendered markdown clamped
+    /// to nothing — and wrote the debt down as an open account: a `.csv` with a
+    /// hundred rows and a `README.md` longer than the pane could be *drawn* past
+    /// their own ends and never scrolled back. The account is settled here, and
+    /// it is settled by asking each geometry for the extent it already computes
+    /// rather than by teaching the mono path about two layouts that are not
+    /// monospace grids.
+    ///
+    /// Neither of the two scrolls sideways, and that is not an omission: a table
+    /// whose columns are derived from its own widest cells is as wide as it is,
+    /// and markdown *wraps* to the pane, so a horizontal offset would be an
+    /// offset into nothing.
+    fn preview_max_scroll(&self, body: [f32; 4], scale: f32) -> [f32; 2] {
         let (rows_height, columns) = self.preview_content_extent(scale);
-        let metrics = match self.preview_doc {
-            PreviewDocument::Diff(_) => seats::preview_diff_metrics(scale),
-            _ => seats::preview_text_metrics(scale),
-        };
-        seats::clamp_preview_scroll(
+        preview_document_max_scroll(
+            &self.preview_doc,
             body,
-            metrics,
+            scale,
+            self.preview_mono_advance,
             rows_height,
             columns,
-            self.preview_mono_advance,
-            scroll,
         )
     }
 
@@ -12371,6 +12639,460 @@ impl Runtime {
         }
     }
 
+    // ── the quick edit (mock-up 4980-4983, 7858-7886) ───────────────────────
+    //
+    // **A `<textarea>`, not an IDE**, and every absence is that sentence: no
+    // line numbers, no syntax, no wrap toggle, no second caret, no language
+    // server. What is here is what a text field has — a caret, a selection, the
+    // keys that move them, and one explicit save.
+
+    /// Whether the quick edit holds the keyboard — **`InputOwner::PreviewEdit`**.
+    ///
+    /// Healed at the read, exactly as [`Self::files_keyboard_seat`] is and for
+    /// the same reason: every way the flag can go stale (the seat closed, the
+    /// document became a picture, the markdown flipped back to its render, the
+    /// file turned out to be truncated and therefore read-only) is answered here
+    /// rather than by remembering to write `false` at each of those places. The
+    /// keyboard falls back to the shell the instant there is nothing to type
+    /// into.
+    fn preview_edit_focus(&self) -> bool {
+        self.preview_edit_focused
+            && self.seats.preview().is_some()
+            && self
+                .current_preview_buffer()
+                .is_some_and(preview::PreviewBuffer::is_editable)
+    }
+
+    /// Whether the preview seat is the focused leaf — the other half of the
+    /// mock-up's global `Ctrl+S` (6139-6150), which saves "from any focus
+    /// state".
+    fn preview_seat_focused(&self) -> bool {
+        self.seats.preview() == Some(self.seats.focus())
+    }
+
+    /// One key, with the quick edit holding the keyboard.
+    ///
+    /// Returns whether the key was the editor's at all. **Everything is**, once
+    /// it has the focus (P139: "editor keys are the editor's — the terminal must
+    /// not hear them"), which is why [`preview_edit::command`] is total and this
+    /// returns `true` for every branch below it. Without the focus exactly one
+    /// chord is still taken, and only when the preview seat is the focused leaf:
+    /// the mock-up's global save, which exists precisely for "you flipped to the
+    /// rendered view / clicked elsewhere in the pane".
+    fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {
+        if !self.preview_edit_focus() {
+            eprintln!(
+                "BT_PVDBG unfocused flag={} seat={:?} editable={:?} key={:?}",
+                self.preview_edit_focused,
+                self.seats.preview(),
+                self.current_preview_buffer()
+                    .map(preview::PreviewBuffer::is_editable),
+                event.logical_key
+            );
+            if !event.repeat
+                && self.preview_seat_focused()
+                && matches!(
+                    preview_edit::command(&event.logical_key, self.modifiers),
+                    preview_edit::EditCommand::Save
+                )
+            {
+                self.save_preview()?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        let command = preview_edit::command(&event.logical_key, self.modifiers);
+        eprintln!(
+            "BT_PVDBG key={:?} mods={:?} -> {command:?}",
+            event.logical_key, self.modifiers
+        );
+        // Repeats travel and type; they do not save, copy, paste or blur. Held
+        // Enter is one continuous "again" and held Ctrl+S is not — the same line
+        // the files tree draws between its travel keys and its verbs.
+        if event.repeat
+            && matches!(
+                command,
+                preview_edit::EditCommand::Save
+                    | preview_edit::EditCommand::Copy
+                    | preview_edit::EditCommand::Cut
+                    | preview_edit::EditCommand::Paste
+                    | preview_edit::EditCommand::SelectAll
+                    | preview_edit::EditCommand::Release
+            )
+        {
+            return Ok(true);
+        }
+        match command {
+            preview_edit::EditCommand::Insert(text) => self.insert_into_preview(&text)?,
+            preview_edit::EditCommand::Newline => {
+                let eol = self
+                    .current_preview_buffer()
+                    .and_then(|buffer| buffer.content.as_deref())
+                    .map_or("\n", preview_edit::eol_of);
+                self.insert_into_preview(eol)?;
+            }
+            // A literal tab. `tab-size: 4` is how one is *drawn* (mock-up 603);
+            // expanding it on the way in would rewrite the indentation of every
+            // file the preview was opened in.
+            preview_edit::EditCommand::Tab => self.insert_into_preview("\t")?,
+            preview_edit::EditCommand::Backspace => {
+                self.edit_preview(preview_edit::backspace)?;
+            }
+            preview_edit::EditCommand::Delete => {
+                self.edit_preview(preview_edit::delete_forward)?;
+            }
+            preview_edit::EditCommand::Move { motion, extend } => {
+                self.move_preview_caret(motion, extend)?;
+            }
+            preview_edit::EditCommand::SelectAll => {
+                let mut caret = self.preview_caret;
+                if let Some(content) = self
+                    .current_preview_buffer()
+                    .and_then(|buffer| buffer.content.as_deref())
+                {
+                    preview_edit::select_all(content, &mut caret);
+                }
+                self.preview_caret = caret;
+                self.repaint_preview()?;
+            }
+            preview_edit::EditCommand::Copy => self.copy_preview_selection(),
+            preview_edit::EditCommand::Cut => {
+                self.copy_preview_selection();
+                self.edit_preview(|content, caret| {
+                    !caret.is_empty() && preview_edit::insert(content, caret, "")
+                })?;
+            }
+            preview_edit::EditCommand::Paste => self.paste_into_preview()?,
+            preview_edit::EditCommand::Save => self.save_preview()?,
+            // Esc gives the keyboard back. Answered here rather than encoded,
+            // which is exactly what §7.1.5's layering says: Esc reaches the child
+            // only when the owner is the terminal.
+            preview_edit::EditCommand::Release => {
+                self.preview_edit_focused = false;
+                self.repaint_preview()?;
+            }
+            preview_edit::EditCommand::Ignore => {}
+        }
+        Ok(true)
+    }
+
+    /// Type into the buffer on the seat.
+    fn insert_into_preview(&mut self, text: &str) -> Result<()> {
+        self.edit_preview(|content, caret| preview_edit::insert(content, caret, text))
+    }
+
+    /// Run one edit against the buffer the seat is showing.
+    ///
+    /// **The pool's buffer, not a copy of it.** A file open in two panes is one
+    /// buffer (§7.1.3), so an edit goes to the pool or it forks — and the caret
+    /// travels beside it because a caret is the *view's* (ruling 8⑧), which is
+    /// why the two live in different places and move together here.
+    fn edit_preview(
+        &mut self,
+        edit: impl FnOnce(&mut String, &mut preview_edit::EditCaret) -> bool,
+    ) -> Result<()> {
+        let Some(path) = self.preview_buffer.clone() else {
+            return Ok(());
+        };
+        let mut caret = self.preview_caret;
+        let Some(buffer) = self.preview_pool.get_mut(&path) else {
+            return Ok(());
+        };
+        if !buffer.is_editable() {
+            return Ok(());
+        }
+        let changed = buffer.edit_content(|content| edit(content, &mut caret));
+        self.preview_caret = caret;
+        if changed {
+            // A keystroke answers whatever the last save had to say: a conflict
+            // notice still standing over a body that has moved on is a sentence
+            // about a state that no longer exists.
+            self.preview_notice = None;
+        }
+        self.reveal_preview_caret();
+        self.repaint_preview()
+    }
+
+    /// Move the caret, and bring it back into view.
+    fn move_preview_caret(&mut self, motion: preview_edit::Motion, extend: bool) -> Result<()> {
+        let Some(content) = self
+            .current_preview_buffer()
+            .and_then(|buffer| buffer.content.clone())
+        else {
+            return Ok(());
+        };
+        let rows = self.preview_page_rows();
+        let mut caret = self.preview_caret;
+        preview_edit::move_caret(&content, &mut caret, motion, extend, rows);
+        self.preview_caret = caret;
+        self.reveal_preview_caret();
+        self.repaint_preview()
+    }
+
+    /// How many lines the edit surface can show — what a page is.
+    fn preview_page_rows(&self) -> usize {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+            return 1;
+        };
+        let metrics = seats::preview_text_metrics(scale);
+        (((body[3] - body[1]) / metrics.line_height).floor() as usize).max(1)
+    }
+
+    /// Scroll until the caret is on screen.
+    ///
+    /// **The minimum move, on each axis independently.** A caret that walked off
+    /// the bottom brings the body up by exactly one line rather than recentring,
+    /// which is what every text field does and the only behaviour that makes
+    /// holding Down look like reading rather than like jumping.
+    fn reveal_preview_caret(&mut self) {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+            return;
+        };
+        let Some((line, column)) = self.preview_caret_position() else {
+            return;
+        };
+        let metrics = seats::preview_text_metrics(scale);
+        let advance = self.preview_mono_advance;
+        let top = metrics.padding_y + metrics.line_height * line as f32;
+        let bottom = top + metrics.line_height;
+        let left = metrics.padding_x + advance * column as f32;
+        let mut scroll = self.preview_scroll;
+        let height = body[3] - body[1];
+        let width = body[2] - body[0];
+        scroll[1] = scroll[1].min(top).max(bottom - height);
+        // The caret's own cell has to fit, not just its left edge — otherwise the
+        // character being typed is the one thing off the right of the pane.
+        scroll[0] = scroll[0]
+            .min(left - metrics.padding_x)
+            .max(left + advance + metrics.padding_x - width);
+        self.preview_scroll = self.clamped_preview_scroll(body, scale, scroll);
+    }
+
+    /// Which row and column the caret stands on.
+    fn preview_caret_position(&self) -> Option<(usize, usize)> {
+        let content = self
+            .current_preview_buffer()
+            .and_then(|buffer| buffer.content.as_deref())?;
+        let starts = preview_edit::line_starts(content);
+        let caret = preview_edit::normalize(content, self.preview_caret.caret);
+        let line = preview_edit::line_index(&starts, caret);
+        let (start, _) = preview_edit::line_bounds(content, &starts, line);
+        let text = preview_edit::line_text(content, &starts, line);
+        Some((line, preview_edit::column_of(text, caret - start)))
+    }
+
+    /// Put the selection on the clipboard, through the door the terminal's own
+    /// copy already uses.
+    fn copy_preview_selection(&mut self) {
+        let Some(text) = self
+            .current_preview_buffer()
+            .and_then(|buffer| buffer.content.as_deref())
+            .map(|content| self.preview_caret.selected(content).to_owned())
+            .filter(|text| !text.is_empty())
+        else {
+            return;
+        };
+        if let Err(error) = write_terminal_clipboard_text(&self.window, &text) {
+            eprintln!("recoverable preview copy failure: {error:#}");
+        }
+    }
+
+    /// Paste into the buffer, with the breaks the *file* uses.
+    ///
+    /// A clipboard on this platform carries CRLF whatever it was copied from, so
+    /// pasting it verbatim into a file written with bare newlines is how a
+    /// one-line paste turns the next diff into a whole-file rewrite.
+    fn paste_into_preview(&mut self) -> Result<()> {
+        let hwnd = window_hwnd(&self.window)?;
+        let text = match bt_platform::clipboard_text(hwnd) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("recoverable preview paste failure: {error}");
+                return Ok(());
+            }
+        };
+        if text.is_empty() {
+            return Ok(());
+        }
+        let eol = self
+            .current_preview_buffer()
+            .and_then(|buffer| buffer.content.as_deref())
+            .map_or("\n", preview_edit::eol_of);
+        let text = preview_edit::with_eol(&text, eol);
+        self.insert_into_preview(&text)
+    }
+
+    /// Write the buffer on the seat back to its file (mock-up 6139-6150).
+    ///
+    /// Nothing happens to a clean buffer — the mock-up's own guard, and the
+    /// reason is the acknowledgement: "Saved" printed over a save that had
+    /// nothing to write teaches the word to mean "the key worked" rather than
+    /// "the file changed".
+    fn save_preview(&mut self) -> Result<()> {
+        let Some(path) = self.preview_buffer.clone() else {
+            return Ok(());
+        };
+        let Some(buffer) = self.preview_pool.get_mut(&path) else {
+            return Ok(());
+        };
+        if !buffer.is_editable() || !buffer.dirty {
+            return Ok(());
+        }
+        let notice = match buffer.save() {
+            preview::SaveOutcome::Saved => preview::PREVIEW_SAVED_NOTICE.to_owned(),
+            preview::SaveOutcome::Conflict => preview::PREVIEW_CONFLICT_NOTICE.to_owned(),
+            preview::SaveOutcome::Failed(error) => {
+                eprintln!("recoverable preview save failure: {error}");
+                format!("Not saved \u{2014} {error}")
+            }
+        };
+        self.preview_notice = Some((notice, Instant::now()));
+        self.repaint_preview()
+    }
+
+    /// The sentence the body is owed about the last save, if it is still owed
+    /// one.
+    ///
+    /// "Saved" is an acknowledgement and expires after [`FOOT_REVEAL_FEEDBACK`]
+    /// (ruling 6: the mock-up's four durations are one). A refusal does not
+    /// expire, because it is not a report of something that happened but of
+    /// something that did *not*, and a warning that fades is a warning the user
+    /// is entitled to have missed.
+    fn preview_save_notice(&self, now: Instant) -> Option<&str> {
+        let (notice, at) = self.preview_notice.as_ref()?;
+        if notice == preview::PREVIEW_SAVED_NOTICE
+            && now.saturating_duration_since(*at) >= FOOT_REVEAL_FEEDBACK
+        {
+            return None;
+        }
+        Some(notice)
+    }
+
+    /// The acknowledgement's one wake-up: the instant it is due to go away.
+    fn preview_notice_deadline(&self) -> Option<Instant> {
+        self.preview_notice
+            .as_ref()
+            .filter(|(notice, _)| notice == preview::PREVIEW_SAVED_NOTICE)
+            .map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)
+    }
+
+    /// Take the expired acknowledgement down.
+    fn advance_preview_notice(&mut self, now: Instant) -> Result<()> {
+        if self.preview_notice.is_none() || self.preview_save_notice(now).is_some() {
+            return Ok(());
+        }
+        self.preview_notice = None;
+        self.repaint_preview()
+    }
+
+    /// A press inside the edit surface: take the keyboard, put the caret where
+    /// the pointer is, and arm the drag that selects.
+    ///
+    /// Returns whether the press was the surface's.
+    fn press_preview_body(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = self.preview_edit_body(position, scale) else {
+            return Ok(false);
+        };
+        let Some(offset) = self.preview_offset_at(body, scale, position) else {
+            return Ok(false);
+        };
+        let Some(content) = self
+            .current_preview_buffer()
+            .and_then(|buffer| buffer.content.clone())
+        else {
+            return Ok(false);
+        };
+        let mut caret = self.preview_caret;
+        // Shift-click extends from wherever the selection already was, which is
+        // the one gesture that makes a long selection possible without a drag
+        // that outruns the pane.
+        caret.place(&content, offset, self.modifiers.shift_key());
+        self.preview_caret = caret;
+        self.preview_edit_focused = true;
+        self.preview_selecting = true;
+        self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// The pointer travelling with the button down, mid-selection.
+    fn drag_preview_selection(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        if !self.preview_selecting {
+            return Ok(false);
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+            return Ok(false);
+        };
+        let Some(offset) = self.preview_offset_at(body, scale, position) else {
+            return Ok(false);
+        };
+        let Some(content) = self
+            .current_preview_buffer()
+            .and_then(|buffer| buffer.content.clone())
+        else {
+            return Ok(false);
+        };
+        let mut caret = self.preview_caret;
+        caret.place(&content, offset, true);
+        if caret == self.preview_caret {
+            return Ok(true);
+        }
+        self.preview_caret = caret;
+        self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// The edit surface's rectangle, if the pointer is inside one.
+    fn preview_edit_body(&self, position: PhysicalPosition<f64>, scale: f32) -> Option<[f32; 4]> {
+        if !self
+            .current_preview_buffer()
+            .is_some_and(preview::PreviewBuffer::is_editable)
+        {
+            return None;
+        }
+        let body = seats::preview_body_rect(&self.seats, &self.seat_layout, scale)?;
+        let (x, y) = (position.x as f32, position.y as f32);
+        (body[0] <= x && x <= body[2] && body[1] <= y && y <= body[3]).then_some(body)
+    }
+
+    /// Which byte of the body a point names.
+    ///
+    /// **The painter's own arithmetic, read backwards.** The row is the line the
+    /// point is inside and the column is the *nearest* cell boundary rather than
+    /// the one it is inside — a click on the right half of a character puts the
+    /// caret after it, which is what makes clicking at the end of a line land at
+    /// the end of the line.
+    fn preview_offset_at(
+        &self,
+        body: [f32; 4],
+        scale: f32,
+        position: PhysicalPosition<f64>,
+    ) -> Option<usize> {
+        let content = self
+            .current_preview_buffer()
+            .and_then(|buffer| buffer.content.as_deref())?;
+        let metrics = seats::preview_text_metrics(scale);
+        let advance = self.preview_mono_advance;
+        if advance <= 0.0 {
+            return None;
+        }
+        let x = position.x as f32 - body[0] - metrics.padding_x + self.preview_scroll[0];
+        let y = position.y as f32 - body[1] - metrics.padding_y + self.preview_scroll[1];
+        let line = (y / metrics.line_height).floor().max(0.0) as usize;
+        let column = (x / advance).round().max(0.0) as usize;
+        Some(preview_edit::offset_at(content, line, column))
+    }
+
+    /// The body has changed and the window owes a frame for it.
+    fn repaint_preview(&mut self) -> Result<()> {
+        self.refresh_preview_body();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
     /// The only scroll the preview body is allowed to hold.
     ///
     /// `heal_files_scroll`'s twin and its whole argument: the painter believes
@@ -12394,13 +13116,7 @@ impl Runtime {
     fn rebuild_preview_document(&mut self, body: [f32; 4], scale: f32) {
         let key = self
             .current_preview_buffer()
-            .map(|buffer| PreviewDocumentKey {
-                path: buffer.path.clone(),
-                md_source: buffer.md_source,
-                content_len: buffer.content.as_deref().map_or(0, str::len),
-                body_width_px: (body[2] - body[0]).max(0.0).round() as u32,
-                scale_ppm: (scale * 1_000_000.0).round() as u32,
-            });
+            .map(|buffer| preview_document_key(buffer, body[2] - body[0], scale));
         if key == self.preview_doc_key {
             return;
         }
@@ -12415,8 +13131,12 @@ impl Runtime {
         let text_metrics = seats::preview_text_metrics(scale);
         self.preview_mono_advance = self.renderer.preview_mono_advance(text_metrics.font_size);
         self.preview_doc = match view {
+            // The editor's own line model, not [`str::lines`]: a body ending in
+            // a break has an empty line after it, the caret can stand on that
+            // line, and a document that did not draw it would be a document a
+            // caret could leave.
             preview::PreviewView::Text => {
-                PreviewDocument::Text(content.lines().map(preview::expand_tabs).collect())
+                PreviewDocument::Text(preview_edit::display_lines(&content))
             }
             preview::PreviewView::Diff => {
                 let metrics = seats::preview_diff_metrics(scale);
@@ -12595,11 +13315,12 @@ impl Runtime {
         let advance = self.preview_mono_advance;
         let (rows_height, columns) = self.preview_content_extent(scale);
         let mut built = match &self.preview_doc {
-            PreviewDocument::Text(lines) => build_preview_text_body(
-                &self.preview_doc_text_geometry(body, scale, rows_height, columns, advance),
-                lines,
-                &palette,
-            ),
+            PreviewDocument::Text(lines) => {
+                let geometry =
+                    self.preview_doc_text_geometry(body, scale, rows_height, columns, advance);
+                let edit = self.preview_edit_paint(&geometry, lines.len(), scale);
+                build_preview_text_body(&geometry, lines, advance, edit.as_ref(), &palette)
+            }
             PreviewDocument::Diff(rows) => build_preview_diff_body(
                 &seats::preview_mono_geometry(
                     body,
@@ -12641,16 +13362,66 @@ impl Runtime {
                 paragraphs: Vec::new(),
             },
         };
-        // The read-only degradation, at the end of whatever was shown: a body
-        // that stops at 64KB without saying so is a body quietly claiming the
-        // file stops there too.
-        if let Some(notice) = self
+        // One strip, two sentences, and they cannot both be owed: a truncated
+        // body is read-only, so it has no save to report. The degradation comes
+        // first anyway, because it is a standing fact about the file rather than
+        // news about a keystroke.
+        let notice = self
             .current_preview_buffer()
             .and_then(preview::PreviewBuffer::truncation_notice)
-        {
-            push_preview_truncation_notice(&mut built, body, scale, notice, &palette);
+            .map(str::to_owned)
+            .or_else(|| self.preview_save_notice(Instant::now()).map(str::to_owned));
+        if let Some(notice) = notice {
+            push_preview_truncation_notice(&mut built, body, scale, &notice, &palette);
         }
         self.renderer.set_preview_body(Some(built));
+    }
+
+    /// The caret and the selection, in the columns the painter draws them in.
+    ///
+    /// **Only the visible lines**, on the same principle the rest of the body is
+    /// built on: a selection over a 64KB file covers two thousand rows and a
+    /// pane shows forty, and a band per row would put the file's size into the
+    /// frame's cost.
+    fn preview_edit_paint(
+        &self,
+        geometry: &seats::PreviewMonoGeometry,
+        lines: usize,
+        scale: f32,
+    ) -> Option<PreviewEditPaint> {
+        let buffer = self.current_preview_buffer()?;
+        if !buffer.is_editable() {
+            return None;
+        }
+        let content = buffer.content.as_deref()?;
+        let starts = preview_edit::line_starts(content);
+        let range = visible_range(
+            geometry.line_rect(0)[1],
+            geometry.line_height,
+            lines,
+            geometry.viewport,
+        );
+        let selection = self.preview_caret.range();
+        let bands = range
+            .filter_map(|line| {
+                preview_edit::selected_columns(content, &starts, line, &selection)
+                    .map(|(from, to)| (line, from, to))
+            })
+            .collect();
+        // The caret belongs to the *focus*, not to the buffer: a body you have
+        // clicked away from keeps its selection, greyed, the way a text field
+        // does, but it has no caret because nothing is going to land there.
+        let caret = self
+            .preview_edit_focus()
+            .then(|| self.preview_caret_position())
+            .flatten();
+        Some(PreviewEditPaint {
+            bands,
+            caret,
+            caret_width: (bt_render::CURSOR_BAR_WIDTH_LOGICAL_PX * scale)
+                .round()
+                .max(1.0),
+        })
     }
 
     fn preview_doc_text_geometry(
@@ -13251,6 +14022,20 @@ impl Runtime {
                                 continue;
                             };
                             buffer.accept(outcome);
+                            // A body has just arrived under a caret that was
+                            // restored from the view store, and the file may not
+                            // be the one it was remembered against — a buffer
+                            // evicted and re-read is a fresh read of a file that
+                            // has had time to change. Healed here rather than
+                            // trusted, which is the same discipline the scroll
+                            // offset is held to two lines from a body landing.
+                            let content = buffer.content.clone();
+                            let tab = &mut self.tabs[index];
+                            if tab.preview_buffer.as_deref() == Some(response.path.as_path())
+                                && let Some(content) = content
+                            {
+                                tab.preview_caret.heal(&content);
+                            }
                             changed |= index == self.active_tab
                                 && self.tabs[index].preview_buffer.as_deref()
                                     == Some(response.path.as_path());
@@ -17406,6 +18191,14 @@ impl Runtime {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.pointer_position = Some(position);
+        // A selection being drawn across the edit surface owns the pointer, and
+        // it owns it *outside* its own body too: a drag that stopped extending
+        // the moment it left the pane would make selecting the last line a matter
+        // of aim. It is asked before every hover below it for the reason a
+        // divider drag is — a gesture in flight is not a hover.
+        if self.drag_preview_selection(position)? {
+            return Ok(());
+        }
         // The overlay owns the pointer the way it owns the next click: no chrome
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
         if let Some(layout) = self.settings_layout() {
@@ -19048,6 +19841,12 @@ impl Runtime {
             return Ok(false);
         }
         if state == ElementState::Released {
+            // A selection drawn across the edit surface ends wherever the button
+            // comes up. The release is consumed because the press was: a gesture
+            // belongs to the surface it began on, whatever it is let go over.
+            if std::mem::take(&mut self.preview_selecting) {
+                return Ok(true);
+            }
             // Ahead of the press: a gesture that has become a drag answers with
             // its drop, and the press that started it is no longer a click.
             if self.release_drag()? {
@@ -19112,6 +19911,18 @@ impl Runtime {
             }
             self.finish_rename(true)?;
         }
+        // Blur is every press that is not inside the editor — the same sentence
+        // the rename guard above makes, and the same reason: a surface that kept
+        // the keyboard after you clicked somewhere else is a surface that eats
+        // the next thing you type.
+        if self.preview_edit_focused
+            && self
+                .preview_edit_body(position, self.renderer.metrics().scale_factor as f32)
+                .is_none()
+        {
+            self.preview_edit_focused = false;
+            self.repaint_preview()?;
+        }
         let Some(target) = target else {
             // Not on chrome, but possibly not on a terminal either — a press in a
             // preview's body belongs to that seat and must not reach the grid
@@ -19119,6 +19930,13 @@ impl Runtime {
             // every terminal leaf answers for itself; see [`press_reaches_no_grid`]
             // for the primary-seat version this replaced and what it cost.
             self.tab_clicks.interrupt();
+            // A press inside the edit surface puts the caret where the pointer
+            // is and takes the keyboard, which is what a `<textarea>` does and
+            // the only way into `InputOwner::PreviewEdit` that does not need a
+            // chord.
+            if self.press_preview_body(position)? {
+                return Ok(true);
+            }
             return Ok(press_reaches_no_grid(
                 &self.seat_layout,
                 position.x,
@@ -20528,17 +21346,26 @@ impl Runtime {
         if self.preedit.is_some() && input::is_ime_owned_key(&event.logical_key, self.modifiers) {
             return Ok(());
         }
-        if input::should_copy_selection(
-            &event.logical_key,
-            self.modifiers,
-            self.session.view_selection().is_some(),
-        ) {
+        // The terminal's copy and paste, **unless the quick edit has the
+        // keyboard**. Those two are the one part of the editor's vocabulary that
+        // is claimed this far up the ladder, so the exemption has to be made
+        // here rather than in the branch below it: without it, Ctrl+V typed into
+        // a file would go to a shell the user is not looking at, which is the
+        // exact failure `InputOwner` exists to prevent.
+        let editing = self.preview_edit_focus();
+        if !editing
+            && input::should_copy_selection(
+                &event.logical_key,
+                self.modifiers,
+                self.session.view_selection().is_some(),
+            )
+        {
             if !event.repeat {
                 self.copy_selection()?;
             }
             return Ok(());
         }
-        if input::is_paste_shortcut(&event.logical_key, self.modifiers) {
+        if !editing && input::is_paste_shortcut(&event.logical_key, self.modifiers) {
             if !event.repeat {
                 self.paste_from_clipboard()?;
             }
@@ -20660,6 +21487,14 @@ impl Runtime {
         if let Some(seat) = self.files_keyboard_seat()
             && self.files_tree_key(seat, event)?
         {
+            return Ok(());
+        }
+        // **`InputOwner::PreviewEdit`** (§7.1.5), beside the tree's rung and for
+        // the same reasons: under every popup, so the window's own chords still
+        // work over a file being edited; over the encoder, so not one character
+        // typed into that file reaches the shell behind it. It answers Esc for
+        // itself, which is how the keyboard is given back.
+        if self.preview_key(event)? {
             return Ok(());
         }
         let application_cursor_mode = self.session.application_cursor_mode();
@@ -21556,6 +22391,11 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        // And the preview's own acknowledgement, on the same 1300ms clock.
+        if let Err(error) = runtime.advance_preview_notice(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = match runtime.flush_pending_pty_resize(now) {
@@ -21620,6 +22460,9 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime
                 .revealed_foot
                 .map(|(_, at)| at + FOOT_REVEAL_FEEDBACK),
+            // The preview's "Saved", on the same clock and owing the same single
+            // wake-up: the instant it is due to go away.
+            runtime.preview_notice_deadline(),
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
@@ -33800,6 +34643,281 @@ mod tests {
         assert_eq!(line.runs[0].color, palette.body_hint_text);
         assert!(!line.runs[0].mono, "the card's family, not the file's");
         assert!(line.rect[1] >= strip[1] && line.rect[3] <= strip[3]);
+    }
+
+    // ── slice 3: quick edit ─────────────────────────────────────────────────
+
+    /// A buffer with a body, for the document tests below.
+    fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
+        let mut buffer =
+            preview::PreviewBuffer::new(PathBuf::from(format!(r"C:\w\{name}")), name.to_owned());
+        buffer.accept(preview::HeadOutcome::Read {
+            text: body.to_owned(),
+            truncated: false,
+            mtime: None,
+        });
+        buffer
+    }
+
+    /// ⑥ A same-length edit rebuilds the document.
+    ///
+    /// **The named bug.** The cache key's revision counter was the content's
+    /// *length* — written down as "the cheapest honest revision counter until
+    /// slice 3 gives a buffer edits to count" — and a length cannot see the
+    /// commonest edit there is. Typing over a selected character, correcting a
+    /// letter, pressing Delete then typing the replacement: all three keep the
+    /// length, and all three left the cached document convinced it was still
+    /// looking at the text from before the keystroke.
+    ///
+    /// Mutation: put `content_len: buffer.content.map_or(0, str::len)` back in
+    /// place of `revision` in [`preview_document_key`]. The first assertion then
+    /// fails and the second still passes, which is exactly the shape of the bug.
+    #[test]
+    fn a_same_length_edit_rebuilds_the_cached_document() {
+        let mut buffer = text_buffer("a.rs", "let x = 1;\n");
+        let before = preview_document_key(&buffer, 400.0, 2.0);
+        buffer.edit_content(|content| {
+            content.replace_range(8..9, "2");
+            true
+        });
+        assert_eq!(buffer.content.as_deref(), Some("let x = 2;\n"));
+        let after = preview_document_key(&buffer, 400.0, 2.0);
+        assert_ne!(
+            before, after,
+            "one letter for another is still a different document"
+        );
+        // And nothing else moved: the same buffer at the same width and scale is
+        // the same key, or every wheel notch would re-parse the file.
+        assert_eq!(after, preview_document_key(&buffer, 400.0, 2.0));
+        assert_ne!(after, preview_document_key(&buffer, 401.0, 2.0));
+        assert_ne!(after, preview_document_key(&buffer, 400.0, 1.0));
+    }
+
+    /// ⑤ A caret, a selection and a scroll survive a switch to another buffer
+    /// and back.
+    ///
+    /// Ruling 8⑧, and the half of it a window that never rebuilds its DOM still
+    /// has to earn: the prototype's problem was a re-render destroying the live
+    /// `<textarea>`, and this one's is the *switcher* — a pool whose whole point
+    /// is that "unsaved edits survive switching with zero prompts" would be
+    /// telling half a truth if the place you were reading did not survive with
+    /// them.
+    ///
+    /// Mutation: make [`PreviewViewStore::remember`] a no-op, or have
+    /// [`PreviewViewStore::restore`] always answer with the default.
+    #[test]
+    fn a_caret_and_a_scroll_survive_a_switch_to_another_buffer_and_back() {
+        let mut store = PreviewViewStore::default();
+        let one = Path::new(r"C:\w\one.rs");
+        let two = Path::new(r"C:\w\two.rs");
+        // A file never looked at starts at the top with the caret at its head.
+        assert_eq!(store.restore(one), PreviewViewState::default());
+
+        let reading = PreviewViewState {
+            caret: preview_edit::EditCaret {
+                anchor: 40,
+                caret: 12,
+                desired_column: Some(7),
+            },
+            scroll: [16.0, 380.0],
+        };
+        store.remember(one, reading);
+        // Away to another file, which has a place of its own.
+        store.remember(
+            two,
+            PreviewViewState {
+                caret: preview_edit::EditCaret {
+                    anchor: 3,
+                    caret: 3,
+                    desired_column: None,
+                },
+                scroll: [0.0, 19.0],
+            },
+        );
+        assert_eq!(
+            store.restore(one),
+            reading,
+            "and back to the first: the caret, what it had selected, and how far down"
+        );
+        assert_eq!(store.restore(two).scroll, [0.0, 19.0]);
+        assert_eq!(store.restore(one).caret.range(), 12..40);
+    }
+
+    /// ⑦ A long markdown and a long table scroll, and neither scrolls past its
+    /// own end.
+    ///
+    /// **Slice 2's open account.** Both bodies clamped to `[0, 0]` — the extent
+    /// function answered `(0.0, 0)` for them — so a `README.md` longer than its
+    /// pane and a `.csv` with a hundred rows were *drawn* past their own ends
+    /// and could never be scrolled to. Neither scrolls sideways, and that is a
+    /// ruling rather than an omission: markdown wraps to the pane and a table's
+    /// columns are as wide as its own cells.
+    ///
+    /// Mutation: return `[0.0, 0.0]` for either arm of
+    /// [`preview_document_max_scroll`], which restores the bug exactly.
+    #[test]
+    fn a_long_markdown_and_a_long_table_scroll_and_stop_at_their_own_ends() {
+        let body = [0.0, 0.0, 400.0, 200.0];
+        let scale = 1.0;
+        let metrics = seats::preview_markdown_metrics(scale);
+        // Forty blocks of one line each, laid out the way the runtime lays them.
+        let blocks: Vec<preview::MarkdownBlock> = (0..40)
+            .map(|index| {
+                preview::MarkdownBlock::Paragraph(vec![preview::Span::plain(&format!(
+                    "line {index}"
+                ))])
+            })
+            .collect();
+        let mut tops = Vec::new();
+        let mut heights = Vec::new();
+        let mut top = 0.0_f32;
+        for _ in &blocks {
+            top += metrics.paragraph_gap;
+            tops.push(top);
+            heights.push(metrics.line_height);
+            top += metrics.line_height;
+        }
+        let expected = tops.last().unwrap() + heights.last().unwrap() + metrics.padding_y * 2.0
+            - (body[3] - body[1]);
+        let markdown = PreviewDocument::Markdown {
+            blocks,
+            heights,
+            tops,
+        };
+        let max = preview_document_max_scroll(&markdown, body, scale, 8.0, 0.0, 0);
+        assert!(max[1] > 0.0, "a document taller than its pane can scroll");
+        assert_eq!(max[1], expected, "and stops exactly at its own last line");
+        assert_eq!(max[0], 0.0, "markdown wraps, so there is nowhere sideways");
+
+        let rows: Vec<Vec<String>> = (0..60)
+            .map(|index| vec![format!("row {index}"), "value".to_owned()])
+            .collect();
+        let table = PreviewDocument::Table {
+            rows,
+            column_cells: vec![8, 5],
+        };
+        let max = preview_document_max_scroll(&table, body, scale, 8.0, 0.0, 0);
+        let geometry = seats::preview_table_geometry(body, &[8, 5], 60, 8.0, scale, [0.0, 0.0]);
+        assert_eq!(max, geometry.max_scroll);
+        assert!(max[1] > 0.0, "sixty rows do not fit in two hundred pixels");
+
+        // A short one still cannot be scrolled at all, on either axis.
+        let short = PreviewDocument::Table {
+            rows: vec![vec!["a".to_owned()]],
+            column_cells: vec![2],
+        };
+        assert_eq!(
+            preview_document_max_scroll(&short, body, scale, 8.0, 0.0, 0),
+            [0.0, 0.0]
+        );
+    }
+
+    /// PIN — the selection's band is drawn **under** the text, in the same body,
+    /// and the caret stands in it.
+    ///
+    /// The band has to ride in [`bt_render::PreviewBody::quads`] rather than go
+    /// out as seat chrome: chrome is drawn a whole pass earlier and would sit
+    /// under the *pane*, so a band painted there would stay put while the
+    /// document it is about scrolled away from it.
+    ///
+    /// Mutation: derive the band's right edge from the paragraph's own text
+    /// instead of from the columns, which drops the break at the end of every
+    /// line inside a multi-line selection.
+    #[test]
+    fn a_selection_band_is_drawn_under_the_text_of_its_own_body() {
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 400.0, 200.0];
+        let metrics = seats::preview_text_metrics(1.0);
+        let lines = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
+        let geometry = seats::preview_mono_geometry(
+            body,
+            metrics,
+            metrics.line_height * 3.0,
+            5,
+            8.0,
+            [0.0, 0.0],
+        );
+        let paint = PreviewEditPaint {
+            bands: vec![(0, 1, 4), (1, 0, 4)],
+            caret: Some((1, 3)),
+            caret_width: 1.0,
+        };
+        let built = build_preview_text_body(&geometry, &lines, 8.0, Some(&paint), &palette);
+        assert_eq!(built.quads.len(), 3, "two bands and one caret");
+        assert_eq!(built.quads[0].color, palette.preview_selection);
+        let row = geometry.line_rect(0);
+        assert_eq!(
+            built.quads[0].rect,
+            [row[0] + 8.0, row[1], row[0] + 32.0, row[3]]
+        );
+        // The second line's band runs one column past its own three characters:
+        // the break is selected too.
+        let second = geometry.line_rect(1);
+        assert_eq!(built.quads[1].rect[2], second[0] + 32.0);
+        let caret = built.quads[2];
+        assert_eq!(caret.color, palette.preview_caret);
+        assert_eq!(
+            caret.rect,
+            [second[0] + 24.0, second[1], second[0] + 25.0, second[3]]
+        );
+        // And the text is still there, over the top of all three.
+        assert_eq!(built.paragraphs.len(), 3);
+        assert_eq!(built.paragraphs[0].runs[0].text, "one");
+
+        // With no edit surface there are no quads at all, which is the read-only
+        // body slice 2 shipped.
+        let plain = build_preview_text_body(&geometry, &lines, 8.0, None, &palette);
+        assert!(plain.quads.is_empty());
+    }
+
+    /// The per-keystroke cost of the edit surface, on a file the size of the
+    /// whole head read.
+    ///
+    /// **Re-laying the whole document per key is the design**, not a compromise
+    /// waiting for an incremental one: a 64KB head is the largest body this
+    /// surface can ever hold (§7.1.3 refuses more), and what a key costs is one
+    /// splice, one re-split into lines and one walk for the widest line. This
+    /// pins that the whole of it stays inside a frame's budget, so that the day
+    /// an incremental relayout is proposed there is a number to argue with.
+    ///
+    /// The bound is deliberately loose — this is a wall clock on a shared
+    /// machine, and a test that fails on a busy build server teaches people to
+    /// ignore it. The number that matters is reported, not asserted.
+    #[test]
+    fn a_keystroke_relays_a_full_head_read_inside_a_frame() {
+        let line = "    let value = compute(argument, other) + 1; // a line of source\n";
+        let mut body = String::with_capacity(preview::PREVIEW_HEAD_BYTES);
+        while body.len() < preview::PREVIEW_HEAD_BYTES {
+            body.push_str(line);
+        }
+        body.truncate(preview::PREVIEW_HEAD_BYTES);
+        let mut buffer = text_buffer("big.rs", &body);
+        let mut caret = preview_edit::EditCaret {
+            anchor: body.len() / 2,
+            caret: body.len() / 2,
+            desired_column: None,
+        };
+
+        const KEYS: usize = 60;
+        let started = Instant::now();
+        for index in 0..KEYS {
+            buffer.edit_content(|content| preview_edit::insert(content, &mut caret, "x"));
+            // What the painter does with the result, every key: the document is
+            // re-derived from the new revision.
+            let lines = preview_edit::display_lines(buffer.content.as_deref().unwrap());
+            assert!(!lines.is_empty(), "key {index}");
+            std::hint::black_box(&lines);
+        }
+        let per_key = started.elapsed() / KEYS as u32;
+        println!(
+            "preview quick-edit: {:.3} ms/key over {} bytes",
+            per_key.as_secs_f64() * 1000.0,
+            body.len()
+        );
+        assert!(
+            per_key < Duration::from_millis(40),
+            "a keystroke took {per_key:?}, which is not a frame by any reading"
+        );
     }
 
     /// PIN — K156, and the day the second door closed. **Every file opens its
