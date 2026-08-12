@@ -633,6 +633,74 @@ fn files_keyboard_seat_of(owner: Option<LeafId>, tab: &TabState) -> Option<SeatI
     .then_some(owner.seat)
 }
 
+/// How the keyboard arrived at a files column.
+///
+/// **This is the whole of `:focus-visible`.** The mock-up rings the selected row
+/// under `.files-tree:focus-visible .frow.sel` (line 789), and a browser's
+/// `:focus-visible` is *not* `:focus`: focus taken by a **press** draws no ring,
+/// because the hand that took it already knows where it went, and focus taken or
+/// used by the **keyboard** does, because the ring is the only thing that says
+/// which of two lists an arrow key is about to move.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FilesFocusArrival {
+    /// A press — on a row, on the head's root button, on `DOCK`. The pointer
+    /// said where it was going and asked for nothing to be lit.
+    Pointer,
+    /// A key: either one that carried the focus in, or one the column has just
+    /// answered while holding it.
+    Keyboard,
+}
+
+/// Which files column holds the keyboard, and whether it is *showing* that it
+/// does.
+///
+/// Two facts, kept together because one is meaningless without the other and
+/// because the pair has to change atomically: a press that lands on a column
+/// which already has the keyboard changes no owner at all and must still put the
+/// ring out (D47 + the 2026-08-12 `:focus-visible` ruling). Reading them as one
+/// value is what makes "the ring went out but the arrows still work" expressible
+/// rather than an accident.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FilesKeyboardFocus {
+    /// The column, or `None` while a shell has the keyboard. Stale readings are
+    /// healed at the *read*, by [`files_keyboard_seat_of`].
+    owner: Option<LeafId>,
+    /// Whether that column's selection wears the accent ring.
+    ///
+    /// Never true without an owner: a ring belonging to no column is a ring on
+    /// nothing, and the invariant is enforced here rather than trusted at the
+    /// four call sites that write it.
+    visible: bool,
+}
+
+impl FilesKeyboardFocus {
+    /// The keyboard has arrived somewhere (or gone back to a shell). Returns
+    /// whether the picture owes a frame.
+    fn arrive(&mut self, owner: Option<LeafId>, arrival: FilesFocusArrival) -> bool {
+        let next = Self {
+            owner,
+            visible: owner.is_some() && arrival == FilesFocusArrival::Keyboard,
+        };
+        let changed = *self != next;
+        *self = next;
+        changed
+    }
+
+    /// The column that already holds the keyboard has just answered a key.
+    ///
+    /// Rule ② of the ruling, and the one a `arrive` cannot express: nothing about
+    /// *who* holds the keyboard changed, only that it is now being used as a
+    /// keyboard. A press on the same column afterwards puts the ring out again,
+    /// through `arrive`, exactly as a browser does.
+    fn navigated(&mut self) -> bool {
+        if self.owner.is_none() || self.visible {
+            return false;
+        }
+        self.visible = true;
+        true
+    }
+}
+
 fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> bool {
     if !*running {
         return false;
@@ -1394,7 +1462,12 @@ struct Runtime {
     /// back into a seat, and that accessor is where every way it can go stale —
     /// the tab switched, the column was closed, the pane became something else —
     /// is answered in one place.
-    files_focus: Option<LeafId>,
+    ///
+    /// It carries the ring's own bit beside the owner — see
+    /// [`FilesKeyboardFocus`] — because `.files-tree:focus-visible` is a
+    /// different question from "does this column have the keyboard", and holding
+    /// the answers apart is what let the ring come up on a mouse click.
+    files_focus: FilesKeyboardFocus,
     /// The one floating window this window may have open (§7.1.2, G80/G96).
     ///
     /// A window-level singleton for the same reason `rename` above is one: there
@@ -1420,8 +1493,15 @@ struct Runtime {
     /// after a drag step and a hover read before it are two different answers,
     /// and the one that matters is the one the pointer event produced.
     float_hover: Option<float::FloatPart>,
-    /// When the foot last confirmed a reveal, or `None` (B24).
-    float_revealed_at: Option<Instant>,
+    /// Which foot last confirmed a reveal and when, or `None` (B24).
+    ///
+    /// **One clock for both feet.** A floating window's `.fly-foot` and a docked
+    /// column's `.files-foot` are the same control on two chassis, and there is
+    /// one pointer: the confirmation is a thing you have just done, and pressing
+    /// a second strip supersedes the first rather than leaving a stale
+    /// "Revealed" sitting on a surface you have stopped looking at. It also buys
+    /// one expiry and one wake-up instead of a pair of each.
+    revealed_foot: Option<(RevealedFoot, Instant)>,
     /// The open tab-name editor, or `None` when nobody is renaming anything.
     ///
     /// On the runtime rather than on the tab, because it is a *window*-level
@@ -1832,9 +1912,19 @@ impl TabState {
                         // asking and no answer for.
                         turns: BTreeMap::new(),
                         // Left false and filled by the caller for the same
-                        // reason: which column holds the keyboard is a window's
-                        // fact, and a tab cannot answer it.
-                        focused: false,
+                        // reason: whether a column is *showing* that it holds the
+                        // keyboard is a window's fact, and a tab cannot answer
+                        // it.
+                        focus_ring: false,
+                        // Left empty and filled by the caller for a third
+                        // reason: the path has to be *cut to the strip*, and
+                        // only the window has the font that says where the cut
+                        // falls. The full root is right here in `state`, which
+                        // is exactly the temptation — an uncut path handed down
+                        // would draw past the pane and be clipped mid-letter
+                        // with nothing to say it had been.
+                        foot_path: String::new(),
+                        foot_revealed: false,
                     },
                     view.wanted,
                 ),
@@ -2226,11 +2316,27 @@ const FLOAT_DOCK_LABEL: &str = "DOCK";
 /// the tab's and on the pane head's alike.
 const FLOAT_TRIGGER_TIP: &str = "Peek files here";
 
-/// What the foot says while it is confirming a reveal (B24).
-const FLOAT_REVEALED_LABEL: &str = "Revealed in File Explorer";
+/// What a foot says while it is confirming a reveal (B24).
+const FOOT_REVEALED_LABEL: &str = "Revealed in File Explorer";
 
-/// How long that confirmation stands before the path comes back (B24).
-const FLOAT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
+/// How long that confirmation stands before the path comes back (B24) — the
+/// mock-up's own `setTimeout(…, 1300)` in `revealFolderFeedback`, which is one
+/// function serving the flyout's foot and the pane's alike.
+const FOOT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
+
+/// A foot that is confirming a reveal.
+///
+/// Two chassis wear the same strip — `.float-win .fly-foot` and
+/// `.files-pane .files-foot` — and the mock-up hands both to one
+/// `revealFolderFeedback`. This is which of them is talking, so that one clock
+/// can serve both without either being able to answer for the other's strip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RevealedFoot {
+    /// The floating window's.
+    Float,
+    /// One docked column's.
+    Column(SeatId),
+}
 
 /// A pinned float being moved or resized (G92).
 ///
@@ -8129,10 +8235,10 @@ impl Runtime {
             float: float::FloatHost::default(),
             float_drag: None,
             float_hover: None,
-            float_revealed_at: None,
+            revealed_foot: None,
             files_name_widths: BTreeMap::new(),
             files_notice: None,
-            files_focus: None,
+            files_focus: FilesKeyboardFocus::default(),
             rename: None,
             rename_blink: CursorBlink::new(Instant::now()),
             settings_marks: marks::ChromeMarkRasters::default(),
@@ -8925,7 +9031,15 @@ impl Runtime {
         // C28-C43, per leaf: the rows each files column shows this frame. Walked
         // here, beside the names, because the walk needs the directory cache and
         // `seats` holds neither content nor a filesystem (L1).
-        let files_trees = self.files_trees(now);
+        let mut files_trees = self.files_trees(now);
+        // R2 乙案, before the rows are laid out: the painter believes the stored
+        // scroll now, so a list that got shorter or a pane that got taller has to
+        // be answered here rather than by the layout quietly disagreeing with the
+        // number it was handed.
+        self.heal_files_scroll(scale, &mut files_trees);
+        // And the strip along the bottom of each of them, whose caption is cut to
+        // the room it has — which only something holding a font can decide.
+        self.dress_files_feet(scale, now, &mut files_trees);
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
             // An open pane with nothing chosen invites rather than sits mute.
@@ -11203,8 +11317,15 @@ impl Runtime {
         // keyboard straight back to the shell that never stopped being
         // `focused_leaf`. Nothing is consumed: this runs above the router, and
         // the same press goes on to land on the row it was aimed at.
+        //
+        // **A press, so no ring** (`:focus-visible`, 2026-08-12). This is rule ①
+        // and it is the one that fires most: clicking a row is how a selection is
+        // usually made, and the hand that made it does not need to be told which
+        // list it was in. It reaches here even when the column *already* had the
+        // keyboard — the owner does not move, the ring goes out, and the frame is
+        // owed for that alone.
         let files = self.tabs[self.active_tab].files.contains_key(&seat);
-        if self.set_files_keyboard(files.then_some(seat)) {
+        if self.set_files_keyboard(files.then_some(seat), FilesFocusArrival::Pointer) {
             self.refresh_chrome();
         }
         if !self.seats.set_focus(seat) {
@@ -11719,12 +11840,14 @@ impl Runtime {
         let active = self.active_tab;
         let tab_id = self.tabs[active].id;
         let motion = self.motion;
-        let focused = self.files_keyboard_seat();
+        // The *ring's* seat, not the keyboard's: `:focus-visible`, so a column
+        // that took the keyboard from a press shows its selection without one.
+        let ringed = self.files_ring_seat();
         let walked = self.files_tree_walk();
         let mut views = BTreeMap::new();
         let mut asks = Vec::new();
         for (seat, (mut content, wanted)) in walked {
-            content.focused = Some(seat) == focused;
+            content.focus_ring = Some(seat) == ringed;
             let root = self.tabs[active]
                 .files
                 .get(&seat)
@@ -11767,14 +11890,63 @@ impl Runtime {
 
     /// The rows as the hit test sees them: walked, never asked for.
     fn files_tree_contents(&self) -> BTreeMap<SeatId, seats::FilesTreeContent> {
-        let focused = self.files_keyboard_seat();
+        let ringed = self.files_ring_seat();
         self.files_tree_walk()
             .into_iter()
             .map(|(seat, (mut content, _))| {
-                content.focused = Some(seat) == focused;
+                content.focus_ring = Some(seat) == ringed;
                 (seat, content)
             })
             .collect()
+    }
+
+    /// Fill in each column's `.files-foot` — what it says, and whether it is
+    /// saying it in the accent.
+    ///
+    /// **The cut lives here** because the strip's width and the font are both
+    /// here, and it is `settings::ellipsized_left` — the same cut the float's
+    /// foot takes, from the *front*, so `…ers\Weiyi\Developer\BetterTerminal`
+    /// keeps the segment that answers "where am I" (B23). The mock-up reaches it
+    /// with `direction: rtl` and a `<bdi>` around the path; we draw our own text,
+    /// so we simply cut the string and lay it out left to right, and the bidi
+    /// reordering bug that workaround exists for cannot occur.
+    fn dress_files_feet(
+        &mut self,
+        scale: f32,
+        now: Instant,
+        trees: &mut BTreeMap<SeatId, seats::FilesTreeContent>,
+    ) {
+        let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
+        let active = self.active_tab;
+        for (seat, tree) in trees.iter_mut() {
+            let revealed = self.revealed_foot.is_some_and(|(shown, at)| {
+                shown == RevealedFoot::Column(*seat)
+                    && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
+            });
+            let root = self.tabs[active].files_state(*seat).root;
+            tree.foot_revealed = revealed;
+            // An unrooted column has no path and nothing to reveal, so its strip
+            // is a hairline and nothing else — the mock-up's foot with an empty
+            // `${files.root}` in it.
+            if root.is_empty() {
+                tree.foot_path = String::new();
+                continue;
+            }
+            let Some(rect) = seats::files_pane_rect(&self.seat_layout, *seat) else {
+                tree.foot_path = String::new();
+                continue;
+            };
+            let path_box = seats::files_pane_geometry(rect, scale).foot_path;
+            let room = path_box[2] - path_box[0];
+            let text = if revealed {
+                FOOT_REVEALED_LABEL.to_owned()
+            } else {
+                root
+            };
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            tree.foot_path = settings::ellipsized_left(&text, room, font, &mut measure);
+        }
     }
 
     /// Ask for a folder again because it has just been opened.
@@ -12091,8 +12263,8 @@ impl Runtime {
         self.root_menu.toggle(seat);
         // Pressing the head is also how you say "type here", and the column is
         // somewhere you can type — so the button lends the keyboard exactly as
-        // the tree below it does.
-        self.set_files_keyboard(Some(seat));
+        // the tree below it does, ringless for the same reason: it is a press.
+        self.set_files_keyboard(Some(seat), FilesFocusArrival::Pointer);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -12276,7 +12448,9 @@ impl Runtime {
             // window where the menu's own wording had become a lie.
             profiles::FileMenuRow::Open => match activation {
                 RowActivation::Preview(path) => self.open_preview_image(path)?,
-                RowActivation::DefaultApp(path) => self.open_local_path(&path),
+                RowActivation::DefaultApp(path) => {
+                    let _ = self.open_local_path(&path);
+                }
                 RowActivation::Nowhere => {}
             },
             profiles::FileMenuRow::CopyPath => self.copy_path_to_clipboard(&path)?,
@@ -12328,7 +12502,7 @@ impl Runtime {
         // press that raised this menu very likely came from a column that had
         // taken the keyboard, and a path that arrived in a shell the arrow keys
         // still do not reach is a path you cannot edit.
-        if self.set_files_keyboard(None) {
+        if self.set_files_keyboard(None, FilesFocusArrival::Pointer) {
             self.refresh_chrome();
         }
         // And layout focus follows, which is the mock-up's `w.focus = leaf.id`:
@@ -12429,15 +12603,37 @@ impl Runtime {
         Ok(())
     }
 
+    /// The foot's confirmation has stood long enough: it goes back to saying
+    /// where it is (B24).
+    ///
+    /// Its own tick rather than a line inside [`Self::advance_float`], because
+    /// the two feet are drawn into two different surfaces — the float's into the
+    /// overlay stack, a docked column's into the seat chrome — and the strip that
+    /// has to be rebuilt is decided by which foot was talking. Folding it back in
+    /// would have refreshed the overlay for a change that happened in a pane, and
+    /// the pane would have kept saying "Revealed" until something else moved.
+    fn advance_foot_reveal(&mut self, now: Instant) -> Result<()> {
+        let Some((foot, at)) = self.revealed_foot else {
+            return Ok(());
+        };
+        if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK {
+            return Ok(());
+        }
+        self.revealed_foot = None;
+        let changed = match foot {
+            RevealedFoot::Float => self.refresh_overlay(),
+            RevealedFoot::Column(_) => self.refresh_chrome(),
+        };
+        if changed {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Advance both of the float's clocks and its animation.
     fn advance_float(&mut self, now: Instant) -> Result<()> {
         let scale = self.renderer.metrics().scale_factor as f32;
         let mut changed = false;
-        // The confirmation has run out: the foot goes back to saying where it is.
-        if self.float_revealed_at.is_some() && !self.float_reveal_is_fresh(now) {
-            self.float_revealed_at = None;
-            changed = true;
-        }
         // A *transient* peek whose trigger has gone — the tab closed, the split
         // collapsed, the pane it hung from stopped being a terminal — has nothing
         // left to hang from, and `PeekHost::retain`'s rule applies: a popup whose
@@ -12637,7 +12833,7 @@ impl Runtime {
             .spawn()
             .is_ok()
         {
-            self.float_revealed_at = Some(Instant::now());
+            self.revealed_foot = Some((RevealedFoot::Float, Instant::now()));
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -12645,10 +12841,39 @@ impl Runtime {
         Ok(())
     }
 
-    /// Whether the foot is still showing its confirmation.
-    fn float_reveal_is_fresh(&self, now: Instant) -> bool {
-        self.float_revealed_at
-            .is_some_and(|at| now.saturating_duration_since(at) < FLOAT_REVEAL_FEEDBACK)
+    /// Show a docked column's root in File Explorer — `.files-pane .files-foot`
+    /// (mock-up 527-537), the same verb the float's foot has and the same
+    /// confirmation after it.
+    ///
+    /// **Through `open_local_path`**, which is this window's one door out to the
+    /// shell for a path the user pointed at: it refuses the executable list
+    /// whatever `PATHEXT` says, and a directory is nothing on that list — so
+    /// "the tree never runs a program" costs this button nothing and is enforced
+    /// by the same gate that enforces it for a double-clicked row, rather than by
+    /// this call site being careful.
+    fn reveal_files_root(&mut self, seat: SeatId) -> Result<()> {
+        let root = self.tabs[self.active_tab].files_state(seat).root;
+        if root.is_empty() {
+            return Ok(());
+        }
+        // The refusal path is `open_local_path`'s own — it speaks the one-line
+        // notice — and a failure to reach Explorer withholds the confirmation
+        // rather than claiming one, which is the honest report.
+        if !self.open_local_path(Path::new(&root)) {
+            return Ok(());
+        }
+        self.revealed_foot = Some((RevealedFoot::Column(seat), Instant::now()));
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Whether `foot` is still showing its confirmation.
+    fn foot_reveal_is_fresh(&self, foot: RevealedFoot, now: Instant) -> bool {
+        self.revealed_foot.is_some_and(|(shown, at)| {
+            shown == foot && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
+        })
     }
 
     /// Move or resize the float under a dragged pointer. Returns whether it owned
@@ -12791,9 +13016,22 @@ impl Runtime {
 
     /// How wide the `DOCK` caption is — only the font knows, so it is measured
     /// beside the renderer exactly as the tip's and the badge's are.
+    ///
+    /// **Measured wearing what it is drawn wearing.** `float::build` sets this
+    /// label semibold and tracked at `FLOAT_HEAD_TRACKING_EM`, per
+    /// `.float-win .fly-head button { font-weight: 600; letter-spacing: .04em }`
+    /// (mock-up 720-725). Measuring it as plain regular-weight text made the
+    /// button's box a couple of pixels too narrow for its own caption, and the
+    /// label's rect *is* that box less its padding — so the `K` was clipped
+    /// against the bounds the shortfall had drawn.
     fn float_dock_label_width(&mut self, scale: f32) -> f32 {
         let font = float::FLOAT_DOCK_FONT_LOGICAL_PX * scale;
-        self.renderer.measure_chrome_text(FLOAT_DOCK_LABEL, font)
+        self.renderer.measure_chrome_label(
+            FLOAT_DOCK_LABEL,
+            font,
+            bt_render::ChromeLabelWeight::SemiBold,
+            float::FLOAT_HEAD_TRACKING_EM,
+        )
     }
 
     /// The float's own layer of the overlay stack.
@@ -12829,11 +13067,20 @@ impl Runtime {
                     scroll_px: win.cache.scroll_px,
                     selected: win.files.sel.clone(),
                     turns,
-                    // A transient peek is never keyboard-driven (G90), so it
-                    // never wears the focus ring — the ring's whole job is to say
-                    // which list the arrow keys belong to, and the answer for a
-                    // peek is "neither".
-                    focused: win.focused,
+                    // Never, for either mode — ruled 2026-08-12. A transient
+                    // peek is never keyboard-driven (G90). A pinned float holds
+                    // `win.focused` from the moment a *click* tore it off, which
+                    // is `:focus`; the ring is `:focus-visible`, earned only by
+                    // keys — and no key is routed to a float's tree at all yet
+                    // (the float-keyboard ledger item). When that lands, this
+                    // becomes the float's own keyboard-visible bit, exactly as
+                    // the docked column's.
+                    focus_ring: false,
+                    // A float wears its own foot, drawn by `float::build` from
+                    // the chassis geometry — these two are the *docked* strip's
+                    // and nothing here reads them.
+                    foot_path: String::new(),
+                    foot_revealed: false,
                 },
             )
         };
@@ -12878,9 +13125,9 @@ impl Runtime {
         // shouts its ROOT, and the rule is the files head's alone because a
         // *filename* keeps its case (mock-up 698-699).
         let name = profiles::cwd_leaf(&root).to_uppercase();
-        let revealed = self.float_reveal_is_fresh(now);
+        let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float, now);
         let root = if revealed {
-            FLOAT_REVEALED_LABEL.to_owned()
+            FOOT_REVEALED_LABEL.to_owned()
         } else {
             root
         };
@@ -13228,7 +13475,8 @@ impl Runtime {
         let active = self.active_tab;
         self.tabs[active].files.insert(seat, win.files);
         self.tabs[active].file_trees.insert(seat, win.cache);
-        self.set_files_keyboard(Some(seat));
+        // `DOCK` is a button and this is the click on it.
+        self.set_files_keyboard(Some(seat), FilesFocusArrival::Pointer);
         self.divider_drag = None;
         self.resolve_seat_layout(self.renderer.presentation_geometry().swapchain_size.into());
         self.mark_session_dirty(Instant::now());
@@ -13245,20 +13493,36 @@ impl Runtime {
     /// keyboard falls back to the shell the instant the column it was lent to
     /// stops being on screen.
     fn files_keyboard_seat(&self) -> Option<SeatId> {
-        files_keyboard_seat_of(self.files_focus, &self.tabs[self.active_tab])
+        files_keyboard_seat_of(self.files_focus.owner, &self.tabs[self.active_tab])
+    }
+
+    /// Whether the column holding the keyboard is *showing* that it does —
+    /// `.files-tree:focus-visible`, healed through the same read as the owner.
+    fn files_ring_seat(&self) -> Option<SeatId> {
+        self.files_focus
+            .visible
+            .then(|| self.files_keyboard_seat())
+            .flatten()
     }
 
     /// Lend the keyboard to a column, or take it back for the shells.
     ///
-    /// Returns whether anything changed, because the selection ring the tree
-    /// wears while it has the keyboard is drawn from this and a frame is owed
-    /// exactly when it moves.
-    fn set_files_keyboard(&mut self, seat: Option<SeatId>) -> bool {
+    /// `arrival` is what decides the ring, and every caller knows it because
+    /// every caller *is* one gesture or the other: a press passes
+    /// [`FilesFocusArrival::Pointer`] and a key passes
+    /// [`FilesFocusArrival::Keyboard`]. That is `:focus-visible` and not
+    /// `:focus`, and the difference is the whole of the 2026-08-12 ruling — a
+    /// click on a row used to light the accent ring, which the mock-up's own
+    /// rule never does.
+    ///
+    /// Returns whether anything changed, because the ring is drawn from this and
+    /// a frame is owed exactly when it moves — including when the *owner* stands
+    /// still and only the ring goes out, which is what a press on the column that
+    /// already had the keyboard does.
+    fn set_files_keyboard(&mut self, seat: Option<SeatId>, arrival: FilesFocusArrival) -> bool {
         let tab = self.tabs[self.active_tab].id;
         let owner = seat.map(|seat| LeafId { tab, seat });
-        let changed = self.files_focus != owner;
-        self.files_focus = owner;
-        changed
+        self.files_focus.arrive(owner, arrival)
     }
 
     /// Enter, Space or a double click on a file row (K156/D44).
@@ -13282,7 +13546,7 @@ impl Runtime {
         match files_row_activation(&root, key) {
             RowActivation::Preview(path) => self.open_preview_image(path),
             RowActivation::DefaultApp(path) => {
-                self.open_local_path(&path);
+                let _ = self.open_local_path(&path);
                 Ok(())
             }
             RowActivation::Nowhere => Ok(()),
@@ -13290,14 +13554,18 @@ impl Runtime {
     }
 
     /// Hand one path to the system's default handler, and say so when the window
-    /// declines.
+    /// declines. Returns whether the system took it.
     ///
     /// The refusal is spoken rather than logged: a double click that does
     /// nothing at all is indistinguishable from a double click that was not
     /// registered, and "the files tree does not run programs" is a rule the user
     /// is entitled to be told once, in the same one-line status the worker
     /// notices use.
-    fn open_local_path(&mut self, path: &Path) {
+    ///
+    /// The answer is reported because a *foot* has something to do with it that
+    /// a row has not: it confirms in place, and a confirmation printed over a
+    /// reveal that never happened would be the one thing worse than silence.
+    fn open_local_path(&mut self, path: &Path) -> bool {
         let result = window_hwnd(&self.window).and_then(|hwnd| {
             bt_platform::open_local_path(hwnd, path)
                 .map_err(|error| anyhow!(error))
@@ -13308,7 +13576,9 @@ impl Runtime {
                 self.files_notice = Some((FILES_PROGRAM_REFUSED_NOTICE.to_owned(), Instant::now()));
             }
             eprintln!("recoverable files row open failure: {error:#}");
+            return false;
         }
+        true
     }
 
     /// One key, with a files column holding the keyboard (D44/D47).
@@ -13322,8 +13592,24 @@ impl Runtime {
         let Some(command) = files::tree_command(&event.logical_key, self.modifiers) else {
             // Still the tree's key: it owns the keyboard, so nothing here
             // reaches a shell. It simply has nothing to do with this one.
+            //
+            // And it does *not* light the ring. Rule ② is about the keys this
+            // column answers — the arrows, Home/End, Enter, Escape — not about
+            // every byte that happens to arrive while it holds the keyboard: a
+            // stray letter is the user typing at a list that has nothing to type
+            // into, and answering it with a focus ring would be the column
+            // claiming a gesture it did not receive.
             return Ok(true);
         };
+        // **Rule ②** (`:focus-visible`, 2026-08-12): the column already had the
+        // keyboard, and it is now being *used* as a keyboard. Nothing about who
+        // owns it changed — only that the ring has been earned, which is the one
+        // transition `set_files_keyboard` cannot express. Set before the command
+        // is carried out, so the very keypress that moves the selection is the
+        // one that lights the ring around it, in the same frame.
+        if self.files_focus.navigated() {
+            self.refresh_chrome();
+        }
         if event.repeat
             && matches!(
                 command,
@@ -13336,7 +13622,10 @@ impl Runtime {
             return Ok(true);
         }
         if command == files::TreeCommand::Release {
-            if self.set_files_keyboard(None) && self.refresh_chrome() {
+            // The arrival is immaterial with no owner to arrive at — rule ④: the
+            // bit stops meaning anything the moment the keyboard leaves, and the
+            // next entry recomputes it from *how* that entry happened.
+            if self.set_files_keyboard(None, FilesFocusArrival::Keyboard) && self.refresh_chrome() {
                 self.present_chrome_change()?;
             }
             return Ok(true);
@@ -13438,27 +13727,38 @@ impl Runtime {
         } else {
             return;
         };
+        let rows = tree.rows.len();
         let cache = self.tabs[self.active_tab]
             .file_trees
             .entry(seat)
             .or_default();
-        cache.scroll_px = (geometry.scroll_px + travel).max(0.0);
+        cache.scroll_px = seats::clamp_files_scroll(body, rows, geometry.scroll_px + travel, scale);
     }
 
     /// Wheel over a files column's body (C28's `overflow-y: auto`).
     fn scroll_files_tree(
         &mut self,
         seat: SeatId,
-        body_height: f32,
+        body: [f32; 4],
         delta: MouseScrollDelta,
     ) -> Result<()> {
-        let travel = self.vertical_wheel_travel(delta, body_height);
+        let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let rows = self
+            .files_tree_contents()
+            .get(&seat)
+            .map(|tree| tree.rows.len())
+            .unwrap_or_default();
         let active = self.active_tab;
         let cache = self.tabs[active].file_trees.entry(seat).or_default();
-        // Clamped to zero here and to the content's own height when the geometry
-        // is built: this side knows there is no scrolling backwards, and only
-        // that side knows how far forwards there is.
-        let scrolled = (cache.scroll_px - travel).max(0.0);
+        // **Both ends, here** (R2 乙案). There is no scrolling backwards past the
+        // top and none forwards past the last row, and this side knows both —
+        // it has the body the painter will use and the rows that are in it. The
+        // upper half used to be left to the painter, which meant a wheel at the
+        // end of a list went on adding to a number nothing was reading: the
+        // stored offset ran away from the picture, and coming back up cost one
+        // notch per notch spent, with the list frozen until the debt was paid.
+        let scrolled = seats::clamp_files_scroll(body, rows, cache.scroll_px - travel, scale);
         if scrolled == cache.scroll_px {
             return Ok(());
         }
@@ -13467,6 +13767,40 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// Pull every column's stored scroll back inside what its list can still
+    /// show, in the cache **and** in the frame's own copy of it.
+    ///
+    /// The third writer, and the one that answers the half of R2 乙案 the other
+    /// two cannot: a scroll that was legal when it was written stops being legal
+    /// when the *list* changes under it — a folder folded, a directory re-read
+    /// with fewer children in it, a divider dragged to make the pane taller. The
+    /// wheel is not involved in any of those and has nothing to clamp.
+    ///
+    /// It is handed the trees this frame is about to draw rather than walking
+    /// its own, and it writes the healed number into both: one walk, and the
+    /// picture and the cache cannot disagree about the offset even for the frame
+    /// the heal happens on. `refresh_chrome` is the caller, which is the one
+    /// funnel every path that rebuilds the picture already goes through, so
+    /// "what is stored is what is drawn" holds for every frame rather than for
+    /// the frames somebody remembered to heal.
+    fn heal_files_scroll(
+        &mut self,
+        scale: f32,
+        trees: &mut BTreeMap<SeatId, seats::FilesTreeContent>,
+    ) {
+        let active = self.active_tab;
+        for (seat, tree) in trees.iter_mut() {
+            let Some(body) = seats::files_body_rect(&self.seat_layout, *seat, scale) else {
+                continue;
+            };
+            let healed = seats::clamp_files_scroll(body, tree.rows.len(), tree.scroll_px, scale);
+            tree.scroll_px = healed;
+            if let Some(cache) = self.tabs[active].file_trees.get_mut(seat) {
+                cache.scroll_px = healed;
+            }
+        }
     }
 
     /// C35, applied only where a landed directory has proved a selection gone.
@@ -15826,6 +16160,12 @@ impl Runtime {
         // head carries the same `×` and the same drag handle every other pane
         // has, and the tree lives strictly below it. Asking the rows first would
         // put a row where the close button is on any column scrolled far enough.
+        // The foot before the rows, and before the rows can even reach it: the
+        // tree's body now stops at the strip, so the two cannot overlap. Asked
+        // first anyway, for the reason the root button is asked before the head
+        // it lives in — a control's claim on its own rectangle should not depend
+        // on a *second* rectangle happening to have been shortened correctly.
+        .or_else(|| seats::hit_files_foot(&self.seat_layout, scale, position.x, position.y))
         .or_else(|| {
             seats::hit_files_tree(
                 &self.seat_layout,
@@ -17198,6 +17538,15 @@ impl Runtime {
                 self.tab_clicks.interrupt();
                 self.press_files_row(seat, index)?;
             }
+            // B24 — the strip is one button and pressing it hands the folder to
+            // Explorer. It breaks a click chain for the same reason `.close` and
+            // `.pin` do: a chain of clicks on a button is a chain of button
+            // presses, not the beginning of a rename somewhere else.
+            seats::ChromeTarget::FilesFoot(seat) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.reveal_files_root(seat)?;
+            }
             seats::ChromeTarget::FilesRoot(seat) => {
                 self.tab_clicks.interrupt();
                 self.files_row_clicks.interrupt();
@@ -18031,14 +18380,14 @@ impl Runtime {
         // router's answer for a files column is "nobody's", and until this slice
         // gave the column rows that was the truth.
         if let Some(position) = self.pointer_position
-            && let Some((seat, body_height)) = seats::files_body_at(
+            && let Some((seat, body)) = seats::files_body_at(
                 &self.seat_layout,
                 self.renderer.metrics().scale_factor as f32,
                 position.x,
                 position.y,
             )
         {
-            return self.scroll_files_tree(seat, body_height, delta);
+            return self.scroll_files_tree(seat, body, delta);
         }
         // A notch belongs to the pane it is over. With one terminal that is the
         // terminal or nothing, which is what this guard has always said; with a
@@ -19438,6 +19787,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        // And the foot's own 1300ms, whichever strip is wearing it. Its own step
+        // because the two feet are drawn into two different surfaces — see
+        // `advance_foot_reveal`.
+        if let Err(error) = runtime.advance_foot_reveal(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = match runtime.flush_pending_pty_resize(now) {
@@ -19497,10 +19853,11 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             // trigger reports nothing and costs no wake-ups at all.
             runtime.float_deadline(now),
             // The foot's confirmation owes exactly one wake-up: the instant it is
-            // due to turn back into a path.
+            // due to turn back into a path. One entry for both feet, because
+            // there is one clock.
             runtime
-                .float_revealed_at
-                .map(|at| at + FLOAT_REVEAL_FEEDBACK),
+                .revealed_foot
+                .map(|(_, at)| at + FOOT_REVEAL_FEEDBACK),
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
@@ -21105,6 +21462,105 @@ mod tests {
 
     fn at(x: f64, y: f64) -> PhysicalPosition<f64> {
         PhysicalPosition::new(x, y)
+    }
+
+    // ── `.files-tree:focus-visible` (user ruling 2026-08-12) ────────────────
+
+    /// PIN — **a press takes the keyboard without lighting the ring; the first
+    /// key the column answers lights it; the next press puts it out again.**
+    ///
+    /// The mock-up rings the selection under `.files-tree:focus-visible .frow.sel`
+    /// (line 789), and `:focus-visible` is not `:focus`. A browser draws no ring
+    /// when focus arrives by pointer — the hand that put it there already knows
+    /// where it went — and draws one as soon as the element is being driven by
+    /// the keyboard, because that is the moment "which of these two lists moves
+    /// when I press ↓" becomes a real question.
+    ///
+    /// Red gate, and it is the whole of the user's report: this was
+    /// `content.focused = (the column holds the keyboard)`, which is `:focus`. So
+    /// clicking a folder lit the accent ring, while the mock-up under the same
+    /// click shows only the `--active` pill. The three assertions are the three
+    /// gestures in the order the user made them — click, ↓, click.
+    ///
+    /// The mutation that must re-redden it: make `visible` unconditionally true
+    /// in `FilesKeyboardFocus::arrive`, which is exactly the old behaviour.
+    #[test]
+    fn a_pointer_takes_the_keyboard_without_a_ring_and_the_first_key_lights_it() {
+        let column = LeafId {
+            tab: A,
+            seat: SeatId(3),
+        };
+        let mut focus = FilesKeyboardFocus::default();
+
+        // ① The click that selects a folder. The column has the keyboard — ↓ will
+        //    move *this* list — and it does not say so, because you just pointed
+        //    at it.
+        assert!(focus.arrive(Some(column), FilesFocusArrival::Pointer));
+        assert_eq!(focus.owner, Some(column), "the keyboard did move");
+        assert!(
+            !focus.visible,
+            "and the ring stayed out: `:focus`, not `:focus-visible`"
+        );
+
+        // ② The first arrow key. Nothing about *who* owns the keyboard changed,
+        //    so only a rule about being driven by one can light this.
+        assert!(focus.navigated(), "the first answered key owes a frame");
+        assert!(focus.visible, "and lights the ring");
+        assert_eq!(focus.owner, Some(column), "without moving the keyboard");
+        assert!(
+            !focus.navigated(),
+            "the second key owes nothing — the ring is already lit"
+        );
+
+        // ③ A click back onto the same column. The owner does not move and the
+        //    ring must still go out, which is why the change is reported off the
+        //    pair rather than off the owner.
+        assert!(
+            focus.arrive(Some(column), FilesFocusArrival::Pointer),
+            "the ring going out is a change worth a frame"
+        );
+        assert!(!focus.visible, "a press puts the ring out again");
+        assert_eq!(focus.owner, Some(column), "and keeps the keyboard");
+    }
+
+    /// PIN — the ring cannot outlive the column it belongs to, and a keyboard
+    /// route in arrives already lit.
+    ///
+    /// Rules ③ and ④ of the same ruling. There is no keyboard route into a column
+    /// in this build — `toggle_files_pane` deliberately does not take the
+    /// keyboard — so ③ is pinned here rather than in a gesture, which is what
+    /// makes it true the day such a route is added instead of a thing that has to
+    /// be remembered.
+    #[test]
+    fn the_ring_never_outlives_its_column_and_a_key_that_arrives_brings_one() {
+        let column = LeafId {
+            tab: A,
+            seat: SeatId(3),
+        };
+        let mut focus = FilesKeyboardFocus::default();
+
+        // ③ Focus carried in *by* the keyboard is visible from the first frame:
+        //    nothing else would tell you where the next ↓ is going.
+        assert!(focus.arrive(Some(column), FilesFocusArrival::Keyboard));
+        assert!(focus.visible, "a keyboard arrival rings at once");
+
+        // ④ Escape, or a click in a shell. The bit is meaningless with no column
+        //    to be about, and is never left set behind the keyboard's back.
+        assert!(focus.arrive(None, FilesFocusArrival::Keyboard));
+        assert_eq!(focus.owner, None);
+        assert!(
+            !focus.visible,
+            "a ring belonging to no column is a ring on nothing"
+        );
+        assert!(
+            !focus.navigated(),
+            "and a key with no column to answer for lights nothing"
+        );
+
+        // A column that never had the keyboard cannot be lit into having it.
+        let mut cold = FilesKeyboardFocus::default();
+        assert!(!cold.navigated());
+        assert_eq!(cold, FilesKeyboardFocus::default());
     }
 
     /// J105 (mock-up 5743-5765) — a press chooses a tab; the switch lands 180ms
@@ -27060,8 +27516,12 @@ mod tests {
         let split = solved_terminal_seat(&seats, dpi_milli, physical);
         assert_eq!(lone.y, 40);
         assert_eq!(lone.height, 860, "lone terminal body is the whole seat");
-        assert_eq!(split.y, lone.y + 28);
-        assert_eq!(split.height, lone.height - 28);
+        // The head's own height, read from the constant rather than restated —
+        // it moved from 28 to 30 on 2026-08-12 and this assertion is about the
+        // body giving up exactly a head, not about the number.
+        let head = bt_render::SEAT_TITLE_BAR_LOGICAL_PX as u32;
+        assert_eq!(split.y, lone.y + head);
+        assert_eq!(split.height, lone.height - head);
 
         // Representative renderer metrics make the viewport-to-grid boundary
         // explicit here; CellMetrics::grid_for_pixels owns the same floor.

@@ -429,14 +429,31 @@ switch ($Cmd) {
     "captured ${w}x${hh} (margin $Margin) -> $Out"
   }
   "wheel" {
+    # A notch belongs to whatever the pointer is over, so where the pointer is
+    # put is the whole of what this command means. -X/-Y address it exactly as
+    # `click` and `hover` do — including the negative-counts-from-the-far-edge
+    # rule — and omitting both keeps the old behaviour of the window's centre,
+    # which is what every existing caller wants for the terminal's own history.
     $h = Get-AppWindow $ProcId
     if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not scrolling blind" }
     $r = New-Object PRECT
     [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
-    [Probe]::SetCursorPos([int](($r.L + $r.R) / 2), [int](($r.T + $r.B) / 2)) | Out-Null
+    if ($X -eq 0 -and $Y -eq 0) {
+      $px = [int](($r.L + $r.R) / 2); $py = [int](($r.T + $r.B) / 2)
+    } else {
+      $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
+      $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+      # The same ownership check a click makes, and for the same reason: a notch
+      # has an address, and one aimed past the window's edge scrolls whatever is
+      # behind it.
+      if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) {
+        throw "REFUSED: ($px, $py) does not belong to pid=$ProcId — not scrolling someone else's window"
+      }
+    }
+    [Probe]::SetCursorPos($px, $py) | Out-Null
     Start-Sleep -Milliseconds 150
     [Probe]::Wheel($Delta)   # positive = scroll up (into history), negative = down
-    "wheeled $Delta notches on pid=$ProcId (foreground verified)"
+    "wheeled $Delta notches at ($px, $py) on pid=$ProcId (foreground verified)"
   }
   "click" {
     $h = Get-AppWindow $ProcId

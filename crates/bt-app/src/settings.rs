@@ -2745,6 +2745,63 @@ mod tests {
         }
     }
 
+    /// PIN (B23) — the *left* cut keeps the longest **suffix** that fits, which
+    /// on a path is the part that answers "where am I".
+    ///
+    /// The mirror of the test above, and the rule both feet are drawn by: a
+    /// float's `.fly-foot` and a docked column's `.files-foot` both show a full
+    /// path in a strip narrower than one, and a right cut would give
+    /// `C:\Users\Weiyi\Developer\Bett…` — every character of which the user
+    /// already knew. The user's own screenshot of what they wanted is the second
+    /// assertion here: `…ers\Weiyi\Developer\BetterTerminal`.
+    #[test]
+    fn the_left_ellipsis_keeps_the_longest_suffix_that_fits() {
+        let font = 10.0;
+        let advance = font * TEST_ADVANCE_PER_EM;
+        let text = r"C:\Users\Weiyi\Developer\BetterTerminal";
+        assert_eq!(
+            ellipsized_left(text, advance * 100.0, font, &mut measure),
+            text,
+            "a path with room to spare is left whole"
+        );
+        // The width the user photographed: room for a `…` and the last 34
+        // characters, which is exactly where their own screenshot cut.
+        assert_eq!(
+            ellipsized_left(text, advance * 35.0, font, &mut measure),
+            format!("{ELLIPSIS}ers\\Weiyi\\Developer\\BetterTerminal"),
+            "the folder you are in survives; the drive letter is what goes"
+        );
+        for characters in 1..text.chars().count() {
+            let room = advance * characters as f32;
+            let cut = ellipsized_left(text, room, font, &mut measure);
+            assert!(
+                measure(&cut, font) <= room,
+                "{cut:?} does not fit {characters} characters' worth"
+            );
+            let kept = cut.strip_prefix(ELLIPSIS).expect("a cut path is marked");
+            assert!(text.ends_with(kept), "{kept:?} is a suffix of {text:?}");
+            // The longest such suffix, by the same arithmetic as the prefix
+            // test: the `…` costs one character's room.
+            assert_eq!(
+                kept.chars().count(),
+                characters.saturating_sub(1),
+                "{cut:?} left room unused in {characters} characters' worth"
+            );
+        }
+        assert_eq!(ellipsized_left(text, 0.0, font, &mut measure), ELLIPSIS);
+        // And cut between characters: a path with three-byte names in it is
+        // still a path after the cut.
+        let wide = r"C:\用户\伟毅\开发\终端";
+        for characters in 1..=wide.chars().count() {
+            let cut = ellipsized_left(wide, advance * characters as f32, font, &mut measure);
+            let kept = cut.strip_prefix(ELLIPSIS).unwrap_or(&cut);
+            assert!(
+                wide.ends_with(kept),
+                "{kept:?} is a whole-character suffix of {wide:?}"
+            );
+        }
+    }
+
     /// PIN: a window that cannot host the dialog answers `None` rather than a
     /// squashed one — and the runtime reads `None` as "shut", so nothing is
     /// trapped behind a modal with nothing on it.

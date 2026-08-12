@@ -251,13 +251,24 @@ pub fn float_geometry(
         + dock_label_px;
     let dock_height = px(FLOAT_DOCK_HEIGHT_LOGICAL_PX);
     let [dock_top, dock_bottom] = centred(dock_height, head);
-    let dock_right = close[0] - gap;
-    let dock_left = dock_right - dock_box;
+    // **Both edges floored, never rounded.** `dock_box` is padding and a gap —
+    // whole numbers at any scale — plus a *measured* caption, which is
+    // fractional almost always, and `close[0] - gap` is fractional at every
+    // fractional scale. Snapping the two edges independently rounds one of them
+    // inward half the time, and the half pixel it takes comes off the caption's
+    // own room: the label's rect is this box less its two paddings, so a box a
+    // fraction short is a caption clipped at its last letter. Flooring puts both
+    // edges on whole device pixels — which is what `snap` was here for, and what
+    // a rounded pill fill needs — while moving each of them in the one direction
+    // that cannot lose ink: the box only grows, and the gap to the `×` only
+    // widens.
+    let dock_right = (close[0] - gap).floor();
+    let dock_left = (dock_right - dock_box).floor();
     // A head with no room for the button does without it rather than drawing it
     // on top of the name: `×` is the one control that must never be crowded out,
     // because it is the only one that can undo the squeeze.
     let dock = (dock_left > head_mark[2] + gap)
-        .then(|| snap([dock_left, dock_top, dock_right, dock_bottom]));
+        .then(|| [dock_left, dock_top.round(), dock_right, dock_bottom.round()]);
 
     let title_right = dock.map_or(close[0], |dock| dock[0]) - gap;
     let head_title = snap([
@@ -1267,6 +1278,61 @@ mod tests {
             geometry.head_title[0] >= geometry.head_mark[2],
             "starting after the folder mark"
         );
+    }
+
+    /// PIN — the `DOCK` box holds the whole of the caption it was sized for, at
+    /// every scale and every fractional measured width, and still clears the `×`.
+    ///
+    /// Two numbers meet in this box and both are fractional: the caption's
+    /// measured width, which the font decides, and `close[0] - gap`, which a
+    /// fractional scale decides. The box used to be `snap`ped — each edge
+    /// rounded to the nearer pixel independently — so half of those pairs lost
+    /// up to a pixel off the *inside* of the button. The label's own rect is this
+    /// box less its two paddings, so the pixel came straight out of the
+    /// caption's room and the last letter was clipped by the bounds around it.
+    ///
+    /// Red gate: with `snap`, `dock_label_px = 22.6` at scale 1.0 gives a box of
+    /// 45 device pixels where the caption needs 45.6 — the assertion below fails
+    /// by 0.6, which is exactly the fraction of a `K` the user photographed.
+    #[test]
+    fn the_dock_box_is_never_rounded_narrower_than_its_own_caption() {
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+            // The measured caption is whatever the face says; these stand in for
+            // the fractions it produces, since this module has no font.
+            for label_px in [18.0_f32, 22.6, 23.4, 30.0, 41.07] {
+                let geometry = float_geometry(
+                    frame(100.5, 100.0, 264.0 * scale, 400.0),
+                    FloatMode::Pinned,
+                    scale,
+                    label_px,
+                );
+                let dock = geometry.dock.expect("a 264px head seats the button");
+                let wanted = (FLOAT_DOCK_PADDING_X_LOGICAL_PX * 2.0
+                    + FLOAT_DOCK_GLYPH_LOGICAL_PX
+                    + FLOAT_DOCK_GAP_LOGICAL_PX)
+                    * scale
+                    + label_px;
+                assert!(
+                    dock[2] - dock[0] >= wanted,
+                    "scale {scale}, caption {label_px}: the box is {} against {wanted} of \
+                     glyph, gap, padding and caption",
+                    dock[2] - dock[0],
+                );
+                // The `×`'s own room is the other side of the same rounding, and
+                // it is not allowed to pay for the button's.
+                assert!(
+                    dock[2] + FLOAT_HEAD_GAP_LOGICAL_PX * scale <= geometry.close[0],
+                    "scale {scale}, caption {label_px}: DOCK's right edge {} plus its gap \
+                     runs into the × at {}",
+                    dock[2],
+                    geometry.close[0],
+                );
+                // And both edges are still whole device pixels, which is what the
+                // rounded pill fill behind the caption needs.
+                assert_eq!(dock[0], dock[0].floor(), "the left edge is a whole pixel");
+                assert_eq!(dock[2], dock[2].floor(), "and so is the right");
+            }
+        }
     }
 
     /// The `×` is the one control that may not be crowded out: it is the only one

@@ -3162,15 +3162,44 @@ impl Renderer {
         changed
     }
 
-    /// How wide `text` will be when drawn as a [`ChromeLabel`] at
+    /// How wide `text` will be when drawn as a plain [`ChromeLabel`] at
     /// `font_size_px`, in physical pixels.
     ///
     /// The one caller that cannot do without it is the tab's pane-count badge:
     /// the mock-up sizes that pill as `max(min-width, text + padding)`, so its
     /// box is a function of the number inside it, and the font is the only thing
     /// that knows how wide a number is.
+    ///
+    /// "Plain" is the whole of the difference from [`Self::measure_chrome_label`]
+    /// — the face's regular weight and no tracking, which is what the great
+    /// majority of this chrome's labels are drawn as. A caller whose label
+    /// carries either must measure with it; see the note on
+    /// [`chrome_label_attrs`].
     pub fn measure_chrome_text(&mut self, text: &str, font_size_px: f32) -> f32 {
-        measure_chrome_text(&mut self.font_system, text, font_size_px)
+        self.measure_chrome_label(text, font_size_px, ChromeLabelWeight::Regular, 0.0)
+    }
+
+    /// How wide `text` will be when drawn as a [`ChromeLabel`] carrying `weight`
+    /// and `letter_spacing_em`.
+    ///
+    /// The measurement a *button* needs: `.float-win .fly-head button` is
+    /// `font-weight: 600; letter-spacing: .04em; text-transform: uppercase`, and
+    /// a box sized from the untracked regular-weight width of the same string is
+    /// a box the caption overflows by a letter.
+    pub fn measure_chrome_label(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        weight: ChromeLabelWeight,
+        letter_spacing_em: f32,
+    ) -> f32 {
+        measure_chrome_label(
+            &mut self.font_system,
+            text,
+            font_size_px,
+            weight,
+            letter_spacing_em,
+        )
     }
 
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
@@ -5081,6 +5110,35 @@ struct ChromeTextLayout {
     color: Color,
 }
 
+/// The shaping attributes one chrome label is set with.
+///
+/// **One builder, read by the measurer and by the shaper both.** A width and the
+/// ink it is supposed to hold are the same shaping run asked twice, and every
+/// attribute that changes an advance — the weight axis, letter spacing, tabular
+/// figures — has to be on both runs or the box is measured for a text that is
+/// not the one drawn. It was not: `measure_chrome_text` set neither the weight
+/// nor the tracking, so the float's `DOCK` was measured as regular-weight
+/// untracked text and drawn as semibold at `.04em`, and the last letter was
+/// clipped by the box its own caption had been used to size.
+fn chrome_label_attrs(
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+    tabular_numerals: bool,
+) -> Attrs<'static> {
+    let mut attrs = Attrs::new()
+        .family(Family::SansSerif)
+        .weight(weight.shaping_weight());
+    if tabular_numerals {
+        let mut features = FontFeatures::new();
+        features.enable(TABULAR_FIGURES);
+        attrs = attrs.font_features(features);
+    }
+    if letter_spacing_em != 0.0 {
+        attrs = attrs.letter_spacing(letter_spacing_em);
+    }
+    attrs
+}
+
 /// How wide a chrome label's text will be, in physical pixels.
 ///
 /// Shaped through the same face, the same size and the same shaper
@@ -5091,7 +5149,13 @@ struct ChromeTextLayout {
 /// The caller of the hour is the tab's pane-count badge, which the mock-up sizes
 /// as `max(min-width, text + padding)` (`.panecount`, lines 292-304): the badge
 /// cannot know its own width without knowing the number's.
-fn measure_chrome_text(font_system: &mut FontSystem, text: &str, font_size_px: f32) -> f32 {
+fn measure_chrome_label(
+    font_system: &mut FontSystem,
+    text: &str,
+    font_size_px: f32,
+    weight: ChromeLabelWeight,
+    letter_spacing_em: f32,
+) -> f32 {
     if text.is_empty() {
         return 0.0;
     }
@@ -5103,7 +5167,11 @@ fn measure_chrome_text(font_system: &mut FontSystem, text: &str, font_size_px: f
     buffer.set_size(None, Some(line_height));
     buffer.set_text(
         text,
-        &Attrs::new().family(Family::SansSerif),
+        // Tabular figures are deliberately not a parameter: they are a *fixed*
+        // advance per digit, so they can only ever make a measured string
+        // narrower than the proportional one, and the two callers that set them
+        // both size their box off the widest digit already.
+        &chrome_label_attrs(weight, letter_spacing_em, false),
         Shaping::Advanced,
         None,
     );
@@ -5140,17 +5208,11 @@ fn shape_chrome_labels(
                 Buffer::new(font_system, Metrics::new(label.font_size_px, line_height));
             buffer.set_wrap(Wrap::None);
             buffer.set_size(Some(width), Some(line_height));
-            let mut attrs = Attrs::new()
-                .family(Family::SansSerif)
-                .weight(label.weight.shaping_weight());
-            if label.tabular_numerals {
-                let mut features = FontFeatures::new();
-                features.enable(TABULAR_FIGURES);
-                attrs = attrs.font_features(features);
-            }
-            if label.letter_spacing_em != 0.0 {
-                attrs = attrs.letter_spacing(label.letter_spacing_em);
-            }
+            let attrs = chrome_label_attrs(
+                label.weight,
+                label.letter_spacing_em,
+                label.tabular_numerals,
+            );
             buffer.set_text(&label.text, &attrs, Shaping::Advanced, None);
             buffer.shape_until_scroll(font_system, false);
             let text_width = buffer
@@ -10506,6 +10568,93 @@ mod tests {
         baseline - cap_height_ratio * label.font_size_px / 2.0
     }
 
+    /// PIN — a label's *measured* width is the width its own glyphs take on the
+    /// drawing path, tracking and weight included.
+    ///
+    /// Every box in this chrome that hugs its caption is sized from a measure
+    /// and filled by the shaper, so the two runs have to be one run asked twice.
+    /// They were not: the measurer set neither the weight axis nor letter
+    /// spacing, so any label carrying either was measured short — by 2.4 physical
+    /// pixels on the float's `DOCK` at 100%, which is most of a letter, and the
+    /// `K` was clipped against the very bounds its short measure had drawn.
+    ///
+    /// Asserted against the sum of the run's own advances rather than against a
+    /// number, because the number is the face's business and the *agreement* is
+    /// ours. `.float-win .fly-head button` (mock-up 720-725) is the case that
+    /// found it, and the loop keeps the plain and tabular cases honest beside it.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_chrome_labels_measured_width_is_the_width_its_glyphs_take() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let cap_height_ratio = chrome_cap_height_ratio(&mut font_system, &mut swash_cache)
+            .expect("the chrome sans face publishes or renders a cap height");
+        for (what, text, size, weight, tracking) in [
+            (
+                "`.fly-head button` — the float's DOCK",
+                "DOCK",
+                10.0_f32,
+                ChromeLabelWeight::SemiBold,
+                0.04_f32,
+            ),
+            // The same button at 200%, where a per-glyph tracking error is twice
+            // as large and a rounding-sized tolerance would hide it.
+            (
+                "the same button at 200%",
+                "DOCK",
+                20.0,
+                ChromeLabelWeight::SemiBold,
+                0.04,
+            ),
+            (
+                "a plain pane title",
+                "Terminal",
+                11.5,
+                ChromeLabelWeight::Regular,
+                0.0,
+            ),
+            (
+                "a focused pane title, which is Medium",
+                "Terminal",
+                11.5,
+                ChromeLabelWeight::Medium,
+                0.0,
+            ),
+        ] {
+            let measured = measure_chrome_label(&mut font_system, text, size, weight, tracking);
+            let label = ChromeLabel {
+                text: text.to_owned(),
+                // Laid out in a box far wider than the text wants, so the run
+                // that comes back is the text's own width and not the box's.
+                rect: [0.0, 0.0, 1_000.0, size * 1.4],
+                clip: None,
+                font_size_px: size,
+                color: [255, 255, 255],
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: tracking,
+                weight,
+                tabular_numerals: false,
+            };
+            let laid_out = shape_chrome_labels(
+                &mut font_system,
+                std::slice::from_ref(&label),
+                cap_height_ratio,
+                1.0,
+            )
+            .first()
+            .expect("the label shapes")
+            .buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max);
+            assert!(
+                (measured - laid_out).abs() < 0.01,
+                "{what}: measured {measured} against {laid_out} laid out"
+            );
+        }
+    }
+
     /// PIN (T2 breathing): a mark that has only changed opacity is a *changed*
     /// mark, and `set_chrome` must say so.
     ///
@@ -10879,9 +11028,9 @@ mod tests {
         for dpi_milli in [1000_u32, 1250, 1500, 2000] {
             let scale = dpi_milli as f32 / 1000.0;
             // The head's *content* box, which is the border box less its
-            // hairline: `* { box-sizing: border-box }` makes `.panehead`'s 28px
-            // twenty-seven rows of flex row plus one of border, and the caption
-            // is centred in the twenty-seven.
+            // hairline: `* { box-sizing: border-box }` makes `.panehead`'s 30px
+            // twenty-nine rows of flex row plus one of border, and the caption
+            // is centred in the twenty-nine.
             let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round()
                 - (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
             let label = ChromeLabel {

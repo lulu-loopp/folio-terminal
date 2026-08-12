@@ -1599,7 +1599,7 @@ pub fn seat_viewport(layout: &SeatLayout, seat: SeatId) -> Option<SeatViewport> 
     })
 }
 
-/// A pane's content rectangle. A multi-pane tree excludes the common 28px pane
+/// A pane's content rectangle. A multi-pane tree excludes the common 30px pane
 /// head; a lone terminal leaf consumes its whole seat. This is the only
 /// rectangle allowed to derive terminal rows.
 pub fn pane_body_viewport(
@@ -1663,6 +1663,16 @@ pub enum ChromeTarget {
         seat: SeatId,
         index: usize,
     },
+    /// `.files-pane .files-foot` — the path strip along the bottom of a docked
+    /// column, whose whole width is one button: press it and the folder opens in
+    /// File Explorer (mock-up 527-537, `revealFolderFeedback`).
+    ///
+    /// The seat and nothing narrower, because the strip has no parts. The mark
+    /// and the path are one control's contents — the mock-up hangs the click on
+    /// `.files-foot` itself and lets the two children ride it — and splitting
+    /// them would make the six pixels between them a dead zone in the middle of
+    /// a button.
+    FilesFoot(SeatId),
     /// `.files-root` — the head's root name, which is a button that opens the
     /// menu of places this column could be pointed at instead (B15/E53).
     ///
@@ -3529,7 +3539,7 @@ pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.7;
 /// fractional scale nobody tested.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaneHeadGeometry {
-    /// The head's border box — 28 logical pixels including the hairline.
+    /// The head's border box — 30 logical pixels including the hairline.
     pub head: [f32; 4],
     /// The content box the flex row centres in: the border box less its border.
     pub content_bottom: f32,
@@ -4746,7 +4756,7 @@ pub fn build_chrome_for_tabs(
     // The mock-up puts the card on the pane itself (`.slot.resizing .pane {
     // margin: 5px; border-radius: 8px }`, 1465-1468): the *whole* box moves in,
     // head included, and the `--panel` floor is what the gap reveals. It reaches
-    // the head only as a translation — `.panehead`'s own `height: 28px` and
+    // the head only as a translation — `.panehead`'s own `height: 30px` and
     // `padding` are never touched by the resizing state, so the caption keeps
     // every pixel of its top padding while the box around it shrinks.
     //
@@ -4847,9 +4857,9 @@ pub fn build_chrome_for_tabs(
             // be a pane whose chrome was built and never handed over.
             Presentation::Full if seats.seat_wears_head(placement.kind) => {
                 // `* { box-sizing: border-box }` (mock-up line 77) rules the
-                // arithmetic here: `.panehead { height: 28px; border-bottom: 1px }`
-                // is twenty-eight rows *including* the hairline, not twenty-eight
-                // plus one. Rounded once, in `pane_head_geometry`, because
+                // arithmetic here: `.panehead { height: 30px; border-bottom: 1px }`
+                // is thirty rows *including* the hairline, not thirty plus one.
+                // Rounded once, in `pane_head_geometry`, because
                 // `pane_body_viewport` and the hit test round the same product
                 // and the three must not round apart at a fractional scale.
                 // **F63/B22 — the head rides the card, it is not cropped by it.**
@@ -4857,8 +4867,8 @@ pub fn build_chrome_for_tabs(
                 // `box` is the pane's border box for *drawing*: the solved
                 // rectangle at rest, and the card while this pane is being
                 // resized. That is the whole of the mock-up's `margin: 5px`,
-                // which moves the box and leaves `.panehead { height: 28px }`
-                // alone — so the fill below is the same 27-plus-hairline it
+                // which moves the box and leaves `.panehead { height: 30px }`
+                // alone — so the fill below is the same 29-plus-hairline it
                 // always was, and the caption keeps its top padding to the
                 // pixel. Only the corner it starts from moved.
                 //
@@ -5160,12 +5170,20 @@ pub fn build_chrome_for_tabs(
                     .then(|| files_trees.get(&placement.id))
                     .flatten();
                 let mut files_notice = None;
-                if let Some(tree) = files_tree {
-                    let body = [head_box[0], head_bottom, head_box[2], head_box[3]];
+                // The head, the list and the foot, from one derivation — the
+                // same one `files_body_rect` hands the wheel, the hit test and
+                // the keyboard, so all four agree about where the rows stop.
+                // Off `head_box` rather than `rect` because that is what this
+                // pass draws into: a pane mid-resize rides its card (F63/B22),
+                // and a foot pinned to the solved rectangle would stand outside
+                // the card its own pane had moved into.
+                let files_pane = (placement.kind == SeatKind::Files)
+                    .then(|| files_pane_geometry(head_box, scale));
+                if let (Some(tree), Some(geometry)) = (files_tree, files_pane) {
                     match whole_tree_notice(&tree.rows) {
                         Some(message) => files_notice = Some(message.to_owned()),
                         None => push_files_tree(
-                            body,
+                            geometry.body,
                             tree,
                             match pointer.hover {
                                 Some(ChromeTarget::FilesRow { seat, index })
@@ -5181,6 +5199,20 @@ pub fn build_chrome_for_tabs(
                             (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
                         ),
                     }
+                }
+                // The foot, drawn for a files column whether or not it has rows:
+                // it is part of the pane's chassis like the head, not a footer on
+                // the list, and an unrooted column saying "No folder opened" in
+                // its body still owes the strip its hairline.
+                if let Some(geometry) = files_pane {
+                    push_files_foot(
+                        &geometry,
+                        files_tree,
+                        pointer.hover == Some(ChromeTarget::FilesFoot(placement.id)),
+                        scale,
+                        &palette,
+                        (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+                    );
                 }
                 let body_notice = match placement.kind {
                     SeatKind::Preview => preview_message,
@@ -5207,7 +5239,11 @@ pub fn build_chrome_for_tabs(
                             // head's border box ends — not from its fill.
                             head_bottom + pad,
                             head_box[2] - pad,
-                            head_box[3] - pad,
+                            // And centred in the body, not in the pane: a files
+                            // column's floor is its foot's hairline, and a notice
+                            // measured to the pane's own bottom edge would sit
+                            // fourteen pixels low in every empty column.
+                            files_pane.map_or(head_box[3], |geometry| geometry.body[3]) - pad,
                         ],
                         font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                         color: palette.body_hint_text,
@@ -7817,6 +7853,36 @@ pub const FILES_ROOT_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 5.0;
 /// is punctuation on the name rather than a control of its own.
 pub const FILES_ROOT_CHEVRON_OPACITY: f32 = 0.6;
 
+// ── `.files-pane .files-foot` (mock-up 527-538) ─────────────────────────────
+//
+// The strip along the bottom of a **docked** column: the full path, and a click
+// that hands the folder to Explorer. The mock-up's own note at 527 says what it
+// is for — "full path at the foot of a docked files pane too — same role as the
+// flyout's" — and it is the same role deliberately: the head names the leaf and
+// changes root, the foot says where you actually are and gives it to the OS.
+//
+// Its numbers are *not* the float foot's, and the mock-up writes both: this one
+// is 28px tall with 12px of padding on both sides, the float's is 30px with 10
+// and 18, because the float has a resize grip living in its bottom-right corner
+// and a docked column does not.
+
+/// `.files-pane .files-foot { height: 28px }`, border included — the same
+/// `box-sizing: border-box` reading the pane head is built on.
+pub const FILES_FOOT_BAR_LOGICAL_PX: f32 = 28.0;
+/// `border-top: 1px solid var(--border-soft)`, the head's hairline read from the
+/// other end of the pane. Written as the head's own constant rather than as a
+/// second `1.0`, because they are one declaration's worth of separation and the
+/// day one of them moves the other one is a bug.
+pub const FILES_FOOT_EDGE_LOGICAL_PX: f32 = SEAT_TITLE_EDGE_LOGICAL_PX;
+/// `.files-pane .files-foot { padding: 0 12px }`.
+pub const FILES_FOOT_PADDING_X_LOGICAL_PX: f32 = 12.0;
+/// `.files-pane .files-foot { gap: 6px }`, between the mark and the path.
+pub const FILES_FOOT_GAP_LOGICAL_PX: f32 = 6.0;
+/// `.files-pane .files-foot .foot-ico { width: 13px; height: 13px }`.
+pub const FILES_FOOT_MARK_LOGICAL_PX: f32 = 13.0;
+/// `.files-pane .files-foot { font-size: 11px }`.
+pub const FILES_FOOT_FONT_LOGICAL_PX: f32 = 11.0;
+
 /// `.files-root` — the head's root name, as the button it is (B15).
 ///
 /// **The button hugs its name.** `flex: 0 1 auto` and not `flex: 1`, and the
@@ -7907,12 +7973,13 @@ pub fn hit_files_root(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FilesTreeContent {
     pub rows: Vec<crate::files::TreeRow>,
-    /// How far the list is scrolled, in physical pixels, before clamping.
+    /// How far the list is scrolled, in physical pixels.
     ///
-    /// Clamped here rather than at the wheel, because the bound is
-    /// `content - viewport` and the viewport is a rectangle only the geometry
-    /// knows. A stored offset that outlived its rows is therefore harmless: it
-    /// is re-clamped every frame against the rows that actually exist.
+    /// Already clamped, and clamped by whoever *wrote* it — see
+    /// [`clamp_files_scroll`]. It used to be clamped here instead, on the theory
+    /// that only the geometry knows the viewport; the cost was a writer with no
+    /// bound at all, which is the R2 乙案 ruling's subject and is written up on
+    /// [`files_tree_geometry`].
     pub scroll_px: f32,
     /// The selected node's stable id, straight off `FilesLeafState`.
     ///
@@ -7927,15 +7994,45 @@ pub struct FilesTreeContent {
     /// with no entry are not mid-turn and take their angle from their own state,
     /// which is every row of a tree nobody has clicked in.
     pub turns: BTreeMap<String, f32>,
-    /// Whether this column is the one holding the keyboard.
+    /// Whether this column's selected row wears the accent ring.
     ///
     /// C32 splits what a selection means in two, and both halves matter: the
     /// selected row is filled **whether or not the tree has focus**, because
     /// where you are standing is a fact about the tree and you are entitled to
-    /// see it from a terminal; and it wears an accent ring **only** while the
-    /// tree has focus, because that is the one thing the fill cannot say — which
-    /// of the two panes an arrow key is about to move.
-    pub focused: bool,
+    /// see it from a terminal; and it wears an accent ring only when the tree is
+    /// *showing* that it holds the keyboard, because that is the one thing the
+    /// fill cannot say — which of the two panes an arrow key is about to move.
+    ///
+    /// **Named for the ring and not for the focus, deliberately** (2026-08-12).
+    /// The mock-up's rule is `.files-tree:focus-visible .frow.sel` (line 789),
+    /// and `:focus-visible` is not `:focus`: a browser draws no ring for focus
+    /// taken by a **press**, only for focus taken or used by the **keyboard**.
+    /// This field was called `focused` and was fed "the tree holds the keyboard",
+    /// which is `:focus` — so clicking a folder lit the ring, which the mock-up
+    /// never does. The host decides; this module only draws what it is told, and
+    /// the name now says which of the two questions it is the answer to.
+    pub focus_ring: bool,
+    /// What `.files-foot` says: the column's root in full, **already cut to the
+    /// strip's own width**.
+    ///
+    /// Cut by the caller and arriving as the final string, for the reason every
+    /// other measured caption in this module does: only the thing holding the
+    /// font can say how many characters fit, and the cut here is
+    /// `settings::ellipsized_left` — from the *front*, because the end of a path
+    /// is the part that answers "where am I" (B23, `.foot-path`).
+    ///
+    /// It carries the confirmation too, while one is up: the mock-up's
+    /// `revealFolderFeedback` swaps the path for "Revealed in File Explorer" and
+    /// swaps it back, and choosing which of the two sentences it is is the same
+    /// kind of decision as choosing where to cut one.
+    pub foot_path: String,
+    /// Whether the foot is confirming a reveal rather than saying where it is.
+    ///
+    /// The colour and the mark, not the words — `.files-foot.done { color:
+    /// var(--accent) }` with `#i-check` in place of `#i-folder-open`, which is
+    /// the same swap the float's foot makes because it is the same function
+    /// making it.
+    pub foot_revealed: bool,
 }
 
 /// Where each row of one files column lands.
@@ -7947,7 +8044,7 @@ pub struct FilesTreeContent {
 pub struct FilesTreeGeometry {
     /// The body rectangle the rows are clipped to.
     pub viewport: [f32; 4],
-    /// Physical pixels of scroll actually applied, after clamping.
+    /// Physical pixels of scroll applied — the stored offset, believed.
     pub scroll_px: f32,
     /// How far the content would extend if nothing clipped it.
     pub content_height: f32,
@@ -8087,9 +8184,19 @@ fn whole_tree_notice(rows: &[crate::files::TreeRow]) -> Option<&str> {
 ///
 /// Separate from [`hit_files_tree`] because a notch is owed to the *list*, not
 /// to a row: the empty space below the last row is still the scroller, and a
-/// wheel there has to move it. Returns the body height because the wheel's own
-/// page-sized step is a screenful of whatever it is over.
-pub fn files_body_at(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<(SeatId, f32)> {
+/// wheel there has to move it.
+///
+/// Returns the whole body rectangle rather than only its height. The wheel needs
+/// both halves of it and for two different reasons — the height, because its
+/// page-sized step is a screenful of whatever it is over; and the rectangle,
+/// because since R2 乙案 the wheel is the one that *clamps*, and a clamp needs
+/// the same body the painter will lay the rows into.
+pub fn files_body_at(
+    layout: &SeatLayout,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<(SeatId, [f32; 4])> {
     let (x, y) = (x as f32, y as f32);
     for placement in &layout.rects {
         if placement.kind != SeatKind::Files
@@ -8101,10 +8208,91 @@ pub fn files_body_at(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<
             continue;
         };
         if x >= body[0] && x < body[2] && y >= body[1] && y < body[3] {
-            return Some((placement.id, body[3] - body[1]));
+            return Some((placement.id, body));
         }
     }
     None
+}
+
+/// Everything a docked files column is, below its head: the tree's rectangle
+/// and the foot's.
+///
+/// **The one subtraction.** A files column is a head, a list and a foot, and the
+/// list is what is left over — so the day the foot arrived, every reader of
+/// "the seat less its head" became wrong by 28 pixels at once: the painter would
+/// have drawn rows under the strip, the wheel would have scrolled a taller body
+/// than exists, and a click at the bottom of the pane would have landed on a row
+/// the foot is covering. There is one derivation of the leftover and every one of
+/// those four asks it here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilesPaneGeometry {
+    /// What the tree gets: under the head's hairline, above the foot's.
+    pub body: [f32; 4],
+    /// `border-top: 1px solid var(--border-soft)` — the foot's own first row.
+    pub foot_edge: [f32; 4],
+    /// `.files-foot`, the whole clickable strip, hairline included.
+    pub foot: [f32; 4],
+    /// The open-folder mark at the foot's left.
+    pub foot_mark: [f32; 4],
+    /// The room the path is laid out in — and therefore the width it is cut to.
+    pub foot_path: [f32; 4],
+}
+
+/// Lay a docked files column's body and foot out inside its border box.
+///
+/// The foot keeps its whole height and the *body* is what gives way, down to
+/// nothing — the rule `float_geometry` already follows for the same reason: a
+/// column squeezed to a sliver is more use with a path in it than with two rows
+/// of tree and no way to reach the folder.
+#[must_use]
+pub fn files_pane_geometry(rect: [f32; 4], scale: f32) -> FilesPaneGeometry {
+    let head = pane_head_geometry(rect, SeatKind::Files, scale);
+    let bar = (FILES_FOOT_BAR_LOGICAL_PX * scale).round();
+    let edge = (FILES_FOOT_EDGE_LOGICAL_PX * scale).max(1.0);
+    let foot_top = (rect[3] - bar).max(head.head[3]);
+    let foot = [rect[0], foot_top, rect[2], rect[3]];
+    let foot_edge = [foot[0], foot[1], foot[2], (foot[1] + edge).min(foot[3])];
+    let body = [rect[0], head.head[3], rect[2], foot[1].max(head.head[3])];
+
+    let pad = (FILES_FOOT_PADDING_X_LOGICAL_PX * scale).round();
+    let gap = FILES_FOOT_GAP_LOGICAL_PX * scale;
+    let mark = (FILES_FOOT_MARK_LOGICAL_PX * scale).round().max(1.0);
+    // Centred in the strip *below its hairline*, which is the flex row's own
+    // content box — the same reading the head's controls are centred by.
+    let mark_top = (foot_edge[3] + ((foot[3] - foot_edge[3]) - mark) / 2.0).round();
+    let mark_left = (foot[0] + pad).round();
+    let foot_mark = [mark_left, mark_top, mark_left + mark, mark_top + mark];
+    let foot_path = [
+        foot_mark[2] + gap,
+        foot_edge[3],
+        (foot[2] - pad).max(foot_mark[2] + gap),
+        foot[3],
+    ];
+    FilesPaneGeometry {
+        body,
+        foot_edge,
+        foot,
+        foot_mark,
+        foot_path,
+    }
+}
+
+/// The border box of one named files column, or `None` when it is not a full
+/// column.
+#[must_use]
+pub fn files_pane_rect(layout: &SeatLayout, seat: SeatId) -> Option<[f32; 4]> {
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat
+            && placement.kind == SeatKind::Files
+            && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    Some([
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ])
 }
 
 /// The tree's own rectangle inside one named files column.
@@ -8112,23 +8300,35 @@ pub fn files_body_at(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<
 /// The third caller of the same subtraction the paint and the wheel already
 /// make, and the reason it is a function: the keyboard has to scroll a row into
 /// view without a pointer to find the column by, and a fourth copy of
-/// "the seat less its head" is a fourth chance for one of them to be off by the
-/// hairline.
+/// "the seat less its head and its foot" is a fourth chance for one of them to be
+/// off by the hairline.
 pub fn files_body_rect(layout: &SeatLayout, seat: SeatId, scale: f32) -> Option<[f32; 4]> {
-    let placement = layout.rects.iter().find(|placement| {
-        placement.id == seat
-            && placement.kind == SeatKind::Files
-            && matches!(placement.presentation, Presentation::Full)
-    })?;
-    let device = placement.device_rect?;
-    let rect = [
-        device.left as f32,
-        device.top as f32,
-        device.right as f32,
-        device.bottom as f32,
-    ];
-    let head = pane_head_geometry(rect, placement.kind, scale);
-    Some([rect[0], head.head[3], rect[2], rect[3]])
+    Some(files_pane_geometry(files_pane_rect(layout, seat)?, scale).body)
+}
+
+/// Which files column's foot the pointer is on — `.files-foot`, whose whole
+/// strip is the button (mock-up 529-535).
+///
+/// Its own hit test rather than a branch of [`hit_files_tree`] for the reason
+/// `.pane-close` is its own inside a head: the tree is a list of rows and this is
+/// one control beside it, and it answers even for a column whose tree is a single
+/// sentence about itself.
+#[must_use]
+pub fn hit_files_foot(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Files {
+            continue;
+        }
+        let Some(rect) = files_pane_rect(layout, placement.id) else {
+            continue;
+        };
+        let foot = files_pane_geometry(rect, scale).foot;
+        if contains(foot, x, y) {
+            return Some(ChromeTarget::FilesFoot(placement.id));
+        }
+    }
+    None
 }
 
 /// Which files-tree row the pointer is on.
@@ -8186,20 +8386,12 @@ pub fn files_tree_geometry_of(
     if !matches!(placement.presentation, Presentation::Full) {
         return None;
     }
-    let device = placement.device_rect?;
     let tree = trees.get(&seat)?;
     // A column showing a single sentence about itself has no rows to hit.
     if whole_tree_notice(&tree.rows).is_some() {
         return None;
     }
-    let rect = [
-        device.left as f32,
-        device.top as f32,
-        device.right as f32,
-        device.bottom as f32,
-    ];
-    let head = pane_head_geometry(rect, placement.kind, scale);
-    let body = [rect[0], head.head[3], rect[2], rect[3]];
+    let body = files_pane_geometry(files_pane_rect(layout, seat)?, scale).body;
     Some(files_tree_geometry(
         body,
         tree.rows.len(),
@@ -8266,8 +8458,9 @@ pub(crate) fn push_files_tree(
         // `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px
         // var(--accent) }` — the ring is the whole of what tells you an arrow key
         // belongs to this list rather than to the shell beside it, so it is drawn
-        // on the selection and only while the list has the keyboard.
-        if selected && tree.focused {
+        // on the selection and only while the list is showing that it has the
+        // keyboard. **`:focus-visible`, not `:focus`** — see `focus_ring`.
+        if selected && tree.focus_ring {
             sprites.push(ChromeSprite::new(
                 ChromeMark::ControlPillRing {
                     radius_px: radius,
@@ -8399,6 +8592,83 @@ pub(crate) fn push_files_tree(
     }
 }
 
+/// Draw one docked files column's foot — `.files-pane .files-foot`.
+///
+/// **Not shared with the float's** (`float::build` draws that one), and the
+/// mock-up is why: the two strips do the same job and are written as two rules
+/// with different numbers, on two different grounds. This one stands on
+/// `--termbg` and takes its inks pre-mixed over it; the float's stands on
+/// `--win`. That is C39's split exactly as `FilesRowInk` states it, and the
+/// drawing either side of it is eight lines long.
+fn push_files_foot(
+    geometry: &FilesPaneGeometry,
+    tree: Option<&FilesTreeContent>,
+    hovered: bool,
+    scale: f32,
+    palette: &bt_render::ChromePalette,
+    out: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let (quads, labels, sprites) = out;
+    let revealed = tree.is_some_and(|tree| tree.foot_revealed);
+    // `.files-pane .files-foot:hover { background: var(--hover) }` — the row
+    // fill, because it is the same `--hover` over the same `--termbg`, and one
+    // pane cannot have two answers to "what does hovering look like here".
+    if hovered {
+        quads.push(ChromeQuad {
+            rect: geometry.foot,
+            color: palette.files_row_hover,
+        });
+    }
+    quads.push(ChromeQuad {
+        rect: geometry.foot_edge,
+        color: palette.pane_head_edge,
+    });
+    // A path with nowhere to point — an unrooted column — draws the strip and
+    // stops. The mark is a verb ("open this folder") and there is no folder.
+    let Some(path) = tree
+        .map(|tree| tree.foot_path.as_str())
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    // `.done { color: var(--accent) }` takes the mark as well as the words: a
+    // tick beside an unchanged path would read as a property of the folder
+    // rather than as an answer to the click. The same reasoning, and the same
+    // three-way choice, as the float's foot.
+    let ink = if revealed {
+        palette.accent
+    } else if hovered {
+        palette.files_row_text_hover
+    } else {
+        palette.files_row_muted
+    };
+    sprites.push(ChromeSprite::new(
+        if revealed {
+            ChromeMark::Check
+        } else {
+            ChromeMark::FolderOpen
+        },
+        geometry.foot_mark,
+        ink,
+    ));
+    labels.push(ChromeLabel {
+        text: path.to_owned(),
+        rect: geometry.foot_path,
+        font_size_px: FILES_FOOT_FONT_LOGICAL_PX * scale,
+        color: ink,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: Some(geometry.foot_path),
+    });
+}
+
 /// How tall a tree of `rows` rows wants its body to be.
 ///
 /// The same arithmetic [`files_tree_geometry`] does, asked *before* there is a
@@ -8412,7 +8682,22 @@ pub fn files_tree_content_height(rows: usize, scale: f32) -> f32 {
     files_tree_geometry([0.0, 0.0, 0.0, 0.0], rows, 0.0, scale).content_height
 }
 
-/// Lay the rows into the body, clamping the scroll to what there is to see.
+/// Lay the rows into the body at the scroll they are stored at.
+///
+/// **The stored offset is believed** (R2 乙案, ruling 2026-08-12). This used to
+/// clamp, and a painter that clamps is a painter that lets a *writer* store
+/// nonsense: the wheel wrote `(stored - travel).max(0.0)` with no upper bound at
+/// all, so scrolling down at the end of a list kept adding to a number the
+/// picture had stopped following. Every notch spent that way had to be spent
+/// again on the way back, and the list sat still for as long as it took — the
+/// "scrolled to the bottom, now it will not come back up" report.
+///
+/// So the bound moved to where the writing happens, [`clamp_files_scroll`], and
+/// this function keeps the arithmetic it is the authority for: how tall a row
+/// is, how tall the content is, and how far the content may be scrolled at all.
+/// The clamp reads its ceiling from here, so there is still exactly one
+/// derivation of [`Self::max_scroll`] — one authority for the bound, one
+/// authority for obeying it.
 pub fn files_tree_geometry(
     body: [f32; 4],
     rows: usize,
@@ -8427,7 +8712,7 @@ pub fn files_tree_geometry(
     let max_scroll = (content_height - (body[3] - body[1])).max(0.0);
     FilesTreeGeometry {
         viewport: body,
-        scroll_px: scroll_px.clamp(0.0, max_scroll),
+        scroll_px,
         content_height,
         max_scroll,
         row_height,
@@ -8435,6 +8720,26 @@ pub fn files_tree_geometry(
         padding_x,
         padding_top,
     }
+}
+
+/// The only scroll a files column is allowed to hold, given what there is to
+/// see.
+///
+/// **Every write of `DirCache::scroll_px` goes through here** — the wheel, the
+/// keyboard's scroll-into-view, and the per-frame heal that catches a list which
+/// got *shorter* under a scroll that was legal when it was written (a folder
+/// folded, a directory re-read smaller, the pane grown taller). Three writers
+/// and one bound, which is the whole of the ruling: the picture is then simply
+/// what the number says, and no notch is ever spent burning off a distance the
+/// list never had.
+///
+/// The ceiling is read off [`files_tree_geometry`] rather than restated, because
+/// two expressions for `content - viewport` are two numbers with a way to
+/// disagree, and the day the tree's padding changes is the day they would.
+#[must_use]
+pub fn clamp_files_scroll(body: [f32; 4], rows: usize, scroll_px: f32, scale: f32) -> f32 {
+    let max_scroll = files_tree_geometry(body, rows, 0.0, scale).max_scroll;
+    scroll_px.clamp(0.0, max_scroll)
 }
 
 /// The tail line of the L4 strip: how many seats it had no row for.
@@ -9914,16 +10219,19 @@ mod tests {
         assert!(sprites.iter().any(|sprite| sprite.mark == ChromeMark::File));
     }
 
-    /// PIN (D2): the pane head is twenty-eight pixels *including* its hairline,
-    /// and the terminal's first row starts on the twenty-ninth.
+    /// PIN (D2): the pane head is [`SEAT_TITLE_BAR_LOGICAL_PX`] pixels
+    /// *including* its hairline, and the terminal's first row starts on the one
+    /// after.
     ///
     /// The mock-up opens with `* { box-sizing: border-box }` (line 77), so
-    /// `.panehead { height: 28px; border-bottom: 1px }` (lines 1515-1523) is 27
-    /// rows of fill plus one of `--border-soft` — twenty-eight in total, and
-    /// the flex box centres its mark and caption in the 27 that are left.
+    /// `.panehead { height: 30px; border-bottom: 1px }` is 29 rows of fill plus
+    /// one of `--border-soft` — thirty in total, and the flex box centres its
+    /// mark and caption in the 29 that are left. Written against the constant
+    /// rather than against the number, which is what let the 2026-08-12 raise
+    /// from 28 to 30 land without editing an assertion.
     ///
-    /// Red gate: the head was drawn as 28 rows of fill with the hairline laid
-    /// across 28..29, while `pane_body_viewport` advanced the terminal by 28.
+    /// Red gate: the head was drawn as a full bar of fill with the hairline laid
+    /// *below* it, while `pane_body_viewport` advanced the terminal by the bar.
     /// The hairline therefore sat *on top of* the terminal's first logical
     /// pixel row — one row of every multi-pane terminal painted over by
     /// chrome, at every scale, in both themes. Border-box is not a detail here:
@@ -9934,7 +10242,7 @@ mod tests {
     /// the body's own origin — because any two of them can agree while the
     /// third is wrong, and the overlap is exactly what a two-way check misses.
     #[test]
-    fn the_pane_heads_hairline_is_the_last_row_of_its_own_twenty_eight() {
+    fn the_pane_heads_hairline_is_the_last_row_of_its_own_bar() {
         let palette = chrome_palette();
         for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
             let scale = dpi_milli as f32 / 1_000.0;
@@ -11458,9 +11766,10 @@ mod tests {
         }
     }
 
-    /// The two channels a tree draws into, named so the tests below read as
+    /// The three channels a tree draws into, named so the tests below read as
     /// questions about the picture rather than about tuple positions.
     struct TreeChrome {
+        quads: Vec<ChromeQuad>,
         labels: Vec<ChromeLabel>,
         sprites: Vec<ChromeSprite>,
     }
@@ -11471,8 +11780,6 @@ mod tests {
         hover_row: Option<usize>,
     ) -> (Seats, SeatLayout, SeatId, TreeChrome) {
         let seats = term_beside_files();
-        let metrics = seat_metrics(1_000);
-        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
         let column = seats.files().first().copied().expect("a files column");
         // Built here rather than by the caller because the seat id is minted by
         // the tree: a hover aimed at a guessed id is a hover at nothing, and it
@@ -11481,9 +11788,22 @@ mod tests {
             seat: column,
             index,
         });
+        files_chrome_hovering(content, hover)
+    }
+
+    /// The same, with the pointer put on whatever part of the column the caller
+    /// names — the foot as readily as a row.
+    fn files_chrome_hovering(
+        content: FilesTreeContent,
+        hover: Option<ChromeTarget>,
+    ) -> (Seats, SeatLayout, SeatId, TreeChrome) {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        let column = seats.files().first().copied().expect("a files column");
         let mut trees = BTreeMap::new();
         trees.insert(column, content);
-        let (_, labels, sprites) = build_chrome_for_tabs(
+        let (quads, labels, sprites) = build_chrome_for_tabs(
             &seats,
             &layout,
             1.0,
@@ -11516,7 +11836,16 @@ mod tests {
             },
         )
         .flattened();
-        (seats, layout, column, TreeChrome { labels, sprites })
+        (
+            seats,
+            layout,
+            column,
+            TreeChrome {
+                quads,
+                labels,
+                sprites,
+            },
+        )
     }
 
     fn three_row_tree() -> FilesTreeContent {
@@ -11534,7 +11863,9 @@ mod tests {
             scroll_px: 0.0,
             selected: None,
             turns: BTreeMap::new(),
-            focused: false,
+            focus_ring: false,
+            foot_path: String::new(),
+            foot_revealed: false,
         }
     }
 
@@ -11802,7 +12133,8 @@ mod tests {
         );
     }
 
-    /// PIN — C32's third half, and the whole of how the keyboard is visible.
+    /// PIN — C32's third half: the ring is drawn on the selection, in the
+    /// accent, and only when the column says it has earned one.
     ///
     /// The fill says *where you are standing in this tree*; the accent ring says
     /// *this tree is the one an arrow key belongs to*. Two panes can show a
@@ -11810,12 +12142,17 @@ mod tests {
     /// that drew the fill alone would leave the user pressing ↓ with no way to
     /// know which list was about to move — and one that hid the fill without
     /// focus would lose the standing place every time you clicked into a shell.
+    ///
+    /// **This half is only the drawing.** Whether the flag is set is
+    /// `:focus-visible` and belongs to the host — see
+    /// `a_pointer_takes_the_keyboard_without_a_ring_and_the_first_key_lights_it`
+    /// in `main.rs`, which is the half the 2026-08-12 ruling was about.
     #[test]
-    fn only_the_column_holding_the_keyboard_rings_its_selected_row() {
-        let ring_of = |focused: bool| {
+    fn only_a_column_that_has_earned_the_ring_draws_one_on_its_selection() {
+        let ring_of = |focus_ring: bool| {
             let mut content = three_row_tree();
             content.selected = Some("/a.txt".to_owned());
-            content.focused = focused;
+            content.focus_ring = focus_ring;
             let (_, _, _, chrome) = files_chrome(content, None);
             chrome.sprites.iter().find_map(|sprite| match sprite.mark {
                 ChromeMark::ControlPillRing { stroke_px, .. } => {
@@ -11827,17 +12164,34 @@ mod tests {
         assert_eq!(
             ring_of(false),
             None,
-            "a column the keyboard has left shows its selection and claims nothing"
+            "a column that has not earned a ring shows its selection and claims nothing"
         );
-        let (stroke_px, color, rect) = ring_of(true).expect("the focused column rings its row");
+        let (stroke_px, color, rect) = ring_of(true).expect("a column that has earned one rings");
         assert_eq!(color, chrome_palette().accent);
         assert!(stroke_px >= 1, "a ring of no thickness is not drawn");
+
+        // The fill is there either way: `.frow.sel { background: var(--active) }`
+        // carries no `:focus-visible`, so the standing place survives the ring
+        // going out — which is the half of C32 the ruling did *not* touch.
+        for focus_ring in [false, true] {
+            let mut content = three_row_tree();
+            content.selected = Some("/a.txt".to_owned());
+            content.focus_ring = focus_ring;
+            let (_, _, _, chrome) = files_chrome(content, None);
+            assert!(
+                chrome
+                    .sprites
+                    .iter()
+                    .any(|sprite| sprite.color == chrome_palette().files_row_selected),
+                "ring {focus_ring}: the selected fill is a fact about the tree"
+            );
+        }
 
         // The ring is the selected row's own box, so it lands on the selection
         // and not merely somewhere in the list.
         let mut content = three_row_tree();
         content.selected = Some("/a.txt".to_owned());
-        content.focused = true;
+        content.focus_ring = true;
         let (_, layout, column, _) = files_chrome(content, None);
         let body = files_body_rect(&layout, column, 1.0).expect("the column has a body");
         let geometry = files_tree_geometry(body, 3, 0.0, 1.0);
@@ -11872,6 +12226,282 @@ mod tests {
                 .sprites
                 .iter()
                 .any(|sprite| sprite.color == palette.files_row_hover)
+        );
+    }
+
+    // ── `.files-pane .files-foot` (mock-up 527-538) ────────────────────────
+
+    /// A three-row column with a path in its foot.
+    fn footed_tree(path: &str) -> FilesTreeContent {
+        FilesTreeContent {
+            foot_path: path.to_owned(),
+            ..three_row_tree()
+        }
+    }
+
+    /// PIN — the foot is the mock-up's, declaration for declaration.
+    ///
+    /// Every number here is one the mock-up writes at 529-536, and they are
+    /// asserted separately because any one of them can be right while the others
+    /// are not: a 28px strip with 10px padding is still wrong, and it is wrong in
+    /// a way only a ruler catches.
+    #[test]
+    fn the_foot_is_twenty_eight_pixels_of_hairline_padding_mark_and_path() {
+        let rect = [0.0, 0.0, 260.0, 600.0];
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let rect = [rect[0], rect[1], rect[2] * scale, rect[3] * scale];
+            let geometry = files_pane_geometry(rect, scale);
+            assert_eq!(
+                geometry.foot[3] - geometry.foot[1],
+                (FILES_FOOT_BAR_LOGICAL_PX * scale).round(),
+                "{scale}: `height: 28px`, border included"
+            );
+            assert_eq!(
+                geometry.foot[3], rect[3],
+                "{scale}: and it sits on the pane's own floor"
+            );
+            assert_eq!(
+                geometry.foot_edge[1], geometry.foot[1],
+                "{scale}: `border-top` is the strip's first row"
+            );
+            assert_eq!(
+                geometry.foot_edge[3] - geometry.foot_edge[1],
+                (FILES_FOOT_EDGE_LOGICAL_PX * scale).max(1.0),
+                "{scale}: one hairline, never less than a device pixel"
+            );
+            assert_eq!(
+                geometry.foot_mark[0] - geometry.foot[0],
+                (FILES_FOOT_PADDING_X_LOGICAL_PX * scale).round(),
+                "{scale}: `padding: 0 12px`, the left half"
+            );
+            assert_eq!(
+                geometry.foot[2] - geometry.foot_path[2],
+                (FILES_FOOT_PADDING_X_LOGICAL_PX * scale).round(),
+                "{scale}: and the right half — the same 12, not the float's 18"
+            );
+            assert_eq!(
+                geometry.foot_mark[2] - geometry.foot_mark[0],
+                (FILES_FOOT_MARK_LOGICAL_PX * scale).round(),
+                "{scale}: `.foot-ico {{ width: 13px }}`"
+            );
+            assert_eq!(
+                geometry.foot_path[0] - geometry.foot_mark[2],
+                FILES_FOOT_GAP_LOGICAL_PX * scale,
+                "{scale}: `gap: 6px`"
+            );
+            // Centred in the flex row, which is the strip below its hairline.
+            let above = geometry.foot_mark[1] - geometry.foot_edge[3];
+            let below = geometry.foot[3] - geometry.foot_mark[3];
+            assert!(
+                (above - below).abs() <= 1.0,
+                "{scale}: the mark is centred in the strip: {above} above, {below} below"
+            );
+        }
+    }
+
+    /// PIN — **the tree's body stops at the foot, for everyone at once.**
+    ///
+    /// The connective tissue of the whole change: the painter, the wheel, the hit
+    /// test and the keyboard's scroll-into-view all ask one function where the
+    /// rows go, so the foot could not be added to three of them and forgotten in
+    /// the fourth. Red gate: with the body still running to the pane's floor,
+    /// `hit_files_tree` answers with a row for a point inside the strip — a click
+    /// on the path selects a file behind it.
+    #[test]
+    fn the_body_every_reader_gets_stops_at_the_foots_hairline() {
+        let content = footed_tree(r"C:\Users\Weiyi");
+        let (_, layout, column, _) = files_chrome(content.clone(), None);
+        let rect = files_pane_rect(&layout, column).expect("the column is placed");
+        let geometry = files_pane_geometry(rect, 1.0);
+
+        assert_eq!(
+            files_body_rect(&layout, column, 1.0),
+            Some(geometry.body),
+            "the wheel and the keyboard read the shortened body"
+        );
+        assert_eq!(
+            geometry.body[3], geometry.foot[1],
+            "which ends where the strip begins"
+        );
+        assert_eq!(
+            files_body_at(
+                &layout,
+                1.0,
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from(rect[3] - 4.0)
+            ),
+            None,
+            "a wheel notch over the foot is not the list's"
+        );
+
+        // And the hit test agrees: the strip answers for itself, and no row is
+        // hiding under it.
+        let mut trees = BTreeMap::new();
+        trees.insert(column, content);
+        let inside_foot = (
+            f64::from((geometry.foot[0] + geometry.foot[2]) / 2.0),
+            f64::from((geometry.foot[1] + geometry.foot[3]) / 2.0),
+        );
+        assert_eq!(
+            hit_files_tree(&layout, &trees, 1.0, inside_foot.0, inside_foot.1),
+            None,
+            "no row lives under the foot"
+        );
+        assert_eq!(
+            hit_files_foot(&layout, 1.0, inside_foot.0, inside_foot.1),
+            Some(ChromeTarget::FilesFoot(column)),
+            "and the strip claims its own rectangle"
+        );
+        assert_eq!(
+            hit_files_foot(
+                &layout,
+                1.0,
+                inside_foot.0,
+                f64::from(geometry.body[3] - 1.0)
+            ),
+            None,
+            "one pixel above the hairline is still the list"
+        );
+    }
+
+    /// PIN — the foot draws its hairline, its open-folder mark and the path it
+    /// was handed, in `--ink3` over the body it stands on.
+    #[test]
+    fn the_foot_draws_a_hairline_a_folder_and_the_path() {
+        let path = r"C:\Users\Weiyi\Developer\BetterTerminal";
+        let (_, layout, column, chrome) = files_chrome(footed_tree(path), None);
+        let palette = chrome_palette();
+        let geometry = files_pane_geometry(files_pane_rect(&layout, column).expect("placed"), 1.0);
+        assert!(
+            chrome.quads.iter().any(|quad| quad.rect == geometry.foot_edge
+                && quad.color == palette.pane_head_edge),
+            "`border-top: 1px solid var(--border-soft)`"
+        );
+        assert!(
+            !chrome
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.files_row_hover),
+            "and no hover fill, because the pointer is elsewhere"
+        );
+        let mark = chrome
+            .sprites
+            .iter()
+            .find(|sprite| sprite.rect == geometry.foot_mark)
+            .expect("the foot wears a mark");
+        assert_eq!(mark.mark, ChromeMark::FolderOpen);
+        assert_eq!(mark.color, palette.files_row_muted, "`color: var(--ink3)`");
+        let label = chrome
+            .labels
+            .iter()
+            .find(|label| label.text == path)
+            .expect("the path is drawn");
+        assert_eq!(label.rect, geometry.foot_path);
+        assert_eq!(label.font_size_px, FILES_FOOT_FONT_LOGICAL_PX);
+        assert_eq!(label.color, palette.files_row_muted);
+    }
+
+    /// PIN — the strip lights under the pointer and turns accent while it is
+    /// confirming, and the two are different states of one control.
+    #[test]
+    fn the_foot_lights_on_hover_and_goes_accent_while_it_confirms() {
+        let path = r"C:\Users\Weiyi";
+        let palette = chrome_palette();
+        // The fixture's tree is built the same way every time, so the column's
+        // id is the same one a second build mints — which is what lets the hover
+        // be aimed at it before the chrome exists.
+        let seat = term_beside_files()
+            .files()
+            .first()
+            .copied()
+            .expect("a column");
+
+        // Hovered: `.files-foot:hover { background: var(--hover); color: var(--ink2) }`.
+        let (_, layout, column, chrome) =
+            files_chrome_hovering(footed_tree(path), Some(ChromeTarget::FilesFoot(seat)));
+        assert_eq!(column, seat, "the fixture mints the same id twice");
+        let geometry = files_pane_geometry(files_pane_rect(&layout, column).expect("placed"), 1.0);
+        assert!(
+            chrome
+                .quads
+                .iter()
+                .any(|quad| quad.rect == geometry.foot && quad.color == palette.files_row_hover),
+            "the whole strip fills, because the whole strip is the button"
+        );
+        assert!(
+            chrome
+                .labels
+                .iter()
+                .any(|label| label.text == path && label.color == palette.files_row_text_hover),
+            "and the path steps up from --ink3 to --ink2"
+        );
+
+        // Confirming: `.files-foot.done { color: var(--accent) }`, mark included.
+        let confirming = FilesTreeContent {
+            foot_path: "Revealed in File Explorer".to_owned(),
+            foot_revealed: true,
+            ..three_row_tree()
+        };
+        let (_, _, _, chrome) = files_chrome(confirming, None);
+        let mark = chrome
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::Check)
+            .expect("the folder becomes a tick");
+        assert_eq!(mark.color, palette.accent);
+        assert!(
+            chrome
+                .labels
+                .iter()
+                .any(|label| label.text == "Revealed in File Explorer"
+                    && label.color == palette.accent),
+            "and the sentence is in the accent with it"
+        );
+    }
+
+    /// PIN — an unrooted column keeps the strip and drops its contents.
+    ///
+    /// The foot is part of the chassis, like the head: a column with nothing to
+    /// point at still owes the hairline that closes the list, and it must not
+    /// offer a folder mark for a folder that is not there.
+    #[test]
+    fn an_unrooted_column_keeps_its_foots_hairline_and_nothing_else() {
+        let bare = FilesTreeContent {
+            rows: vec![tree_row(
+                "",
+                "No folder opened",
+                0,
+                crate::files::RowKind::Notice(crate::files::RowNotice::Unrooted),
+            )],
+            ..FilesTreeContent::default()
+        };
+        let (_, layout, column, chrome) = files_chrome(bare, None);
+        let palette = chrome_palette();
+        let geometry = files_pane_geometry(files_pane_rect(&layout, column).expect("placed"), 1.0);
+        assert!(
+            chrome.quads.iter().any(|quad| quad.rect == geometry.foot_edge
+                && quad.color == palette.pane_head_edge),
+            "the strip is still there"
+        );
+        assert!(
+            !chrome
+                .sprites
+                .iter()
+                .any(|sprite| sprite.rect == geometry.foot_mark),
+            "with no folder to open and so no mark offering to"
+        );
+        // And the sentence in the body is centred in the *body*, not in a pane
+        // whose bottom 28 pixels belong to the foot.
+        let notice = chrome
+            .labels
+            .iter()
+            .find(|label| label.text == "No folder opened")
+            .expect("the column says what it is");
+        assert!(
+            notice.rect[3] <= geometry.body[3],
+            "the notice stays above the strip: {:?} against a body ending at {}",
+            notice.rect,
+            geometry.body[3]
         );
     }
 
@@ -11970,23 +12600,118 @@ mod tests {
 
     /// PIN — a wheel cannot scroll a list that fits, and cannot scroll one that
     /// does not past its own end.
+    ///
+    /// Asked of [`clamp_files_scroll`] since R2 乙案, because that is where the
+    /// bound now is. It used to be asked of `files_tree_geometry`, and that is
+    /// **why this test could not see the bug it was standing on**: it proved the
+    /// painter clamped, which was true, and the painter clamping was precisely
+    /// what let the writer store a number the painter then ignored. A test on
+    /// the reader can never fail for a writer's sake.
     #[test]
     fn the_scroll_is_clamped_to_what_there_is_to_see() {
-        let short = files_tree_geometry([0.0, 0.0, 240.0, 600.0], 3, 400.0, 1.0);
-        assert_eq!(short.max_scroll, 0.0);
+        let body = [0.0, 0.0, 240.0, 600.0];
+        assert_eq!(files_tree_geometry(body, 3, 0.0, 1.0).max_scroll, 0.0);
         assert_eq!(
-            short.scroll_px, 0.0,
+            clamp_files_scroll(body, 3, 400.0, 1.0),
+            0.0,
             "a list that fits does not move however hard it is pushed"
         );
-        let long = files_tree_geometry([0.0, 0.0, 240.0, 600.0], 200, 100_000.0, 1.0);
+        let long = files_tree_geometry(body, 200, 0.0, 1.0);
         assert!(long.max_scroll > 0.0);
-        assert_eq!(long.scroll_px, long.max_scroll);
+        assert_eq!(
+            clamp_files_scroll(body, 200, 100_000.0, 1.0),
+            long.max_scroll
+        );
+        assert_eq!(
+            clamp_files_scroll(body, 200, -1.0, 1.0),
+            0.0,
+            "and there is no scrolling backwards past the top"
+        );
         assert_eq!(
             long.content_height,
             FILES_TREE_PADDING_TOP_LOGICAL_PX
                 + FILES_ROW_HEIGHT_LOGICAL_PX * 200.0
                 + FILES_TREE_PADDING_BOTTOM_LOGICAL_PX,
             "the content is the rows plus the list's own two margins"
+        );
+    }
+
+    /// PIN (R2 乙案) — **one notch back off the end of the list moves the list.**
+    ///
+    /// The user's report, written as arithmetic. Scrolling down at the bottom of
+    /// a tree used to keep adding to the stored offset, because the wheel's own
+    /// write had no upper bound — `(stored - travel).max(0.0)` — and the only
+    /// clamp in the system was the painter's, which threw the excess away every
+    /// frame without ever writing the smaller number back. The list therefore
+    /// held an offset it was not drawn at, and the first notches back up were
+    /// spent paying that phantom distance off: the tree sat perfectly still under
+    /// a scrolling wheel, which is what "滚到底再向上滚必卡" is.
+    ///
+    /// Red gate: with the clamp only in the painter, `stored` below is
+    /// `max_scroll + 4 * notch` and the first notch back leaves it three notches
+    /// clear of the end, so the drawn offset does not change at all and the third
+    /// assertion fails.
+    ///
+    /// The mutation that must re-redden it: restore `(stored - travel).max(0.0)`
+    /// as the wheel's write (or drop the upper half of `clamp_files_scroll`).
+    #[test]
+    fn a_tree_scrolled_past_its_own_end_moves_on_the_very_first_notch_back() {
+        let body = [0.0, 0.0, 240.0, 600.0];
+        let rows = 200;
+        let notch = 120.0;
+        let max = files_tree_geometry(body, rows, 0.0, 1.0).max_scroll;
+        assert!(max > notch * 4.0, "the list is long enough to have an end");
+
+        // Four notches of wheel spent at the bottom of the list. Each one is the
+        // wheel's own write, and the point is that the fourth leaves the stored
+        // offset exactly where the first did.
+        let mut stored = max;
+        for _ in 0..4 {
+            stored = clamp_files_scroll(body, rows, stored + notch, 1.0);
+        }
+        assert_eq!(
+            stored, max,
+            "pushing against the end of the list stores nothing new"
+        );
+
+        // And so one notch back is one notch of movement, on screen, now.
+        let back = clamp_files_scroll(body, rows, stored - notch, 1.0);
+        assert_eq!(
+            back,
+            max - notch,
+            "the first notch back moves the list by a notch"
+        );
+        assert_eq!(
+            files_tree_geometry(body, rows, back, 1.0).scroll_px,
+            back,
+            "and the painter draws it there, because it draws what is stored"
+        );
+    }
+
+    /// PIN (R2 乙案, the other half) — a list that got *shorter* pulls its stored
+    /// scroll back with it.
+    ///
+    /// The wheel cannot answer this one: nobody turned it. A folder folded, a
+    /// directory re-read with fewer children, a pane dragged taller — the offset
+    /// was legal when it was written and is not any more, and with the painter
+    /// no longer clamping, an unhealed offset is rows drawn off the top of a body
+    /// with blank space under them. `Runtime::heal_files_scroll` is the caller,
+    /// from the one funnel that rebuilds the chrome.
+    #[test]
+    fn a_list_that_got_shorter_pulls_its_scroll_back_to_the_new_end() {
+        let body = [0.0, 0.0, 240.0, 600.0];
+        let deep = clamp_files_scroll(body, 200, 100_000.0, 1.0);
+        assert!(deep > 0.0);
+        let after_folding = clamp_files_scroll(body, 30, deep, 1.0);
+        assert_eq!(
+            after_folding,
+            files_tree_geometry(body, 30, 0.0, 1.0).max_scroll,
+            "the offset comes back to the end of the list that is left"
+        );
+        assert_eq!(
+            clamp_files_scroll(body, 3, deep, 1.0),
+            0.0,
+            "and all the way to the top when what is left fits"
         );
     }
 
@@ -15931,7 +16656,7 @@ mod tests {
     ///
     /// `.slot.resizing .pane { margin: 5px }` (mock-up 1465-1466) insets the
     /// pane's border box and says nothing at all about `.panehead`, whose
-    /// `height: 28px` and padding are untouched by the resizing state — so the
+    /// `height: 30px` and padding are untouched by the resizing state — so the
     /// caption keeps every pixel of its top padding and simply rides the box in.
     ///
     /// The bug: the card was drawn as four `--panel` bands laid over the outer

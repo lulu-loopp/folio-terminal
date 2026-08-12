@@ -547,7 +547,7 @@
      the preview-singleton (VS Code semantics), so the next Enter opens a fresh
      preview instead of clobbering your dirty buffer. */
   .preview-pane .pane-inner { background: var(--termbg); display: flex; flex-direction: column; }
-  /* same 28px header as every other pane — the .panehead height rules it; only
+  /* same 30px header as every other pane — the .panehead height rules it; only
      the horizontal padding is ours (user report 2026-07-17: it ran taller) */
   .preview-head {
     display: flex; align-items: center; gap: 7px; padding: 0 6px 0 11px;
@@ -1527,7 +1527,11 @@
   .panehead {
     flex: none; position: relative;
     display: flex; align-items: center; gap: 7px;
-    height: 28px; padding: 0 6px 0 12px;
+    /* 30px, not 28: user ruling 2026-08-12 — the head read as cramped against
+       the 24px tree rows beside it. The font size is unchanged and nothing in
+       the head is positioned from the top, so `align-items: center` spends the
+       two new rows as padding above and below the caption. */
+    height: 30px; padding: 0 6px 0 12px;
     font-size: 11.5px; color: var(--ink3);
     border-bottom: 1px solid var(--border-soft);
     cursor: pointer; user-select: none;

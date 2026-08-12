@@ -1034,8 +1034,15 @@ fn chrome_palette_for_background(background: [u8; 3]) -> ChromePalette {
     }
 }
 
-/// A seat title bar's height, in logical pixels (`.panehead { height: 28px }`).
-pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 28.0;
+/// A seat title bar's height, in logical pixels (`.panehead { height: 30px }`).
+///
+/// Twenty-eight until the 2026-08-12 ruling raised it to thirty. The font did
+/// not move with it: the head's contents are centred on the strip's own middle
+/// (`.panehead { align-items: center }`), so the two extra rows are shared
+/// between the caption's top and bottom padding and every box in the head —
+/// mark, `×`, trigger, root button — re-centres by construction rather than by
+/// a second number being edited to match.
+pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 30.0;
 /// The self-drawn window title bar (`--titleh`).
 pub const WINDOW_TITLE_BAR_LOGICAL_PX: f32 = 40.0;
 /// Every settings/min/max/close box in `.capbtn` (`width: 46px; height: 40px`).
