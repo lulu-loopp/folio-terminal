@@ -1012,11 +1012,12 @@ pub fn build(
             palette.float_pinned_shadow_outer_alpha,
         ),
     };
+    let border = px(FLOAT_WINDOW_BORDER_LOGICAL_PX).max(1.0).round();
     crate::settings::push_float_window(
         &mut quads,
         geometry.frame,
         px(FLOAT_WINDOW_RADIUS_LOGICAL_PX),
-        px(FLOAT_WINDOW_BORDER_LOGICAL_PX).max(1.0).round(),
+        border,
         px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
         palette.dialog_surface,
         palette.menu_shadow,
@@ -1037,8 +1038,26 @@ pub fn build(
         });
     }
     if hover == Some(FloatPart::Foot) {
+        // `.fly-foot:hover { background: var(--hover) }`, stopped at the face's
+        // own corners: the strip is the bottom of a rounded window, and a square
+        // fill painted over the curve (user-reported 2026-08-12). The bottom
+        // corners take the face's radius — the frame's less the border it sits
+        // inside — and the top edge, which is interior, is squared back off by
+        // a plain band laid over the rounded fill's upper reach.
+        let radius = (px(FLOAT_WINDOW_RADIUS_LOGICAL_PX) - border).max(0.0);
+        quads.extend(bt_render::rounded_overlay_fill(
+            geometry.foot,
+            radius,
+            palette.dialog_hover,
+            1.0,
+        ));
         quads.push(OverlayQuad {
-            rect: geometry.foot,
+            rect: [
+                geometry.foot[0],
+                geometry.foot[1],
+                geometry.foot[2],
+                (geometry.foot[1] + radius).min(geometry.foot[3]),
+            ],
             color: palette.dialog_hover,
             alpha: 1.0,
         });
@@ -1491,6 +1510,67 @@ mod tests {
 
     fn y_of(rect: [f32; 4]) -> f32 {
         (rect[1] + rect[3]) / 2.0
+    }
+
+    /// `.fly-foot:hover` lights the strip — but the strip is the bottom of a
+    /// *rounded* window, and a full-alpha fill that reaches the corner pixel is
+    /// the hover painted square over the face's curve (user-reported
+    /// 2026-08-12). The corner may receive coverage, not opacity: only the
+    /// anti-aliased partial quads of a rounded fill are allowed to touch it.
+    #[test]
+    fn the_foot_hover_never_paints_full_alpha_into_the_faces_rounded_corner() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 264.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+        );
+        let palette = bt_render::chrome_palette();
+        let layer = build(
+            &geometry,
+            FloatMode::Pinned,
+            "WEIYI",
+            "C:\\Users\\Weiyi",
+            "DOCK",
+            Some(FloatPart::Foot),
+            false,
+            FloatBody {
+                quads: Vec::new(),
+                labels: Vec::new(),
+                sprites: Vec::new(),
+            },
+            SCALE,
+            &palette,
+            FloatFade {
+                opacity: 1.0,
+                rise: 0.0,
+                moving: false,
+            },
+        );
+        let corner = [geometry.foot[0] + 0.5, geometry.foot[3] - 0.5];
+        let offending: Vec<_> = layer
+            .quads
+            .iter()
+            .filter(|quad| {
+                quad.color == palette.dialog_hover
+                    && quad.alpha >= 1.0
+                    && quad.rect[0] <= corner[0]
+                    && corner[0] <= quad.rect[2]
+                    && quad.rect[1] <= corner[1]
+                    && corner[1] <= quad.rect[3]
+            })
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "a full-alpha hover quad reached the face's corner: {offending:?}"
+        );
+        assert!(
+            layer
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.dialog_hover),
+            "the foot still lights on hover"
+        );
     }
 
     /// The body hands its rows to the tenant's own hit test, in the body's

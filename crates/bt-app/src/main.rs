@@ -12769,6 +12769,7 @@ impl Runtime {
     /// rebuild the list** — a row node swapped between two clicks is how the
     /// double-click that opens a preview goes silently missing.
     fn press_float_row(&mut self, index: usize) -> Result<()> {
+        let motion = self.motion;
         let Some(win) = self.float.live_mut() else {
             return Ok(());
         };
@@ -12777,31 +12778,29 @@ impl Runtime {
             return Ok(());
         };
         let key = row.key.clone();
-        let is_dir = matches!(row.kind, files::RowKind::Directory { .. });
-        win.files.sel = Some(key.clone());
-        if is_dir {
-            let epoch = win.epoch;
-            let root = win.files.root.clone();
-            let opened =
-                files::apply_tree_command(&mut win.files, &rows, files::TreeCommand::Right);
+        let kind = row.kind;
+        // The same press as a docked column's (`press_files_node`), because a
+        // click is a *toggle* and not a keystroke. This used to be spelled as
+        // `TreeCommand::Right`-then-`Left` — but Right on an already-open
+        // directory means "select the next row" (the keyboard's own semantics),
+        // so the Left that followed acted on the *child* and an open folder
+        // could never be shut from a float (user-reported 2026-08-12).
+        let opening = press_files_node(&mut win.files, &key, kind);
+        if matches!(kind, files::RowKind::Directory { .. }) {
+            win.cache.turn_row(&key, opening, Instant::now(), motion);
+        }
+        if opening {
             // Unfolding is this product's refresh gesture (there is no watcher
             // yet), so an opened directory is re-asked exactly as a column's is.
-            if matches!(opened, files::TreeAction::Opened(_)) {
-                win.cache.turn_row(&key, true, Instant::now(), Motion::Full);
-                let request = files::DirRequest {
-                    host: files::FilesHost::Float(epoch),
-                    path: files::full_path(&root, &key),
-                    key,
-                };
-                if !self.files_worker.request(request) {
-                    self.disable_files_worker();
-                }
-            } else {
-                let _ = files::apply_tree_command(
-                    &mut self.float.live_mut().expect("still open").files,
-                    &rows,
-                    files::TreeCommand::Left,
-                );
+            let epoch = win.epoch;
+            let root = win.files.root.clone();
+            let request = files::DirRequest {
+                host: files::FilesHost::Float(epoch),
+                path: files::full_path(&root, &key),
+                key,
+            };
+            if !self.files_worker.request(request) {
+                self.disable_files_worker();
             }
         }
         if self.refresh_overlay() {
