@@ -18,6 +18,7 @@ mod input;
 mod marks;
 mod peek_strip;
 mod persist;
+mod preview;
 mod profiles;
 mod restore;
 mod seats;
@@ -151,6 +152,13 @@ enum AppEvent {
     /// drag the decoration drain across every tab, and a formula landing must
     /// not make the tree re-walk itself.
     FilesReady,
+    /// A file head the preview worker was asked for has been read.
+    ///
+    /// Its own wake-up, for the reason [`Self::FilesReady`] has one: a file
+    /// landing must not make every tree re-walk itself, and a preview is the one
+    /// lane where the answer is allowed to be seconds late without anything else
+    /// noticing.
+    PreviewReady,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -498,12 +506,22 @@ fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
 }
 
 /// Where an activated files row goes.
+///
+/// **One door.** There used to be two — pictures to the preview seat, everything
+/// else to whatever the system had registered — and the second was written down
+/// as an interim from the day it was built, because `DESIGN.md` §7.1.3 rules
+/// that activating *any* file opens the preview and this window simply had
+/// nothing to show for the files that were not pictures. It has now: a text
+/// body, and a "no preview" card for what even that cannot read. So the door
+/// closed, and what is left is a path and the absence of one.
+///
+/// The system's own handler did not go away; it moved to where it belongs. It is
+/// the card's one button, offered *after* the window has said it cannot show the
+/// file — an escape hatch you choose rather than a fork you fall down.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RowActivation {
-    /// A picture: the preview seat this build already has.
+    /// The preview seat, which is now where every file goes.
     Preview(PathBuf),
-    /// Everything else: whatever the system has registered for it.
-    DefaultApp(PathBuf),
     /// A column with no root has no path to hand anyone.
     Nowhere,
 }
@@ -513,29 +531,19 @@ impl RowActivation {
     /// it from.
     fn path(&self) -> Option<&Path> {
         match self {
-            Self::Preview(path) | Self::DefaultApp(path) => Some(path),
+            Self::Preview(path) => Some(path),
             Self::Nowhere => None,
         }
     }
 
-    /// What the menu's first row should say it will do — the wording the verb
-    /// earns, not the wording the specification will earn later.
+    /// What the menu's first row says it will do.
     ///
-    /// `DESIGN.md` §7.1.3 rules that activating any file opens the preview, and
-    /// [`Runtime::activate_files_row`] records why this build cannot yet: only
-    /// pictures have a preview to go to, and the rest go to the system's own
-    /// handler. A menu row is the one place that interim becomes a *sentence*,
-    /// and a sentence can lie where a double click cannot. So the row is named
-    /// after the door it will actually open, and the day the second door closes
-    /// this collapses to one word without anything else moving.
+    /// One wording, with no branch to get wrong: the row is named after the one
+    /// door there is. While there were two, this was a `match` and its comment
+    /// said "the day the second door closes this collapses to one word without
+    /// anything else moving" — and nothing else moved.
     fn open_text(&self) -> &'static str {
-        match self {
-            Self::Preview(_) => "Open preview",
-            // The system's own verb, which is literally the string handed to
-            // `ShellExecuteW`.
-            Self::DefaultApp(_) => "Open",
-            Self::Nowhere => "Open",
-        }
+        "Open preview"
     }
 }
 
@@ -598,24 +606,46 @@ fn input_line_needs_a_space_first(session: &bt_term::DualPlaneSession) -> bool {
         .is_some_and(|text| !text.chars().all(char::is_whitespace) && !text.is_empty())
 }
 
-/// Which of the two doors a row's name opens (K156).
+/// Where a row's name opens (K156).
 ///
-/// Pure, and asked of the *whole* path rather than of the row's name, because
-/// the answer has to be the same one the terminal gives: an image reference on a
-/// line and a row in the tree name the same file, and the two must not disagree
-/// about whether it is a picture. That is why the test is
-/// [`bt_term::has_admissible_image_extension`] — the detector's own list — and
-/// not a second copy of six extensions written here.
+/// Pure, and there is one answer for every file it can name: §7.1.3's ruling
+/// that activating a file opens its preview, with the "no preview" card standing
+/// in for what this window cannot display. The only row that goes nowhere is one
+/// in a column with no root, which is not a file that failed — it is a column
+/// that was never pointed anywhere.
 fn files_row_activation(root: &str, key: &str) -> RowActivation {
     if !files::root_is_addressable(root) {
         return RowActivation::Nowhere;
     }
-    let path = files::full_path(root, key);
-    if bt_term::has_admissible_image_extension(&path) {
-        RowActivation::Preview(path)
-    } else {
-        RowActivation::DefaultApp(path)
-    }
+    RowActivation::Preview(files::full_path(root, key))
+}
+
+/// A file's own name, for the preview head and the buffer that fills it.
+///
+/// Falls back to the whole path for the paths that have no last component,
+/// which a root does; a nameless head is worse than a long one.
+fn files_row_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// Which of the two content lanes a path belongs in.
+///
+/// Asked of the *whole* path rather than of the row's name, because the answer
+/// has to be the same one the terminal gives: an image reference on a line and a
+/// row in the tree name the same file, and the two must not disagree about
+/// whether it is a picture. That is why the test is
+/// [`bt_term::has_admissible_image_extension`] — the detector's own list — and
+/// not a second copy of six extensions written here.
+///
+/// It deliberately does *not* consult [`preview::preview_ftype`], whose `Image`
+/// class is the mock-up's six-extension table: the two lists agree today, and
+/// the day they do not, the one that decides what the *decoder* is handed has to
+/// be the decoder's own.
+fn path_is_previewable_image(path: &Path) -> bool {
+    bt_term::has_admissible_image_extension(path)
 }
 
 /// The files column a stored [`LeafId`] still names on the tab in front of you.
@@ -988,6 +1018,28 @@ struct TabState {
     /// the same answer and is derived by the same pass (§4.3).
     seat_overflow: Option<seats::FitOverflow>,
     preview_image: Option<PreviewImageState>,
+    /// This tab's shared pool of live preview buffers (`DESIGN.md` §7.1.3).
+    ///
+    /// **On the tab, because that is who owns it.** The 2026-07-17 ruling moved
+    /// buffer ownership up from the pane precisely so that a file open in two
+    /// panes could not become two buffers, and a pool hanging off a seat would
+    /// re-introduce the fork the ruling exists to forbid. It is content, so red
+    /// line L1 keeps it out of the layout tree and out of `seats` entirely.
+    preview_pool: preview::PreviewPool,
+    /// Which buffer the preview seat is showing, by path.
+    ///
+    /// A path rather than an index or a reference: the pool is a `Vec` whose
+    /// order is its history, and an index into a list that evicts is an index
+    /// that goes stale between the frame that took it and the frame that reads
+    /// it. Mutually exclusive with [`Self::preview_image`] — the seat shows a
+    /// picture or a document, and the two doors clear each other on the way in.
+    preview_buffer: Option<PathBuf>,
+    /// How far the shown buffer's body is scrolled, in physical pixels.
+    ///
+    /// A property of the *view*, so it lives beside `preview_buffer` rather than
+    /// on the buffer: two panes showing one buffer are one buffer at two scroll
+    /// positions, which is the one thing about them that is allowed to differ.
+    preview_scroll: f32,
     /// The arc's easing toward the reading it is now showing, if it is moving.
     ring_tween: Option<SweepTween>,
     /// The sweep the ring is displaying, which is also what a state change
@@ -1062,6 +1114,25 @@ struct Runtime {
     files_worker: files::FilesWorker,
     files_worker_running: bool,
     files_worker_notice_pending: bool,
+    /// The thread that reads the heads of files the preview is showing.
+    ///
+    /// Its own lane rather than a share of `files_worker`, for the reason the
+    /// two `AppEvent`s are separate: a directory read and a file read are both
+    /// disk questions but they are not each other's queue, and a preview of a
+    /// large file must not be what a tree waits behind to draw its next row.
+    preview_worker: preview::PreviewWorker,
+    preview_worker_running: bool,
+    preview_worker_notice_pending: bool,
+    /// How wide the "no preview" card's button caption is drawn.
+    ///
+    /// Measured into the runtime where the picture is built, for the reason
+    /// `files_name_widths` is: the hit test is `&self` by construction and
+    /// cannot measure, and "the button you can press is the button you can see"
+    /// has to be true by one number rather than by two functions agreeing.
+    preview_button_width: f32,
+    /// When "Open in default app" was last pressed, if it still has something to
+    /// say about it.
+    preview_opened_at: Option<Instant>,
     pending_frames: LatestFrameSlot,
     /// The size the child has actually been told about — never a size that has only been solved or
     /// queued. It is the same value as `grid` at rest, and the two are deliberately separate only
@@ -2336,6 +2407,15 @@ const FOOT_REVEALED_LABEL: &str = "Revealed in File Explorer";
 /// mock-up's own `setTimeout(…, 1300)` in `revealFolderFeedback`, which is one
 /// function serving the flyout's foot and the pane's alike.
 const FOOT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
+/// `.pv-unknown button` at rest (mock-up 4987).
+const PREVIEW_OPEN_EXTERNALLY_LABEL: &str = "Open in default app";
+/// And for [`FOOT_REVEAL_FEEDBACK`] after it is pressed (mock-up 7823-7829).
+///
+/// **1300ms, not the mock-up's 1100.** The prototype grew four of these
+/// acknowledgements at four durations — 1100, 1300, 1400, 1500 — and none of the
+/// differences was ever a decision. Ruling 6 (2026-08-12) collapses them onto
+/// the one that was reasoned about: `revealFolderFeedback`'s.
+const PREVIEW_OPENED_LABEL: &str = "Opened \u{2713}";
 
 /// A foot that is confirming a reveal.
 ///
@@ -7689,6 +7769,9 @@ fn assemble_tab_state(
         seat_layout,
         seat_overflow,
         preview_image: None,
+        preview_pool: preview::PreviewPool::default(),
+        preview_buffer: None,
+        preview_scroll: 0.0,
     };
     debug_assert!(
         tab.sessions_match_terminals(),
@@ -8325,6 +8408,7 @@ impl Runtime {
         let pty_time = phase_started.elapsed();
         let math_worker = MathWorker::spawn(proxy.clone())?;
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
+        let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
         let mut runtime = Self {
             renderer,
             tabs,
@@ -8337,6 +8421,11 @@ impl Runtime {
             files_worker,
             files_worker_running: true,
             files_worker_notice_pending: false,
+            preview_worker,
+            preview_worker_running: true,
+            preview_worker_notice_pending: false,
+            preview_button_width: 0.0,
+            preview_opened_at: None,
             pending_frames: LatestFrameSlot::default(),
             modifiers: ModifiersState::default(),
             math_context_menu,
@@ -9210,7 +9299,14 @@ impl Runtime {
             active_tab += usize::from(active_tab >= slot);
             grabbed = grabbed.map(|index| index + usize::from(index >= slot));
         }
-        let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
+        // The head's caption comes from whichever door filled the seat. Two
+        // doors, one caption, and only one of them can be open at a time.
+        let preview_title = match self.preview_image.as_ref() {
+            Some(preview) => Some(preview.title()),
+            None => self
+                .current_preview_buffer()
+                .map(|buffer| buffer.name.clone()),
+        };
         // C28, per leaf: every terminal pane head names its *own* shell. Resolved
         // here rather than in `seats`, which knows nothing about sessions (L1).
         let terminal_names = self.terminal_names();
@@ -9230,15 +9326,41 @@ impl Runtime {
         // And the strip along the bottom of each of them, whose caption is cut to
         // the room it has — which only something holding a font can decide.
         self.dress_files_feet(scale, now, &mut files_trees);
-        let preview_message = match self.preview_image.as_ref() {
-            Some(preview) => preview.message(),
+        let preview_message = match (self.preview_image.as_ref(), self.current_preview_buffer()) {
+            (Some(preview), _) => preview.message(),
+            // A document on its way: the same sentence a picture uses, because
+            // it is the same wait.
+            (None, Some(buffer)) => (buffer.load == preview::PreviewLoad::Pending)
+                .then(|| format!("Loading {}\u{2026}", buffer.name)),
             // An open pane with nothing chosen invites rather than sits mute.
-            None => self
+            (None, None) => self
                 .seats
                 .preview()
                 .is_some()
                 .then(|| "Click a dotted path to preview it here".to_owned()),
         };
+        // The "no preview" card, when the buffer on the seat has said it will
+        // never have a body. Measured here beside the files names, and for the
+        // same reason: only something holding a font can size a button, and the
+        // hit test reads the number this frame stored.
+        let preview_card_notice = self
+            .current_preview_buffer()
+            .and_then(preview::PreviewBuffer::refusal)
+            .map(preview::PreviewRefusal::notice);
+        let preview_open_label = self.preview_open_button_label(now);
+        self.preview_button_width = self.renderer.measure_chrome_text(
+            preview_open_label,
+            seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
+        );
+        let preview_card = preview_card_notice.map(|notice| seats::PreviewCardContent {
+            notice,
+            button: preview_open_label,
+            button_text_px: self.preview_button_width,
+            button_hovered: matches!(
+                self.seat_pointer.hover,
+                Some(seats::ChromeTarget::PreviewOpenButton(_))
+            ),
+        });
         // U8 — sampled here, on the same `now` every other animated value in
         // this build reads, and handed over as numbers. `seats` has an explicit
         // invariant that nothing in it knows what time it is, and a `PaneMotion`
@@ -9287,6 +9409,7 @@ impl Runtime {
                 files_root_open: self.root_menu.seat(),
                 files_trees: &files_trees,
                 preview_message: preview_message.as_deref(),
+                preview_card,
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
                 chevron_turn: self.chevron_turn.sample(now, self.motion).0,
@@ -11098,6 +11221,7 @@ impl Runtime {
         if was_open {
             self.preview_image = None;
             self.renderer.set_preview_image(None);
+            self.clear_preview_view();
         }
         self.seat_pointer = seats::ChromePointer::default();
         self.divider_drag = None;
@@ -11225,6 +11349,7 @@ impl Runtime {
         if kind == bt_layout::SeatKind::Preview {
             self.preview_image = None;
             self.renderer.set_preview_image(None);
+            self.clear_preview_view();
         }
         // A terminal seat holds a shell, and the pane going away takes that too.
         // Closing the pane and leaving the ConPTY alive would leak a process
@@ -11509,12 +11634,202 @@ impl Runtime {
     fn open_preview_image(&mut self, path: PathBuf) -> Result<()> {
         self.preview_image = Some(PreviewImageState::new(path));
         self.renderer.set_preview_image(None);
+        // The document the seat was showing is not what it is showing now. The
+        // buffer itself stays in the pool — it belongs to the tab, not to the
+        // pane — so switching back finds it whole.
+        self.preview_buffer = None;
+        self.preview_scroll = 0.0;
+        self.renderer.set_preview_text(None);
         if self.seats.preview().is_none() {
             return self.toggle_preview_seat();
         }
         self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.present_chrome_change()
+    }
+
+    /// Open a file in **the** preview seat — the document door.
+    ///
+    /// [`Self::open_preview_image`]'s sibling and its opposite number: one takes
+    /// a picture down the decode lane, this takes everything else through the
+    /// tab's shared pool. Both leave the keyboard exactly where it was, which is
+    /// §7.1.3's browsing continuity ("打开时键盘焦点不离开树") and the reason a
+    /// tree can be walked more than once.
+    ///
+    /// **The pool answers first.** A file already open is the same buffer, its
+    /// edits intact, whichever pane showed it — so this is a *lookup* that
+    /// sometimes reads a disk, never a read that sometimes finds a cache.
+    fn open_preview_file(&mut self, path: PathBuf) -> Result<()> {
+        let name = files_row_display_name(&path);
+        // The picture on the seat, if there was one, is not what the seat is
+        // showing any more. Cleared before the buffer lands so no frame between
+        // the two can find both.
+        self.preview_image = None;
+        self.renderer.set_preview_image(None);
+        let tab = self.id;
+        let shown: Vec<PathBuf> = self.preview_buffer.iter().cloned().collect();
+        let buffer = self.preview_pool.open(path.clone(), name, &shown);
+        let wants_read = buffer.wants_head_read();
+        self.preview_buffer = Some(path.clone());
+        self.preview_scroll = 0.0;
+        if wants_read
+            && !self
+                .preview_worker
+                .request(preview::HeadRequest { tab, path })
+        {
+            self.disable_preview_worker();
+        }
+        if self.seats.preview().is_none() {
+            return self.toggle_preview_seat();
+        }
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// The pane stopped showing a document. **The buffer does not go away.**
+    ///
+    /// The pool is the tab's and outlives any one pane (§7.1.3): what a closing
+    /// pane takes with it is the *view*, which is which buffer it was on and how
+    /// far down. The pool itself is emptied only by the dirty gates, which are
+    /// slice 4's — and until edits exist there is nothing dirty for them to
+    /// guard, so nothing here has anything to confirm.
+    fn clear_preview_view(&mut self) {
+        self.preview_buffer = None;
+        self.preview_scroll = 0.0;
+        self.renderer.set_preview_text(None);
+    }
+
+    /// The buffer the preview seat is showing, if it is showing one.
+    fn current_preview_buffer(&self) -> Option<&preview::PreviewBuffer> {
+        let path = self.preview_buffer.as_deref()?;
+        self.preview_pool.get(path)
+    }
+
+    /// A wheel notch over a preview's text body.
+    ///
+    /// [`Self::scroll_files_tree`]'s twin, clamped at both ends by the same
+    /// authority and for the same reason (R2 乙案): a wheel at the end of a
+    /// document that goes on adding to a number nothing reads is a body that
+    /// costs one notch per notch to come back up.
+    ///
+    /// The text surface is rebuilt rather than repainted, because the lines
+    /// *are* the offset: which of them exist this frame is what scrolling
+    /// changes.
+    fn scroll_preview_body(&mut self, body: [f32; 4], delta: MouseScrollDelta) -> Result<()> {
+        let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let lines = self.preview_line_count();
+        let scrolled =
+            seats::clamp_preview_scroll(body, lines, self.preview_scroll - travel, scale);
+        if scrolled == self.preview_scroll {
+            return Ok(());
+        }
+        self.preview_scroll = scrolled;
+        self.refresh_preview_text();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// Hand the file on the seat to whatever the system has registered for it.
+    ///
+    /// **The same one door out this window has always had** —
+    /// [`Self::open_local_path`], and through it `bt_platform`'s own refusal for
+    /// anything that is not a local file. What changed is where the door is: it
+    /// used to be what a double click fell through to, and it is now a button
+    /// the window offers *after* saying it cannot show the file itself.
+    ///
+    /// The acknowledgement is only printed when the system took it. A word that
+    /// says "Opened" over a launch that was refused is the one thing worse than
+    /// silence — the foot's own rule, applied to the card.
+    fn open_preview_externally(&mut self) -> Result<()> {
+        let Some(path) = self
+            .current_preview_buffer()
+            .map(|buffer| buffer.path.clone())
+        else {
+            return Ok(());
+        };
+        if self.open_local_path(&path) {
+            self.preview_opened_at = Some(Instant::now());
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// What the card's one control says right now.
+    ///
+    /// Two words for 1300ms after a press and its own name the rest of the time
+    /// — the same acknowledgement, and the same duration, the foot's "Revealed"
+    /// uses (ruling 6, 2026-08-12: the four mock-up durations collapse to this
+    /// one).
+    fn preview_open_button_label(&self, now: Instant) -> &'static str {
+        match self.preview_opened_at {
+            Some(at) if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK => {
+                PREVIEW_OPENED_LABEL
+            }
+            _ => PREVIEW_OPEN_EXTERNALLY_LABEL,
+        }
+    }
+
+    /// The only scroll the preview body is allowed to hold.
+    ///
+    /// `heal_files_scroll`'s twin and its whole argument: the painter believes
+    /// the stored number, so a buffer that got shorter, a pane that got taller
+    /// or a switch to a smaller file has to be answered *here* rather than by
+    /// the layout quietly disagreeing with what it was handed.
+    fn heal_preview_scroll(&mut self) {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+            return;
+        };
+        let lines = self.preview_line_count();
+        self.preview_scroll = seats::clamp_preview_scroll(body, lines, self.preview_scroll, scale);
+    }
+
+    fn preview_line_count(&self) -> usize {
+        self.current_preview_buffer()
+            .and_then(|buffer| buffer.content.as_deref())
+            .map_or(0, |content| content.lines().count())
+    }
+
+    /// Hand the renderer the lines of the buffer on the seat, laid out and
+    /// scrolled.
+    ///
+    /// **Only the visible ones are built.** A 64KB head is some two thousand
+    /// lines and a pane holds perhaps forty; building the rest would put the
+    /// file's size into the frame's cost, which is exactly what the head read
+    /// exists to keep out of it.
+    fn refresh_preview_text(&mut self) {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let body = seats::preview_body_rect(&self.seats, &self.seat_layout, scale);
+        let Some((body, content)) = body.zip(
+            self.current_preview_buffer()
+                .and_then(|buffer| buffer.content.clone()),
+        ) else {
+            self.renderer.set_preview_text(None);
+            return;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let geometry = seats::preview_text_geometry(body, lines.len(), self.preview_scroll, scale);
+        let drawn: Vec<bt_render::PreviewTextLine> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| (index, geometry.line_rect(index), line))
+            .filter(|(_, rect, _)| rect[3] > body[1] && rect[1] < body[3])
+            .map(|(_, rect, line)| bt_render::PreviewTextLine {
+                text: seats::expand_tabs(line),
+                rect,
+            })
+            .collect();
+        self.renderer.set_preview_text(Some(bt_render::PreviewText {
+            clip: body,
+            lines: drawn,
+            font_size_px: geometry.font_size,
+            line_height_px: geometry.line_height,
+            color: bt_render::chrome_palette().preview_body_text,
+        }));
     }
 
     fn defer_preview_resample(&mut self, observed_at: Instant) {
@@ -11539,6 +11854,11 @@ impl Runtime {
     /// Refit the current image to the solver's latest preview body. Decodes stay on the decoration
     /// worker and Lanczos3 runs on its independent scale lane; this method only routes shared data.
     fn refresh_preview_for_layout(&mut self) {
+        // The document lane's half of the same refit, and asked first because it
+        // is total: a seat that has gone away wants both surfaces cleared, and
+        // `refresh_preview_text` answers that case itself.
+        self.heal_preview_scroll();
+        self.refresh_preview_text();
         let Some(preview_seat) = self.seats.preview() else {
             self.renderer.set_preview_image(None);
             return;
@@ -11922,6 +12242,15 @@ impl Runtime {
         {
             terminal_frame.status_text = Some(notice.to_owned());
         }
+        // The third of the same one-shot, in the same queue and last for the
+        // same reason: each `take` clears only the flag it read, so a window
+        // that loses all three threads says all three sentences, one per frame.
+        if terminal_frame.status_text.is_none()
+            && let Some(notice) =
+                preview::take_preview_worker_notice(&mut self.preview_worker_notice_pending)
+        {
+            terminal_frame.status_text = Some(notice.to_owned());
+        }
         let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
             .context("reject non-rectangular frame before IME composition")?;
         if skip_unchanged
@@ -11986,6 +12315,62 @@ impl Runtime {
             &mut self.files_worker_running,
             &mut self.files_worker_notice_pending,
         )
+    }
+
+    fn disable_preview_worker(&mut self) -> bool {
+        preview::disable_preview_worker_state(
+            &mut self.preview_worker_running,
+            &mut self.preview_worker_notice_pending,
+        )
+    }
+
+    /// Take every file head the preview worker has finished.
+    ///
+    /// The twin of [`Self::apply_files_results`], down to the shape of the
+    /// silence: a tab that closed, or a buffer the pool has since evicted, has
+    /// nowhere to put the answer, and that is not a failure — it is the
+    /// cancellation §7.1.3 asks for, arriving as a dropped result.
+    fn apply_preview_results(&mut self) -> Result<()> {
+        let mut changed = false;
+        loop {
+            match self.preview_worker.responses.try_recv() {
+                Ok(response) => {
+                    let Some(index) = self.tabs.iter().position(|tab| tab.id == response.tab)
+                    else {
+                        continue;
+                    };
+                    let tab = &mut self.tabs[index];
+                    let Some(buffer) = tab.preview_pool.get_mut(&response.path) else {
+                        continue;
+                    };
+                    buffer.accept(response.outcome);
+                    changed |= index == self.active_tab
+                        && self.tabs[index].preview_buffer.as_deref()
+                            == Some(response.path.as_path());
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    changed |= self.disable_preview_worker();
+                    break;
+                }
+            }
+        }
+        if changed {
+            // **The whole body, not just the chrome around it.** A head read
+            // landing is the one event that turns "Loading …" into lines, and
+            // the lines are not chrome — they are the renderer's own preview
+            // surface. Asking `refresh_chrome` alone was the first thing this
+            // slice got wrong on a real window: the head named the file and the
+            // body stayed empty, because nothing rebuilt the text after the
+            // frame that had nothing to build it from.
+            self.refresh_preview_for_layout();
+            self.refresh_chrome();
+            // And presented unconditionally, for the same reason: the chrome
+            // genuinely may not have changed — the head already said the name
+            // one frame ago — while the body has changed completely.
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// Every files column of the active tab, walked into the rows it draws this
@@ -12616,10 +13001,7 @@ impl Runtime {
             // it, and a window in which they could ever disagree would be a
             // window where the menu's own wording had become a lie.
             profiles::FileMenuRow::Open => match activation {
-                RowActivation::Preview(path) => self.open_preview_image(path)?,
-                RowActivation::DefaultApp(path) => {
-                    let _ = self.open_local_path(&path);
-                }
+                RowActivation::Preview(path) => self.open_preview(path)?,
                 RowActivation::Nowhere => {}
             },
             profiles::FileMenuRow::CopyPath => self.copy_path_to_clipboard(&path)?,
@@ -13902,15 +14284,12 @@ impl Runtime {
 
     /// Enter, Space or a double click on a file row (K156/D44).
     ///
-    /// **Two doors, one gesture.** A picture goes to the preview seat this build
-    /// already has — the very machine a click on an image path in the terminal
-    /// drives, so a `.png` opens in the same place however you reached it —
-    /// and everything else goes to the handler the system has registered for
-    /// it. That split is an interim and is written down as one: `DESIGN.md`
-    /// §7.1.3 rules that activating *any* file opens the preview, with
-    /// "no preview" cards for what cannot be shown, and the preview block is
-    /// what will make the second door narrow to the files this window cannot
-    /// display itself.
+    /// **One door, one gesture.** Every file goes to the preview seat — a
+    /// picture down the decode lane it always used, so a `.png` opens in the
+    /// same place however you reached it, and everything else through the tab's
+    /// buffer pool, which shows it as text or says in its own body why it
+    /// cannot. `DESIGN.md` §7.1.3 asked for exactly that; until this slice the
+    /// rest went to the system's own handler, and that interim is over.
     ///
     /// **The keyboard does not move.** §7.1.3 asks for browsing continuity in as
     /// many words ("打开时键盘焦点不离开树"): opening a file is something you do
@@ -13919,12 +14298,23 @@ impl Runtime {
     fn activate_files_row(&mut self, seat: SeatId, key: &str) -> Result<()> {
         let root = self.tabs[self.active_tab].files_state(seat).root;
         match files_row_activation(&root, key) {
-            RowActivation::Preview(path) => self.open_preview_image(path),
-            RowActivation::DefaultApp(path) => {
-                let _ = self.open_local_path(&path);
-                Ok(())
-            }
+            RowActivation::Preview(path) => self.open_preview(path),
             RowActivation::Nowhere => Ok(()),
+        }
+    }
+
+    /// Put a file on the preview seat, down whichever of the two content lanes
+    /// it belongs in.
+    ///
+    /// **The fork lives here and nowhere else.** Every entrance — a double
+    /// click, Enter, the menu row, a click on an inline image — asks this one
+    /// question, so the two lanes cannot come to disagree about what a `.png`
+    /// is depending on how it was reached.
+    fn open_preview(&mut self, path: PathBuf) -> Result<()> {
+        if path_is_previewable_image(&path) {
+            self.open_preview_image(path)
+        } else {
+            self.open_preview_file(path)
         }
     }
 
@@ -16547,6 +16937,22 @@ impl Runtime {
         // it lives in — a control's claim on its own rectangle should not depend
         // on a *second* rectangle happening to have been shortened correctly.
         .or_else(|| seats::hit_files_foot(&self.seat_layout, scale, position.x, position.y))
+        // The card's button, asked only while the card is up: a control that
+        // answers a hit test it is not on screen for is an invisible button.
+        .or_else(|| {
+            self.current_preview_buffer()
+                .and_then(preview::PreviewBuffer::refusal)
+                .and_then(|_| {
+                    seats::hit_preview_card_button(
+                        &self.seats,
+                        &self.seat_layout,
+                        self.preview_button_width,
+                        scale,
+                        position.x,
+                        position.y,
+                    )
+                })
+        })
         .or_else(|| {
             seats::hit_files_tree(
                 &self.seat_layout,
@@ -17933,6 +18339,14 @@ impl Runtime {
                 self.files_row_clicks.interrupt();
                 self.reveal_files_root(seat)?;
             }
+            // The one way out of a file this window cannot show. It breaks a
+            // click chain for `.files-foot`'s reason: a chain of clicks on a
+            // button is a chain of button presses.
+            seats::ChromeTarget::PreviewOpenButton(_) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.open_preview_externally()?;
+            }
             seats::ChromeTarget::FilesRoot(seat) => {
                 self.tab_clicks.interrupt();
                 self.files_row_clicks.interrupt();
@@ -18784,10 +19198,31 @@ impl Runtime {
         {
             return self.scroll_files_tree(seat, body, delta);
         }
+        // `.preview-body { overflow: auto }` (mock-up 597) — and the same
+        // sentence again. Asked here, beside the tree's, because it is the same
+        // kind of answer: a pane whose body is a scroller, which the router
+        // below has no vocabulary for.
+        if let Some(position) = self.pointer_position
+            && self
+                .current_preview_buffer()
+                .is_some_and(|buffer| buffer.content.is_some())
+            && let Some(body) = seats::preview_body_rect(
+                &self.seats,
+                &self.seat_layout,
+                self.renderer.metrics().scale_factor as f32,
+            )
+            && body[0] <= position.x as f32
+            && position.x as f32 <= body[2]
+            && body[1] <= position.y as f32
+            && position.y as f32 <= body[3]
+        {
+            return self.scroll_preview_body(body, delta);
+        }
         // A notch belongs to the pane it is over. With one terminal that is the
         // terminal or nothing, which is what this guard has always said; with a
         // fleet it is whichever terminal pane the pointer is in, and a notch
-        // over a preview is still nobody's.
+        // over a preview showing something that does not scroll is still
+        // nobody's.
         //
         // Routing by the pointer rather than by focus is what the rest of the
         // desktop does, and it is the only reading that lets you read a build
@@ -20005,6 +20440,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             AppEvent::FilesReady => {
                 if let Some(runtime) = self.runtime.as_mut()
                     && let Err(error) = runtime.apply_files_results()
+                {
+                    self.fail(event_loop, error);
+                }
+            }
+            AppEvent::PreviewReady => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.apply_preview_results()
                 {
                     self.fail(event_loop, error);
                 }
@@ -32241,31 +32683,53 @@ mod tests {
         );
     }
 
-    /// PIN — K156. A picture goes where a picture goes, and everything else
-    /// goes to the system.
+    /// PIN — K156, and the day the second door closed. **Every file opens its
+    /// preview.**
     ///
-    /// The image half is measured against the *terminal's* own list rather than
-    /// against a list written in the test, because the property being pinned is
-    /// that the two agree: a `.webp` clicked on a line of output and a `.webp`
-    /// double-clicked in the tree must land in the same pane.
+    /// This test used to assert the opposite for everything that was not a
+    /// picture, and that half of it was written down as an interim from the
+    /// beginning: `DESIGN.md` §7.1.3 rules that activating any file opens the
+    /// preview, with "no preview" cards for what cannot be shown. The preview
+    /// block built the cards, so the interim ended and the assertion inverted.
+    ///
+    /// The picture half stays, and stays measured against the *terminal's* own
+    /// list rather than a list written here, because the property it pins is
+    /// unchanged: a `.webp` clicked on a line of output and a `.webp`
+    /// double-clicked in the tree must land in the same pane — now on the same
+    /// seat by the same lane, chosen by [`path_is_previewable_image`].
+    ///
+    /// Mutation: restore the `DefaultApp` branch for non-pictures in
+    /// [`files_row_activation`].
     #[test]
-    fn a_picture_opens_in_the_preview_and_everything_else_opens_where_windows_says() {
+    fn every_file_opens_in_the_preview_and_a_rootless_column_opens_nothing() {
         let root = r"C:\work";
-        for picture in ["/shot.png", "/a/b/SHOT.JPEG", "/icon.svg", "/anim.gif"] {
+        for name in [
+            "/shot.png",
+            "/a/b/SHOT.JPEG",
+            "/icon.svg",
+            "/anim.gif",
+            "/notes.md",
+            "/Cargo.toml",
+            "/README",
+            "/image.bmp",
+            "/setup.exe",
+        ] {
             assert_eq!(
-                files_row_activation(root, picture),
-                RowActivation::Preview(files::full_path(root, picture)),
-                "{picture} is a picture"
+                files_row_activation(root, name),
+                RowActivation::Preview(files::full_path(root, name)),
+                "{name} opens in the preview"
             );
-            assert!(bt_term::has_admissible_image_extension(&files::full_path(
-                root, picture
-            )));
         }
-        for other in ["/notes.md", "/Cargo.toml", "/README", "/image.bmp"] {
-            assert_eq!(
-                files_row_activation(root, other),
-                RowActivation::DefaultApp(files::full_path(root, other)),
-                "{other} is not one this window can draw"
+        for picture in ["/shot.png", "/a/b/SHOT.JPEG", "/icon.svg", "/anim.gif"] {
+            assert!(
+                path_is_previewable_image(&files::full_path(root, picture)),
+                "{picture} takes the decode lane"
+            );
+        }
+        for document in ["/notes.md", "/Cargo.toml", "/README", "/setup.exe"] {
+            assert!(
+                !path_is_previewable_image(&files::full_path(root, document)),
+                "{document} takes the buffer lane"
             );
         }
         assert_eq!(
@@ -32275,7 +32739,7 @@ mod tests {
         );
         assert_eq!(
             files_row_activation(root, "/notes.md"),
-            RowActivation::DefaultApp(PathBuf::from(root).join("notes.md")),
+            RowActivation::Preview(PathBuf::from(root).join("notes.md")),
             "L167: the id's slashes never reach the filesystem"
         );
     }
@@ -32344,21 +32808,32 @@ mod tests {
         );
     }
 
-    /// PIN — K143. The menu's first row is named after the door it will
-    /// actually open, so it cannot promise a preview and then start Notepad.
+    /// PIN — K143, collapsed. **The menu's first row is one word.**
     ///
-    /// The red gate: naming the row `Open preview` unconditionally (which is
-    /// what §7.1.3's *finished* wording says, and what the mock-up hard-codes at
-    /// 8087) makes the menu lie about every file this build cannot draw — which
-    /// today is every file that is not a picture.
+    /// While there were two doors this row had to be named after whichever one
+    /// it would actually walk through, because a sentence can lie where a double
+    /// click cannot; [`RowActivation::open_text`] carried the promise that "the
+    /// day the second door closes this collapses to one word without anything
+    /// else moving". This is that day, and this is the assertion that the row
+    /// no longer has a branch to get wrong — including for the rootless column,
+    /// where the row still names the door even though it has no path for it.
+    ///
+    /// Mutation: give `open_text` back its `match`, answering "Open" for
+    /// anything.
     #[test]
-    fn the_menus_first_row_is_named_after_the_door_that_row_opens() {
+    fn the_menus_first_row_says_one_thing_now_that_there_is_one_door() {
         let root = r"C:\work";
+        for name in ["/shot.png", "/notes.md", "/setup.exe"] {
+            assert_eq!(
+                files_row_activation(root, name).open_text(),
+                "Open preview",
+                "{name}"
+            );
+        }
         assert_eq!(
-            files_row_activation(root, "/shot.png").open_text(),
+            files_row_activation("", "/notes.md").open_text(),
             "Open preview"
         );
-        assert_eq!(files_row_activation(root, "/notes.md").open_text(), "Open");
         assert_eq!(
             files_row_activation(root, "/shot.png").path(),
             Some(files::full_path(root, "/shot.png").as_path())

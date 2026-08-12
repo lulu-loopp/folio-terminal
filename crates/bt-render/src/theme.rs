@@ -298,6 +298,17 @@ pub struct ChromePalette {
     pub tab_pin_state_on_hovered_tab: [u8; 3],
     /// Body state notices — an empty pane's invitation, "Loading …", a failure.
     pub body_hint_text: [u8; 3],
+    /// A preview's own text body — `.pv-edit { color: var(--ink) }` (mock-up
+    /// 599-604) over `--termbg`.
+    ///
+    /// Its own field rather than a re-use of [`Self::files_row_text_selected`],
+    /// which happens to hold the same two numbers today, on exactly the
+    /// precedent the block below cites for `files_row_*`: two declarations
+    /// either of which could be re-struck without the other. A file's text is
+    /// the strongest ink this window puts on a body — full `--ink`, not the
+    /// `--ink2` a *list of file names* is set in — because a preview is the one
+    /// surface where the content is the point and the chrome is the frame.
+    pub preview_body_text: [u8; 3],
     // ── the file tree's rows, mixed over the one ground a files body has ──
     //
     // A files pane's body is `--termbg` and nothing else (B15/U11), so unlike
@@ -731,6 +742,10 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     tab_pin_state_on_active_tab: [0xe1, 0xe1, 0xe1],
     tab_pin_state_on_hovered_tab: [0xe4, 0xe4, 0xe4],
     body_hint_text: [0x75, 0x75, 0x75],
+    // `--ink` is white at .87 over `--termbg #1B1B1B` = 27: 27 + 228×.87 = 225.4
+    // — the same value the selected row's ink resolves to, arrived at over the
+    // bare body rather than over the selection fill.
+    preview_body_text: [0xe4, 0xe4, 0xe4],
     // The file tree's three grounds on `--termbg #1B1B1B`:
     //   `--hover`  white .055 → 27 + 228×.055 = 39.5
     //   `--active` white .09  → 27 + 228×.09  = 47.5
@@ -891,6 +906,9 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     tab_pin_state_on_active_tab: [0x37, 0x35, 0x2f],
     tab_pin_state_on_hovered_tab: [0x37, 0x35, 0x2f],
     body_hint_text: [0xa5, 0xa4, 0xa1],
+    // `--ink rgba(55,53,47,.87)` is opaque enough to be itself in the mock-up's
+    // own light palette, and `--termbg` here is `#FFFFFF`, so this is `--ink`.
+    preview_body_text: [0x37, 0x35, 0x2f],
     // The file tree's three grounds on `--termbg #FFFFFF`. The inks here are
     // rgb(55,53,47), so each channel steps down by {200,202,208}×alpha:
     //   `--hover`  .055 → (244.0, 243.9, 243.6)

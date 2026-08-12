@@ -1682,6 +1682,14 @@ pub enum ChromeTarget {
     /// travel and a bare click never has them. That is only true if the button
     /// answers the hit test first.
     FilesRoot(SeatId),
+    /// `.pv-unknown button` — "Open in default app", the one way out of a file
+    /// this window cannot show (mock-up 4984-4988).
+    ///
+    /// Its own target rather than a press anywhere on the card, because the card
+    /// is a *sentence* and only the button is a control: a click on the notice
+    /// that launched a program would be the one thing worse than a card that
+    /// does nothing.
+    PreviewOpenButton(SeatId),
     Settings,
     Minimize,
     Maximize,
@@ -4209,6 +4217,7 @@ pub fn build_chrome_with_preview(
             files_root_open: None,
             files_trees: &NO_FILES_TREES,
             preview_message,
+            preview_card: None,
             fit_overflow: None,
             profile_menu_open: false,
             chevron_turn: 0.0,
@@ -4512,6 +4521,13 @@ pub struct ChromeContent<'a> {
     /// directory on the event loop.
     pub files_trees: &'a BTreeMap<SeatId, FilesTreeContent>,
     pub preview_message: Option<&'a str>,
+    /// The "no preview" card, when the preview seat is showing one.
+    ///
+    /// Beside [`Self::preview_message`] rather than instead of it, because the
+    /// two are different states of the same body: the message is what a preview
+    /// says while it is *becoming* something, and the card is what it says when
+    /// it never will be. Only one is ever `Some`.
+    pub preview_card: Option<PreviewCardContent<'a>>,
     /// What the L4 fit-what-fits strip could not show, when the window is in
     /// that state at all ([`fit_what_fits`]). `None` on every ordinary solve.
     pub fit_overflow: Option<FitOverflow>,
@@ -4709,6 +4725,7 @@ pub fn build_chrome_for_tabs(
         files_root_open,
         files_trees,
         preview_message,
+        preview_card,
         fit_overflow,
         profile_menu_open,
         chevron_turn,
@@ -5218,7 +5235,72 @@ pub fn build_chrome_for_tabs(
                         (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
                     );
                 }
+                // The "no preview" card: 30px file mark at half strength, the
+                // sentence, and the one way out (mock-up 614-623). Drawn instead
+                // of a body notice, never beside one.
+                if placement.kind == SeatKind::Preview
+                    && let Some(card) = preview_card
+                {
+                    let body = [head_box[0], head_bottom, head_box[2], head_box[3]];
+                    let geometry = preview_card_geometry(body, card.button_text_px, scale);
+                    // `.pv-unknown svg { opacity: .5 }` — the element's own
+                    // opacity and not a paler ink, which is the distinction
+                    // `with_opacity` exists to keep.
+                    pane_sprites.push(
+                        ChromeSprite::new(ChromeMark::File, geometry.icon, palette.files_row_muted)
+                            .with_opacity(0.5),
+                    );
+                    pane_labels.push(ChromeLabel {
+                        text: card.notice.to_owned(),
+                        rect: geometry.notice,
+                        font_size_px: geometry.notice_font,
+                        color: palette.body_hint_text,
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: false,
+                        clip: None,
+                    });
+                    if card.button_hovered {
+                        pane_sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: geometry.button_radius.max(0.0) as u32,
+                            },
+                            geometry.button,
+                            palette.files_row_hover,
+                        ));
+                    }
+                    // `border: 1px solid var(--border)` — a ring and not a fill,
+                    // so the button reads as an offer rather than as a primary
+                    // action (the mock-up gives it no background at rest).
+                    pane_sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPillRing {
+                            radius_px: geometry.button_radius.max(0.0) as u32,
+                            stroke_px: (scale.round().max(1.0)) as u32,
+                        },
+                        geometry.button,
+                        palette.divider,
+                    ));
+                    pane_labels.push(ChromeLabel {
+                        text: card.button.to_owned(),
+                        rect: geometry.button,
+                        font_size_px: geometry.button_font,
+                        color: if card.button_hovered {
+                            palette.files_row_text_selected
+                        } else {
+                            palette.files_row_text
+                        },
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: false,
+                        clip: None,
+                    });
+                }
                 let body_notice = match placement.kind {
+                    SeatKind::Preview if preview_card.is_some() => None,
                     SeatKind::Preview => preview_message,
                     // T227: the degradation has to be *visible*. A leaf whose
                     // kind this build does not know keeps its place in the tree
@@ -8746,6 +8828,273 @@ pub fn clamp_files_scroll(body: [f32; 4], rows: usize, scroll_px: f32, scale: f3
     scroll_px.clamp(0.0, max_scroll)
 }
 
+// ── the preview seat's text body (mock-up 597-604) ──────────────────────────
+//
+// `.pv-edit { font: 12.5px/1.5 Consolas, "Cascadia Mono", monospace; padding:
+// 10px 12px; white-space: pre; tab-size: 4 }`. Five numbers, and every one of
+// them is here rather than at the call site for the reason `FILES_ROW_*` are:
+// the painter and the wheel and the hit test have to be laying out the same
+// lines, and a constant with two copies is a list whose click lands on the row
+// above the one you can see.
+
+/// `.pv-edit`'s type size, in logical pixels.
+pub const PREVIEW_TEXT_FONT_LOGICAL_PX: f32 = 12.5;
+/// `.pv-edit`'s line box, as a ratio of the type size — CSS `12.5px/1.5`.
+pub const PREVIEW_TEXT_LINE_HEIGHT_RATIO: f32 = 1.5;
+/// `.pv-edit { padding: 10px 12px }`, horizontal half.
+pub const PREVIEW_TEXT_PADDING_X_LOGICAL_PX: f32 = 12.0;
+/// `.pv-edit { padding: 10px 12px }`, vertical half.
+pub const PREVIEW_TEXT_PADDING_Y_LOGICAL_PX: f32 = 10.0;
+/// `.pv-edit { tab-size: 4 }`.
+///
+/// Expanded into spaces on the way to the shaper rather than shaped as a tab,
+/// because a tab is a *stop* and cosmic-text has no tab stops: what the CSS
+/// property names is a column grid, and in a monospace face a column grid is
+/// exactly N spaces.
+pub const PREVIEW_TEXT_TAB_WIDTH: usize = 4;
+
+/// Where a preview's text body puts its lines.
+///
+/// The twin of [`FilesTreeGeometry`], and one authority for the same three
+/// things: how tall a line is, how tall the content is, and how far it may be
+/// scrolled at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewTextGeometry {
+    /// The body rectangle the lines are drawn into and clipped to.
+    pub viewport: [f32; 4],
+    pub scroll_px: f32,
+    pub line_height: f32,
+    pub font_size: f32,
+    pub content_height: f32,
+    pub max_scroll: f32,
+    left: f32,
+    top: f32,
+}
+
+impl PreviewTextGeometry {
+    /// The layout box of the line at `index`, scroll already applied.
+    ///
+    /// The right edge is deliberately the body's own and not a measured one: a
+    /// line wider than the pane runs past it and is cropped, which is
+    /// `white-space: pre` rather than the reflow it forbids. A generous box that
+    /// the clip then cuts is how the shaper is told "do not fit this".
+    pub fn line_rect(&self, index: usize) -> [f32; 4] {
+        let top = self.top - self.scroll_px + self.line_height * index as f32;
+        [
+            self.left,
+            top,
+            // Room for a line far wider than the pane, so nothing is squeezed;
+            // the clip is what decides how much of it is seen.
+            self.left + (self.viewport[2] - self.viewport[0]).max(1.0) * 64.0,
+            top + self.line_height,
+        ]
+    }
+}
+
+/// Lay out a preview's text body.
+pub fn preview_text_geometry(
+    body: [f32; 4],
+    lines: usize,
+    scroll_px: f32,
+    scale: f32,
+) -> PreviewTextGeometry {
+    let font_size = PREVIEW_TEXT_FONT_LOGICAL_PX * scale;
+    let line_height = (font_size * PREVIEW_TEXT_LINE_HEIGHT_RATIO)
+        .round()
+        .max(1.0);
+    let padding_x = (PREVIEW_TEXT_PADDING_X_LOGICAL_PX * scale).round();
+    let padding_y = (PREVIEW_TEXT_PADDING_Y_LOGICAL_PX * scale).round();
+    let content_height = padding_y * 2.0 + line_height * lines as f32;
+    PreviewTextGeometry {
+        viewport: body,
+        scroll_px,
+        line_height,
+        font_size,
+        content_height,
+        max_scroll: (content_height - (body[3] - body[1])).max(0.0),
+        left: body[0] + padding_x,
+        top: body[1] + padding_y,
+    }
+}
+
+/// The only scroll a preview body is allowed to hold, given what there is to
+/// see.
+///
+/// [`clamp_files_scroll`]'s twin, with the same contract: every write of the
+/// stored offset goes through here, so a buffer that got shorter — a re-read, a
+/// pane grown taller, a switch to a smaller file — cannot leave the body parked
+/// past its own end.
+#[must_use]
+pub fn clamp_preview_scroll(body: [f32; 4], lines: usize, scroll_px: f32, scale: f32) -> f32 {
+    let max_scroll = preview_text_geometry(body, lines, 0.0, scale).max_scroll;
+    scroll_px.clamp(0.0, max_scroll)
+}
+
+/// Expand tab stops the way `tab-size: 4` does.
+///
+/// **Column-aware, not a blind replace.** `tab-size` advances to the next
+/// multiple of four *columns*, so a tab after two characters is worth two
+/// spaces and a tab at the start of a line is worth four. Replacing each tab
+/// with four spaces is the thing that misaligns every continuation line in an
+/// indented file, which is precisely what a preview of source code is for.
+pub fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut column = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let advance = PREVIEW_TEXT_TAB_WIDTH - column % PREVIEW_TEXT_TAB_WIDTH;
+            out.extend(std::iter::repeat_n(' ', advance));
+            column += advance;
+        } else {
+            out.push(ch);
+            column += 1;
+        }
+    }
+    out
+}
+
+// ── the "no preview" card (mock-up 614-623, 4984-4988) ──────────────────────
+
+/// `.pv-unknown svg { width: 30px; height: 30px }`.
+const PREVIEW_CARD_ICON_LOGICAL_PX: f32 = 30.0;
+/// `.pv-unknown { gap: 10px }`.
+const PREVIEW_CARD_GAP_LOGICAL_PX: f32 = 10.0;
+/// `.pv-unknown { font-size: 12.5px }`.
+const PREVIEW_CARD_FONT_LOGICAL_PX: f32 = 12.5;
+/// `.pv-unknown button { font-size: 12px }`.
+pub const PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX: f32 = 12.0;
+/// `.pv-unknown button { padding: 5px 12px }`, and the 1px border around it.
+const PREVIEW_CARD_BUTTON_PADDING_X_LOGICAL_PX: f32 = 12.0;
+const PREVIEW_CARD_BUTTON_PADDING_Y_LOGICAL_PX: f32 = 5.0;
+const PREVIEW_CARD_BUTTON_BORDER_LOGICAL_PX: f32 = 1.0;
+/// `.pv-unknown button { border-radius: 6px }` — carried for the day the chrome
+/// pass grows rounded quads; the button is drawn as a hairline frame today.
+const PREVIEW_CARD_BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
+
+/// The card's three boxes, and the button's among them.
+///
+/// One derivation, read by the painter and by the hit test both — the rule
+/// [`FilesTreeGeometry`] states in as many words, applied to a control whose
+/// whole purpose is being pressed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewCardGeometry {
+    pub icon: [f32; 4],
+    pub notice: [f32; 4],
+    pub button: [f32; 4],
+    pub notice_font: f32,
+    pub button_font: f32,
+    pub button_radius: f32,
+}
+
+/// What the "no preview" card says this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewCardContent<'a> {
+    /// The sentence — the mock-up's single "No preview for this file type", or
+    /// the more specific one a binary, a network path or a failed read earns.
+    pub notice: &'a str,
+    /// The button's caption: "Open in default app", or the acknowledgement that
+    /// replaces it for 1300ms after a press.
+    pub button: &'a str,
+    /// How wide that caption is drawn, measured with the renderer's own font —
+    /// the same reason [`ChromeContent::files_name_widths`] is measured outside.
+    pub button_text_px: f32,
+    pub button_hovered: bool,
+}
+
+/// Stack the card's icon, sentence and button in the middle of a body.
+///
+/// `button_text_px` is the caption's measured width, which only something
+/// holding a font can answer; the column is centred on the body and the button
+/// is centred on the column.
+pub fn preview_card_geometry(
+    body: [f32; 4],
+    button_text_px: f32,
+    scale: f32,
+) -> PreviewCardGeometry {
+    let icon = (PREVIEW_CARD_ICON_LOGICAL_PX * scale).round().max(1.0);
+    let gap = (PREVIEW_CARD_GAP_LOGICAL_PX * scale).round();
+    let notice_font = PREVIEW_CARD_FONT_LOGICAL_PX * scale;
+    let button_font = PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale;
+    let notice_height = (notice_font * CHROME_LINE_HEIGHT).round().max(1.0);
+    let button_height = ((button_font * CHROME_LINE_HEIGHT).round()
+        + (PREVIEW_CARD_BUTTON_PADDING_Y_LOGICAL_PX + PREVIEW_CARD_BUTTON_BORDER_LOGICAL_PX)
+            * 2.0
+            * scale)
+        .round()
+        .max(1.0);
+    let button_width = (button_text_px
+        + (PREVIEW_CARD_BUTTON_PADDING_X_LOGICAL_PX + PREVIEW_CARD_BUTTON_BORDER_LOGICAL_PX)
+            * 2.0
+            * scale)
+        .round()
+        .max(1.0);
+    let total = icon + gap + notice_height + gap + button_height;
+    let centre_x = (body[0] + body[2]) / 2.0;
+    let top = (body[1] + (body[3] - body[1] - total) / 2.0).max(body[1]);
+    let notice_top = top + icon + gap;
+    let button_top = notice_top + notice_height + gap;
+    PreviewCardGeometry {
+        icon: [
+            centre_x - icon / 2.0,
+            top,
+            centre_x + icon / 2.0,
+            top + icon,
+        ],
+        // The sentence is centred by the label itself, so its box is the body's
+        // width and its height is the one line it gets.
+        notice: [body[0], notice_top, body[2], notice_top + notice_height],
+        button: [
+            centre_x - button_width / 2.0,
+            button_top,
+            centre_x + button_width / 2.0,
+            button_top + button_height,
+        ],
+        notice_font,
+        button_font,
+        button_radius: (PREVIEW_CARD_BUTTON_RADIUS_LOGICAL_PX * scale).round(),
+    }
+}
+
+/// The preview seat's body rectangle, in physical pixels.
+///
+/// The `[f32; 4]` the painter, the wheel and the card's hit test all want, from
+/// the same subtraction [`preview_body_viewport`] already makes for the picture
+/// — a second copy of "the seat less its head" is a second chance for one of
+/// them to be off by the hairline.
+pub fn preview_body_rect(seats: &Seats, layout: &SeatLayout, scale: f32) -> Option<[f32; 4]> {
+    let seat = seats.preview()?;
+    let viewport = preview_body_viewport(seats, layout, seat, scale)?;
+    Some([
+        viewport.x as f32,
+        viewport.y as f32,
+        (viewport.x + viewport.width) as f32,
+        (viewport.y + viewport.height) as f32,
+    ])
+}
+
+/// Whether the pointer is on the "no preview" card's button.
+///
+/// Asked only when there *is* a card, which the caller knows and this module
+/// does not: a control that answers a hit test while it is not on screen is the
+/// invisible button, and this window has paid for one of those already.
+#[must_use]
+pub fn hit_preview_card_button(
+    seats: &Seats,
+    layout: &SeatLayout,
+    button_text_px: f32,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let seat = seats.preview()?;
+    let body = preview_body_rect(seats, layout, scale)?;
+    let button = preview_card_geometry(body, button_text_px, scale).button;
+    contains(button, x as f32, y as f32).then_some(ChromeTarget::PreviewOpenButton(seat))
+}
+
 /// The tail line of the L4 strip: how many seats it had no row for.
 ///
 /// Plain counting, and a verb that agrees with it — the sentence is read at the
@@ -11531,6 +11880,7 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
+                    preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -11740,6 +12090,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open,
                 chevron_turn,
@@ -11832,6 +12183,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &trees,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -12200,6 +12552,111 @@ mod tests {
         let body = files_body_rect(&layout, column, 1.0).expect("the column has a body");
         let geometry = files_tree_geometry(body, 3, 0.0, 1.0);
         assert_eq!(rect, geometry.row_rect(2), "the third row is `/a.txt`");
+    }
+
+    // ── the preview seat's text body and its "no preview" card ──────────────
+
+    /// PIN — `.pv-edit { white-space: pre; tab-size: 4 }` (mock-up 599-604).
+    ///
+    /// A tab is a *stop*, not four characters: it advances to the next multiple
+    /// of four columns. Replacing each with four spaces is what misaligns every
+    /// continuation line of an indented file, which is precisely the thing a
+    /// preview of source code exists to show.
+    ///
+    /// Mutation: `out.extend(std::iter::repeat_n(' ', PREVIEW_TEXT_TAB_WIDTH))`
+    /// instead of the computed advance.
+    #[test]
+    fn a_tab_advances_to_the_next_stop_rather_than_to_four_more_spaces() {
+        assert_eq!(expand_tabs("\tfn main() {"), "    fn main() {");
+        assert_eq!(expand_tabs("ab\tc"), "ab  c", "two columns in, two to go");
+        assert_eq!(
+            expand_tabs("abcd\te"),
+            "abcd    e",
+            "a full stop is skipped"
+        );
+        assert_eq!(expand_tabs("a\t\tb"), "a       b", "stops compose");
+        assert_eq!(expand_tabs("no tabs here"), "no tabs here");
+    }
+
+    /// PIN — R2 乙案, on the preview body. **One authority for the bound.**
+    ///
+    /// The clamp reads its ceiling off [`preview_text_geometry`], so a body that
+    /// holds its whole document cannot be scrolled at all and one that does not
+    /// stops exactly where the content does. The line boxes are the same
+    /// arithmetic the painter uses, which is what makes "the line you see is the
+    /// line you scrolled to" true by construction.
+    ///
+    /// Mutation: drop the `.max(0.0)` from `max_scroll`, which lets a short file
+    /// scroll upward off its own top.
+    #[test]
+    fn a_preview_body_scrolls_exactly_as_far_as_it_has_content() {
+        let body = [0.0, 100.0, 400.0, 300.0];
+        let geometry = preview_text_geometry(body, 4, 0.0, 1.0);
+        // 12.5 × 1.5 = 18.75, rounded to 19; padding 10 top and bottom.
+        assert_eq!(geometry.line_height, 19.0);
+        assert_eq!(geometry.content_height, 20.0 + 19.0 * 4.0);
+        assert_eq!(
+            geometry.max_scroll, 0.0,
+            "four lines fit in two hundred pixels, so there is nowhere to go"
+        );
+        assert_eq!(clamp_preview_scroll(body, 4, 500.0, 1.0), 0.0);
+
+        let long = preview_text_geometry(body, 100, 0.0, 1.0);
+        assert_eq!(long.max_scroll, 20.0 + 19.0 * 100.0 - 200.0);
+        assert_eq!(clamp_preview_scroll(body, 100, -30.0, 1.0), 0.0);
+        assert_eq!(
+            clamp_preview_scroll(body, 100, 1.0e6, 1.0),
+            long.max_scroll,
+            "and never past the last line"
+        );
+
+        let scrolled = preview_text_geometry(body, 100, 38.0, 1.0);
+        assert_eq!(
+            scrolled.line_rect(2)[1],
+            110.0,
+            "two lines of scroll puts the third line where the first one was"
+        );
+    }
+
+    /// PIN — the card's button is the button you can press.
+    ///
+    /// `preview_card_geometry` is the single derivation the painter and
+    /// [`hit_preview_card_button`] both read, which is the rule
+    /// [`FilesTreeGeometry`] states in as many words. Asserted as the *agreement*
+    /// rather than as a rectangle, because a rectangle written here would be a
+    /// third opinion about the same box.
+    ///
+    /// Mutation: change the padding constant in either the width or the height
+    /// of [`preview_card_geometry`] — the point outside the button then lands
+    /// inside it, or the point inside stops answering.
+    #[test]
+    fn the_cards_button_answers_for_exactly_the_box_it_is_drawn_in() {
+        let body = [40.0, 60.0, 440.0, 460.0];
+        let geometry = preview_card_geometry(body, 120.0, 1.0);
+        assert!(
+            geometry.icon[3] < geometry.notice[1] && geometry.notice[3] < geometry.button[1],
+            "icon over sentence over button, in that order"
+        );
+        assert_eq!(
+            (geometry.button[0] + geometry.button[2]) / 2.0,
+            (body[0] + body[2]) / 2.0,
+            "and the column is centred on the body"
+        );
+        // 120 of caption plus 12 of padding and 1 of border on each side.
+        assert_eq!(geometry.button[2] - geometry.button[0], 146.0);
+        let inside = (
+            (geometry.button[0] + geometry.button[2]) / 2.0,
+            (geometry.button[1] + geometry.button[3]) / 2.0,
+        );
+        assert!(contains(geometry.button, inside.0, inside.1));
+        assert!(
+            !contains(geometry.button, geometry.button[0] - 1.0, inside.1),
+            "one pixel to the left of the frame is not the button"
+        );
+        assert!(
+            !contains(geometry.button, inside.0, geometry.notice[1]),
+            "and neither is the sentence above it"
+        );
     }
 
     /// PIN — C32, the other half. A selection shows with no pointer anywhere
@@ -15337,6 +15794,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -15528,6 +15986,7 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
+                    preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -15628,6 +16087,7 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
+                    preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -15833,6 +16293,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -17604,6 +18065,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -17658,6 +18120,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -18440,6 +18903,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -18678,6 +19142,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -18926,6 +19391,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -19077,6 +19543,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -20258,6 +20725,7 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
+                preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,

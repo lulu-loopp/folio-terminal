@@ -894,6 +894,49 @@ pub struct PreviewImage {
     pub display_height_px: u32,
 }
 
+/// One visual line of a preview's text body.
+///
+/// A line and not a paragraph: the mock-up's `.pv-edit` is `white-space: pre`
+/// (4980-4983), so a line of the file is a line on the screen, and wrapping is
+/// something this surface deliberately does not do. The caller has already
+/// decided where each one sits, which is what lets it scroll: scrolling is the
+/// caller subtracting an offset from every `rect[1]`, and nothing here has to
+/// know that happened.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewTextLine {
+    pub text: String,
+    /// `[left, top, right, bottom]`, physical pixels, whole-surface coordinates.
+    ///
+    /// The right edge is the line's *layout* bound and is deliberately generous:
+    /// a long line runs past the body and is cropped by [`PreviewText::clip`],
+    /// which is the horizontal overflow `white-space: pre` asks for rather than
+    /// the reflow it forbids.
+    pub rect: [f32; 4],
+}
+
+/// The text body of the preview seat.
+///
+/// The sibling of [`PreviewImage`] and prepared in the same slot of the frame,
+/// because it is the same thing: **content filling a preview seat's body, below
+/// the head that names it.** What differs is only that one arrives as pixels
+/// from a decoder and the other as lines from a file, so one is a textured quad
+/// and this is a shaping run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewText {
+    /// The box the body may be seen in — the seat's body, already excluding its
+    /// head, and already intersected with whatever a pane FLIP is cropping it
+    /// to. Every line is clipped to this and to its own `rect`.
+    pub clip: [f32; 4],
+    pub lines: Vec<PreviewTextLine>,
+    pub font_size_px: f32,
+    /// The line box each `rect` was laid out with, which is also the advance
+    /// between consecutive lines. Kept here rather than derived from
+    /// `font_size_px` because the mock-up's ratio (1.5) is the *caller's* ruling
+    /// and this surface should not hold a second copy of it.
+    pub line_height_px: f32,
+    pub color: [u8; 3],
+}
+
 /// Fit an image inside a preview body while preserving aspect ratio and never enlarging it beyond
 /// its native dimensions.
 #[must_use]
@@ -1926,6 +1969,8 @@ pub struct Renderer {
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
     preview_image: Option<PreviewImage>,
+    preview_text: Option<PreviewText>,
+    preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
 }
@@ -2872,6 +2917,12 @@ impl Renderer {
         }];
         let chrome_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        // Its own renderer rather than a share of the chrome's, for the reason
+        // every seat has its own: one `TextRenderer` holds one prepared batch,
+        // and a preview body is prepared from a different shaping run (a
+        // monospace face, one buffer per line) than the chrome around it.
+        let preview_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let overlay_text_renderers = Vec::new();
         let rect_pipeline = create_rect_pipeline(&device, config.format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
@@ -2897,6 +2948,7 @@ impl Renderer {
             chrome_viewport,
             atlas,
             chrome_text_renderer,
+            preview_text_renderer,
             overlay_text_renderers,
             rect_pipeline,
             math_pipeline,
@@ -2927,6 +2979,7 @@ impl Renderer {
             cursor_blink_visible: true,
             peek_overlay: None,
             preview_image: None,
+            preview_text: None,
             trace_perf,
             perf_frame: 0,
         })
@@ -3058,6 +3111,17 @@ impl Renderer {
             _ => true,
         };
         self.preview_image = image;
+        changed
+    }
+
+    /// Replace the preview seat's text body. Returns whether anything changed.
+    ///
+    /// The whole body, every frame it differs, rather than a placement door
+    /// beside it: a text body's rectangles are recomputed from the seat and the
+    /// scroll offset by the caller anyway, so there is no cheaper half to move.
+    pub fn set_preview_text(&mut self, text: Option<PreviewText>) -> bool {
+        let changed = self.preview_text != text;
+        self.preview_text = text;
         changed
     }
 
@@ -3558,6 +3622,23 @@ impl Renderer {
                 &chrome_layouts,
             )
             .is_ok();
+        let preview_text_layouts = self
+            .preview_text
+            .as_ref()
+            .map(|text| shape_preview_text(&mut self.font_system, text))
+            .unwrap_or_default();
+        let preview_text_prepared = !preview_text_layouts.is_empty()
+            && prepare_chrome_text_atlas(
+                &mut self.preview_text_renderer,
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.chrome_viewport,
+                &mut self.swash_cache,
+                &preview_text_layouts,
+            )
+            .is_ok();
         // The modal overlay, one layer at a time. Empty on every frame no dialog
         // is up, and every branch below is guarded on emptiness, so a window
         // without one issues exactly the command stream it issued before modals
@@ -3808,6 +3889,26 @@ impl Renderer {
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
                 }
+            }
+            // The preview seat's text body, in the same slot as its picture and
+            // for the same reason — above that seat's body chrome, below the
+            // floating windows. Whole-surface viewport rather than the picture's
+            // seat-local one: these coordinates are already the window's, and
+            // every line carries its own clip box, so a pane FLIP crops them
+            // without the pass having to.
+            if preview_text_prepared {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                self.preview_text_renderer
+                    .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             }
             // The hover-peek flyout, over every seat, over seat chrome and over a
             // preview's picture — a floating window is not a child of the pane it
@@ -5267,6 +5368,69 @@ fn shape_chrome_labels(
                     bottom: clip[3].ceil() as i32,
                 },
                 color: Color::rgba(r, g, b, a),
+            }
+        })
+        .collect()
+}
+
+/// Shape a preview's text body — one buffer per visible line, in the monospace
+/// face.
+///
+/// **The face is the difference.** Chrome text is the window talking about
+/// itself and is set in the sans face; this is a file's own bytes, and a file's
+/// bytes were written in a grid. `Family::Monospace` resolves to the same
+/// `PRIMARY_FONT_FAMILY` the terminal grid is set in, so the preview of a source
+/// file and the terminal beside it agree about how wide a character is — which
+/// is the whole of the mock-up's `font: 12.5px/1.5 Consolas, "Cascadia Mono",
+/// monospace` (4980-4983).
+///
+/// **No width bound and no wrapping.** `white-space: pre` means a line that does
+/// not fit runs off the edge and is cropped, not reflowed, so the buffer is
+/// given no width to fit into and the crop is left to `clip`.
+fn shape_preview_text(font_system: &mut FontSystem, text: &PreviewText) -> Vec<ChromeTextLayout> {
+    let attrs = Attrs::new()
+        .family(Family::Monospace)
+        .weight(Weight::NORMAL);
+    let [r, g, b] = text.color;
+    text.lines
+        .iter()
+        .filter(|line| !line.text.is_empty())
+        // A line wholly above or below the body is not drawn at all, which is
+        // what keeps a 64KB file's cost proportional to the pane rather than to
+        // the file — the same rule `push_files_tree` applies to its rows.
+        .filter(|line| line.rect[3] > text.clip[1] && line.rect[1] < text.clip[3])
+        .map(|line| {
+            let mut buffer = Buffer::new(
+                font_system,
+                Metrics::new(text.font_size_px, text.line_height_px),
+            );
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(None, Some(text.line_height_px));
+            buffer.set_text(&line.text, &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(font_system, false);
+            // Clipped to the body *and* to the line's own box, so a partly
+            // visible first or last line is cut by the body edge rather than
+            // drawn over the head above it.
+            let clip = [
+                line.rect[0].max(text.clip[0]),
+                line.rect[1].max(text.clip[1]),
+                line.rect[2].min(text.clip[2]),
+                line.rect[3].min(text.clip[3]),
+            ];
+            ChromeTextLayout {
+                buffer,
+                left: line.rect[0],
+                // The line box's top, not a cap-height axis: body text sits on
+                // consecutive baselines a line height apart, which is what the
+                // metrics already encode.
+                top: line.rect[1],
+                bounds: TextBounds {
+                    left: clip[0].floor() as i32,
+                    top: clip[1].floor() as i32,
+                    right: clip[2].ceil() as i32,
+                    bottom: clip[3].ceil() as i32,
+                },
+                color: Color::rgba(r, g, b, 255),
             }
         })
         .collect()
