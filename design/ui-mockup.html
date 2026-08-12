@@ -596,6 +596,12 @@
   @media (prefers-reduced-motion: reduce) { .preview-head .pv-tool { transition: none; } }
   .preview-body { flex: 1; overflow: auto; min-height: 0; }
   /* text/code editing: the pane IS the editor surface — same metrics as the terminal */
+  /* P109 OVERRULED (user ruling 2026-08-13): the native build wraps this surface
+     (`white-space: pre-wrap`) — a preview is a quick look, and content reachable
+     only by a hidden horizontal gesture reads as a file that was truncated.
+     `.pv-diff` keeps `pre`, because a patch's column alignment and its
+     full-width row tints are what a patch means. Left as `pre` here because the
+     prototype is the record of what was drawn, not of what was decided. */
   .pv-edit {
     width: 100%; height: 100%; box-sizing: border-box; display: block;
     background: transparent; border: none; outline: none; resize: none;
@@ -4910,7 +4916,12 @@
   /* a deliberately small markdown renderer: headings, lists, fences, inline
      code/bold. Enough for the rendered view to be an honest mirror of the
      editable source — completeness is the product's problem (P0-6), not the
-     prototype's. */
+     prototype's.
+     SETTLED 2026-08-13: the product took the problem. The native renderer adds
+     tables (`|---|` separator required), heading levels 4-6 on a size ladder,
+     ordered lists, `>` blockquotes, `---`/`***` rules and `[text](url)` links
+     rendering the label only. This function stays as written: it is the record
+     of what the prototype drew. */
   function renderMarkdownMock(src) {
     const inline = (t) => esc(t)
       .replace(/`([^`]+)`/g, "<code>$1</code>")

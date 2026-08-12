@@ -257,6 +257,15 @@ pub enum SpanStyle {
     Bold,
     /// `` `like this` `` — set in the monospace face.
     Code,
+    /// `[text](url)` — **the text only**, in the accent colour.
+    ///
+    /// Not clickable, and that is a scope line rather than an oversight: what a
+    /// click on a link *does* is a decision about opening browsers and relative
+    /// paths that belongs to the day the preview grows a navigation model. What
+    /// is decided now is only that a link stops looking like four punctuation
+    /// marks around a word, and that the URL is not printed — printing it is the
+    /// one behaviour that is wrong under every future ruling.
+    Link,
 }
 
 /// One run of inline text inside a markdown block.
@@ -287,30 +296,82 @@ impl Span {
             style: SpanStyle::Code,
         }
     }
+
+    pub fn link(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            style: SpanStyle::Link,
+        }
+    }
 }
 
+/// One row of a rendered markdown table: one cell per column, each already
+/// split into its inline runs.
+pub type TableRow = Vec<Vec<Span>>;
+
 /// One block of a rendered markdown document.
+///
+/// **The support surface is the product's, not the prototype's.** The mock-up's
+/// own renderer stops at headings, lists, fences and two inline styles and says
+/// so in a comment — "completeness is the product's problem" (4914-4941). This
+/// is the product, the file the user read it against is `docs/DESIGN.md`, and
+/// what that file uses and the prototype could not draw is exactly the five
+/// members below the first four.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MarkdownBlock {
     Heading {
+        /// `1..=6`. The prototype allowed `1..=3` and printed the rest as
+        /// paragraphs beginning with hashes, which is what a `####` in a real
+        /// document looks like when it is not supported.
         level: u8,
         spans: Vec<Span>,
     },
-    /// Consecutive `-`/`*` rows, gathered the way the mock-up's `flushList`
-    /// gathers them: a list is one block, not one block per bullet.
-    List(Vec<Vec<Span>>),
+    /// Consecutive list rows, gathered the way the mock-up's `flushList` gathers
+    /// them: a list is one block, not one block per bullet.
+    List {
+        /// `Some(n)` for a `n.`-numbered list, `None` for a bulleted one.
+        ///
+        /// The *first* number rather than a flag, because a list that starts at
+        /// `3.` is a list that starts at 3 — renumbering it from one is the
+        /// renderer overruling the document about its own contents.
+        ordered: Option<u64>,
+        items: Vec<Vec<Span>>,
+    },
     Code {
         lang: Option<String>,
         text: String,
     },
+    /// `| a | b |` under a `|---|---|` — **and only under one**.
+    ///
+    /// The separator row is what makes a table a table. Without it a line full
+    /// of pipes is a line full of pipes, which is the common case in prose about
+    /// shell commands and in ASCII art, and a renderer that tabulated those
+    /// would be wrong far more often than it was right.
+    Table {
+        /// The heading row first, then the body. Never empty: a table exists
+        /// only where a heading row was found.
+        rows: Vec<TableRow>,
+    },
+    /// Consecutive `>` rows, one entry per line, gathered as one block so the
+    /// accent bar down their left is one bar rather than several.
+    Quote(Vec<Vec<Span>>),
+    /// `---` or `***` alone on a line.
+    Rule,
     Paragraph(Vec<Span>),
 }
 
 /// Split one line into its inline runs.
 ///
-/// Backticks first and asterisks second, which is the mock-up's order (4915-4917)
-/// and the one that makes `` `**not bold**` `` come out as literal code rather
-/// than as a bold run inside a code span.
+/// **Three passes, and the order is the ruling.** Backticks first, which is the
+/// mock-up's order (4915-4917) and the one that makes `` `**not bold**` `` come
+/// out as literal code rather than as a bold run inside a code span; then links,
+/// so a `**[bold link](url)**`'s brackets are gone before the asterisks are
+/// read; then asterisks over whatever is still plain.
+///
+/// **One door for every block that has text in it.** A table cell, a list item,
+/// a quote line and a paragraph all come through here, which is the whole of why
+/// `` `code` `` inside a table cell works without a line of its own: there is no
+/// second inline parser to teach.
 pub fn parse_inline(line: &str) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut rest = line;
@@ -319,15 +380,51 @@ pub fn parse_inline(line: &str) -> Vec<Span> {
         let Some(close) = rest[open + 1..].find('`') else {
             break;
         };
-        push_bold_runs(&rest[..open], &mut spans);
+        push_link_runs(&rest[..open], &mut spans);
         spans.push(Span::code(&rest[open + 1..open + 1 + close]));
         rest = &rest[open + 1 + close + 1..];
     }
-    push_bold_runs(rest, &mut spans);
+    push_link_runs(rest, &mut spans);
     spans
 }
 
-/// The second pass: `**bold**` inside whatever the code pass left plain.
+/// The second pass: `[text](url)` inside whatever the code pass left plain.
+///
+/// The label is emitted as one run and the target is dropped. A label carrying
+/// its own emphasis (`[**a**](b)`) keeps the asterisks visible rather than
+/// nesting two styles in one run — a deliberate floor, because the alternative
+/// is a span model with a stack in it and the case is vanishing.
+fn push_link_runs(text: &str, spans: &mut Vec<Span>) {
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some(label_end) = rest[open..].find(']').map(|at| open + at) else {
+            break;
+        };
+        // The target has to follow the label immediately, which is what keeps
+        // `[a] (b)` and a bare `[TODO]` out of this branch.
+        if !rest[label_end + 1..].starts_with('(') {
+            push_bold_runs(&rest[..label_end + 1], spans);
+            rest = &rest[label_end + 1..];
+            continue;
+        }
+        let target_open = label_end + 1;
+        let Some(target_end) = rest[target_open..].find(')').map(|at| target_open + at) else {
+            break;
+        };
+        // `[]()` is punctuation, not an empty link.
+        if label_end == open + 1 {
+            push_bold_runs(&rest[..target_end + 1], spans);
+            rest = &rest[target_end + 1..];
+            continue;
+        }
+        push_bold_runs(&rest[..open], spans);
+        spans.push(Span::link(&rest[open + 1..label_end]));
+        rest = &rest[target_end + 1..];
+    }
+    push_bold_runs(rest, spans);
+}
+
+/// The third pass: `**bold**` inside whatever the two above left plain.
 fn push_bold_runs(text: &str, spans: &mut Vec<Span>) {
     let mut rest = text;
     while let Some(open) = rest.find("**") {
@@ -346,76 +443,144 @@ fn push_bold_runs(text: &str, spans: &mut Vec<Span>) {
     push_plain(rest, spans);
 }
 
+/// Add plain text, **joined to the plain run before it if there is one**.
+///
+/// The three passes hand each other the text they did not claim, so a line the
+/// link pass looked at and left alone comes back in two or three pieces. Two
+/// adjacent plain runs shape and draw identically to one, but they are not one:
+/// the shaper is given a rich-text sequence and a break opportunity between two
+/// runs is not the same thing as one inside a run, so `a [TODO] note` split at
+/// the bracket could wrap where the text does not permit it.
 fn push_plain(text: &str, spans: &mut Vec<Span>) {
-    if !text.is_empty() {
-        spans.push(Span::plain(text));
+    if text.is_empty() {
+        return;
+    }
+    match spans.last_mut() {
+        Some(last) if last.style == SpanStyle::Plain => last.text.push_str(text),
+        _ => spans.push(Span::plain(text)),
     }
 }
 
-/// A deliberately small markdown renderer: headings, lists, fences, inline code
-/// and bold.
+/// The markdown renderer: headings, lists, fences, tables, quotes, rules, links
+/// and three inline styles.
 ///
-/// The mock-up's own support surface (4910-4941), and its own reason for
-/// stopping there: "enough for the rendered view to be an honest mirror of the
-/// editable source — completeness is the product's problem". What is *not*
-/// negotiable is the honesty: this renders **the argument**, because the
-/// prototype's first rendered view was a static mock that showed the same
-/// document whatever the buffer held (P103).
+/// **Indexed rather than streamed, and the reason is the table.** A pipe row is
+/// only a table row if the row *after* it is a separator, so the scanner needs
+/// one line of lookahead; every other block is decidable from its own first
+/// line. Written as an index walk rather than an iterator with a peek because
+/// the table then consumes its own run in one place instead of leaving a
+/// half-open state machine for the next four blocks to step around.
+///
+/// What is not negotiable is the honesty this inherits from the prototype: it
+/// renders **the argument**, because the mock-up's first rendered view was a
+/// static mock that showed the same document whatever the buffer held (P103).
 pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
+    let lines: Vec<&str> = src.lines().collect();
     let mut blocks = Vec::new();
-    let mut fence: Option<(Option<String>, Vec<&str>)> = None;
     let mut list: Vec<Vec<Span>> = Vec::new();
+    let mut ordered: Option<u64> = None;
+    let mut index = 0usize;
 
-    for line in src.lines() {
+    while index < lines.len() {
+        let line = lines[index];
+
+        // ── the fence, which swallows everything until it closes ────────────
         if let Some(rest) = line.strip_prefix("```") {
-            match fence.take() {
-                None => {
-                    flush_list(&mut list, &mut blocks);
-                    let lang = rest.trim();
-                    fence = Some(((!lang.is_empty()).then(|| lang.to_owned()), Vec::new()));
-                }
-                Some((lang, body)) => blocks.push(MarkdownBlock::Code {
-                    lang,
-                    text: body.join("\n"),
-                }),
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            let lang = rest.trim();
+            let lang = (!lang.is_empty()).then(|| lang.to_owned());
+            let mut body = Vec::new();
+            index += 1;
+            while index < lines.len() && !lines[index].starts_with("```") {
+                body.push(lines[index]);
+                index += 1;
             }
+            // A fence nobody closed still draws, rather than swallowing the rest
+            // of the document in silence (mock-up 4939) — which is what the
+            // `index < len` bound above means when the loop runs off the end.
+            index += usize::from(index < lines.len());
+            blocks.push(MarkdownBlock::Code {
+                lang,
+                text: body.join("\n"),
+            });
             continue;
         }
-        if let Some((_, body)) = fence.as_mut() {
-            body.push(line);
+
+        // ── the table, which is the one block needing lookahead ─────────────
+        if is_pipe_row(line)
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| is_table_separator(next))
+        {
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            let mut rows = vec![split_pipe_row(line)];
+            // Past the separator, then every pipe row that follows without a
+            // break. A blank line ends the table exactly as it ends a paragraph.
+            index += 2;
+            while index < lines.len() && is_pipe_row(lines[index]) {
+                rows.push(split_pipe_row(lines[index]));
+                index += 1;
+            }
+            blocks.push(MarkdownBlock::Table { rows });
             continue;
         }
+
+        index += 1;
+
         if let Some(heading) = parse_heading(line) {
-            flush_list(&mut list, &mut blocks);
+            flush_list(&mut list, &mut ordered, &mut blocks);
             blocks.push(heading);
             continue;
         }
-        if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        // **After the table and before the list**, which is what keeps a `---`
+        // that is a table's separator out of here and a `- item` out of the
+        // rule: a separator is only ever reached by the branch above (which
+        // consumed it), and a rule is three or more of one character with
+        // nothing else on the line, which `- item` is not.
+        if is_thematic_break(line) {
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            blocks.push(MarkdownBlock::Rule);
+            continue;
+        }
+        if let Some((number, item)) = parse_list_row(line) {
+            // A bulleted list and a numbered one standing next to each other are
+            // two lists, not one list that changes its mind halfway down.
+            if !list.is_empty() && ordered.is_some() != number.is_some() {
+                flush_list(&mut list, &mut ordered, &mut blocks);
+            }
+            if list.is_empty() {
+                ordered = number;
+            }
             list.push(parse_inline(item));
             continue;
         }
-        flush_list(&mut list, &mut blocks);
+        if let Some(first) = strip_quote(line) {
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            let mut quoted = vec![parse_inline(first)];
+            while let Some(more) = lines.get(index).and_then(|line| strip_quote(line)) {
+                quoted.push(parse_inline(more));
+                index += 1;
+            }
+            blocks.push(MarkdownBlock::Quote(quoted));
+            continue;
+        }
+        flush_list(&mut list, &mut ordered, &mut blocks);
         if !line.trim().is_empty() {
             blocks.push(MarkdownBlock::Paragraph(parse_inline(line)));
         }
     }
-    flush_list(&mut list, &mut blocks);
-    // A fence nobody closed still draws, rather than swallowing the rest of the
-    // document in silence (mock-up 4939).
-    if let Some((lang, body)) = fence {
-        blocks.push(MarkdownBlock::Code {
-            lang,
-            text: body.join("\n"),
-        });
-    }
+    flush_list(&mut list, &mut ordered, &mut blocks);
     blocks
 }
 
-/// `#`, `##` or `###` followed by a space — three levels, exactly as the
-/// mock-up's `#{1,3}` allows.
+/// `#` through `######` followed by a space.
+///
+/// Six levels rather than the mock-up's three (`#{1,3}`), because a `####` in a
+/// real document rendered as a paragraph beginning with four hashes is precisely
+/// what "the prototype stops here" looks like from the outside.
 fn parse_heading(line: &str) -> Option<MarkdownBlock> {
     let hashes = line.len() - line.trim_start_matches('#').len();
-    if !(1..=3).contains(&hashes) {
+    if !(1..=6).contains(&hashes) {
         return None;
     }
     let rest = line[hashes..].strip_prefix(' ')?;
@@ -425,10 +590,98 @@ fn parse_heading(line: &str) -> Option<MarkdownBlock> {
     })
 }
 
-fn flush_list(list: &mut Vec<Vec<Span>>, blocks: &mut Vec<MarkdownBlock>) {
-    if !list.is_empty() {
-        blocks.push(MarkdownBlock::List(std::mem::take(list)));
+/// One list row: its number if it had one, and what it says.
+fn parse_list_row(line: &str) -> Option<(Option<u64>, &str)> {
+    if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return Some((None, item));
     }
+    let digits = line.len()
+        - line
+            .trim_start_matches(|ch: char| ch.is_ascii_digit())
+            .len();
+    if digits == 0 {
+        return None;
+    }
+    let item = line[digits..].strip_prefix(". ")?;
+    // A number too long to be a number is prose that happens to start with
+    // digits; `u64` overflowing is the honest edge to refuse at.
+    Some((Some(line[..digits].parse().ok()?), item))
+}
+
+/// A quoted line, without its marker. `>` alone is an empty quoted line.
+fn strip_quote(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('>')?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
+}
+
+/// `---`, `***` or `___` alone on a line.
+///
+/// Three or more of one character and nothing else. **Not** a setext heading
+/// underline, which is what CommonMark would call a `---` under a paragraph —
+/// the preview has no setext headings, so reading it as a rule is the reading
+/// that is right in every case this renderer can distinguish.
+fn is_thematic_break(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    matches!(first, '-' | '*' | '_')
+        && trimmed.chars().count() >= 3
+        && trimmed.chars().all(|ch| ch == first)
+}
+
+/// Whether a line is shaped like a table row: a pipe somewhere in it, and
+/// something other than pipes and spaces.
+fn is_pipe_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains('|') && trimmed.chars().any(|ch| ch != '|' && !ch.is_whitespace())
+}
+
+/// Whether a line is the `|---|:--:|` under a heading row.
+fn is_table_separator(line: &str) -> bool {
+    let cells = split_pipe_cells(line);
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let cell = cell.trim().trim_start_matches(':').trim_end_matches(':');
+            !cell.is_empty() && cell.chars().all(|ch| ch == '-')
+        })
+}
+
+/// One table row's cells, still as text.
+///
+/// The leading and trailing pipes are optional and are not cells: `| a | b |`
+/// and `a | b` are the same two columns, which is what every markdown renderer
+/// agrees on and what a document written by hand relies on.
+fn split_pipe_cells(line: &str) -> Vec<&str> {
+    let trimmed = line.trim();
+    let trimmed = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let trimmed = trimmed.strip_suffix('|').unwrap_or(trimmed);
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    trimmed.split('|').collect()
+}
+
+/// One table row, each cell already split into its inline runs.
+fn split_pipe_row(line: &str) -> TableRow {
+    split_pipe_cells(line)
+        .into_iter()
+        .map(|cell| parse_inline(cell.trim()))
+        .collect()
+}
+
+fn flush_list(
+    list: &mut Vec<Vec<Span>>,
+    ordered: &mut Option<u64>,
+    blocks: &mut Vec<MarkdownBlock>,
+) {
+    if !list.is_empty() {
+        blocks.push(MarkdownBlock::List {
+            ordered: *ordered,
+            items: std::mem::take(list),
+        });
+    }
+    *ordered = None;
 }
 
 /// Split a comma-separated file into rows of cells.
@@ -1600,7 +1853,7 @@ mod tests {
              ```rust\n\
              let x = 1;\n\
              ```\n\
-             #### not a heading\n",
+             ####### not a heading\n",
         );
         assert_eq!(
             doc,
@@ -1618,10 +1871,10 @@ mod tests {
                 ]),
                 // Both bullet characters, one list — and the list is closed by
                 // the heading rather than swallowing it.
-                MarkdownBlock::List(vec![
-                    vec![Span::plain("first")],
-                    vec![Span::plain("second")],
-                ]),
+                MarkdownBlock::List {
+                    ordered: None,
+                    items: vec![vec![Span::plain("first")], vec![Span::plain("second")]],
+                },
                 MarkdownBlock::Heading {
                     level: 2,
                     spans: vec![Span::plain("Sub")],
@@ -1630,7 +1883,10 @@ mod tests {
                     lang: Some("rust".to_owned()),
                     text: "let x = 1;".to_owned(),
                 },
-                MarkdownBlock::Paragraph(vec![Span::plain("#### not a heading")]),
+                // Seven hashes is not a heading in any dialect, and the ceiling
+                // has to be *somewhere* or `#` would be a heading marker for a
+                // line of nothing but hashes.
+                MarkdownBlock::Paragraph(vec![Span::plain("####### not a heading")]),
             ]
         );
         // A fence never closed still renders, rather than eating the rest of the
@@ -1644,6 +1900,130 @@ mod tests {
         );
         // A blank line is a separator, not a paragraph.
         assert_eq!(parse_markdown("\n\n"), vec![]);
+    }
+
+    /// PIN (user report, 2026-08-13: "做得不太好") — **the five block kinds the
+    /// prototype could not draw**, each classified from its own first line.
+    ///
+    /// `docs/DESIGN.md` is the file the report was made against and it uses
+    /// every one of them. Asserted as classification rather than as pixels,
+    /// because classification is where all five of them can go wrong: a table
+    /// that is really two paragraphs of pipes, a `####` that is really a
+    /// paragraph of hashes, a `>` that is really prose beginning with a chevron.
+    ///
+    /// MUTATIONS, one per member:
+    /// ① drop the `1..=6` bound back to `1..=3` — the `####` row goes red;
+    /// ② accept a pipe row without looking ahead for the separator — the last
+    ///    assertion in this test (a pipe row that is *not* a table) goes red;
+    /// ③ drop the `ordered` split in `flush_list` — the numbered list arrives as
+    ///    a bulleted one;
+    /// ④ let `is_thematic_break` run before the table branch — the separator row
+    ///    is eaten as a rule and the table loses its heading;
+    /// ⑤ drop `strip_quote` — the quote arrives as two paragraphs with chevrons.
+    #[test]
+    fn the_five_blocks_the_prototype_could_not_draw() {
+        let doc = parse_markdown(
+            "#### Fourth\n\
+             ##### Fifth\n\
+             ###### Sixth\n\
+             1. one\n\
+             2. two\n\
+             - bullet\n\
+             > quoted\n\
+             > still quoted\n\
+             ---\n\
+             | a | `b` |\n\
+             |---|:--:|\n\
+             | 1 | **2** |\n\
+             \n\
+             not | a | table\n",
+        );
+        assert_eq!(
+            doc,
+            vec![
+                MarkdownBlock::Heading {
+                    level: 4,
+                    spans: vec![Span::plain("Fourth")],
+                },
+                MarkdownBlock::Heading {
+                    level: 5,
+                    spans: vec![Span::plain("Fifth")],
+                },
+                MarkdownBlock::Heading {
+                    level: 6,
+                    spans: vec![Span::plain("Sixth")],
+                },
+                MarkdownBlock::List {
+                    ordered: Some(1),
+                    items: vec![vec![Span::plain("one")], vec![Span::plain("two")]],
+                },
+                // The bullet does not join the numbers: two lists.
+                MarkdownBlock::List {
+                    ordered: None,
+                    items: vec![vec![Span::plain("bullet")]],
+                },
+                MarkdownBlock::Quote(vec![
+                    vec![Span::plain("quoted")],
+                    vec![Span::plain("still quoted")],
+                ]),
+                MarkdownBlock::Rule,
+                MarkdownBlock::Table {
+                    rows: vec![
+                        vec![vec![Span::plain("a")], vec![Span::code("b")]],
+                        vec![vec![Span::plain("1")], vec![Span::bold("2")]],
+                    ],
+                },
+                // **The pipe row with no separator under it stays prose.** This
+                // is the assertion that keeps every sentence about `a | b` in a
+                // shell out of a grid.
+                MarkdownBlock::Paragraph(vec![Span::plain("not | a | table")]),
+            ]
+        );
+        // A list that starts at three is a list that starts at three.
+        assert_eq!(
+            parse_markdown("3. third\n4. fourth"),
+            vec![MarkdownBlock::List {
+                ordered: Some(3),
+                items: vec![vec![Span::plain("third")], vec![Span::plain("fourth")]],
+            }]
+        );
+    }
+
+    /// PIN — `[text](url)` renders its text and **never its url**, and the three
+    /// inline passes keep their order.
+    ///
+    /// MUTATION ①: emit `text (url)` and the second assertion goes red — which
+    /// is the one failure mode a link renderer must not have, because a printed
+    /// URL is wrong under every future ruling about what a click does.
+    /// MUTATION ②: run the link pass before the code pass and the third
+    /// assertion goes red: a bracket inside a code span stops being literal.
+    #[test]
+    fn a_link_renders_its_label_and_drops_its_target() {
+        assert_eq!(
+            parse_inline("see [the design](docs/DESIGN.md) first"),
+            vec![
+                Span::plain("see "),
+                Span::link("the design"),
+                Span::plain(" first"),
+            ]
+        );
+        let rendered: String = parse_inline("[a](http://example.com/x)")
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect();
+        assert_eq!(rendered, "a", "the target is not printed anywhere");
+        // Backticks first: a bracket inside a code span is a bracket.
+        assert_eq!(
+            parse_inline("`[a](b)`"),
+            vec![Span::code("[a](b)")],
+            "the code pass runs before the link pass"
+        );
+        // Punctuation that only looks like a link stays punctuation.
+        assert_eq!(
+            parse_inline("a [TODO] note"),
+            vec![Span::plain("a [TODO] note")]
+        );
+        assert_eq!(parse_inline("[unclosed"), vec![Span::plain("[unclosed")]);
     }
 
     /// PIN — the rendered view renders **the content**.

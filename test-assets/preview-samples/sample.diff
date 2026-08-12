@@ -1,0 +1,9 @@
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,5 +1,6 @@
+ fn unchanged() {}
+-fn removed_line() { old(); }
++fn added_line() { new(); }
++fn another_added() {}
+ fn also_unchanged() {}

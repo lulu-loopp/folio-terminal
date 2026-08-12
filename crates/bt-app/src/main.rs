@@ -518,8 +518,12 @@ fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
 enum PreviewDocument {
     #[default]
     Empty,
-    /// One entry per line, tabs already the spaces they draw as.
-    Text(Vec<String>),
+    /// One entry per line, tabs already the spaces they draw as, and where
+    /// those lines break when they are wider than the pane.
+    Text {
+        lines: Vec<String>,
+        wrap: preview_edit::WrapLayout,
+    },
     Diff(Vec<DiffRow>),
     Table {
         rows: Vec<Vec<String>>,
@@ -528,11 +532,78 @@ enum PreviewDocument {
     },
     Markdown {
         blocks: Vec<preview::MarkdownBlock>,
-        /// One height per block, measured against the pane it will wrap in.
-        heights: Vec<f32>,
-        /// Where each block starts inside the content.
-        tops: Vec<f32>,
+        /// One entry per block, measured against the pane it will wrap in.
+        layout: Vec<MarkdownBlockLayout>,
     },
+}
+
+/// Everything measuring one markdown block worked out that **drawing it must
+/// not work out again**.
+///
+/// The reported "整屏空白" (user, 2026-08-13) was this type not existing. A list
+/// was *measured* with the shaper — every item asked how many lines it took when
+/// wrapped into the pane — and then *drawn* on the assumption that every item
+/// took exactly one. On a document of long items in a narrow pane the two
+/// answers differ by a factor of three or four, and the difference comes out as
+/// a hole: the block reserved the space its measurement asked for, painted a
+/// third of it, and the next heading started below the reservation. Its twin
+/// symptom was the one nobody reported because it is quieter — every item's
+/// second and further lines were clipped away by the same one-line box.
+///
+/// So the measuring pass writes down what it found and the drawing pass reads
+/// it. One number per row rather than one for the block, because the rows are
+/// exactly what the drawing pass walks: a list's items, a quote's lines, a
+/// table's rows.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MarkdownBlockLayout {
+    /// Where the block's own box starts inside the content, margins already
+    /// collapsed with its neighbour's.
+    top: f32,
+    /// How tall that box is, margins excluded — because margins collapse
+    /// between neighbours and a height that had swallowed one could not be.
+    height: f32,
+    /// One height per row, for the blocks that have rows. Empty for the rest.
+    rows: Vec<f32>,
+    /// One outer width per column, tables only. The sum is the table's width.
+    columns: Vec<f32>,
+    /// How wide this block insists on being, when it insists at all.
+    ///
+    /// **Zero for everything that reflows** (user rulings, 2026-08-13). A
+    /// paragraph, a heading, a list item and a quoted line all wrap to the pane
+    /// and therefore have no opinion about its width — including a paragraph
+    /// carrying a 180-character unbreakable token, which the shaper breaks
+    /// mid-token rather than let it push a horizontal axis onto the whole
+    /// document. What is left insisting is the two blocks that mean something by
+    /// their own geometry: a code fence (its longest line, unbroken, for the
+    /// same reason a `.diff` does not reflow) and a table (the sum of its
+    /// natural columns). The largest of these is the document's content width,
+    /// and the difference between that and the pane is its horizontal scroll.
+    width: f32,
+}
+
+impl MarkdownBlockLayout {
+    /// A block with no rows of its own: a paragraph, a heading, a fence, a rule.
+    fn solid(height: f32) -> Self {
+        Self {
+            height,
+            ..Self::default()
+        }
+    }
+
+    /// A block whose height **is** the sum of its rows, plus whatever chrome
+    /// stands outside them.
+    ///
+    /// A constructor rather than two fields assigned side by side, so that
+    /// "reserves exactly what it paints" is true by construction rather than by
+    /// two lines agreeing. The bug this type exists for was those two lines
+    /// disagreeing in a place where neither of them was visibly wrong.
+    fn rows(rows: Vec<f32>, chrome: f32) -> Self {
+        Self {
+            height: rows.iter().sum::<f32>() + chrome,
+            rows,
+            ..Self::default()
+        }
+    }
 }
 
 /// One line of a diff, with the offset its hunk margins have pushed it to.
@@ -664,13 +735,20 @@ fn markdown_block_margin(
     match block {
         preview::MarkdownBlock::Heading { .. } => metrics.heading_margin,
         preview::MarkdownBlock::Code { .. } => metrics.code_margin,
-        preview::MarkdownBlock::List(_) | preview::MarkdownBlock::Paragraph(_) => {
-            metrics.paragraph_gap
-        }
+        // A rule, a quote and a table all ask for a `<p>`'s own air: they are
+        // block siblings of a paragraph and nothing about them argues for more.
+        preview::MarkdownBlock::List { .. }
+        | preview::MarkdownBlock::Paragraph(_)
+        | preview::MarkdownBlock::Quote(_)
+        | preview::MarkdownBlock::Table { .. }
+        | preview::MarkdownBlock::Rule => metrics.paragraph_gap,
     }
 }
 
 /// One markdown block's spans, as runs the shaper can set.
+///
+/// `heading` is the level's font weight decision and nothing else — *which* size
+/// a heading is set at belongs to the rectangle, because a run carries no size.
 fn markdown_runs(
     spans: &[preview::Span],
     palette: &bt_render::ChromePalette,
@@ -679,8 +757,7 @@ fn markdown_runs(
     spans
         .iter()
         .map(|span| match span.style {
-            // `.md-h { font-weight: 600; color: var(--ink) }` — a heading is
-            // emphasis at body size, not a second type scale (mock-up 1201).
+            // `.md-h { font-weight: 600; color: var(--ink) }` (mock-up 1201).
             preview::SpanStyle::Plain if heading => bt_render::PreviewRun {
                 text: span.text.clone(),
                 color: palette.preview_body_text,
@@ -705,8 +782,54 @@ fn markdown_runs(
                 mono: true,
                 bold: heading,
             },
+            // The accent, and no underline: the accent alone is what every
+            // reader already reads as a link, and an underline under text that
+            // does not answer a click is a promise this build does not keep.
+            preview::SpanStyle::Link => bt_render::PreviewRun {
+                text: span.text.clone(),
+                color: palette.accent,
+                mono: false,
+                bold: heading,
+            },
         })
         .collect()
+}
+
+/// One list row's marker, in the muted ink both kinds share.
+///
+/// A figure space after it rather than a normal one, because a figure space is
+/// the width of a digit in any face: `9.` and `10.` then start their text one
+/// glyph apart instead of at two unrelated offsets.
+fn markdown_list_marker(
+    ordered: Option<u64>,
+    index: usize,
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewRun {
+    let text = match ordered {
+        Some(first) => format!("{}.\u{2007}", first.saturating_add(index as u64)),
+        None => "\u{2022}\u{2007}".to_owned(),
+    };
+    bt_render::PreviewRun {
+        text,
+        color: palette.files_row_muted,
+        mono: false,
+        bold: false,
+    }
+}
+
+/// One list item's runs, marker included.
+fn markdown_item_runs(
+    spans: &[preview::Span],
+    ordered: Option<u64>,
+    index: usize,
+    palette: &bt_render::ChromePalette,
+) -> Vec<bt_render::PreviewRun> {
+    // The marker rides the item's own first run rather than being a paragraph
+    // of its own, which is what lets the shaper wrap the item as one line of
+    // text instead of two boxes that have to be butted together by hand.
+    let mut runs = vec![markdown_list_marker(ordered, index, palette)];
+    runs.extend(markdown_runs(spans, palette, false));
+    runs
 }
 
 /// One unwrapped monospace line, in one colour.
@@ -734,6 +857,119 @@ fn mono_paragraph(
     }
 }
 
+/// A selection, cut into the **rows** it is drawn on.
+///
+/// A free function beside [`step_preview_caret_by_row`] and for the same reason:
+/// this is the arithmetic that turns a range of a *line* into bands on the
+/// glass, and on a folded line it is the arithmetic that can be silently one row
+/// out. Cut per row rather than per line, because a band drawn once for a
+/// wrapped line would start on its first row and run off the right edge instead
+/// of turning the corner with the text it is under.
+///
+/// Only the visible rows, on the same principle the rest of the body is built
+/// on: a selection over a 64KB file covers two thousand rows and a pane shows
+/// forty.
+fn preview_edit_bands(
+    content: &str,
+    starts: &[usize],
+    selection: &std::ops::Range<usize>,
+    wrap: &preview_edit::WrapLayout,
+    rows: std::ops::Range<usize>,
+) -> Vec<(usize, usize, usize)> {
+    rows.filter_map(|row| {
+        let (line, from, to) = wrap.row_span(row)?;
+        let (start, end) = preview_edit::selected_columns(content, starts, line, selection)?;
+        let start = start.max(from);
+        let end = end.min(to);
+        (end > start).then_some((row, start - from, end - from))
+    })
+    .collect()
+}
+
+/// Where a caret standing at one column of one line is **drawn**: its row, and
+/// how far into that row.
+fn preview_caret_row(
+    wrap: &preview_edit::WrapLayout,
+    line: usize,
+    column: usize,
+) -> (usize, usize) {
+    let (row, start) = wrap.row_of(line, column);
+    (row, column - start)
+}
+
+/// Move the caret one visual row, or one page of them. `None` for every motion
+/// that is not vertical, which the line model answers unchanged.
+///
+/// **A free function over the content and the layout**, so the whole of "what
+/// Down means on a reflowed line" is answerable in a test with no window in it.
+/// The desired column is the column *inside the row*, which is what makes a walk
+/// down a ragged paragraph keep the x it started at instead of drifting left at
+/// every short row.
+fn step_preview_caret_by_row(
+    content: &str,
+    caret: &mut preview_edit::EditCaret,
+    motion: preview_edit::Motion,
+    wrap: &preview_edit::WrapLayout,
+    page_rows: usize,
+) -> Option<()> {
+    use preview_edit::Motion;
+    let step = match motion {
+        Motion::Up => -1isize,
+        Motion::Down => 1,
+        Motion::PageUp => -(page_rows.max(1) as isize),
+        Motion::PageDown => page_rows.max(1) as isize,
+        _ => return None,
+    };
+    caret.heal(content);
+    let starts = preview_edit::line_starts(content);
+    let line = preview_edit::line_index(&starts, caret.caret);
+    let (start, _) = preview_edit::line_bounds(content, &starts, line);
+    let text = preview_edit::line_text(content, &starts, line);
+    let column = preview_edit::column_of(text, caret.caret - start);
+    let (row, row_start) = wrap.row_of(line, column);
+    let wanted = caret.desired_column.unwrap_or(column - row_start);
+    let target = row as isize + step;
+    // Off either end is that end, which is what a text field does — and the
+    // desired column is kept, so coming back returns to it.
+    if target < 0 {
+        caret.caret = 0;
+    } else if target as usize >= wrap.rows() {
+        caret.caret = content.len();
+    } else {
+        let (target_line, from, to) = wrap.row_span(target as usize)?;
+        let (line_start, _) = preview_edit::line_bounds(content, &starts, target_line);
+        let text = preview_edit::line_text(content, &starts, target_line);
+        // `to` runs one past the last row's own text — the cell the line break
+        // stands in — and a caret may not stand past the end of a line.
+        let column = (from + wanted).min(to.saturating_sub(1).max(from));
+        caret.caret = line_start + preview_edit::byte_at_column(text, column);
+    }
+    caret.caret = preview_edit::normalize(content, caret.caret);
+    caret.desired_column = Some(wanted);
+    Some(())
+}
+
+/// How many columns the text surface wraps at, or `None` when it cannot wrap.
+///
+/// **The soft wrap is on for the text surface and only for it** (user ruling,
+/// 2026-08-13). `None` is not a preference here — it is the honest answer when
+/// the arithmetic has no answer: a pane too narrow for one cell, or a font whose
+/// advance is not yet measured. Wrapping to zero columns is an infinite number
+/// of empty rows, so the surface falls back to `white-space: pre` until there is
+/// room for a character.
+fn preview_wrap_columns(
+    body: [f32; 4],
+    metrics: seats::PreviewMonoMetrics,
+    advance: f32,
+) -> Option<usize> {
+    if advance <= 0.0 {
+        return None;
+    }
+    let width = body[2] - body[0] - metrics.padding_x * 2.0;
+    let columns = (width / advance).floor();
+    (columns >= 1.0).then_some(columns as usize)
+}
+
 /// Which lines of a body the pane can actually show.
 fn visible_range(
     first_top: f32,
@@ -757,10 +993,11 @@ fn visible_range(
 /// backwards, which is what keeps the caret drawn where the click was made.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct PreviewEditPaint {
-    /// `(line, from_column, to_column)`, one per visible line the selection
-    /// touches.
+    /// `(visual_row, from_column, to_column)`, one per visible *row* the
+    /// selection touches — and the columns are measured from that row's own
+    /// left edge, because a wrapped line's second row starts at the margin.
     bands: Vec<(usize, usize, usize)>,
-    /// `(line, column)` — drawn only while the surface holds the keyboard.
+    /// `(visual_row, column)` — drawn only while the surface holds the keyboard.
     caret: Option<(usize, usize)>,
     caret_width: f32,
 }
@@ -776,36 +1013,41 @@ struct PreviewEditPaint {
 fn build_preview_text_body(
     geometry: &seats::PreviewMonoGeometry,
     lines: &[String],
+    wrap: &preview_edit::WrapLayout,
     advance: f32,
     edit: Option<&PreviewEditPaint>,
     palette: &bt_render::ChromePalette,
 ) -> bt_render::PreviewBody {
     let clip = geometry.viewport;
+    // **Visual rows throughout.** Everything below indexes the drawn rows, of
+    // which a wrapped line has several and an unwrapped one has exactly one —
+    // which is what lets the wrapping and the `pre` surfaces share every line of
+    // arithmetic here instead of each carrying a copy.
     let range = visible_range(
         geometry.line_rect(0)[1],
         geometry.line_height,
-        lines.len(),
+        wrap.rows(),
         clip,
     );
     let mut quads = Vec::new();
     if let Some(edit) = edit {
-        for (line, from, to) in &edit.bands {
-            let row = geometry.line_rect(*line);
+        for (row, from, to) in &edit.bands {
+            let box_of_row = geometry.line_rect(*row);
             quads.push(bt_render::PreviewQuad {
                 rect: [
-                    row[0] + advance * *from as f32,
-                    row[1],
-                    row[0] + advance * *to as f32,
-                    row[3],
+                    box_of_row[0] + advance * *from as f32,
+                    box_of_row[1],
+                    box_of_row[0] + advance * *to as f32,
+                    box_of_row[3],
                 ],
                 color: palette.preview_selection,
             });
         }
-        if let Some((line, column)) = edit.caret {
-            let row = geometry.line_rect(line);
-            let x = row[0] + advance * column as f32;
+        if let Some((row, column)) = edit.caret {
+            let box_of_row = geometry.line_rect(row);
+            let x = box_of_row[0] + advance * column as f32;
             quads.push(bt_render::PreviewQuad {
-                rect: [x, row[1], x + edit.caret_width, row[3]],
+                rect: [x, box_of_row[1], x + edit.caret_width, box_of_row[3]],
                 color: palette.preview_caret,
             });
         }
@@ -814,16 +1056,24 @@ fn build_preview_text_body(
         clip,
         quads,
         paragraphs: range
-            .map(|index| {
-                mono_paragraph(
-                    lines[index].clone(),
-                    geometry.line_rect(index),
+            .filter_map(|row| {
+                let (line, from, to) = wrap.row_span(row)?;
+                let text = lines.get(line)?;
+                // The columns this row draws, cut out of the line by column and
+                // not by byte: the surface is a cell grid and a wide character
+                // occupies two of its cells.
+                let start = preview_edit::byte_at_column(text, from);
+                let end = preview_edit::byte_at_column(text, to);
+                Some(mono_paragraph(
+                    text[start..end].to_owned(),
+                    geometry.line_rect(row),
                     geometry.font_size,
                     geometry.line_height,
                     palette.preview_body_text,
-                )
+                ))
             })
             .collect(),
+        foot: None,
     }
 }
 
@@ -868,6 +1118,7 @@ fn build_preview_diff_body(
         clip,
         quads,
         paragraphs,
+        foot: None,
     }
 }
 
@@ -967,35 +1218,47 @@ fn build_preview_table_body(
         clip,
         quads,
         paragraphs,
+        foot: None,
     }
 }
 
 /// `.pv-md`'s body: the rendered document.
+///
+/// **Every row is placed at the height the measuring pass wrote down for it.**
+/// Not one the painter recomputes and not one it assumes: see
+/// [`MarkdownBlockLayout`] for what assuming cost.
 fn build_preview_markdown_body(
     body: [f32; 4],
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
-    document: (&[preview::MarkdownBlock], &[f32], &[f32]),
+    document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
     palette: &bt_render::ChromePalette,
 ) -> bt_render::PreviewBody {
-    let (blocks, heights, tops) = document;
-    let left = body[0] + metrics.padding_x;
-    let right = body[2] - metrics.padding_x;
+    let (blocks, layout) = document;
+    // **The whole page travels with the horizontal scroll**, prose included:
+    // scrolling right to read the far end of a table while the paragraphs stay
+    // nailed to the left margin is not a page, it is two pages sharing a pane.
+    // What does *not* change is the width prose wraps into — that is the pane's,
+    // measured against the pane, which is why `right` is derived from `left`
+    // rather than from the body's own far edge.
+    let left = body[0] + metrics.padding_x - scroll[0];
+    let right = left + (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
     let origin = body[1] + metrics.padding_y - scroll[1];
     let mut quads = Vec::new();
     let mut paragraphs = Vec::new();
-    for ((block, height), block_top) in blocks.iter().zip(heights).zip(tops) {
-        let top = origin + block_top;
+    for (block, placed) in blocks.iter().zip(layout) {
+        let top = origin + placed.top;
+        let height = placed.height;
         if top + height <= body[1] || top >= body[3] {
             continue;
         }
         match block {
-            preview::MarkdownBlock::Heading { spans, .. } => {
+            preview::MarkdownBlock::Heading { level, spans } => {
                 paragraphs.push(bt_render::PreviewParagraph {
                     runs: markdown_runs(spans, palette, true),
                     rect: [left, top, right, top + height],
-                    font_size_px: metrics.heading_font,
-                    line_height_px: metrics.line_height,
+                    font_size_px: metrics.heading_font(*level),
+                    line_height_px: metrics.heading_line_height(*level),
                     wrap: true,
                     letter_spacing_em: 0.0,
                     align_right: false,
@@ -1014,22 +1277,19 @@ fn build_preview_markdown_body(
                     align_center: false,
                 });
             }
-            preview::MarkdownBlock::List(items) => {
+            preview::MarkdownBlock::List { ordered, items } => {
                 let mut item_top = top;
-                for spans in items {
-                    let mut runs = vec![bt_render::PreviewRun {
-                        // The marker rides the item's own first run, so a
-                        // wrapped item's second line hangs under its text
-                        // rather than under its bullet.
-                        text: "\u{2022}\u{2007}".to_owned(),
-                        color: palette.files_row_muted,
-                        mono: false,
-                        bold: false,
-                    }];
-                    runs.extend(markdown_runs(spans, palette, false));
-                    let item_height = metrics.line_height;
+                for (index, spans) in items.iter().enumerate() {
+                    // The measured height, so a wrapped item gets the box its
+                    // own wrap needs — and so the item under it starts where
+                    // that box ends rather than one line down.
+                    let item_height = placed
+                        .rows
+                        .get(index)
+                        .copied()
+                        .unwrap_or(metrics.line_height);
                     paragraphs.push(bt_render::PreviewParagraph {
-                        runs,
+                        runs: markdown_item_runs(spans, *ordered, index, palette),
                         rect: [
                             left + metrics.list_indent,
                             item_top,
@@ -1045,6 +1305,56 @@ fn build_preview_markdown_body(
                     });
                     item_top += item_height;
                 }
+            }
+            preview::MarkdownBlock::Quote(lines) => {
+                // The bar first and the whole height of the block: one bar for
+                // the quote, not one per line, which is why consecutive `>`
+                // rows are gathered into a single block at all.
+                quads.push(bt_render::PreviewQuad {
+                    rect: [left, top, left + metrics.quote_bar, top + height],
+                    color: palette.accent,
+                });
+                let mut line_top = top + metrics.quote_padding_y;
+                for (index, spans) in lines.iter().enumerate() {
+                    let line_height = placed
+                        .rows
+                        .get(index)
+                        .copied()
+                        .unwrap_or(metrics.line_height);
+                    paragraphs.push(bt_render::PreviewParagraph {
+                        runs: markdown_runs(spans, palette, false),
+                        rect: [
+                            left + metrics.quote_indent,
+                            line_top,
+                            right,
+                            line_top + line_height,
+                        ],
+                        font_size_px: metrics.font_size,
+                        line_height_px: metrics.line_height,
+                        wrap: true,
+                        letter_spacing_em: 0.0,
+                        align_right: false,
+                        align_center: false,
+                    });
+                    line_top += line_height;
+                }
+            }
+            preview::MarkdownBlock::Rule => {
+                quads.push(bt_render::PreviewQuad {
+                    rect: [left, top, right, top + metrics.rule_thickness],
+                    color: palette.preview_grid_line,
+                });
+            }
+            preview::MarkdownBlock::Table { rows } => {
+                push_markdown_table(
+                    &mut quads,
+                    &mut paragraphs,
+                    rows,
+                    placed,
+                    [left, top],
+                    metrics,
+                    palette,
+                );
             }
             preview::MarkdownBlock::Code { lang, text } => {
                 let fence = [left, top, right, top + height];
@@ -1107,6 +1417,167 @@ fn build_preview_markdown_body(
         clip: body,
         quads,
         paragraphs,
+        foot: None,
+    }
+}
+
+/// How wide a code fence insists on being: its longest line, plus its border
+/// and padding on both sides.
+///
+/// **The measurer is injected**, which is what makes the ruling ("a fence does
+/// not reflow, so the page scrolls to it") assertable without a GPU: the
+/// arithmetic around the measurement is the part that can be wrong, and it is
+/// all here. Tabs are expanded first, for the same reason the fence's own lines
+/// are drawn expanded — a tab is a stop, and a stop the width calculation did
+/// not take is a last column that cannot be reached.
+fn markdown_fence_width(
+    text: &str,
+    metrics: seats::PreviewMarkdownMetrics,
+    mut measure: impl FnMut(&[bt_render::PreviewRun]) -> f32,
+) -> f32 {
+    let widest = text
+        .lines()
+        .map(|line| {
+            let runs = [bt_render::PreviewRun {
+                text: preview::expand_tabs(line),
+                color: [0, 0, 0],
+                mono: true,
+                bold: false,
+            }];
+            measure(&runs)
+        })
+        .fold(0.0_f32, f32::max);
+    if widest <= 0.0 {
+        return 0.0;
+    }
+    widest + (metrics.code_border + metrics.code_padding_x) * 2.0
+}
+
+/// One outer width per table column: **each column's own widest cell**, never a
+/// share of the pane (user ruling, 2026-08-13).
+///
+/// The measurer is injected for the same reason it is for a fence. `heading`
+/// tells it which row it is measuring, because a heading cell is set bold and a
+/// bold cell is wider than the same words are not.
+fn markdown_table_columns(
+    rows: &[preview::TableRow],
+    metrics: seats::PreviewMarkdownMetrics,
+    mut measure: impl FnMut(&[preview::Span], bool) -> f32,
+) -> Vec<f32> {
+    let count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let chrome = metrics.table_border + metrics.table_padding_x * 2.0;
+    (0..count)
+        .map(|column| {
+            let widest = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| row.get(column).map(|cell| (index, cell)))
+                .map(|(index, cell)| measure(cell, index == 0))
+                .fold(0.0_f32, f32::max);
+            // A floor so an empty or one-character column is still a column you
+            // can see, rather than two hairlines with padding between them.
+            chrome + widest.max(metrics.table_min_column)
+        })
+        .collect()
+}
+
+/// One markdown table, drawn in the csv grid's own chrome.
+///
+/// A free function rather than a branch inline, because it is the one block that
+/// draws in two dimensions and inlining it would put a nested loop in the middle
+/// of a match arm list. The geometry it reads was all decided by
+/// [`Runtime::measure_markdown_table`]; nothing here computes a width.
+fn push_markdown_table(
+    quads: &mut Vec<bt_render::PreviewQuad>,
+    paragraphs: &mut Vec<bt_render::PreviewParagraph>,
+    rows: &[preview::TableRow],
+    placed: &MarkdownBlockLayout,
+    origin: [f32; 2],
+    metrics: seats::PreviewMarkdownMetrics,
+    palette: &bt_render::ChromePalette,
+) {
+    let border = metrics.table_border;
+    let width: f32 = placed.columns.iter().sum::<f32>() + border;
+    let mut row_top = origin[1];
+    for (index, row) in rows.iter().enumerate() {
+        let height = placed
+            .rows
+            .get(index)
+            .copied()
+            .unwrap_or(metrics.line_height);
+        let bottom = row_top + height;
+        // `.pv-table th { background: var(--hover) }` — the heading's fill runs
+        // the width of the table rather than of its cells, so the hairlines
+        // between the heads sit *on* it.
+        if index == 0 {
+            quads.push(bt_render::PreviewQuad {
+                rect: [origin[0], row_top, origin[0] + width, bottom],
+                color: palette.files_row_hover,
+            });
+        }
+        // `border-collapse: collapse`: one hairline along the top of every row
+        // and one down the left of every cell, plus the two closing edges.
+        quads.push(bt_render::PreviewQuad {
+            rect: [origin[0], row_top, origin[0] + width, row_top + border],
+            color: palette.preview_grid_line,
+        });
+        if index + 1 == rows.len() {
+            quads.push(bt_render::PreviewQuad {
+                rect: [origin[0], bottom - border, origin[0] + width, bottom],
+                color: palette.preview_grid_line,
+            });
+        }
+        let mut cell_left = origin[0];
+        for (column, outer) in placed.columns.iter().copied().enumerate() {
+            quads.push(bt_render::PreviewQuad {
+                rect: [cell_left, row_top, cell_left + border, bottom],
+                color: palette.preview_grid_line,
+            });
+            if column + 1 == placed.columns.len() {
+                quads.push(bt_render::PreviewQuad {
+                    rect: [
+                        cell_left + outer,
+                        row_top,
+                        cell_left + outer + border,
+                        bottom,
+                    ],
+                    color: palette.preview_grid_line,
+                });
+            }
+            if let Some(cell) = row.get(column) {
+                let mut runs = markdown_runs(cell, palette, index == 0);
+                if index == 0 {
+                    // A heading cell is set in the heading ink whatever its own
+                    // spans said, which is `th`'s own rule and the reason the
+                    // first row reads as a heading at all.
+                    for run in &mut runs {
+                        run.color = palette.preview_table_head_text;
+                    }
+                }
+                paragraphs.push(bt_render::PreviewParagraph {
+                    runs,
+                    rect: [
+                        cell_left + border + metrics.table_padding_x,
+                        row_top + border + metrics.table_padding_y,
+                        cell_left + outer - metrics.table_padding_x,
+                        bottom - metrics.table_padding_y,
+                    ],
+                    font_size_px: metrics.font_size,
+                    line_height_px: metrics.line_height,
+                    // **A cell does not wrap** (user ruling, 2026-08-13): the
+                    // column was measured to hold it whole, and a cell that
+                    // reflowed would make the row's height a function of the
+                    // pane — which is the column-compression policy the ruling
+                    // refused. The pane scrolls to the table instead.
+                    wrap: false,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                });
+            }
+            cell_left += outer;
+        }
+        row_top = bottom;
     }
 }
 
@@ -1143,26 +1614,25 @@ fn preview_document_max_scroll(
             )
             .max_scroll
         }
-        PreviewDocument::Markdown { heights, tops, .. } => {
+        PreviewDocument::Markdown { layout, .. } => {
             let metrics = seats::preview_markdown_metrics(scale);
-            let content = tops
-                .last()
-                .zip(heights.last())
-                .map_or(0.0, |(top, height)| top + height);
-            seats::preview_mono_geometry(
-                body,
-                seats::PreviewMonoMetrics {
-                    font_size: metrics.font_size,
-                    line_height: metrics.line_height,
-                    padding_x: metrics.padding_x,
-                    padding_y: metrics.padding_y,
-                },
-                content,
-                0,
-                advance,
-                [0.0, 0.0],
-            )
-            .max_scroll
+            let height =
+                metrics.padding_y * 2.0 + layout.last().map_or(0.0, |last| last.top + last.height);
+            // **The widest block that refuses to reflow** (user rulings,
+            // 2026-08-13): a fence and a table each answer their own width and
+            // everything else answers zero, so a document of nothing but prose —
+            // however long its unbreakable tokens — has no horizontal axis at
+            // all, and one holding a twelve-column table has exactly enough to
+            // reach its last column.
+            let width = metrics.padding_x * 2.0
+                + layout
+                    .iter()
+                    .map(|block| block.width)
+                    .fold(0.0_f32, f32::max);
+            [
+                (width - (body[2] - body[0])).max(0.0),
+                (height - (body[3] - body[1])).max(0.0),
+            ]
         }
         PreviewDocument::Diff(_) => {
             seats::preview_mono_geometry(
@@ -1175,7 +1645,27 @@ fn preview_document_max_scroll(
             )
             .max_scroll
         }
-        PreviewDocument::Text(_) | PreviewDocument::Empty => {
+        PreviewDocument::Text { wrap, .. } => {
+            // **A folded body has nowhere sideways to go** (user ruling,
+            // 2026-08-13). The horizontal extent is derived from the columns, so
+            // handing this geometry zero of them is the whole of "no horizontal
+            // scroll on a wrapping surface" — and it is *this* function's to
+            // decide, because this is the one door every write of the stored
+            // offset already goes through. The unwrapped surface keeps its own
+            // width, which is the `white-space: pre` a `.diff` and a
+            // never-measured pane both still get.
+            let columns = if wrap.wraps() { 0 } else { columns };
+            seats::preview_mono_geometry(
+                body,
+                seats::preview_text_metrics(scale),
+                rows_height,
+                columns,
+                advance,
+                [0.0, 0.0],
+            )
+            .max_scroll
+        }
+        PreviewDocument::Empty => {
             seats::preview_mono_geometry(
                 body,
                 seats::preview_text_metrics(scale),
@@ -1232,6 +1722,95 @@ fn push_preview_truncation_notice(
         align_right: false,
         align_center: false,
     });
+}
+
+/// `.preview-foot` — **the truncation bar, which is furniture and not a
+/// caption** (user report, 2026-08-13).
+///
+/// It began as a line of text laid over the body's last rows, and that is
+/// exactly how it read on a real file: the sentence and the file's own words
+/// printed through each other, and the words underneath were unreachable because
+/// the scroll had already ended. A message that cannot be moved out from under
+/// has to have somewhere of its own to stand.
+///
+/// So this is a **bar with height**, in the docked files foot's own shape — 28px
+/// tall, a hairline of `--border` along its top, an opaque ground in the pane's
+/// own colour, 11px `--ink3` text inset 12px. The height is not decoration: it
+/// comes off the body before a single block is laid out
+/// ([`Runtime::preview_content_body_rect`]), so the scroll extent ends where the
+/// bar begins and nothing can be scrolled under it.
+///
+/// It appears **only for a truncated buffer**, which is also why it can afford
+/// to be structural: truncation is a standing fact about the file for as long as
+/// the file is open, not news about a keystroke. The `Saved` flash, which *is*
+/// news, keeps the old floating strip and cannot collide with this one — a
+/// truncated buffer is read-only, so it has no save to report.
+const PREVIEW_FOOT_HEIGHT_LOGICAL_PX: f32 = 28.0;
+const PREVIEW_FOOT_PADDING_X_LOGICAL_PX: f32 = 12.0;
+const PREVIEW_FOOT_FONT_LOGICAL_PX: f32 = 11.0;
+
+/// How tall the truncation bar stands at this scale, border included.
+fn preview_foot_height(scale: f32) -> f32 {
+    (PREVIEW_FOOT_HEIGHT_LOGICAL_PX * scale).round().max(1.0)
+}
+
+/// The box the **document** lives in inside a pane body, given whether that
+/// body owes a truncation bar.
+///
+/// A free function so the reservation can be asserted without a window, which is
+/// the only way to state "every pixel the bar takes is a pixel the document does
+/// not have" as a property rather than as a screenshot.
+fn preview_content_body(body: [f32; 4], scale: f32, foot: bool) -> [f32; 4] {
+    if !foot {
+        return body;
+    }
+    let top = (body[3] - preview_foot_height(scale)).max(body[1]);
+    [body[0], body[1], body[2], top]
+}
+
+/// The bar for one notice, standing at the foot of `rect` (the **whole** body,
+/// bar included).
+fn preview_foot(
+    rect: [f32; 4],
+    scale: f32,
+    notice: &str,
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewFoot {
+    let height = preview_foot_height(scale);
+    let border = scale.round().max(1.0);
+    let bar = [rect[0], (rect[3] - height).max(rect[1]), rect[2], rect[3]];
+    let font_size = PREVIEW_FOOT_FONT_LOGICAL_PX * scale;
+    let line_height = (font_size * 1.4).round().max(1.0);
+    let inset = (PREVIEW_FOOT_PADDING_X_LOGICAL_PX * scale).round();
+    let top = bar[1]
+        + border
+        + (((bar[3] - bar[1]) - border - line_height) / 2.0)
+            .max(0.0)
+            .round();
+    bt_render::PreviewFoot {
+        bar,
+        border_px: border,
+        // The pane's own ground and nothing paler: an opaque bar is the whole of
+        // "content never prints through it", and a tint over the background
+        // would be the reported bug with one extra step.
+        ground: bt_render::background_rgb(),
+        border: palette.preview_grid_line,
+        label: bt_render::PreviewParagraph {
+            runs: vec![bt_render::PreviewRun {
+                text: notice.to_owned(),
+                color: palette.files_row_muted,
+                mono: false,
+                bold: false,
+            }],
+            rect: [bar[0] + inset, top, bar[2] - inset, top + line_height],
+            font_size_px: font_size,
+            line_height_px: line_height,
+            wrap: false,
+            letter_spacing_em: 0.0,
+            align_right: false,
+            align_center: false,
+        },
+    }
 }
 
 /// Where an activated files row goes.
@@ -2126,6 +2705,23 @@ struct Runtime {
     /// changing places — a divider drag, a focus change, a DPI change, a window
     /// resize, a step of the concession ladder — and leaves the motion alone.
     pane_motion_revision: u64,
+    /// Which [`seats::Seats::structure_revision`] the **shells** were last told
+    /// about — the tripwire under [`Self::settle_seat_set_change`].
+    ///
+    /// Written down because the same defect has now been found twice in two
+    /// different verbs, and both times it was invisible from the inside: the
+    /// tree changed, the layout re-solved, the panes were drawn in their new
+    /// rectangles — and the ConPTYs beside the arriving pane went on believing
+    /// the width they had before it, so a prompt reprinted itself into columns
+    /// that were no longer there. Nothing on screen says so except the shell's
+    /// own output, minutes later, in the middle of a line.
+    ///
+    /// [`Self::resize_leaves_to_layout`] is the only writer, because it is the
+    /// only place a shell is ever told anything about its size; a
+    /// `debug_assert` in [`Self::publish_frame_inner`] is the reader. A path
+    /// that mutates the seat set and then draws without carrying the change to
+    /// the shells trips it on the very next frame.
+    shells_settled_revision: u64,
     /// How far the tab strip is scrolled, in physical pixels (A7/A8).
     ///
     /// App state and nothing else: a scroll offset is where you are looking, not
@@ -9269,6 +9865,9 @@ impl Runtime {
             // The window opens on a tree that has never been edited, so the
             // first commit that *does* edit one is the first thing to animate.
             pane_motion_revision: 0,
+            // A tree nobody has edited is a tree whose shells are in step with
+            // it by construction: the first solve sizes them from it.
+            shells_settled_revision: 0,
             tab_scroll: 0.0,
             rail,
             rail_scroll: 0.0,
@@ -11988,6 +12587,43 @@ impl Runtime {
         Ok(true)
     }
 
+    /// **Everything that follows a change to the *set* of seats in a tab**, in
+    /// the one place every verb that changes it now goes through.
+    ///
+    /// A function rather than five copies of four lines, because the four lines
+    /// have now been forgotten twice in two different verbs and the symptom is
+    /// the same both times and legible from nowhere: the tree changes, the
+    /// layout re-solves, the panes are *drawn* in their new rectangles — and the
+    /// shells beside the arriving pane are never told they have fewer columns,
+    /// so the next prompt reprints itself into a width that no longer exists and
+    /// loses its middle. `dock_float` was the second (it re-solved the layout and
+    /// stopped there); the audit that found it read every call that mutates the
+    /// tree, and this is where they all end now.
+    ///
+    /// The order is the one [`Self::toggle_files_pane`] established:
+    ///
+    /// 1. **the pointer's picture first**, because every rectangle it named has
+    ///    moved and a `pane_hover` naming a seat that is gone keeps a `×` lit on
+    ///    a pane that no longer exists;
+    /// 2. **the drag**, because a divider in flight was steering a split that
+    ///    may not be in the tree any more;
+    /// 3. **the window's own minimum**, which is a floor derived from the seats
+    ///    and so moves with them;
+    /// 4. **the re-solve**, which is the step that actually carries the new
+    ///    columns to every shell — and marks the session dirty on its way out,
+    ///    which is why nothing here does that a second time.
+    ///
+    /// What is deliberately *not* here is anything about a particular kind of
+    /// pane: a closing preview drops its image, a closing files column drops its
+    /// root, a split moves the keyboard. Those belong to their verbs. This is
+    /// only the part that is true whenever the count of seats changes at all.
+    fn settle_seat_set_change(&mut self) -> Result<()> {
+        self.seat_pointer = seats::ChromePointer::default();
+        self.divider_drag = None;
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()
+    }
+
     /// The dev-only preview toggle, and everything one costs: the tree changes,
     /// so the window minimum, the terminal's columns, the ConPTY coalescer and
     /// the session file all follow it, in that order.
@@ -12002,10 +12638,7 @@ impl Runtime {
             self.renderer.set_preview_image(None);
             self.clear_preview_view();
         }
-        self.seat_pointer = seats::ChromePointer::default();
-        self.divider_drag = None;
-        self.apply_window_min_inner_size()?;
-        self.commit_seat_geometry()
+        self.settle_seat_set_change()
     }
 
     /// **`addFilesPane` and its undo, as one verb** — the `˅` menu's `Files pane`
@@ -12059,16 +12692,9 @@ impl Runtime {
             self.files_match_files_seats(),
             "A3: opening a files pane files a state under the seat it minted"
         );
-        // The tree changed, so everything downstream of its shape follows, in
-        // the order `toggle_preview_seat` already establishes for the same
-        // event: a stale pointer picture first, then the window minimum, then
-        // the re-solve that re-columns every shell beside the new column.
-        self.seat_pointer = seats::ChromePointer::default();
-        self.divider_drag = None;
-        self.apply_window_min_inner_size()?;
-        self.commit_seat_geometry()?;
-        self.mark_session_dirty(Instant::now());
-        Ok(())
+        // The tree changed, so everything downstream of its shape follows —
+        // through the one door every seat-set change goes through.
+        self.settle_seat_set_change()
     }
 
     /// Where a files pane opened right now would be rooted (H115).
@@ -12167,17 +12793,13 @@ impl Runtime {
             self.files_match_files_seats(),
             "A3: closing a pane leaves the tab's files states matching its tree"
         );
-        // The pointer's whole picture is stale: the rectangle it was over has
-        // been re-solved out from under it, and a `pane_hover` naming a seat
-        // that no longer exists would keep a `×` lit on a pane that is gone.
-        self.seat_pointer = seats::ChromePointer::default();
-        self.divider_drag = None;
-        self.apply_window_min_inner_size()?;
-        self.commit_seat_geometry()?;
+        self.settle_seat_set_change()?;
+        // And then, uniquely to closing: the pointer is standing still over
+        // whatever moved *into* the gap, so the hover it lost above is
+        // immediately owed again from the new rectangles.
         if let Some(position) = self.pointer_position {
             self.update_chrome_hover(position)?;
         }
-        self.mark_session_dirty(Instant::now());
         Ok(())
     }
 
@@ -12333,11 +12955,8 @@ impl Runtime {
         // order to work in the new pane.
         self.focused_leaf = arriving;
         self.seats.set_focus(arriving);
-        self.seat_pointer = seats::ChromePointer::default();
-        self.apply_window_min_inner_size()?;
-        self.commit_seat_geometry()?;
+        self.settle_seat_set_change()?;
         self.refresh_chrome();
-        self.mark_session_dirty(Instant::now());
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -12823,16 +13442,59 @@ impl Runtime {
         };
         let rows = self.preview_page_rows();
         let mut caret = self.preview_caret;
-        preview_edit::move_caret(&content, &mut caret, motion, extend, rows);
+        // **Up and Down walk visual rows; Home and End walk the logical line.**
+        // The `<textarea>` convention, and the one a reader expects: on a
+        // wrapped line, Down that jumped the whole paragraph would skip most of
+        // what is on the screen, while a Home that stopped at the start of the
+        // *row* would leave no key that reaches the start of the line at all.
+        let stepped = self
+            .preview_wrap()
+            .filter(|wrap| wrap.wraps())
+            .and_then(|wrap| step_preview_caret_by_row(&content, &mut caret, motion, wrap, rows));
+        if stepped.is_none() {
+            preview_edit::move_caret(&content, &mut caret, motion, extend, rows);
+        } else if !extend {
+            caret.anchor = caret.caret;
+        }
         self.preview_caret = caret;
         self.reveal_preview_caret();
         self.repaint_preview()
     }
 
+    /// **The box the document itself lives in** — the seat's body, less the
+    /// truncation bar when there is one.
+    ///
+    /// The one door every question about the preview's geometry now goes
+    /// through: how far it may be scrolled, which row a click named, where the
+    /// caret has to be revealed to, what a page is. `seats::preview_body_rect`
+    /// answers the *pane's* body and is right about that; it is the wrong
+    /// rectangle for a document that has furniture standing in it, and the
+    /// reported bug (2026-08-13) was exactly the difference between the two —
+    /// content laid out to the pane's height, drawn under a caption it could
+    /// never be scrolled out from behind.
+    fn preview_content_body_rect(&self, scale: f32) -> Option<[f32; 4]> {
+        let body = seats::preview_body_rect(&self.seats, &self.seat_layout, scale)?;
+        Some(preview_content_body(
+            body,
+            scale,
+            self.preview_foot_notice().is_some(),
+        ))
+    }
+
+    /// The sentence the truncation bar carries, if it is owed one.
+    ///
+    /// Truncation only. The `Saved` flash is *news* and keeps the old floating
+    /// strip — and the two cannot collide, because a truncated buffer is
+    /// read-only and has no save to report.
+    fn preview_foot_notice(&self) -> Option<&'static str> {
+        self.current_preview_buffer()
+            .and_then(preview::PreviewBuffer::truncation_notice)
+    }
+
     /// How many lines the edit surface can show — what a page is.
     fn preview_page_rows(&self) -> usize {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+        let Some(body) = self.preview_content_body_rect(scale) else {
             return 1;
         };
         let metrics = seats::preview_text_metrics(scale);
@@ -12847,7 +13509,7 @@ impl Runtime {
     /// holding Down look like reading rather than like jumping.
     fn reveal_preview_caret(&mut self) {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+        let Some(body) = self.preview_content_body_rect(scale) else {
             return;
         };
         let Some((line, column)) = self.preview_caret_position() else {
@@ -12855,7 +13517,15 @@ impl Runtime {
         };
         let metrics = seats::preview_text_metrics(scale);
         let advance = self.preview_mono_advance;
-        let top = metrics.padding_y + metrics.line_height * line as f32;
+        // The *drawn* row and the column inside it: on a wrapped surface the
+        // caret's line number is not where it is on the glass, and scrolling to
+        // a line number would put a caret on the fortieth row of a line off the
+        // bottom of a pane that thinks it is showing the first.
+        let (row, column) = self.preview_wrap().map_or((line, column), |wrap| {
+            let (row, start) = wrap.row_of(line, column);
+            (row, column - start)
+        });
+        let top = metrics.padding_y + metrics.line_height * row as f32;
         let bottom = top + metrics.line_height;
         let left = metrics.padding_x + advance * column as f32;
         let mut scroll = self.preview_scroll;
@@ -13023,7 +13693,7 @@ impl Runtime {
             return Ok(false);
         }
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+        let Some(body) = self.preview_content_body_rect(scale) else {
             return Ok(false);
         };
         let Some(offset) = self.preview_offset_at(body, scale, position) else {
@@ -13053,7 +13723,7 @@ impl Runtime {
         {
             return None;
         }
-        let body = seats::preview_body_rect(&self.seats, &self.seat_layout, scale)?;
+        let body = self.preview_content_body_rect(scale)?;
         let (x, y) = (position.x as f32, position.y as f32);
         (body[0] <= x && x <= body[2] && body[1] <= y && y <= body[3]).then_some(body)
     }
@@ -13081,9 +13751,29 @@ impl Runtime {
         }
         let x = position.x as f32 - body[0] - metrics.padding_x + self.preview_scroll[0];
         let y = position.y as f32 - body[1] - metrics.padding_y + self.preview_scroll[1];
-        let line = (y / metrics.line_height).floor().max(0.0) as usize;
+        let row = (y / metrics.line_height).floor().max(0.0) as usize;
         let column = (x / advance).round().max(0.0) as usize;
-        Some(preview_edit::offset_at(content, line, column))
+        // **The painter's arithmetic read backwards, through the same wrap.** A
+        // click names a *drawn* row; which line that is and how far into it the
+        // row starts is exactly what the layout knows, and asking it here is
+        // what keeps the caret under the pointer on a reflowed line.
+        let (line, from, to) = self
+            .preview_wrap()
+            .and_then(|wrap| wrap.row_span(row))
+            .map_or((row, 0, usize::MAX), |span| span);
+        Some(preview_edit::offset_at(
+            content,
+            line,
+            from + column.min(to.saturating_sub(from)),
+        ))
+    }
+
+    /// How the text surface is currently wrapped, if it is showing one.
+    fn preview_wrap(&self) -> Option<&preview_edit::WrapLayout> {
+        match &self.preview_doc {
+            PreviewDocument::Text { wrap, .. } => Some(wrap),
+            _ => None,
+        }
     }
 
     /// The body has changed and the window owes a frame for it.
@@ -13101,7 +13791,7 @@ impl Runtime {
     /// the layout quietly disagreeing with what it was handed.
     fn heal_preview_scroll(&mut self) {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+        let Some(body) = self.preview_content_body_rect(scale) else {
             return;
         };
         self.preview_scroll = self.clamped_preview_scroll(body, scale, self.preview_scroll);
@@ -13136,7 +13826,13 @@ impl Runtime {
             // line, and a document that did not draw it would be a document a
             // caret could leave.
             preview::PreviewView::Text => {
-                PreviewDocument::Text(preview_edit::display_lines(&content))
+                let lines = preview_edit::display_lines(&content);
+                let wrap = match preview_wrap_columns(body, text_metrics, self.preview_mono_advance)
+                {
+                    Some(columns) => preview_edit::WrapLayout::wrapped(&lines, columns),
+                    None => preview_edit::WrapLayout::unwrapped(&lines),
+                };
+                PreviewDocument::Text { lines, wrap }
             }
             preview::PreviewView::Diff => {
                 let metrics = seats::preview_diff_metrics(scale);
@@ -13181,12 +13877,11 @@ impl Runtime {
                 let metrics = seats::preview_markdown_metrics(scale);
                 let blocks = preview::parse_markdown(&content);
                 let width = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
-                let mut heights = Vec::with_capacity(blocks.len());
-                let mut tops = Vec::with_capacity(blocks.len());
+                let mut layout = Vec::with_capacity(blocks.len());
                 let mut top = 0.0_f32;
                 let mut previous_margin = 0.0_f32;
                 for block in &blocks {
-                    let height = self.measure_markdown_block(block, width, metrics);
+                    let mut measured = self.measure_markdown_block(block, width, metrics);
                     let margin = markdown_block_margin(block, metrics);
                     // **Adjacent margins collapse**, which is the rule the
                     // prototype gets free from a browser and this window has to
@@ -13195,44 +13890,62 @@ impl Runtime {
                     // whichever of the two is omitted leaves the heading sitting
                     // on the last bullet.
                     top += previous_margin.max(margin);
-                    tops.push(top);
-                    top += height;
+                    measured.top = top;
+                    top += measured.height;
                     previous_margin = margin;
-                    heights.push(height);
+                    layout.push(measured);
                 }
-                PreviewDocument::Markdown {
-                    blocks,
-                    heights,
-                    tops,
-                }
+                PreviewDocument::Markdown { blocks, layout }
             }
             preview::PreviewView::Image | preview::PreviewView::None => PreviewDocument::Empty,
         };
     }
 
-    /// How tall one markdown block's own content is — margins excluded, because
-    /// margins collapse between neighbours and a height that had swallowed one
-    /// could not be collapsed with anything.
+    /// How tall one markdown block's own content is, and how tall each of its
+    /// rows — margins excluded, because margins collapse between neighbours and
+    /// a height that had swallowed one could not be collapsed with anything.
+    ///
+    /// **Every row a drawing pass will walk is measured here and written down.**
+    /// See [`MarkdownBlockLayout`]: a block whose total is measured with the
+    /// shaper and whose rows are then *assumed* by the painter is the bug that
+    /// put a screenful of nothing in the middle of `docs/DESIGN.md`.
     fn measure_markdown_block(
         &mut self,
         block: &preview::MarkdownBlock,
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
-    ) -> f32 {
+    ) -> MarkdownBlockLayout {
         let palette = bt_render::chrome_palette();
         match block {
-            preview::MarkdownBlock::Heading { spans, .. } => {
+            preview::MarkdownBlock::Heading { level, spans } => {
                 let runs = markdown_runs(spans, &palette, true);
-                self.renderer.measure_preview_paragraph(
-                    &runs,
-                    width,
-                    metrics.heading_font,
-                    metrics.line_height,
+                let font = metrics.heading_font(*level);
+                let line = metrics.heading_line_height(*level);
+                MarkdownBlockLayout::solid(
+                    self.renderer
+                        .measure_preview_paragraph(&runs, width, font, line),
                 )
             }
-            preview::MarkdownBlock::List(items) => {
+            preview::MarkdownBlock::List { ordered, items } => {
                 let inner = (width - metrics.list_indent).max(1.0);
-                items
+                let rows: Vec<f32> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, spans)| {
+                        let runs = markdown_item_runs(spans, *ordered, index, &palette);
+                        self.renderer.measure_preview_paragraph(
+                            &runs,
+                            inner,
+                            metrics.font_size,
+                            metrics.line_height,
+                        )
+                    })
+                    .collect();
+                MarkdownBlockLayout::rows(rows, 0.0)
+            }
+            preview::MarkdownBlock::Quote(lines) => {
+                let inner = (width - metrics.quote_indent).max(1.0);
+                let rows: Vec<f32> = lines
                     .iter()
                     .map(|spans| {
                         let runs = markdown_runs(spans, &palette, false);
@@ -13243,25 +13956,96 @@ impl Runtime {
                             metrics.line_height,
                         )
                     })
-                    .sum::<f32>()
+                    .collect();
+                // The quote's own top and bottom padding, inside the bar.
+                MarkdownBlockLayout::rows(rows, metrics.quote_padding_y * 2.0)
             }
+            preview::MarkdownBlock::Table { rows } => {
+                self.measure_markdown_table(rows, metrics, &palette)
+            }
+            preview::MarkdownBlock::Rule => MarkdownBlockLayout::solid(metrics.rule_thickness),
             preview::MarkdownBlock::Code { text, .. } => {
-                // A fence does not wrap: it is a block of code, and code that
-                // reflows is code that lies about its own indentation.
+                // **A fence does not wrap and scrolls sideways instead** (user
+                // ruling, 2026-08-13). It is a block of code, and code that
+                // reflows is code that lies about its own indentation — the same
+                // argument that keeps a `.diff` unwrapped. So the fence's
+                // longest line is measured here and enters the document's
+                // horizontal extent; without that the line would be drawn and
+                // then be unreachable, which is the worst of both rulings.
                 let lines = text.lines().count().max(1) as f32;
-                metrics.code_border * 2.0
-                    + metrics.code_padding_y * 2.0
-                    + metrics.line_height * lines
+                let width = markdown_fence_width(text, metrics, |runs| {
+                    self.renderer.measure_preview_paragraph_width(
+                        runs,
+                        metrics.font_size,
+                        metrics.line_height,
+                    )
+                });
+                MarkdownBlockLayout {
+                    width,
+                    ..MarkdownBlockLayout::solid(
+                        metrics.code_border * 2.0
+                            + metrics.code_padding_y * 2.0
+                            + metrics.line_height * lines,
+                    )
+                }
             }
             preview::MarkdownBlock::Paragraph(spans) => {
                 let runs = markdown_runs(spans, &palette, false);
-                self.renderer.measure_preview_paragraph(
+                MarkdownBlockLayout::solid(self.renderer.measure_preview_paragraph(
                     &runs,
                     width,
                     metrics.font_size,
                     metrics.line_height,
-                )
+                ))
             }
+        }
+    }
+
+    /// A markdown table's columns and rows, measured from **its own contents**.
+    ///
+    /// **The table is as wide as it is, and the pane scrolls to it** (user
+    /// ruling, 2026-08-13). Each column is its own widest cell, no cell wraps,
+    /// and a table wider than the pane is reached by scrolling sideways — the
+    /// same answer the `.csv` grid beside it has always given, which is the
+    /// point: two tables in one product that behave differently is a defect
+    /// visible in one screenshot. The first draft divided the pane's width among
+    /// the columns in proportion to their content and wrapped inside the cells;
+    /// that is a column-compression algorithm, it was overruled before it
+    /// shipped, and the version that is here is the one with no policy in it.
+    ///
+    /// The chrome — heading fill, collapsed hairlines, cell padding — is the csv
+    /// grid's for the same reason.
+    fn measure_markdown_table(
+        &mut self,
+        rows: &[preview::TableRow],
+        metrics: seats::PreviewMarkdownMetrics,
+        palette: &bt_render::ChromePalette,
+    ) -> MarkdownBlockLayout {
+        let count = rows.iter().map(Vec::len).max().unwrap_or(0);
+        if count == 0 {
+            return MarkdownBlockLayout::default();
+        }
+        let columns = markdown_table_columns(rows, metrics, |cell, heading| {
+            let runs = markdown_runs(cell, palette, heading);
+            self.renderer.measure_preview_paragraph_width(
+                &runs,
+                metrics.font_size,
+                metrics.line_height,
+            )
+        });
+        // No cell wraps, so every row is one line box tall — which is also why
+        // the row heights are uniform and still written down per row: the
+        // painter walks `rows` and must not go back to arithmetic of its own.
+        let row_height = metrics.line_height + metrics.table_border + metrics.table_padding_y * 2.0;
+        let row_heights = vec![row_height; rows.len()];
+        // Plus the hairline that closes the last row and the one down the far
+        // edge: `border-collapse` draws one between neighbours and one at each
+        // end.
+        let width = columns.iter().sum::<f32>() + metrics.table_border;
+        MarkdownBlockLayout {
+            columns,
+            width,
+            ..MarkdownBlockLayout::rows(row_heights, metrics.table_border)
         }
     }
 
@@ -13270,8 +14054,12 @@ impl Runtime {
     fn preview_content_extent(&self, scale: f32) -> (f32, usize) {
         match &self.preview_doc {
             PreviewDocument::Empty => (0.0, 0),
-            PreviewDocument::Text(lines) => (
-                seats::preview_text_metrics(scale).line_height * lines.len() as f32,
+            // **A folded body is as tall as its rows**, not as its lines. The
+            // width it answers is still the file's own; whether that width is
+            // *reachable* is one ruling made in one place, and that place is
+            // `preview_document_max_scroll`.
+            PreviewDocument::Text { wrap, .. } => (
+                seats::preview_text_metrics(scale).line_height * wrap.rows() as f32,
                 self.current_preview_buffer()
                     .map_or(0, |buffer| buffer.max_columns),
             ),
@@ -13294,7 +14082,7 @@ impl Runtime {
     /// keep out of it.
     fn refresh_preview_body(&mut self) {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+        let Some(body) = self.preview_content_body_rect(scale) else {
             self.renderer.set_preview_body(None);
             return;
         };
@@ -13315,11 +14103,11 @@ impl Runtime {
         let advance = self.preview_mono_advance;
         let (rows_height, columns) = self.preview_content_extent(scale);
         let mut built = match &self.preview_doc {
-            PreviewDocument::Text(lines) => {
+            PreviewDocument::Text { lines, wrap } => {
                 let geometry =
                     self.preview_doc_text_geometry(body, scale, rows_height, columns, advance);
-                let edit = self.preview_edit_paint(&geometry, lines.len(), scale);
-                build_preview_text_body(&geometry, lines, advance, edit.as_ref(), &palette)
+                let edit = self.preview_edit_paint(&geometry, wrap, scale);
+                build_preview_text_body(&geometry, lines, wrap, advance, edit.as_ref(), &palette)
             }
             PreviewDocument::Diff(rows) => build_preview_diff_body(
                 &seats::preview_mono_geometry(
@@ -13345,33 +14133,32 @@ impl Runtime {
                 rows,
                 &palette,
             ),
-            PreviewDocument::Markdown {
-                blocks,
-                heights,
-                tops,
-            } => build_preview_markdown_body(
+            PreviewDocument::Markdown { blocks, layout } => build_preview_markdown_body(
                 body,
                 seats::preview_markdown_metrics(scale),
                 scroll,
-                (blocks, heights, tops),
+                (blocks, layout),
                 &palette,
             ),
             PreviewDocument::Empty => bt_render::PreviewBody {
                 clip: body,
                 quads: Vec::new(),
                 paragraphs: Vec::new(),
+                foot: None,
             },
         };
-        // One strip, two sentences, and they cannot both be owed: a truncated
-        // body is read-only, so it has no save to report. The degradation comes
-        // first anyway, because it is a standing fact about the file rather than
-        // news about a keystroke.
-        let notice = self
-            .current_preview_buffer()
-            .and_then(preview::PreviewBuffer::truncation_notice)
-            .map(str::to_owned)
-            .or_else(|| self.preview_save_notice(Instant::now()).map(str::to_owned));
-        if let Some(notice) = notice {
+        // **Two notices, two shapes, and they cannot both be owed.** Truncation
+        // is a standing fact about the file, so it gets a bar with height that
+        // the document was already made shorter for — `body` above is the pane's
+        // body *minus* that bar. A save is news about a keystroke, so it keeps
+        // the floating strip: it is gone in 1300ms and reserving height for it
+        // would reflow the document twice for every Ctrl+S. A truncated buffer
+        // is read-only and has no save to report, so no frame ever owes both.
+        if let Some(notice) = self.preview_foot_notice() {
+            let bar =
+                seats::preview_body_rect(&self.seats, &self.seat_layout, scale).unwrap_or(body);
+            built.foot = Some(preview_foot(bar, scale, notice, &palette));
+        } else if let Some(notice) = self.preview_save_notice(Instant::now()).map(str::to_owned) {
             push_preview_truncation_notice(&mut built, body, scale, &notice, &palette);
         }
         self.renderer.set_preview_body(Some(built));
@@ -13386,7 +14173,7 @@ impl Runtime {
     fn preview_edit_paint(
         &self,
         geometry: &seats::PreviewMonoGeometry,
-        lines: usize,
+        wrap: &preview_edit::WrapLayout,
         scale: f32,
     ) -> Option<PreviewEditPaint> {
         let buffer = self.current_preview_buffer()?;
@@ -13398,23 +14185,23 @@ impl Runtime {
         let range = visible_range(
             geometry.line_rect(0)[1],
             geometry.line_height,
-            lines,
+            wrap.rows(),
             geometry.viewport,
         );
         let selection = self.preview_caret.range();
-        let bands = range
-            .filter_map(|line| {
-                preview_edit::selected_columns(content, &starts, line, &selection)
-                    .map(|(from, to)| (line, from, to))
-            })
-            .collect();
+        // **Cut per visual row, not per line.** A selection is a range of the
+        // *line*, and a wrapped line is several rows: a band drawn once for the
+        // whole line would start on the first row and run off its right edge
+        // instead of turning the corner with the text it is under.
+        let bands = preview_edit_bands(content, &starts, &selection, wrap, range);
         // The caret belongs to the *focus*, not to the buffer: a body you have
         // clicked away from keeps its selection, greyed, the way a text field
         // does, but it has no caret because nothing is going to land there.
         let caret = self
             .preview_edit_focus()
             .then(|| self.preview_caret_position())
-            .flatten();
+            .flatten()
+            .map(|(line, column)| preview_caret_row(wrap, line, column));
         Some(PreviewEditPaint {
             bands,
             caret,
@@ -13501,6 +14288,7 @@ impl Runtime {
                 align_right: false,
                 align_center: true,
             }],
+            foot: None,
         })
     }
 
@@ -13805,6 +14593,18 @@ impl Runtime {
     }
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
+        // **The tripwire.** A frame is about to describe a tab whose seat set
+        // may have changed; if it changed without anyone carrying the change to
+        // the shells, this is the moment the two pictures diverge and the last
+        // moment anything can say so. Two `u64`s, in debug only — the cost of
+        // the third instance of a bug that has now happened twice.
+        debug_assert_eq!(
+            self.shells_settled_revision,
+            self.seats.structure_revision(),
+            "a seat arrived or left without `settle_seat_set_change`: the panes \
+             are about to be drawn at their new widths while their shells still \
+             believe the old ones"
+        );
         // Real-machine decoration-state trace (`BT_DECOR_TRACE=<path>`). Runs on every frame trigger
         // — including held/skipped frames — so a persistent stuck-source block is captured even when
         // the presented frame does not change. Zero cost when the variable is unset.
@@ -15944,9 +16744,16 @@ impl Runtime {
         self.tabs[active].file_trees.insert(seat, win.cache);
         // `DOCK` is a button and this is the click on it.
         self.set_files_keyboard(Some(seat), FilesFocusArrival::Pointer);
-        self.divider_drag = None;
-        self.resolve_seat_layout(self.renderer.presentation_geometry().swapchain_size.into());
-        self.mark_session_dirty(Instant::now());
+        // **The hole this used to be** (user report, 2026-08-13). A column
+        // arriving by this door narrows every pane beside it exactly as one
+        // arriving by `Ctrl+Shift+B` does — but this path re-solved the layout
+        // and stopped there, and `resolve_seat_layout` moves rectangles without
+        // telling a single shell about them. The panes were redrawn narrower
+        // while their ConPTYs went on writing at the old width, which is a
+        // prompt that reprints itself over its own middle. The keyboard twin
+        // never had the bug because it always ran the full ceremony; this one
+        // now runs the same one.
+        self.settle_seat_set_change()?;
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -17067,6 +17874,12 @@ impl Runtime {
         context: &'static str,
     ) -> Result<Option<GridSize>> {
         let scale = self.renderer.metrics().scale_factor as f32;
+        // **The shells are about to be told what the tree looks like**, which
+        // makes this the one honest place to record that they know. See
+        // [`Self::shells_settled_revision`]: every other reading of "the seat
+        // set changed" is a reading of intent, and intent is exactly what the
+        // two verbs that forgot the ceremony had.
+        self.shells_settled_revision = self.seats.structure_revision();
         let plan = leaf_resize_plan(&self.seats, &self.seat_layout, self.focused_leaf, scale);
         let active = self.active_tab;
         // The panes without the keyboard, before the focused one: they take the
@@ -19501,10 +20314,7 @@ impl Runtime {
             self.sessions_match_terminals(),
             "item 6: a layout drop leaves the tab's shells matching its tree"
         );
-        self.seat_pointer = seats::ChromePointer::default();
-        self.divider_drag = None;
-        self.apply_window_min_inner_size()?;
-        self.commit_seat_geometry()?;
+        self.settle_seat_set_change()?;
         Ok(true)
     }
 
@@ -19642,10 +20452,7 @@ impl Runtime {
             self.sessions_match_terminals(),
             "item 6: a tear-out leaves the tab it left matching its own tree"
         );
-        self.seat_pointer = seats::ChromePointer::default();
-        self.divider_drag = None;
-        self.apply_window_min_inner_size()?;
-        self.commit_seat_geometry()?;
+        self.settle_seat_set_change()?;
         Ok(true)
     }
 
@@ -30584,6 +31391,79 @@ mod tests {
         }
     }
 
+    /// PIN (user report, 2026-08-13): **a seat arriving narrows the shells
+    /// beside it, and the arrival is legible from the tree alone.**
+    ///
+    /// The audit behind `Runtime::settle_seat_set_change` needed two facts to be
+    /// true of every seat-set change, and this pins both for the preview seat —
+    /// the one the report was made against:
+    ///
+    /// 1. the terminal's *solved body genuinely shrinks*, so a shell that is not
+    ///    re-sized from the new solve is a shell living at a width the window no
+    ///    longer draws. This is the whole of the reported symptom: a prompt
+    ///    reprinting itself into columns that are not there loses its middle;
+    /// 2. `structure_revision` moves, which is what `shells_settled_revision`
+    ///    compares itself against. The revision is the only thing that can tell
+    ///    a frame "the seat set changed and nobody carried it", because every
+    ///    other reading is a reading of the *caller's* intent — and intent is
+    ///    exactly what the two verbs that skipped the ceremony had plenty of.
+    ///
+    /// MUTATION ①: drop the `structure_revision += 1` from `Seats::toggle_preview`
+    /// and the revision assertion goes red — which is the tripwire going blind,
+    /// the same blindness that let `dock_float` re-solve and stop.
+    /// MUTATION ②: solve the *pre-toggle* tree for `after` and the width
+    /// assertion goes red, which is the pre-fix `dock_float` in one line: the
+    /// tree grew a pane and the rectangle handed to the shell did not.
+    #[test]
+    fn a_preview_seat_arriving_narrows_the_terminal_and_moves_the_revision() {
+        let dpi_milli = 1_000_u32;
+        let scale = dpi_milli as f32 / 1_000.0;
+        let metrics = seats::seat_metrics(dpi_milli);
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(dpi_milli), 0);
+        let solve = |seats: &seats::Seats| {
+            seats
+                .solve(viewport, &metrics, SizePolicy::Lawful)
+                .expect("a 1600x900 window seats a terminal beside a preview")
+        };
+
+        let mut seats = seats::Seats::lone_terminal();
+        let terminal = seats.terminal();
+        let before_layout = solve(&seats);
+        let before = seats::pane_body_viewport(&seats, &before_layout, terminal, scale)
+            .expect("the solver placed the lone terminal");
+        let settled = seats.structure_revision();
+
+        assert!(
+            seats.toggle_preview(&metrics),
+            "a 1600x900 lone-terminal tab has room for the ruled preview seat"
+        );
+        let after_layout = solve(&seats);
+        let after = seats::pane_body_viewport(&seats, &after_layout, terminal, scale)
+            .expect("the solver placed the terminal beside the preview");
+
+        assert!(
+            after.width < before.width,
+            "the terminal must actually give up width to the arriving preview, or \
+             there is no bug here to have: {} against {}",
+            after.width,
+            before.width
+        );
+        assert_ne!(
+            seats.structure_revision(),
+            settled,
+            "the arrival has to move the revision the frame-time tripwire reads"
+        );
+
+        // And the carry itself answers the *new* rectangle for the leaf it is
+        // about — the step `dock_float` was missing entirely.
+        let plan = leaf_resize_plan(&seats, &after_layout, terminal, scale);
+        assert_eq!(plan.len(), 1, "one terminal leaf, one carry");
+        assert_eq!(
+            plan[0].body, after,
+            "the shell is told the rectangle the preview left it, not the one it had"
+        );
+    }
+
     /// PIN: moving the keyboard changes which carry is gated, and no leaf's
     /// target size.
     ///
@@ -34560,6 +35440,520 @@ mod tests {
         assert!(data.iter().all(|p| !p.runs[0].bold));
     }
 
+    /// PIN (user report, 2026-08-13: "整屏空白") — **a block paints every pixel
+    /// it reserved, and the rows it paints are the rows it was measured for.**
+    ///
+    /// The reported hole. A list was measured with the shaper — each item asked
+    /// how many lines it took when *wrapped* into the pane — and then drawn on
+    /// the assumption that every item took exactly one. In `docs/DESIGN.md`, read
+    /// in a pane narrow enough that its long items wrap three and four ways, the
+    /// two answers differ by most of a screen, and the difference came out as
+    /// blank: the block reserved what the measurement asked for, painted a third
+    /// of it, and the next heading began below the reservation. Its quieter twin
+    /// was that every wrapped item's second line was clipped by the same
+    /// one-line box, which is text going missing rather than space appearing.
+    ///
+    /// Stated as the property and not as the document: **the n-th row starts
+    /// where the first n-1 rows ended, and the last one ends where the block
+    /// does.** That is true of a list, a quote and a table alike, which is why
+    /// all three are asserted here through the one painter.
+    ///
+    /// MUTATION: give the list arm of `build_preview_markdown_body` back its
+    /// `let item_height = metrics.line_height;` and the second item's box is a
+    /// line tall in a three-line hole — every assertion below the first goes red.
+    #[test]
+    fn a_wrapped_row_is_painted_in_the_box_it_was_measured_for() {
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 600.0, 4000.0];
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let line = metrics.line_height;
+        let origin = body[1] + metrics.padding_y;
+
+        // Three items that wrap to one, three and two lines. Uneven on purpose:
+        // equal rows would let the buggy painter answer right by accident.
+        let blocks = preview::parse_markdown("- one\n- two\n- three\n");
+        let heights = vec![line, line * 3.0, line * 2.0];
+        let layout = vec![MarkdownBlockLayout::rows(heights.clone(), 0.0)];
+        let built =
+            build_preview_markdown_body(body, metrics, [0.0, 0.0], (&blocks, &layout), &palette);
+        let items: Vec<_> = built
+            .paragraphs
+            .iter()
+            .filter(|p| {
+                p.runs
+                    .first()
+                    .is_some_and(|run| run.text.starts_with('\u{2022}'))
+            })
+            .collect();
+        assert_eq!(items.len(), 3, "one paragraph per item");
+        let mut expected_top = origin;
+        for (index, item) in items.iter().enumerate() {
+            assert_eq!(
+                item.rect[1], expected_top,
+                "item {index} starts where the items above it ended"
+            );
+            assert_eq!(
+                item.rect[3] - item.rect[1],
+                heights[index],
+                "item {index} is given the box its own wrap was measured into"
+            );
+            expected_top = item.rect[3];
+        }
+        assert_eq!(
+            expected_top,
+            origin + layout[0].height,
+            "and the last row ends exactly where the block does — no hole under it"
+        );
+
+        // The same property for a quote, whose rows sit inside the block's own
+        // padding, and whose accent bar spans the whole of it rather than one
+        // bar per line.
+        let quoted = preview::parse_markdown("> a\n> b\n");
+        let quote_rows = vec![line * 2.0, line];
+        let quote_layout = vec![MarkdownBlockLayout::rows(
+            quote_rows.clone(),
+            metrics.quote_padding_y * 2.0,
+        )];
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            (&quoted, &quote_layout),
+            &palette,
+        );
+        let bars: Vec<_> = built
+            .quads
+            .iter()
+            .filter(|quad| quad.color == palette.accent)
+            .collect();
+        assert_eq!(bars.len(), 1, "one bar for the quote, not one per line");
+        assert_eq!(
+            bars[0].rect[3] - bars[0].rect[1],
+            quote_layout[0].height,
+            "and it is as tall as the block it marks"
+        );
+        assert_eq!(bars[0].rect[2] - bars[0].rect[0], metrics.quote_bar);
+        let lines: Vec<_> = built
+            .paragraphs
+            .iter()
+            .filter(|p| p.rect[0] > bars[0].rect[2])
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].rect[1], origin + metrics.quote_padding_y);
+        assert_eq!(
+            lines[1].rect[1],
+            lines[0].rect[1] + quote_rows[0],
+            "the second quoted line clears the first one's own wrap"
+        );
+    }
+
+    /// PIN — `docs/DESIGN.md`, the file the report was made against, parses into
+    /// blocks that reserve nothing they cannot paint.
+    ///
+    /// The fixture is the real file rather than a sample of it, because two of
+    /// the three hypotheses for the hole were about the *document* and not about
+    /// the painter: a fence left open by an indented closer would swallow the
+    /// rest of the file into one enormous `Code` block, and a pipe row measured
+    /// as prose would be a paragraph the width of a table. Both are refuted here
+    /// by construction, and stay refuted if someone edits the document.
+    ///
+    /// MUTATION: make the fence scanner require a *bare* ```` ``` ```` to close
+    /// (`lines[index] == "```"`) and the largest-block assertion goes red, which
+    /// is the swallowing hypothesis in its real form.
+    #[test]
+    fn the_design_document_parses_into_blocks_that_reserve_nothing_extra() {
+        let source = include_str!("../../../docs/DESIGN.md");
+        let blocks = preview::parse_markdown(source);
+        let source_lines = source.lines().count();
+        assert!(
+            source_lines > 100,
+            "the fixture is the real document, not a stub"
+        );
+
+        // ① No fence swallows the file. The largest one in this document is a
+        //    short shell transcript; a tenth of the file is a generous bound
+        //    that a runaway fence blows through by an order of magnitude.
+        let biggest_fence = blocks
+            .iter()
+            .filter_map(|block| match block {
+                preview::MarkdownBlock::Code { text, .. } => Some(text.lines().count()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            biggest_fence * 10 < source_lines,
+            "a fence holding {biggest_fence} of {source_lines} lines is a fence \
+             that never closed"
+        );
+
+        // ② The document really does exercise the blocks the prototype could not
+        //    draw, or this fixture proves nothing about them.
+        let count = |kind: fn(&preview::MarkdownBlock) -> bool| {
+            blocks.iter().filter(|block| kind(block)).count()
+        };
+        assert!(
+            count(|b| matches!(b, preview::MarkdownBlock::Table { .. })) > 0,
+            "DESIGN.md has tables, and they must arrive as tables"
+        );
+        assert!(
+            count(|b| matches!(b, preview::MarkdownBlock::Quote(_))) > 0,
+            "and quotes"
+        );
+        assert!(
+            count(|b| matches!(
+                b,
+                preview::MarkdownBlock::List {
+                    ordered: Some(_),
+                    ..
+                }
+            )) > 0,
+            "and numbered lists"
+        );
+
+        // ③ Every table has a heading row and at least one body row — a table
+        //    of one row is a separator that was read as content.
+        for block in &blocks {
+            if let preview::MarkdownBlock::Table { rows } = block {
+                assert!(
+                    rows.len() >= 2,
+                    "a table needs its heading and something under it: {rows:?}"
+                );
+                assert!(
+                    rows.iter().all(|row| !row.is_empty()),
+                    "and no row of no cells"
+                );
+            }
+        }
+    }
+
+    /// PIN (user rulings, 2026-08-13) — **which markdown blocks insist on a
+    /// width, and which have no opinion.**
+    ///
+    /// Three rulings, one arithmetic, and the arithmetic is the whole of the
+    /// horizontal scroll a rendered document gets:
+    ///
+    /// ① a **code fence does not reflow** — code that wraps lies about its own
+    ///    indentation, the same argument that keeps a `.diff` unwrapped — so it
+    ///    answers its longest line and the pane scrolls to it;
+    /// ② a **table is as wide as its own columns**, and the pane scrolls to it
+    ///    rather than compressing them: the first draft divided the pane's width
+    ///    among the columns and wrapped inside the cells, and that policy was
+    ///    overruled before it shipped;
+    /// ③ a **paragraph never insists**, however long the token inside it. A
+    ///    180-character unbreakable run is broken mid-token by the shaper rather
+    ///    than allowed to push a horizontal axis onto a page of prose — which is
+    ///    what "soft wrap with an anywhere break" means and the reason a wall of
+    ///    text still reads in a narrow pane.
+    ///
+    /// Asserted on `stress.md`, the fixture built to carry all three at once.
+    ///
+    /// MUTATION ①: answer `0.0` for the fence's width and the fence assertion
+    /// goes red — the long line is drawn and can never be reached.
+    /// MUTATION ②: go back to `width`-proportional columns and the table's own
+    /// width stops exceeding the pane, so the table assertion goes red.
+    /// MUTATION ③: give `Paragraph` a `width` and the prose assertion goes red,
+    /// which is a page of text growing a horizontal scrollbar.
+    #[test]
+    fn only_the_blocks_that_refuse_to_reflow_ask_for_a_horizontal_scroll() {
+        let source = include_str!("../../../test-assets/preview-samples/stress.md");
+        let blocks = preview::parse_markdown(source);
+        let fences = blocks
+            .iter()
+            .filter(|block| matches!(block, preview::MarkdownBlock::Code { .. }))
+            .count();
+        let tables: Vec<&preview::MarkdownBlock> = blocks
+            .iter()
+            .filter(|block| matches!(block, preview::MarkdownBlock::Table { .. }))
+            .collect();
+        assert!(fences >= 1, "the fixture carries a fence");
+        assert_eq!(tables.len(), 2, "and a wide table and a narrow one");
+        if let preview::MarkdownBlock::Table { rows } = tables[0] {
+            assert!(
+                rows[0].len() >= 8,
+                "the wide table is at least eight across"
+            );
+        }
+        // The 180-character token really is one token, or ③ proves nothing.
+        assert!(
+            source
+                .split_whitespace()
+                .any(|token| token.chars().count() >= 180),
+            "the fixture carries an unbreakable run long enough to matter"
+        );
+
+        // **The two insisting blocks, measured through the real arithmetic with
+        // a stand-in shaper**: eight pixels a character, which is a monospace
+        // grid and exactly what the assertions below can therefore predict.
+        let metrics_at_1 = seats::preview_markdown_metrics(1.0);
+        let cell_px = 8.0_f32;
+        let fence_text = blocks
+            .iter()
+            .find_map(|block| match block {
+                preview::MarkdownBlock::Code { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the fixture carries a fence");
+        let longest = fence_text
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        assert!(longest >= 250, "the fence's longest line is a stress case");
+        let fence_width = markdown_fence_width(&fence_text, metrics_at_1, |runs| {
+            runs.iter()
+                .map(|run| run.text.chars().count())
+                .sum::<usize>() as f32
+                * cell_px
+        });
+        assert_eq!(
+            fence_width,
+            longest as f32 * cell_px
+                + (metrics_at_1.code_border + metrics_at_1.code_padding_x) * 2.0,
+            "① the fence asks for its longest line and its own chrome"
+        );
+
+        let preview::MarkdownBlock::Table { rows } = tables[0] else {
+            unreachable!("filtered above")
+        };
+        let columns = markdown_table_columns(rows, metrics_at_1, |cell, _| {
+            cell.iter()
+                .map(|span| span.text.chars().count())
+                .sum::<usize>() as f32
+                * cell_px
+        });
+        assert_eq!(columns.len(), rows[0].len(), "one width per column");
+        let chrome = metrics_at_1.table_border + metrics_at_1.table_padding_x * 2.0;
+        for (index, width) in columns.iter().enumerate() {
+            let widest = rows
+                .iter()
+                .filter_map(|row| row.get(index))
+                .map(|cell| cell.iter().map(|s| s.text.chars().count()).sum::<usize>())
+                .max()
+                .unwrap_or(0) as f32
+                * cell_px;
+            assert_eq!(
+                *width,
+                chrome + widest.max(metrics_at_1.table_min_column),
+                "② column {index} is its own widest cell, never a share of the pane"
+            );
+        }
+        assert!(
+            columns.iter().sum::<f32>() > 900.0,
+            "and the table is genuinely wider than a pane, or this proves nothing"
+        );
+
+        // A layout is what the runtime would have measured, with the ruling's
+        // shape and no renderer: the fence and the table insist, prose does not.
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let pane = [0.0, 0.0, 300.0, 200.0];
+        let prose_only = vec![
+            MarkdownBlockLayout::solid(metrics.line_height * 12.0),
+            MarkdownBlockLayout::solid(metrics.line_height * 3.0),
+        ];
+        let document = PreviewDocument::Markdown {
+            blocks: Vec::new(),
+            layout: prose_only,
+        };
+        let max = preview_document_max_scroll(&document, pane, 1.0, 8.0, 0.0, 0);
+        assert_eq!(
+            max[0], 0.0,
+            "③ a page of prose has no horizontal axis, whatever it is made of"
+        );
+
+        let wide = 900.0_f32;
+        let with_a_fence = PreviewDocument::Markdown {
+            blocks: Vec::new(),
+            layout: vec![
+                MarkdownBlockLayout::solid(metrics.line_height),
+                MarkdownBlockLayout {
+                    width: wide,
+                    ..MarkdownBlockLayout::solid(metrics.line_height * 4.0)
+                },
+            ],
+        };
+        let max = preview_document_max_scroll(&with_a_fence, pane, 1.0, 8.0, 0.0, 0);
+        assert_eq!(
+            max[0],
+            wide + metrics.padding_x * 2.0 - (pane[2] - pane[0]),
+            "①/② the widest insisting block, plus the page's own padding, is \
+             exactly how far sideways there is to go"
+        );
+    }
+
+    /// PIN (user report, 2026-08-13 — **the escape**) — nothing a preview body
+    /// produces may be drawn outside the preview's own rectangle.
+    ///
+    /// The report: opening a document holding a 250-character fence line and a
+    /// table of very long cells put grey bands and stray words *across the whole
+    /// window* — over the file tree, over the terminal. A preview that draws on
+    /// its neighbours is a different class of defect from a preview that draws
+    /// its own content badly, and it has exactly two causes, both asserted here:
+    ///
+    /// ① a rectangle that the renderer's crop does not actually bound —
+    ///    `PreviewBody::clip` is the one gate, and every quad and every
+    ///    paragraph has to go through it;
+    /// ② a rectangle that is **inverted or non-finite**, which no crop can save:
+    ///    the pass runs in whole-surface coordinates with no scissor, so
+    ///    `right < left` is a box the rasteriser fills across the surface and a
+    ///    `NaN` is a box with no edges. `bt_render::crop_to` is the gate for
+    ///    that one, and this test's job is to prove the layout never asks it to
+    ///    fire — a rectangle silently dropped is content silently missing.
+    ///
+    /// Run against `stress.md`, the document the report was made with, at a pane
+    /// deliberately far narrower than its widest block, and at every horizontal
+    /// scroll offset the body can reach — because the offset is precisely what
+    /// moves a wide block's rectangle to a negative x.
+    ///
+    /// MUTATION: drop the `.max(body.clip[..])` crop in
+    /// `bt_render::shape_preview_body`, or return the rect unclipped from
+    /// `crop_to`, and the containment assertion goes red — which is the reported
+    /// screenshot, in one number.
+    #[test]
+    fn nothing_a_preview_body_produces_is_drawn_outside_the_preview() {
+        let palette = bt_render::chrome_palette();
+        let source = include_str!("../../../test-assets/preview-samples/stress.md");
+        let blocks = preview::parse_markdown(source);
+        // A narrow pane, so every wide block overruns it and the crop is the only
+        // thing standing between the document and the panes beside it.
+        let body = [480.0, 120.0, 800.0, 620.0];
+        let metrics = seats::preview_markdown_metrics(1.0);
+
+        // A stand-in measurer, eight pixels a character — the same monospace
+        // grid the ruling test uses, so the widths here are predictable and the
+        // wide blocks are genuinely wider than the pane.
+        let cell = 8.0_f32;
+        let mut layout = Vec::with_capacity(blocks.len());
+        let mut top = 0.0_f32;
+        let mut previous = 0.0_f32;
+        for block in &blocks {
+            let mut measured = match block {
+                preview::MarkdownBlock::Code { text, .. } => MarkdownBlockLayout {
+                    width: markdown_fence_width(text, metrics, |runs| {
+                        runs.iter()
+                            .map(|run| run.text.chars().count())
+                            .sum::<usize>() as f32
+                            * cell
+                    }),
+                    ..MarkdownBlockLayout::solid(
+                        metrics.code_border * 2.0
+                            + metrics.code_padding_y * 2.0
+                            + metrics.line_height * text.lines().count().max(1) as f32,
+                    )
+                },
+                preview::MarkdownBlock::Table { rows } => {
+                    let columns = markdown_table_columns(rows, metrics, |cell_spans, _| {
+                        cell_spans
+                            .iter()
+                            .map(|span| span.text.chars().count())
+                            .sum::<usize>() as f32
+                            * cell
+                    });
+                    let width = columns.iter().sum::<f32>() + metrics.table_border;
+                    let heights = vec![
+                        metrics.line_height
+                            + metrics.table_border
+                            + metrics.table_padding_y * 2.0;
+                        rows.len()
+                    ];
+                    MarkdownBlockLayout {
+                        columns,
+                        width,
+                        ..MarkdownBlockLayout::rows(heights, metrics.table_border)
+                    }
+                }
+                preview::MarkdownBlock::List { items, .. } => {
+                    MarkdownBlockLayout::rows(vec![metrics.line_height; items.len()], 0.0)
+                }
+                preview::MarkdownBlock::Quote(lines) => MarkdownBlockLayout::rows(
+                    vec![metrics.line_height; lines.len()],
+                    metrics.quote_padding_y * 2.0,
+                ),
+                preview::MarkdownBlock::Rule => MarkdownBlockLayout::solid(metrics.rule_thickness),
+                _ => MarkdownBlockLayout::solid(metrics.line_height * 2.0),
+            };
+            let margin = markdown_block_margin(block, metrics);
+            top += previous.max(margin);
+            measured.top = top;
+            top += measured.height;
+            previous = margin;
+            layout.push(measured);
+        }
+        let widest = layout.iter().map(|b| b.width).fold(0.0_f32, f32::max);
+        assert!(
+            widest > (body[2] - body[0]) * 2.0,
+            "the fixture must overrun the pane by a wide margin, or this proves \
+             nothing: {widest} against {}",
+            body[2] - body[0]
+        );
+
+        let document = PreviewDocument::Markdown {
+            blocks: blocks.clone(),
+            layout: layout.clone(),
+        };
+        let max = preview_document_max_scroll(&document, body, 1.0, cell, 0.0, 0);
+        assert!(max[0] > 0.0 && max[1] > 0.0, "the page overruns both ways");
+
+        // Every corner of the scroll space, plus the middle: the horizontal
+        // offset is what pushes a wide block's rectangle negative.
+        for x in [0.0, max[0] / 2.0, max[0]] {
+            for y in [0.0, max[1] / 2.0, max[1]] {
+                let built = build_preview_markdown_body(
+                    body,
+                    metrics,
+                    [x, y],
+                    (&blocks, &layout),
+                    &palette,
+                );
+                assert_eq!(built.clip, body, "the body's one gate is the pane's box");
+                let finite = |rect: [f32; 4]| rect.iter().all(|value| value.is_finite());
+                for quad in &built.quads {
+                    assert!(
+                        finite(quad.rect),
+                        "a non-finite fill at scroll {x},{y}: {:?}",
+                        quad.rect
+                    );
+                    assert!(
+                        quad.rect[2] >= quad.rect[0] && quad.rect[3] >= quad.rect[1],
+                        "an inverted fill at scroll {x},{y}: {:?} — the rasteriser \
+                         fills one of these across the whole surface",
+                        quad.rect
+                    );
+                    assert!(
+                        bt_render::crop_to(quad.rect, built.clip)
+                            .is_none_or(|drawn| inside(drawn, built.clip)),
+                        "a fill that survives the crop outside the pane: {:?}",
+                        quad.rect
+                    );
+                }
+                for paragraph in &built.paragraphs {
+                    assert!(
+                        finite(paragraph.rect),
+                        "a non-finite paragraph at scroll {x},{y}: {:?}",
+                        paragraph.rect
+                    );
+                    assert!(
+                        paragraph.rect[2] >= paragraph.rect[0]
+                            && paragraph.rect[3] >= paragraph.rect[1],
+                        "an inverted paragraph at scroll {x},{y}: {:?}",
+                        paragraph.rect
+                    );
+                    assert!(
+                        bt_render::crop_to(paragraph.rect, built.clip)
+                            .is_none_or(|drawn| inside(drawn, built.clip)),
+                        "a paragraph that survives the crop outside the pane: {:?}",
+                        paragraph.rect
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether one rectangle is wholly inside another.
+    fn inside(rect: [f32; 4], outer: [f32; 4]) -> bool {
+        rect[0] >= outer[0] && rect[1] >= outer[1] && rect[2] <= outer[2] && rect[3] <= outer[3]
+    }
+
     /// PIN — a code fence is a box with a ground, and its language rides the
     /// top-right corner of that box (mock-up 1202-1211).
     ///
@@ -34576,7 +35970,14 @@ mod tests {
             body,
             metrics,
             [0.0, 0.0],
-            (&blocks, &[height], &[0.0]),
+            (
+                &blocks,
+                &[MarkdownBlockLayout {
+                    top: 0.0,
+                    height,
+                    ..MarkdownBlockLayout::default()
+                }],
+            ),
             &palette,
         );
         let border = built
@@ -34611,38 +36012,126 @@ mod tests {
         );
     }
 
-    /// PIN — the truncation notice is pinned to the foot of the body, not
-    /// appended to the end of the document.
+    /// PIN — the flashed notice is pinned to the foot of the body, not appended
+    /// to the end of the document.
     ///
-    /// A sentence about the *file* that only appears once you have scrolled to
-    /// the end of what there is arrives at exactly the moment it is too late to
-    /// be useful.
+    /// A sentence that only appears once you have scrolled to the end of what
+    /// there is arrives at exactly the moment it is too late to be useful. This
+    /// is now the `Saved` flash's strip alone: truncation graduated to a bar
+    /// with height of its own (see the pin below).
     ///
     /// Mutation: place the strip at `rect[1]` instead of against `rect[3]`.
     #[test]
-    fn the_read_only_notice_is_pinned_to_the_foot_of_the_body() {
+    fn the_flashed_notice_is_pinned_to_the_foot_of_the_body() {
         let palette = bt_render::chrome_palette();
         let body = [40.0, 100.0, 440.0, 400.0];
         let mut built = bt_render::PreviewBody {
             clip: body,
             quads: Vec::new(),
             paragraphs: Vec::new(),
+            foot: None,
         };
-        push_preview_truncation_notice(
-            &mut built,
-            body,
-            1.0,
-            preview::PREVIEW_TRUNCATED_NOTICE,
-            &palette,
-        );
+        push_preview_truncation_notice(&mut built, body, 1.0, "Saved", &palette);
         let strip = built.quads[0].rect;
         assert_eq!(strip[3], body[3], "flush with the floor");
         assert_eq!([strip[0], strip[2]], [body[0], body[2]]);
         let line = &built.paragraphs[0];
-        assert_eq!(line.runs[0].text, preview::PREVIEW_TRUNCATED_NOTICE);
+        assert_eq!(line.runs[0].text, "Saved");
         assert_eq!(line.runs[0].color, palette.body_hint_text);
         assert!(!line.runs[0].mono, "the card's family, not the file's");
         assert!(line.rect[1] >= strip[1] && line.rect[3] <= strip[3]);
+    }
+
+    /// PIN (user report, 2026-08-13) — **the truncation notice is a bar with
+    /// height, and the document is shorter for it.**
+    ///
+    /// The report: on `huge.txt` the sentence "Read-only — showing the first
+    /// 64 KB of this file" was bare text laid over the body's last rows, and the
+    /// file's own words printed through it. Worse than ugly — the words
+    /// underneath were unreachable, because the scroll had already ended.
+    ///
+    /// Three things make it a bar rather than a caption, and all three are here:
+    ///
+    /// ① it stands in [`bt_render::PreviewBody::foot`], **outside the clip the
+    ///    content is cut to**, so the document cannot be drawn into it at all —
+    ///    which is a stronger statement than "the fill is opaque";
+    /// ② it is opaque, in the pane's own ground, so nothing shows through even
+    ///    where the two do meet;
+    /// ③ the body handed to the layout is the pane's body *minus* the bar, so
+    ///    the scroll extent ends at the bar's top edge.
+    ///
+    /// MUTATION ①: return the full body from `preview_content_body_rect` — the
+    /// clip assertion goes red, and that is the reported bug exactly: the
+    /// document is laid out over the bar again.
+    /// MUTATION ②: push the bar's fill into `quads` instead of `foot` and the
+    /// clip assertion goes red the other way, because the fill would then be cut
+    /// to the content's clip and never drawn.
+    #[test]
+    fn the_truncation_notice_is_a_bar_the_document_is_shortened_for() {
+        let palette = bt_render::chrome_palette();
+        let pane = [40.0, 100.0, 440.0, 400.0];
+        let scale = 2.0;
+        let height = preview_foot_height(scale);
+        assert_eq!(height, 56.0, "28 logical pixels at 2x");
+
+        let foot = preview_foot(pane, scale, preview::PREVIEW_TRUNCATED_NOTICE, &palette);
+        assert_eq!(
+            foot.bar,
+            [pane[0], pane[3] - height, pane[2], pane[3]],
+            "the bar is flush with the floor and the full width of the pane"
+        );
+        assert_eq!(
+            foot.ground,
+            bt_render::background_rgb(),
+            "opaque, in the pane's own ground"
+        );
+        assert_eq!(foot.border, palette.preview_grid_line);
+        assert_eq!(foot.border_px, 2.0, "one device pixel at 2x");
+        assert_eq!(foot.label.runs[0].text, preview::PREVIEW_TRUNCATED_NOTICE);
+        assert_eq!(foot.label.runs[0].color, palette.files_row_muted);
+        assert!(
+            foot.label.rect[0] > foot.bar[0] && foot.label.rect[2] < foot.bar[2],
+            "the sentence is inset from both edges"
+        );
+        assert!(
+            foot.label.rect[1] >= foot.bar[1] + foot.border_px && foot.label.rect[3] <= foot.bar[3],
+            "and stands inside the bar, below its hairline"
+        );
+
+        // ③ The content is laid out in a body that stops where the bar begins,
+        //    which is what makes the reserved height real rather than a promise.
+        let content = preview_content_body(pane, scale, true);
+        assert_eq!(
+            preview_content_body(pane, scale, false),
+            pane,
+            "a buffer that was not truncated keeps the whole pane"
+        );
+        let document = PreviewDocument::Text {
+            lines: vec!["one".to_owned(); 40],
+            wrap: preview_edit::WrapLayout::unwrapped(&vec!["one".to_owned(); 40]),
+        };
+        let metrics = seats::preview_text_metrics(scale);
+        let rows = metrics.line_height * 40.0;
+        let full = preview_document_max_scroll(&document, pane, scale, 8.0, rows, 0);
+        let shortened = preview_document_max_scroll(&document, content, scale, 8.0, rows, 0);
+        assert_eq!(
+            shortened[1] - full[1],
+            height,
+            "every pixel the bar takes is a pixel further the document must scroll"
+        );
+
+        // ① The body the renderer is handed keeps the content's clip above the
+        //    bar, and the bar rides the slot that is not clipped with it.
+        let built = bt_render::PreviewBody {
+            clip: content,
+            quads: Vec::new(),
+            paragraphs: Vec::new(),
+            foot: Some(foot),
+        };
+        assert!(
+            built.clip[3] <= built.foot.as_ref().unwrap().bar[1],
+            "nothing the document draws can reach the bar"
+        );
     }
 
     // ── slice 3: quick edit ─────────────────────────────────────────────────
@@ -34768,22 +36257,20 @@ mod tests {
                 ))])
             })
             .collect();
-        let mut tops = Vec::new();
-        let mut heights = Vec::new();
+        let mut layout: Vec<MarkdownBlockLayout> = Vec::new();
         let mut top = 0.0_f32;
         for _ in &blocks {
             top += metrics.paragraph_gap;
-            tops.push(top);
-            heights.push(metrics.line_height);
+            layout.push(MarkdownBlockLayout {
+                top,
+                height: metrics.line_height,
+                ..MarkdownBlockLayout::default()
+            });
             top += metrics.line_height;
         }
-        let expected = tops.last().unwrap() + heights.last().unwrap() + metrics.padding_y * 2.0
-            - (body[3] - body[1]);
-        let markdown = PreviewDocument::Markdown {
-            blocks,
-            heights,
-            tops,
-        };
+        let last = layout.last().unwrap();
+        let expected = last.top + last.height + metrics.padding_y * 2.0 - (body[3] - body[1]);
+        let markdown = PreviewDocument::Markdown { blocks, layout };
         let max = preview_document_max_scroll(&markdown, body, scale, 8.0, 0.0, 0);
         assert!(max[1] > 0.0, "a document taller than its pane can scroll");
         assert_eq!(max[1], expected, "and stops exactly at its own last line");
@@ -34809,6 +36296,197 @@ mod tests {
         assert_eq!(
             preview_document_max_scroll(&short, body, scale, 8.0, 0.0, 0),
             [0.0, 0.0]
+        );
+    }
+
+    /// PIN (user ruling, 2026-08-13) — **the text surface folds and has no
+    /// sideways; the diff keeps `pre` and has one.**
+    ///
+    /// The two halves of one ruling, asserted together because the ruling is
+    /// about the difference. A preview is a quick look and content reachable
+    /// only by a hidden gesture reads as content that is not there — so the text
+    /// body wraps and its horizontal extent collapses to nothing, because there
+    /// is nowhere sideways to go. A patch is the exception and its own reason:
+    /// the alignment between the two columns and the full-width tint under every
+    /// row are what a patch *means*, and reflow destroys both.
+    ///
+    /// MUTATION ①: answer `buffer.max_columns` for a wrapping text body in
+    /// `preview_content_extent` and the "nowhere sideways" assertion goes red —
+    /// the pane grows a scrollbar for a document that has no width.
+    /// MUTATION ②: hand the diff a `WrapLayout::wrapped` and the last assertion
+    /// goes red, which is a patch losing its columns.
+    #[test]
+    fn the_text_body_folds_with_no_sideways_and_the_diff_keeps_both() {
+        // Deliberately shorter than the folded document, so "can be scrolled to
+        // its own last row" is a question with an answer.
+        let body = [0.0, 0.0, 240.0, 60.0];
+        let scale = 1.0;
+        let advance = 8.0;
+        let metrics = seats::preview_text_metrics(scale);
+        let columns = preview_wrap_columns(body, metrics, advance)
+            .expect("a 240px pane at 8px a cell holds cells");
+        assert!(columns > 4, "the fixture pane is wide enough to be a pane");
+
+        // One line far wider than the pane, and one that fits.
+        let long = "x".repeat(columns * 4);
+        let lines = vec![long.clone(), "short".to_owned()];
+        let wrap = preview_edit::WrapLayout::wrapped(&lines, columns);
+        assert_eq!(
+            wrap.rows(),
+            5,
+            "four rows for the long line and one for the short"
+        );
+
+        // ① The vertical extent is the *rows*, so the scroller can reach the end
+        //    of a folded document; the horizontal one is nothing at all.
+        let document = PreviewDocument::Text {
+            lines: lines.clone(),
+            wrap: wrap.clone(),
+        };
+        // The file's own width is handed in, exactly as the runtime hands it in:
+        // the ruling that a folded body cannot reach it is the function's, not
+        // the caller's, and a caller that pre-zeroed it would prove nothing.
+        let max = preview_document_max_scroll(
+            &document,
+            body,
+            scale,
+            advance,
+            metrics.line_height * wrap.rows() as f32,
+            long.chars().count(),
+        );
+        assert_eq!(max[0], 0.0, "a folded body has nowhere sideways to go");
+        assert!(max[1] > 0.0, "and can be scrolled to its own last row");
+
+        // ② The painter draws one paragraph per *row*, and the rows put the
+        //    whole line back together with nothing lost off the right edge.
+        let palette = bt_render::chrome_palette();
+        // A pane tall enough to hold every row at once: the painter culls what
+        // is off screen, and this assertion is about the folding, not the cull.
+        let tall = [body[0], body[1], body[2], 400.0];
+        let geometry = seats::preview_mono_geometry(
+            tall,
+            metrics,
+            metrics.line_height * wrap.rows() as f32,
+            0,
+            advance,
+            [0.0, 0.0],
+        );
+        let built = build_preview_text_body(&geometry, &lines, &wrap, advance, None, &palette);
+        let drawn: Vec<String> = built
+            .paragraphs
+            .iter()
+            .map(|p| p.runs[0].text.clone())
+            .collect();
+        assert_eq!(drawn.len(), 5, "five rows drawn, not two lines");
+        assert_eq!(
+            drawn[..4].concat(),
+            long,
+            "and the four rows of the long line are the long line, entire"
+        );
+        assert!(
+            drawn
+                .iter()
+                .take(4)
+                .all(|row| row.chars().count() <= columns),
+            "no row is wider than the pane it folded into"
+        );
+        // Consecutive rows sit one line height apart — a folded line's second
+        // row is a row, not an overprint of its first.
+        for pair in built.paragraphs.windows(2) {
+            assert_eq!(pair[1].rect[1] - pair[0].rect[1], geometry.line_height);
+        }
+
+        // The diff is the exception, on both counts.
+        let rows = vec![DiffRow {
+            text: long.clone(),
+            kind: preview::DiffLineKind::Add,
+            top: 0.0,
+        }];
+        let diff = PreviewDocument::Diff(rows);
+        let diff_max = preview_document_max_scroll(
+            &diff,
+            body,
+            scale,
+            advance,
+            seats::preview_diff_metrics(scale).line_height,
+            long.chars().count(),
+        );
+        assert!(
+            diff_max[0] > 0.0,
+            "a patch does not reflow, so it keeps the horizontal scroll it needs"
+        );
+    }
+
+    /// PIN — the caret, the band and the click all agree about which **row** a
+    /// column of a folded line is on.
+    ///
+    /// Three readings of one arithmetic that used to be one reading: the caret's
+    /// drawn position, the selection band under it and the byte a click names.
+    /// Left disagreeing they produce the classic reflow bug — a caret drawn on
+    /// the first row of a paragraph while the text it is editing is on the
+    /// third.
+    ///
+    /// MUTATION: build the paint with `WrapLayout::unwrapped` and the caret's row
+    /// goes to zero while its column runs off the pane — the pre-ruling drawing
+    /// of a wrapped surface.
+    #[test]
+    fn a_caret_on_a_folded_line_is_drawn_on_the_row_it_is_really_on() {
+        let lines = vec!["aaaa bbbb cccc dddd".to_owned()];
+        let wrap = preview_edit::WrapLayout::wrapped(&lines, 10);
+        assert_eq!(wrap.rows(), 2);
+
+        // Column 12 is the third character of "cccc", which is on the second row
+        // and two cells into it.
+        assert_eq!(preview_caret_row(&wrap, 0, 12), (1, 2));
+        // And a caret at the head of the line is on the first row at column
+        // zero, which is the case a wrap-blind painter also gets right — so it
+        // is asserted next to one it does not.
+        assert_eq!(preview_caret_row(&wrap, 0, 0), (0, 0));
+
+        // The band for a selection covering columns 8..14 is cut in two, one
+        // piece per row, each measured from its own row's left edge.
+        let content = "aaaa bbbb cccc dddd";
+        let starts = preview_edit::line_starts(content);
+        let selection = 8..14;
+        let selected = preview_edit::selected_columns(content, &starts, 0, &selection)
+            .expect("the selection covers this line");
+        assert_eq!(selected, (8, 14));
+        let bands = preview_edit_bands(content, &starts, &selection, &wrap, 0..wrap.rows());
+        assert_eq!(
+            bands,
+            vec![(0, 8, 10), (1, 0, 4)],
+            "the band turns the corner with the text it is under"
+        );
+
+        // And Down from the first row lands on the same column of the second,
+        // rather than leaving the line entirely.
+        let mut caret = preview_edit::EditCaret {
+            anchor: 2,
+            caret: 2,
+            desired_column: None,
+        };
+        step_preview_caret_by_row(content, &mut caret, preview_edit::Motion::Down, &wrap, 10)
+            .expect("Down is a vertical motion");
+        assert_eq!(
+            caret.caret, 12,
+            "Down walks one drawn row, not one paragraph"
+        );
+        assert_eq!(caret.desired_column, Some(2));
+        // Up returns to where it started.
+        step_preview_caret_by_row(content, &mut caret, preview_edit::Motion::Up, &wrap, 10)
+            .expect("Up is one too");
+        assert_eq!(caret.caret, 2);
+        // Home and End are not this function's business: they belong to the
+        // logical line, which is the textarea convention the ruling names.
+        assert!(
+            step_preview_caret_by_row(
+                content,
+                &mut caret,
+                preview_edit::Motion::LineEnd,
+                &wrap,
+                10
+            )
+            .is_none()
         );
     }
 
@@ -34842,7 +36520,8 @@ mod tests {
             caret: Some((1, 3)),
             caret_width: 1.0,
         };
-        let built = build_preview_text_body(&geometry, &lines, 8.0, Some(&paint), &palette);
+        let wrap = preview_edit::WrapLayout::unwrapped(&lines);
+        let built = build_preview_text_body(&geometry, &lines, &wrap, 8.0, Some(&paint), &palette);
         assert_eq!(built.quads.len(), 3, "two bands and one caret");
         assert_eq!(built.quads[0].color, palette.preview_selection);
         let row = geometry.line_rect(0);
@@ -34866,7 +36545,7 @@ mod tests {
 
         // With no edit surface there are no quads at all, which is the read-only
         // body slice 2 shipped.
-        let plain = build_preview_text_body(&geometry, &lines, 8.0, None, &palette);
+        let plain = build_preview_text_body(&geometry, &lines, &wrap, 8.0, None, &palette);
         assert!(plain.quads.is_empty());
     }
 

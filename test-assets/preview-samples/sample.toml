@@ -1,0 +1,6 @@
+[package]
+name = "sample"
+edition = "2024"
+
+[features]
+default = ["a", "b"]

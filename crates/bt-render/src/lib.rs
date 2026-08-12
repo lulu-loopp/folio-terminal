@@ -963,12 +963,37 @@ pub struct PreviewQuad {
 /// from a decoder and the other as a document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewBody {
-    /// The box the body may be seen in — the seat's body, already excluding its
-    /// head and already intersected with whatever a pane FLIP is cropping it
-    /// to. Every fill and every paragraph is clipped to this.
+    /// The box the **scrolled document** may be seen in — the seat's body, less
+    /// its head, less whatever furniture stands inside it and owns its own
+    /// height ([`Self::foot`]), and already intersected with whatever a pane
+    /// FLIP is cropping it to. Every fill and every paragraph is clipped to
+    /// this.
     pub clip: [f32; 4],
     pub quads: Vec<PreviewQuad>,
     pub paragraphs: Vec<PreviewParagraph>,
+    /// A bar standing at the bottom of the body, **outside [`Self::clip`]**.
+    ///
+    /// The one thing in this structure that is not the document: furniture the
+    /// document was made shorter for. It is a slot of its own rather than two
+    /// more quads and a paragraph precisely because it must *not* be clipped
+    /// with the content — the content's clip ends where this begins, which is
+    /// what makes "nothing scrolls under it" true by construction rather than
+    /// by the fill being drawn late enough.
+    pub foot: Option<PreviewFoot>,
+}
+
+/// The bar at the foot of a preview body: an opaque ground, a hairline along
+/// its top, and one line of text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewFoot {
+    /// `[left, top, right, bottom]` — the whole bar, hairline included.
+    pub bar: [f32; 4],
+    /// How thick the hairline along the top edge is.
+    pub border_px: f32,
+    pub ground: [u8; 3],
+    pub border: [u8; 3],
+    /// The sentence, already placed inside the bar.
+    pub label: PreviewParagraph,
 }
 
 /// Fit an image inside a preview body while preserving aspect ratio and never enlarging it beyond
@@ -3187,6 +3212,39 @@ impl Renderer {
         buffer.layout_runs().count().max(1) as f32 * line_height_px
     }
 
+    /// How wide a paragraph is when it is **not** wrapped.
+    ///
+    /// [`Self::measure_preview_paragraph`]'s other axis, and it exists for the
+    /// blocks that refuse to reflow: a markdown table's columns are as wide as
+    /// their own widest cell and a code fence is as wide as its longest line
+    /// (user rulings, 2026-08-13), so the horizontal scroll extent of a rendered
+    /// document is a question only the shaper can answer. Approximating it from
+    /// a character count is what a monospace grid may do and a proportional face
+    /// may not — the error compounds across a column of prose and ends as a
+    /// scroll that stops before the last word.
+    pub fn measure_preview_paragraph_width(
+        &mut self,
+        runs: &[PreviewRun],
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        if runs.iter().all(|run| run.text.is_empty()) {
+            return 0.0;
+        }
+        let mut buffer = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size_px, line_height_px),
+        );
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(None, Some(line_height_px));
+        set_preview_runs(&mut buffer, runs, 0.0);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max)
+    }
+
     /// How wide one cell of the monospace face is at `font_size_px`.
     ///
     /// Measured over a run of cells and divided rather than asked of one: a
@@ -3718,23 +3776,46 @@ impl Renderer {
             .preview_body
             .as_ref()
             .map(|body| {
-                body.quads
+                let mut rects: Vec<RectInstance> = body
+                    .quads
                     .iter()
-                    .filter(|quad| quad.rect[3] > body.clip[1] && quad.rect[1] < body.clip[3])
-                    .map(|quad| {
+                    .filter_map(|quad| {
                         // Cropped to the body here rather than by a scissor,
                         // because the pass is in whole-surface coordinates and a
                         // second scissor would have to be set and unset around
                         // two draws that are otherwise one.
-                        let rect = [
-                            quad.rect[0].max(body.clip[0]),
-                            quad.rect[1].max(body.clip[1]),
-                            quad.rect[2].min(body.clip[2]),
-                            quad.rect[3].min(body.clip[3]),
-                        ];
-                        surface_pixel_rect(rect, quad.color, self.config.width, self.config.height)
+                        let rect = crop_to(quad.rect, body.clip)?;
+                        Some(surface_pixel_rect(
+                            rect,
+                            quad.color,
+                            self.config.width,
+                            self.config.height,
+                        ))
                     })
-                    .collect()
+                    .collect();
+                // The foot stands *below* the content's clip and is cropped to
+                // its own bar, which is the whole of why it is a slot rather
+                // than two more entries in `quads`.
+                if let Some(foot) = body.foot.as_ref() {
+                    rects.push(surface_pixel_rect(
+                        foot.bar,
+                        foot.ground,
+                        self.config.width,
+                        self.config.height,
+                    ));
+                    rects.push(surface_pixel_rect(
+                        [
+                            foot.bar[0],
+                            foot.bar[1],
+                            foot.bar[2],
+                            (foot.bar[1] + foot.border_px).min(foot.bar[3]),
+                        ],
+                        foot.border,
+                        self.config.width,
+                        self.config.height,
+                    ));
+                }
+                rects
             })
             .unwrap_or_default();
         let preview_body_rect_buffer = (!preview_body_rects.is_empty()).then(|| {
@@ -5308,6 +5389,35 @@ fn prepare_text_rows(
 /// [`Renderer::pixel_rect`] and this one differ in exactly which rectangle they
 /// call "the world", and having them side by side as one method with a flag is
 /// how the two would eventually be confused for each other.
+/// Crop a rectangle to a clip, or `None` when nothing of it survives.
+///
+/// **The one gate between a laid-out rectangle and the GPU** (user report,
+/// 2026-08-13). The pass below runs in whole-surface coordinates with no
+/// scissor, so a rectangle that arrives inverted (`right < left`) or carrying a
+/// `NaN` is not cropped by anything downstream — it is mapped straight into
+/// normalised device coordinates, where an inverted box is a box the rasteriser
+/// happily fills across the whole surface and a `NaN` is a box with no edges at
+/// all. Either one comes out as bands of colour lying over panes that have
+/// nothing to do with the preview, which is exactly what was reported against a
+/// document holding a 250-character fence line.
+///
+/// A layout that produces such a rectangle is wrong and this does not make it
+/// right. What it does is keep the consequence inside the pane that owns it: a
+/// preview that draws nothing is a bug you can see and reason about, and a
+/// preview that draws over the file tree is a bug that looks like the renderer's.
+pub fn crop_to(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
+    if !rect.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let cropped = [
+        rect[0].max(clip[0]),
+        rect[1].max(clip[1]),
+        rect[2].min(clip[2]),
+        rect[3].min(clip[3]),
+    ];
+    (cropped[2] > cropped[0] && cropped[3] > cropped[1]).then_some(cropped)
+}
+
 fn surface_pixel_rect(rect: [f32; 4], color: [u8; 3], width: u32, height: u32) -> RectInstance {
     surface_pixel_rect_with_alpha(rect, color, 1.0, width, height)
 }
@@ -5557,14 +5667,26 @@ fn set_preview_runs(buffer: &mut Buffer, runs: &[PreviewRun], letter_spacing_em:
 
 /// Shape a preview body — one buffer per visible paragraph.
 fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<ChromeTextLayout> {
-    body.paragraphs
+    let content = body
+        .paragraphs
         .iter()
-        .filter(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()))
-        // A paragraph wholly above or below the body is not drawn at all, which
-        // is what keeps a 64KB file's cost proportional to the pane rather than
-        // to the file — the same rule `push_files_tree` applies to its rows.
-        .filter(|paragraph| paragraph.rect[3] > body.clip[1] && paragraph.rect[1] < body.clip[3])
-        .map(|paragraph| {
+        .map(|paragraph| (paragraph, body.clip));
+    // The foot's sentence is cropped to the foot's own bar: the content's clip
+    // stops above it, and a label cut to that clip would never be drawn at all.
+    let furniture = body.foot.iter().map(|foot| (&foot.label, foot.bar));
+    content
+        .chain(furniture)
+        .filter(|(paragraph, _)| paragraph.runs.iter().any(|run| !run.text.is_empty()))
+        // A paragraph wholly above or below its own clip is not drawn at all,
+        // which is what keeps a 64KB file's cost proportional to the pane rather
+        // than to the file — the same rule `push_files_tree` applies to its rows.
+        .filter(|(paragraph, clip)| paragraph.rect[3] > clip[1] && paragraph.rect[1] < clip[3])
+        // A paragraph whose own box does not survive the clip draws nothing, and
+        // a paragraph whose box is inverted or carries a `NaN` must draw nothing
+        // — see `crop_to`. A `TextBounds` built from such a box is not a crop at
+        // all, and the glyphs land wherever the arithmetic put them.
+        .filter_map(|(paragraph, clip)| crop_to(paragraph.rect, clip).map(|c| (paragraph, c)))
+        .map(|(paragraph, clip)| {
             let width = (paragraph.rect[2] - paragraph.rect[0]).max(1.0);
             let mut buffer = Buffer::new(
                 font_system,
@@ -5592,15 +5714,6 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
             } else {
                 paragraph.rect[0]
             };
-            // Clipped to the body *and* to the paragraph's own box, so a partly
-            // visible first or last line is cut by the body edge rather than
-            // drawn over the head above it.
-            let clip = [
-                paragraph.rect[0].max(body.clip[0]),
-                paragraph.rect[1].max(body.clip[1]),
-                paragraph.rect[2].min(body.clip[2]),
-                paragraph.rect[3].min(body.clip[3]),
-            ];
             let [r, g, b] = paragraph.runs.first().map_or([0, 0, 0], |run| run.color);
             ChromeTextLayout {
                 buffer,
