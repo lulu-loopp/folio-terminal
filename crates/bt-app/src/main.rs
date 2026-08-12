@@ -5462,6 +5462,75 @@ fn partition_clamped(pinned: &[bool], from: usize, to: usize) -> usize {
     at
 }
 
+/// What a pinned float is asking of the hand — under the pointer, or already in
+/// it.
+///
+/// Only the two parts the mock-up gives a cursor to: `.float-win .fly-resize`
+/// is `nwse-resize` (1708) and `.float-win.pinned .fly-head` is `grab`, turning
+/// `grabbing` while held (704-705). A peek asks for nothing, because neither
+/// selector reaches one — it has no grip at all, and its header is not a handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FloatGrasp {
+    /// The corner grip: hovered, or being pulled. One shape for both, because
+    /// pulling a grip is exactly what hovering it advertised.
+    Grip,
+    /// The pinned header under an open hand.
+    Head,
+    /// The same header with the window actually in the hand.
+    Carrying,
+}
+
+/// The ground a float may stand on: the client area with the title bar taken
+/// off the top (user ruling 2026-08-12).
+///
+/// The strip is measured with the same `(logical * scale).round()` the title bar
+/// is *drawn* with, because the two have to be the same edge — a float allowed
+/// to start half a pixel higher than the caption ends is a float that can take
+/// the drag band away, which is the one thing the ruling forbids.
+///
+/// A window shorter than its own caption keeps a one-pixel floor, mirroring
+/// `seats.rs`'s own guard: an inverted rectangle would let every clamp below it
+/// resolve to nonsense, and the tiny-window ladder already promises the strip
+/// degrades rather than turns inside out.
+fn float_viewport_rect(width: u32, height: u32, scale: f32) -> [f32; 4] {
+    let height = height as f32;
+    let caption = (bt_render::WINDOW_TITLE_BAR_LOGICAL_PX * scale)
+        .round()
+        .min((height - 1.0).max(0.0));
+    [0.0, caption, width as f32, height]
+}
+
+/// What the float asks of the pointer.
+///
+/// The gesture already in flight before the part under the pointer, so a grip
+/// pulled past its own floor — or a header carried until the pointer is over the
+/// body — keeps the shape it was grabbed by (K113).
+///
+/// `pinned` gates the hover alone, and gates it for the mock-up's selector:
+/// `.float-win.pinned .fly-head`. A peek cannot reach the grip branch anyway
+/// (it is drawn without one), and a drag cannot begin on one — `press_float`
+/// refuses to pick a moment up by its header.
+fn float_grasp(
+    drag: Option<FloatDrag>,
+    hover: Option<float::FloatPart>,
+    pinned: bool,
+) -> Option<FloatGrasp> {
+    if let Some(drag) = drag {
+        return Some(match drag {
+            FloatDrag::Resize => FloatGrasp::Grip,
+            FloatDrag::Move { .. } => FloatGrasp::Carrying,
+        });
+    }
+    if !pinned {
+        return None;
+    }
+    match hover {
+        Some(float::FloatPart::Grip) => Some(FloatGrasp::Grip),
+        Some(float::FloatPart::Head) => Some(FloatGrasp::Head),
+        _ => None,
+    }
+}
+
 /// The shape the pointer wears — K113 included.
 ///
 /// "You grabbed this with the pointing finger, and the cursor changing shape
@@ -5470,13 +5539,24 @@ fn partition_clamped(pinned: &[bool], from: usize, to: usize) -> usize {
 /// cursor flickers through three shapes on the way to the drop; here the shape a
 /// tab press starts with is the ordinary arrow, so pinning it means keeping
 /// *that* — the point is that it does not change, not which one it is.
+///
+/// The float is asked before the divider for the reason it is a separate gesture
+/// at all: it is a *window over* the layout, so what it covers is not being
+/// aimed at — the same order `cursor_moved` already gives the two drags.
 fn pointer_cursor(
     dragging_tab: bool,
+    float: Option<FloatGrasp>,
     divider_axis: Option<bt_layout::Axis>,
 ) -> winit::window::CursorIcon {
     use winit::window::CursorIcon;
     if dragging_tab {
         return CursorIcon::Default;
+    }
+    match float {
+        Some(FloatGrasp::Grip) => return CursorIcon::NwseResize,
+        Some(FloatGrasp::Head) => return CursorIcon::Grab,
+        Some(FloatGrasp::Carrying) => return CursorIcon::Grabbing,
+        None => {}
     }
     match divider_axis {
         Some(bt_layout::Axis::Row) => CursorIcon::EwResize,
@@ -12316,6 +12396,7 @@ impl Runtime {
         let part = self.float_part_at(position);
         if self.float_hover != part {
             self.float_hover = part;
+            self.apply_pointer_cursor();
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -12478,6 +12559,10 @@ impl Runtime {
             // further, which is what makes a float opaque to the layout beneath.
             float::FloatPart::Body => {}
         }
+        // One place for every branch: two of them put a gesture in the hand and
+        // two of them take the whole window away, and in both directions the
+        // shape the pointer is wearing was decided by what just changed.
+        self.apply_pointer_cursor();
         Ok(true)
     }
 
@@ -12834,45 +12919,25 @@ impl Runtime {
         )]
     }
 
-    /// The rectangle a float is allowed to occupy, in physical pixels.
+    /// The rectangle a float is allowed to occupy, in physical pixels: **the
+    /// whole client area except the title bar** (user ruling 2026-08-12).
     ///
-    /// **The solved content area, never the window** —
-    /// `M2-tiny-window-priority.md` §3.3: a float clamps into the box `solve()`
-    /// already produced, so "it must not cover the chrome to the point of
-    /// illegibility" is true *by construction* rather than by a runtime check
-    /// nobody remembers to write. It is read back off the placements the solver
-    /// produced rather than recomputed from the window size for A12's reason:
-    /// two derivations of one number are two numbers that can differ, and this
-    /// one has to agree with the rectangles the pointer is being tested against.
+    /// The rail and the pane heads are ordinary ground — a float may cover them
+    /// outright, and the overlay stack already draws it over them, so nothing
+    /// beneath prints through. What the ruling keeps is one strip: the caption
+    /// row, whose three buttons and drag band must be reachable at every moment,
+    /// because a window you cannot move, minimise or close is a different order
+    /// of problem from a sidebar you cannot see. So the guarantee is not "chrome
+    /// is never covered" but "the window's own handle is never covered", and it
+    /// is structural for the same reason the old rule was: the strip is removed
+    /// from the space rather than defended by a runtime check.
+    ///
+    /// This overturns `M2-tiny-window-priority.md` §3.3, which clamped into the
+    /// solved content box precisely so that no chrome could ever be covered; see
+    /// the dated annotation there.
     fn float_viewport(&self) -> [f32; 4] {
-        let mut viewport: Option<[f32; 4]> = None;
-        for placement in &self.seat_layout.rects {
-            let Some(device) = placement.device_rect else {
-                continue;
-            };
-            let rect = [
-                device.left as f32,
-                device.top as f32,
-                device.right as f32,
-                device.bottom as f32,
-            ];
-            viewport = Some(match viewport {
-                Some(box_) => [
-                    box_[0].min(rect[0]),
-                    box_[1].min(rect[1]),
-                    box_[2].max(rect[2]),
-                    box_[3].max(rect[3]),
-                ],
-                None => rect,
-            });
-        }
-        viewport.unwrap_or_else(|| {
-            // No seat is on stage, which the solver only produces for a window
-            // with nothing in it. The swapchain is then the honest answer, and
-            // the float has nothing to be pushed out of the way of anyway.
-            let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-            [0.0, 0.0, width as f32, height as f32]
-        })
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        float_viewport_rect(width, height, self.renderer.metrics().scale_factor as f32)
     }
 
     /// The box a trigger occupies **right now** (G86/E60).
@@ -13044,6 +13109,9 @@ impl Runtime {
             Instant::now(),
         );
         self.float_drag = None;
+        // A window that opens under a stationary pointer inherits none of the
+        // last one's shape.
+        self.apply_pointer_cursor();
         // The rail's business may have just begun (G102). Re-asked here rather
         // than waiting for the next pointer move, because the answer changed
         // without the pointer moving — which is the whole reason the rail's zone
@@ -13082,6 +13150,10 @@ impl Runtime {
         }
         self.float_drag = None;
         self.float_hover = None;
+        // The window can go while the pointer stands still — Esc closes it from
+        // the keyboard — so the hand it was shaping has to be given back here
+        // rather than at the next move that may never come.
+        self.apply_pointer_cursor();
         // ...and it may have just ended.
         self.drive_rail_zone(self.pointer_position);
         self.refresh_chrome();
@@ -13146,6 +13218,9 @@ impl Runtime {
             return Ok(());
         };
         self.float_drag = None;
+        // Same reason as dismissal: the window this shape belonged to is gone,
+        // and Dock can be reached without the pointer moving afterwards.
+        self.apply_pointer_cursor();
         let metrics = self.seat_metrics();
         let Some(seat) = self.seats.add_files_pane(&metrics, Some(win.width)) else {
             return Ok(());
@@ -15800,10 +15875,17 @@ impl Runtime {
         Ok(())
     }
 
-    /// The pointer wears the shape of what it is over: a resize arrow along a
-    /// divider's axis (kept for the whole drag, even when the pointer slips off
-    /// the band), the ordinary arrow everywhere else.
+    /// The pointer wears the shape of what it is over: a diagonal arrow on a
+    /// pinned float's grip and an open hand on its header, a resize arrow along
+    /// a divider's axis, the ordinary arrow everywhere else. Each is kept for
+    /// the whole drag it starts, even when the pointer slips off the band or the
+    /// grip it began on.
     fn apply_pointer_cursor(&mut self) {
+        let grasp = float_grasp(
+            self.float_drag,
+            self.float_hover,
+            self.float.pinned_is_open(),
+        );
         let divider_axis = self.divider_drag.as_ref().map(|drag| drag.dir).or_else(|| {
             match self.seat_pointer.hover {
                 Some(seats::ChromeTarget::Divider(split)) => self
@@ -15816,7 +15898,7 @@ impl Runtime {
             }
         });
         self.window
-            .set_cursor(pointer_cursor(self.drag.is_some(), divider_axis));
+            .set_cursor(pointer_cursor(self.drag.is_some(), grasp, divider_axis));
     }
 
     /// Put the frame already on screen back in the slot so a pure chrome change
@@ -17253,6 +17335,17 @@ impl Runtime {
         // kept following the pointer after the button came up would be a window
         // stuck to the hand.
         if state == ElementState::Released && self.float_drag.take().is_some() {
+            // The hand opens onto whatever the release actually left it over,
+            // which has to be *asked* rather than assumed: a drag owns the
+            // pointer, so the hover underneath is as old as the gesture, and a
+            // grip pulled past the 200×150 floor leaves its corner behind — the
+            // part the pull began on is exactly the part no longer under the
+            // hand. Without this the resize arrow would outlive the resize,
+            // until some later move happened to correct it.
+            if let Some(position) = self.pointer_position {
+                self.drive_float_hover(position)?;
+            }
+            self.apply_pointer_cursor();
             return Ok(());
         }
         // The float takes the press where it is drawn, above the layout and below
@@ -30434,22 +30527,130 @@ mod tests {
         // K113. "The cursor changing shape mid-drag would say something happened
         // when nothing did" (mock-up 1710-1711).
         use winit::window::CursorIcon;
-        assert_eq!(pointer_cursor(false, None), CursorIcon::Default);
+        assert_eq!(pointer_cursor(false, None, None), CursorIcon::Default);
         assert_eq!(
-            pointer_cursor(false, Some(bt_layout::Axis::Row)),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Row)),
             CursorIcon::EwResize
         );
         assert_eq!(
-            pointer_cursor(false, Some(bt_layout::Axis::Col)),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Col)),
             CursorIcon::NsResize
         );
         for axis in [None, Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
+            for grasp in [
+                None,
+                Some(FloatGrasp::Grip),
+                Some(FloatGrasp::Head),
+                Some(FloatGrasp::Carrying),
+            ] {
+                assert_eq!(
+                    pointer_cursor(true, grasp, axis),
+                    CursorIcon::Default,
+                    "a tab drag crossing a divider or a float must not flicker into another shape"
+                );
+            }
+        }
+    }
+
+    /// The two shapes a pinned float names for itself: `nwse-resize` on
+    /// `.fly-resize` (mock-up 1708) and `grab`/`grabbing` on the header
+    /// (704-705). The grip is the only resize target there is — the mock-up
+    /// gives the float no single-axis edges, and neither does `FloatPart`.
+    #[test]
+    fn a_pinned_float_wears_the_diagonal_arrow_on_its_grip() {
+        use winit::window::CursorIcon;
+        assert_eq!(
+            pointer_cursor(false, Some(FloatGrasp::Grip), None),
+            CursorIcon::NwseResize
+        );
+        assert_eq!(
+            pointer_cursor(false, Some(FloatGrasp::Head), None),
+            CursorIcon::Grab
+        );
+        assert_eq!(
+            pointer_cursor(false, Some(FloatGrasp::Carrying), None),
+            CursorIcon::Grabbing
+        );
+        for axis in [Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
             assert_eq!(
-                pointer_cursor(true, axis),
-                CursorIcon::Default,
-                "a tab drag crossing a divider must not flicker into a resize arrow"
+                pointer_cursor(false, Some(FloatGrasp::Grip), axis),
+                CursorIcon::NwseResize,
+                "the window is drawn over the divider, so the divider is not what you are aiming at"
             );
         }
+    }
+
+    /// Which of them the float is asking for — hover, and the gesture that
+    /// outlives it.
+    #[test]
+    fn the_grip_keeps_its_arrow_for_the_whole_pull() {
+        use float::FloatPart;
+        assert_eq!(
+            float_grasp(None, Some(FloatPart::Grip), true),
+            Some(FloatGrasp::Grip),
+            "hovering the grip is the whole bug: an arrow was showing where a resize lives"
+        );
+        assert_eq!(
+            float_grasp(None, Some(FloatPart::Head), true),
+            Some(FloatGrasp::Head)
+        );
+        for part in [
+            FloatPart::Body,
+            FloatPart::Foot,
+            FloatPart::Dock,
+            FloatPart::Close,
+            FloatPart::Row(0),
+        ] {
+            assert_eq!(
+                float_grasp(None, Some(part), true),
+                None,
+                "the rest of the window is an ordinary arrow"
+            );
+        }
+        // The pull survives the pointer leaving the grip it began on — the
+        // corner stops at the 200×150 floor while the hand keeps going.
+        assert_eq!(
+            float_grasp(Some(FloatDrag::Resize), Some(FloatPart::Body), true),
+            Some(FloatGrasp::Grip)
+        );
+        assert_eq!(
+            float_grasp(Some(FloatDrag::Move { grab: [0.0, 0.0] }), None, true),
+            Some(FloatGrasp::Carrying)
+        );
+        // A peek is not a window you were told you had: its header is not a
+        // handle, and it is drawn without a grip at all.
+        assert_eq!(float_grasp(None, Some(FloatPart::Head), false), None);
+        assert_eq!(float_grasp(None, Some(FloatPart::Grip), false), None);
+    }
+
+    /// User ruling 2026-08-12, which overturns `M2-tiny-window-priority.md`
+    /// §3.3: a float may stand on the rail and on the pane heads — the overlay
+    /// order already draws it over them — and may never stand on the caption,
+    /// whose buttons and drag band have to be reachable at every moment.
+    #[test]
+    fn a_float_may_stand_anywhere_in_the_window_except_the_title_bar() {
+        let caption = |scale: f32| (bt_render::WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+        let rect = float_viewport_rect(2200, 1400, 2.0);
+        assert_eq!(
+            rect,
+            [0.0, caption(2.0), 2200.0, 1400.0],
+            "the rail's own column, the pane heads and every edge of the client \
+             area are ground a float may cover; only the caption is removed"
+        );
+        assert_eq!(
+            float_viewport_rect(800, 600, 1.0),
+            [0.0, 40.0, 800.0, 600.0],
+            "and the strip is the title bar's own 40 logical px, not a number of \
+             this function's own"
+        );
+        // The floor under the tiny-window ladder: a client area shorter than its
+        // own caption still answers with a rectangle that is the right way up,
+        // because every clamp downstream subtracts from these two edges.
+        let tiny = float_viewport_rect(120, 20, 2.0);
+        assert!(
+            tiny[1] < tiny[3],
+            "a viewport must never come back inverted: {tiny:?}"
+        );
     }
 
     #[test]
