@@ -341,6 +341,39 @@ public class Probe {
     mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
     System.Threading.Thread.Sleep(150);
   }
+  /* One step of a drag, so a caller can photograph the middle of one. `Drag`
+     above is this loop with nothing watching; a gesture whose whole claim is
+     "the window follows the hand" cannot be verified from its endpoints. */
+  public static void DragDown(int x, int y) {
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(150);
+    mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);   // LEFTDOWN
+    System.Threading.Thread.Sleep(80);
+  }
+  public static void DragStep(int x, int y) {
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(40);
+  }
+  public static void DragUp() {
+    System.Threading.Thread.Sleep(80);
+    mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
+    System.Threading.Thread.Sleep(150);
+  }
+  /* Which cursor is on screen *right now*, as the OS's own handle.
+     A screen capture cannot answer this — CopyFromScreen does not draw the
+     pointer — so a claim about the shape a gesture is wearing has to be read
+     from the system rather than from a picture. Handles are stable for the life
+     of the session, so two samples can be compared for identity even though the
+     number itself means nothing. */
+  [StructLayout(LayoutKind.Sequential)]
+  public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public WPOINT pt; }
+  [DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO pci);
+  public static long CursorId() {
+    CURSORINFO ci = new CURSORINFO();
+    ci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
+    if (!GetCursorInfo(ref ci)) return 0;
+    return ci.hCursor.ToInt64();
+  }
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
 }
 '@
@@ -556,8 +589,39 @@ switch ($Cmd) {
     $qy = if ($Y2 -lt 0) { $r.B + $Y2 } else { $r.T + $Y2 }
     if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not dragging blind" }
     if (-not [Probe]::PointBelongsTo($qx, $qy, $ProcId)) { throw "REFUSED: ($qx, $qy) is not over pid=$ProcId — not dragging blind" }
-    [Probe]::Drag($px, $py, $qx, $qy, $Steps)
-    "dragged ($px, $py) -> ($qx, $qy) = window+($X, $Y) -> window+($X2, $Y2) on pid=$ProcId (foreground verified)"
+    if (-not $Out) {
+      [Probe]::Drag($px, $py, $qx, $qy, $Steps)
+      "dragged ($px, $py) -> ($qx, $qy) = window+($X, $Y) -> window+($X2, $Y2) on pid=$ProcId (foreground verified)"
+    } else {
+      # With -Out, the *middle* of the gesture is photographed: a frame per step,
+      # each one paired with the cursor the OS is showing at that instant. A drag
+      # whose whole claim is "the window follows the hand" is a claim about the
+      # frames between the endpoints, and the endpoints alone cannot carry it.
+      Add-Type -AssemblyName System.Drawing
+      $stem = [IO.Path]::Combine([IO.Path]::GetDirectoryName($Out), [IO.Path]::GetFileNameWithoutExtension($Out))
+      $ext = [IO.Path]::GetExtension($Out); if (-not $ext) { $ext = ".png" }
+      $shot = {
+        param($tag)
+        [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+        $bmp = New-Object System.Drawing.Bitmap(($r.R - $r.L), ($r.B - $r.T))
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+        $path = "$stem-$tag$ext"
+        $bmp.Save($path); $g.Dispose(); $bmp.Dispose()
+        "$path cursor=$([Probe]::CursorId())"
+      }
+      & $shot "00-rest"
+      [Probe]::DragDown($px, $py)
+      & $shot "01-pressed"
+      if ($Steps -lt 1) { $Steps = 1 }
+      for ($i = 1; $i -le $Steps; $i++) {
+        [Probe]::DragStep(($px + ($qx - $px) * $i / $Steps), ($py + ($qy - $py) * $i / $Steps))
+        & $shot ("{0:d2}-step{1:d2}" -f ($i + 1), $i)
+      }
+      [Probe]::DragUp()
+      & $shot "99-released"
+      "dragged ($px, $py) -> ($qx, $qy) in $Steps steps on pid=$ProcId (foreground verified)"
+    }
   }
   "hover" {
     $h = Get-AppWindow $ProcId

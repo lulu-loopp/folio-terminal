@@ -1486,6 +1486,15 @@ struct Runtime {
     /// state machine would put a rewrite of the layout one typo away from a
     /// gesture that must never perform one.
     float_drag: Option<FloatDrag>,
+    /// A press on a peek's header that has not yet travelled far enough to mean
+    /// anything (user ruling 2026-08-12) — see [`FloatHeadPress`].
+    ///
+    /// Its own field rather than a third arm of [`FloatDrag`], because it is not
+    /// a drag: nothing is being moved while it is held, the window is still a
+    /// peek, and a release inside the six pixels leaves the world exactly as it
+    /// found it. It becomes a `FloatDrag::Move` at the moment it stops being
+    /// this, which is the one transition it exists to carry.
+    float_head_press: Option<FloatHeadPress>,
     /// What the pointer is over inside the float, or `None`.
     ///
     /// Stored rather than recomputed at paint time because the float's boxes are
@@ -2354,6 +2363,51 @@ enum FloatDrag {
     Move { grab: [f32; 2] },
     /// Resizing from the bottom-right grip, which moves that corner alone.
     Resize,
+}
+
+/// A press on a **peek**'s header, waiting to find out whether it is a drag
+/// (user ruling 2026-08-12).
+///
+/// A peek is a moment, and a moment cannot be picked up — so the press does
+/// nothing at all until the hand has travelled the same six pixels every other
+/// drag in this product is measured by. At that point the moment becomes a
+/// window: the float is promoted in place and the *same* gesture goes on
+/// carrying it, with no second press and nothing to re-aim at.
+///
+/// **The grab offset is taken at the press, not at the promotion**, and that is
+/// the whole of "seamless": the six pixels the gesture spent deciding are six
+/// pixels the pointer has already moved, and a grab measured afterwards would
+/// hand the window a corner six pixels from where the hand actually holds it —
+/// the window would jump on the frame it was picked up.
+#[derive(Clone, Copy, Debug)]
+struct FloatHeadPress {
+    /// The 6px, shared with every other press that can become a drag (J113).
+    latch: DragLatch,
+    /// Where inside the frame the press landed, in physical pixels.
+    grab: [f32; 2],
+}
+
+impl FloatHeadPress {
+    /// Arm one for a press at `position` inside a window standing at `frame`.
+    fn armed(position: PhysicalPosition<f64>, frame: [f32; 4]) -> Self {
+        Self {
+            latch: DragLatch::new(position),
+            grab: [position.x as f32 - frame[0], position.y as f32 - frame[1]],
+        }
+    }
+
+    /// The carry this press has become, or `None` while it is still only a press.
+    ///
+    /// The grab it hands over is the one measured at the press, which is what
+    /// makes the promotion invisible: fed back through
+    /// [`float::float_dragged_to`] with the pointer where it started, it
+    /// reproduces the frame the window is already standing at, so the window
+    /// moves exactly as far as the hand has and not a pixel further.
+    fn promoted(&mut self, position: PhysicalPosition<f64>, scale: f64) -> Option<FloatDrag> {
+        self.latch
+            .travelled(position, scale)
+            .then_some(FloatDrag::Move { grab: self.grab })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5531,6 +5585,96 @@ fn ground_overlay_layers(
     layers
 }
 
+/// Every family the overlay carries, held apart so that **the one thing that
+/// decides what covers what is a list you can read** ([`OverlayStack::flattened`]).
+///
+/// It used to be the order in which thirty lines of `layers.extend(…)` happened
+/// to run, with each family's reasoning written beside its own call and nothing
+/// anywhere stating the whole order. That is how the settings panel ended up
+/// *under* a floating window (user report 2026-08-12): the modal chain was
+/// assembled early because it is a big `if/else if` that wants the renderer, and
+/// "early" silently means "underneath".
+#[derive(Default)]
+struct OverlayStack {
+    /// `.rail { z-index: 15 }` — chrome that floats over the panes and over
+    /// nothing else. Every surface below is entitled to cover it.
+    rail: Vec<marks::OverlayLayer>,
+    /// The arriving panes' veil and the dock drawing (`#dock-shift` 24,
+    /// `#dock-preview` 25) — drawings *on* the layout rather than surfaces over
+    /// the window. See [`ground_overlay_layers`].
+    ground: Vec<marks::OverlayLayer>,
+    /// `.layout-peek { z-index: 35 }` — the split schematic.
+    layout_peek: Vec<marks::OverlayLayer>,
+    /// `#files-flyout` — a floating window. It covers the panes, the rail and
+    /// the schematic, because it is a *place* rather than a moment.
+    float: Vec<marks::OverlayLayer>,
+    /// The modal family: the settings panel, the restore prompt, the profile
+    /// picker, the root menu — every surface you summon, do something with, and
+    /// dismiss. Mutually exclusive with each other by construction (one
+    /// `if/else if`), and **above the float by ruling** (2026-08-12).
+    ///
+    /// The mock-up's own `z-index` disagrees — `#files-flyout` is 60 against the
+    /// menu chain's 30 — and the ruling overturns it on the strength of what it
+    /// looks like: a modal is the window asking you a question, and a window
+    /// that lets a floating tree cover the answer is a window that has stopped
+    /// being modal. The float is a place, but a place you were not asked about
+    /// does not get to stand in front of the question.
+    ///
+    /// **The router already agreed; only the paint did not.** All three pointer
+    /// channels ask this family before they ask the float, and they did so
+    /// before this ruling: [`Runtime::mouse_input`] returns out of
+    /// `settings_mouse_input` above `press_float`, [`Runtime::pointer_moved`]
+    /// returns out of the settings hover above `drive_float_hover`, and
+    /// [`Runtime::mouse_wheel`] returns out of `scroll_settings` first of all.
+    /// So the bug was never that a press landed in the wrong place — it was that
+    /// the window you could not press was drawn on top, which is the worse half
+    /// of the pair: a surface that takes no input and hides what does. Moving the
+    /// paint under the modal is what makes the two say the same thing.
+    modal: Vec<marks::OverlayLayer>,
+    /// `#file-menu { z-index: 60 }` — above the float because it is very often
+    /// raised on a row *inside* it (K146), and above the modal family for the
+    /// same reason it is not in their exclusive chain: it is about whatever is
+    /// under it.
+    file_menu: Vec<marks::OverlayLayer>,
+    /// `.tip { z-index: 60 }` — the one surface in this window that is never
+    /// covered, because it is the only one whose whole job is to explain what is
+    /// under it.
+    tooltip: Vec<marks::OverlayLayer>,
+    /// `z-index: 100` — above even the tip. During a drag, what is under the
+    /// pointer *is* the ghost; in practice the two never meet, because a drag
+    /// empties the tip's anchor list (J117).
+    drag_ghost: Vec<marks::OverlayLayer>,
+}
+
+impl OverlayStack {
+    /// The whole overlay, bottom to top — **this list is the z-order**.
+    fn flattened(self) -> Vec<marks::OverlayLayer> {
+        let Self {
+            rail,
+            ground,
+            layout_peek,
+            float,
+            modal,
+            file_menu,
+            tooltip,
+            drag_ghost,
+        } = self;
+        [
+            rail,
+            ground,
+            layout_peek,
+            float,
+            modal,
+            file_menu,
+            tooltip,
+            drag_ghost,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
 /// K115 — how far from its slot a grabbed tab is drawn, given where the hand
 /// wants it.
 ///
@@ -8234,6 +8378,7 @@ impl Runtime {
             file_menu: None,
             float: float::FloatHost::default(),
             float_drag: None,
+            float_head_press: None,
             float_hover: None,
             revealed_foot: None,
             files_name_widths: BTreeMap::new(),
@@ -9956,12 +10101,12 @@ impl Runtime {
         // surface floating over the *window* — it is chrome, and every popup
         // below is entitled to cover it — but it does float over the panes, and
         // one level up from them is all it ever asked for.
-        let mut layers = self.rail_overlay_layers();
-        layers.extend(ground_overlay_layers(
-            self.pane_fade_veils(now),
-            self.dock_overlay_layers(now),
-        ));
-        layers.extend(if let Some(layout) = self.settings_layout() {
+        let mut stack = OverlayStack {
+            rail: self.rail_overlay_layers(),
+            ground: ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now)),
+            ..OverlayStack::default()
+        };
+        stack.modal = if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font
             // knows where the cut falls. Same division, and same hoist, as the
@@ -10012,40 +10157,13 @@ impl Runtime {
             profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
         } else {
             Vec::new()
-        });
-        // Last, and therefore on top of every one of them: `z-index: 60` against
-        // the menu's `30` (mock-up 1207). A tip is the only surface in this
-        // window that is never covered, because it is the only one whose whole
-        // job is to explain what is under it.
-        // The tip's own family, immediately under it. The order between these
-        // two is unobservable by construction — §6 keeps them from ever being on
-        // screen together — so it is fixed here for the reader's sake rather
-        // than for the compositor's, and the mock-up's own `z-index` agrees
-        // (`.layout-peek` 35, `.tip` 60).
-        layers.extend(self.layout_peek_layer());
-        // `#files-flyout { z-index: 60 }` against the menu chain's 30 and the
-        // root menu's 55 (mock-up 672, 629, 1014): a floating window covers every
-        // popup, because it is not one — a menu is a moment and this is a place.
-        // It goes under the tip for the tip's own stated reason: the tip is the
-        // one surface in this window that is never covered, and a float has
-        // controls with tips of their own.
-        layers.extend(self.float_layer(now));
-        // Above the float, and deliberately not in the `else if` chain that
-        // makes the other two popups exclusive. It is exclusive with them by
-        // state — [`Runtime::open_file_menu`] closes both — but it cannot share
-        // their *level*: this menu is very often raised on a row **inside** the
-        // floating window (K146), and a menu drawn under the window it belongs
-        // to is a menu that is not there. `#file-menu { z-index: 60 }` against
-        // the root menu's 55 is the mock-up saying the same thing (637, 628).
-        layers.extend(self.file_menu_layer());
-        layers.extend(self.tooltip_layer());
-        // Above even the tip: `z-index: 100` against its `60` (mock-up 1717).
-        // The tip's claim to being uncoverable is that it explains what is under
-        // the pointer; during a drag, what is under the pointer *is* the ghost,
-        // and in practice the two never meet anyway — a drag empties the tip's
-        // anchor list (J117's silence, `rebuild_tooltip_anchors`).
-        layers.extend(self.drag_ghost_layer());
-        let layers = self.settings_marks.resolve_overlay(layers);
+        };
+        stack.layout_peek = self.layout_peek_layer();
+        stack.float = self.float_layer(now);
+        stack.file_menu = self.file_menu_layer();
+        stack.tooltip = self.tooltip_layer();
+        stack.drag_ghost = self.drag_ghost_layer();
+        let layers = self.settings_marks.resolve_overlay(stack.flattened());
         self.renderer.set_modal_overlay(layers)
     }
 
@@ -12736,14 +12854,25 @@ impl Runtime {
             float::FloatPart::Foot => self.reveal_float_root()?,
             float::FloatPart::Row(index) => self.press_float_row(index)?,
             float::FloatPart::Head => {
-                // Only a pinned window is draggable: a peek is a moment, and a
-                // moment you can pick up and carry is a window you were not told
-                // you had.
+                let frame = self.float.live().map(|win| win.frame).unwrap_or_default();
+                let grab = [position.x as f32 - frame[0], position.y as f32 - frame[1]];
                 if self.float.pinned_is_open() {
-                    let frame = self.float.live().map(|win| win.frame).unwrap_or_default();
-                    self.float_drag = Some(FloatDrag::Move {
-                        grab: [position.x as f32 - frame[0], position.y as f32 - frame[1]],
-                    });
+                    // A window that is already yours is picked up on the press:
+                    // there is nothing left to decide.
+                    self.float_drag = Some(FloatDrag::Move { grab });
+                } else {
+                    // A peek is a moment, and a moment cannot be picked up — yet.
+                    // **User ruling 2026-08-12**: dragging its header is how you
+                    // say "this one I am keeping", so the press waits at the
+                    // latch, and the six pixels that would begin any other drag
+                    // promote this window and carry it in the same gesture. Held
+                    // still and released, it is the press it always was and means
+                    // nothing at all.
+                    //
+                    // The offset is taken here, at the press, so the promotion
+                    // does not move the window under the hand — see
+                    // [`FloatHeadPress`].
+                    self.float_head_press = Some(FloatHeadPress::armed(position, frame));
                 }
             }
             float::FloatPart::Grip => {
@@ -12875,6 +13004,44 @@ impl Runtime {
         })
     }
 
+    /// A press on a peek's header has travelled: keep the window, and carry it
+    /// (user ruling 2026-08-12).
+    ///
+    /// The whole of the gesture's second half, and it deliberately does not move
+    /// anything: it promotes and hands the *same* pointer position on to
+    /// [`Self::drive_float_drag`], which runs immediately after it in
+    /// `cursor_moved`. Doing the first step of the move here as well would mean
+    /// two functions that both know how a float follows a pointer, and the one
+    /// that ran once per gesture would be the one nobody noticed drifting.
+    ///
+    /// **The frame does not change on this frame.** Promotion is a change of
+    /// *mode*; `promote` is in-place by construction (G91), the grab offset was
+    /// measured at the press, and the clamp that could have moved it —
+    /// `resize_float_to_content`'s `height: auto` — is switched off by the very
+    /// drag step that follows, before any tick can run it.
+    fn promote_float_head_press(&mut self, position: PhysicalPosition<f64>) {
+        let scale = self.renderer.metrics().scale_factor;
+        let Some(press) = self.float_head_press.as_mut() else {
+            return;
+        };
+        let Some(carry) = press.promoted(position, scale) else {
+            return;
+        };
+        self.float_head_press = None;
+        // A peek that stopped being live while the button was down — dismissed by
+        // Esc, wiped by a viewport change — has nothing to promote, and the press
+        // dies with it rather than resurrecting a window that was taken away.
+        if !self.float.promote() {
+            return;
+        }
+        self.float_drag = Some(carry);
+        // The hand closes on it the instant it becomes carryable, rather than at
+        // the next move: this *is* the move, and a frame of open palm over a
+        // window already travelling would be the cursor disagreeing with the
+        // gesture.
+        self.apply_pointer_cursor();
+    }
+
     /// Move or resize the float under a dragged pointer. Returns whether it owned
     /// the event.
     fn drive_float_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
@@ -12959,6 +13126,10 @@ impl Runtime {
         if self.float.peek_is_open() {
             self.float.wipe();
             self.float_drag = None;
+            // Including a header press still waiting to become one: the window it
+            // was about to keep has just been taken away, and a latch that
+            // outlived its window would promote whatever opened next.
+            self.float_head_press = None;
             self.float_hover = None;
             return;
         }
@@ -13355,6 +13526,7 @@ impl Runtime {
             Instant::now(),
         );
         self.float_drag = None;
+        self.float_head_press = None;
         // A window that opens under a stationary pointer inherits none of the
         // last one's shape.
         self.apply_pointer_cursor();
@@ -13395,6 +13567,7 @@ impl Runtime {
             return Ok(false);
         }
         self.float_drag = None;
+        self.float_head_press = None;
         self.float_hover = None;
         // The window can go while the pointer stands still — Esc closes it from
         // the keyboard — so the hand it was shaping has to be given back here
@@ -13464,6 +13637,7 @@ impl Runtime {
             return Ok(());
         };
         self.float_drag = None;
+        self.float_head_press = None;
         // Same reason as dismissal: the window this shape belonged to is gone,
         // and Dock can be reached without the pointer moving afterwards.
         self.apply_pointer_cursor();
@@ -15809,6 +15983,12 @@ impl Runtime {
                 return Ok(());
             }
         }
+        // A peek's header, pressed and now travelling: the window is kept and the
+        // same gesture becomes the carry (user ruling 2026-08-12). Immediately
+        // above the drag it turns into, so the promotion and the first step of the
+        // move land on one pointer event and the window never sits still for a
+        // frame wondering what it is.
+        self.promote_float_head_press(position);
         // A float being moved or resized owns the pointer outright, above the
         // divider for the reason it is a separate state at all: it is a window
         // over the layout, so while your hand is on it the layout underneath is
@@ -17678,6 +17858,15 @@ impl Runtime {
             self.open_file_menu(activation, [position.x as f32, position.y as f32])?;
             return Ok(());
         }
+        // A peek header press that never travelled stops waiting here, and means
+        // nothing — rule ① of the 2026-08-12 ruling. It is cleared rather than
+        // answered, and the release is deliberately *not* consumed: "pressed and
+        // let go without moving" is the absence of a gesture, so whatever that
+        // release meant before this feature existed it still means.
+        //
+        // Ahead of the arming below rather than after it, so the press that arms
+        // one is not the event that throws it away.
+        self.float_head_press = None;
         // A release ends whatever the float was doing, wherever it lands: a
         // gesture that began on the header can finish anywhere, and a window that
         // kept following the pointer after the button came up would be a window
@@ -21461,6 +21650,197 @@ mod tests {
 
     fn at(x: f64, y: f64) -> PhysicalPosition<f64> {
         PhysicalPosition::new(x, y)
+    }
+
+    // ── the overlay's z-order (user ruling 2026-08-12) ──────────────────────
+
+    /// PIN — **the modal family covers the floating window.**
+    ///
+    /// The user's report, as an order: a pinned files window was drawn over the
+    /// settings panel and hid its right-hand side. The cause was not a rule
+    /// anywhere — it was that the modal chain is a big `if/else if` wanting the
+    /// renderer, so it was assembled first, and in a list of `extend` calls
+    /// "first" silently means "underneath".
+    ///
+    /// Asserted as the whole order rather than as the one pair that was wrong,
+    /// because this is the fourth cross-channel z-order bug in this window and
+    /// every one of them was a pair nobody had written down. A list that can be
+    /// read is the fix; this test is what makes it the list that is *used*.
+    ///
+    /// Mutation: swap `float` and `modal` in [`OverlayStack::flattened`].
+    #[test]
+    fn the_modal_family_covers_the_float_and_the_tip_covers_them_both() {
+        // One marker quad per family, carrying its own name in a colour so the
+        // flattened order reads back as the families in order.
+        let mark = |tag: u8| {
+            vec![marks::OverlayLayer {
+                quads: vec![bt_render::OverlayQuad {
+                    rect: [0.0, 0.0, 1.0, 1.0],
+                    color: [tag, 0, 0],
+                    alpha: 1.0,
+                }],
+                ..marks::OverlayLayer::default()
+            }]
+        };
+        let stack = OverlayStack {
+            rail: mark(1),
+            ground: mark(2),
+            layout_peek: mark(3),
+            float: mark(4),
+            modal: mark(5),
+            file_menu: mark(6),
+            tooltip: mark(7),
+            drag_ghost: mark(8),
+        };
+        let order: Vec<u8> = stack
+            .flattened()
+            .iter()
+            .map(|layer| layer.quads[0].color[0])
+            .collect();
+        assert_eq!(
+            order,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            "bottom to top: rail, ground, schematic, float, modal, file menu, tip, ghost"
+        );
+        let at = |tag: u8| {
+            order
+                .iter()
+                .position(|found| *found == tag)
+                .expect("every family is in the stack")
+        };
+        // The three that the report and the ruling are actually about, spelled
+        // out so a future reordering fails with the reason rather than with a
+        // vector literal.
+        assert!(
+            at(5) > at(4),
+            "the settings panel is painted over the floating window, not under it"
+        );
+        assert!(
+            at(4) > at(2) && at(4) > at(1),
+            "and the float still covers the panes, the rail and the dock drawing"
+        );
+        assert!(
+            at(7) > at(5) && at(7) > at(4),
+            "the tip is covered by nothing"
+        );
+    }
+
+    /// PIN — an empty family contributes no layer, so the order above is about
+    /// what is *on screen* and not about eight always-present slots.
+    ///
+    /// The stack is built every frame with most of it empty; if flattening
+    /// emitted placeholders, the renderer would be handed — and diff — a list of
+    /// blank layers that changed every time a family came and went.
+    #[test]
+    fn a_family_with_nothing_in_it_adds_nothing_to_the_overlay() {
+        assert!(OverlayStack::default().flattened().is_empty());
+        let only_float = OverlayStack {
+            float: vec![marks::OverlayLayer::default()],
+            ..OverlayStack::default()
+        };
+        assert_eq!(only_float.flattened().len(), 1);
+    }
+
+    // ── dragging a peek's header keeps it (user ruling 2026-08-12) ──────────
+
+    /// PIN — **a peek's header press becomes a carry at the same six pixels
+    /// every other drag begins at, and the window does not move when it does.**
+    ///
+    /// The ruling's rule ①, as arithmetic. Two halves, and the second is the one
+    /// that is easy to get wrong: the grab offset has to be the one measured at
+    /// the *press*, because by the time the latch trips the pointer has already
+    /// travelled six pixels. A grab measured at the promotion would put the
+    /// window's corner six pixels from where the hand is actually holding it, and
+    /// the window would visibly jump on the frame it was picked up — which is
+    /// exactly the "无缝" the ruling asks for, stated as its opposite.
+    ///
+    /// The check is run through the real [`float::float_dragged_to`], because
+    /// "the window does not jump" is a claim about the frame that function
+    /// produces and not about the offset in isolation.
+    ///
+    /// Mutation that must re-redden it: measure the grab at the promotion
+    /// (`grab: [position.x as f32 - frame[0], …]` inside `promoted`) instead of
+    /// carrying the press's own.
+    #[test]
+    fn a_peeks_header_press_becomes_a_carry_without_the_window_moving() {
+        const SCALE: f64 = 1.0;
+        // Room enough that the drag clamp never has an opinion.
+        let viewport = [0.0_f32, 0.0, 4000.0, 4000.0];
+        let frame = [200.0_f32, 120.0, 464.0, 420.0];
+        let press = at(260.0, 132.0);
+
+        let mut held = FloatHeadPress::armed(press, frame);
+        assert_eq!(held.grab, [60.0, 12.0], "the offset inside the frame");
+
+        // Still a press: a hand holding still is not a hand carrying anything.
+        for (dx, dy) in [(0.0, 0.0), (3.0, 0.0), (0.0, -4.0), (3.5, 3.5)] {
+            assert!(
+                held.promoted(at(press.x + dx, press.y + dy), SCALE)
+                    .is_none(),
+                "({dx}, {dy}) is inside the six pixels and promotes nothing"
+            );
+        }
+
+        // And now it travels. Six pixels is the threshold every other press in
+        // this product is measured by, and it is not re-declared here.
+        let travel = (DRAG_THRESHOLD_LOGICAL_PX, 2.0);
+        let moved = at(press.x + travel.0, press.y + travel.1);
+        let Some(FloatDrag::Move { grab }) = held.promoted(moved, SCALE) else {
+            panic!("crossing the threshold turns the press into a carry");
+        };
+        assert_eq!(grab, [60.0, 12.0], "carrying the press's own offset");
+        assert!(
+            held.promoted(at(press.x + 400.0, press.y), SCALE).is_none(),
+            "and it promotes once, not once per move"
+        );
+
+        // **The window is where the hand has taken it, and nowhere else.** Fed
+        // the pointer it was pressed at, the carry reproduces the frame exactly;
+        // fed the pointer it promoted at, it has moved by the travel and by
+        // nothing else.
+        assert_eq!(
+            float::float_dragged_to(frame, [press.x as f32, press.y as f32], grab, viewport, 1.0),
+            frame,
+            "the promotion itself moves the window not at all"
+        );
+        assert_eq!(
+            float::float_dragged_to(frame, [moved.x as f32, moved.y as f32], grab, viewport, 1.0),
+            [
+                frame[0] + travel.0 as f32,
+                frame[1] + travel.1 as f32,
+                frame[2] + travel.0 as f32,
+                frame[3] + travel.1 as f32,
+            ],
+            "and afterwards it has moved exactly as far as the hand"
+        );
+    }
+
+    /// PIN — the threshold is the *hand's*, so it scales with the display.
+    ///
+    /// J113's rule reaching one more press: six logical pixels is a distance a
+    /// finger travels, and the same gesture on a 200% screen covers twice the
+    /// device pixels. A peek that needed twice the resolve to keep on a HiDPI
+    /// display would be reporting something about monitors that is really about
+    /// hands.
+    #[test]
+    fn the_peek_header_threshold_is_logical_pixels_like_every_other_drag() {
+        let frame = [200.0_f32, 120.0, 464.0, 420.0];
+        let press = at(260.0, 132.0);
+        let just_over = DRAG_THRESHOLD_LOGICAL_PX;
+
+        let mut hidpi = FloatHeadPress::armed(press, frame);
+        assert!(
+            hidpi
+                .promoted(at(press.x + just_over, press.y), 2.0)
+                .is_none(),
+            "six device pixels at 200% is three logical ones — still a press"
+        );
+        assert!(
+            hidpi
+                .promoted(at(press.x + just_over * 2.0, press.y), 2.0)
+                .is_some(),
+            "twelve device pixels is the same six the hand travelled"
+        );
     }
 
     // ── `.files-tree:focus-visible` (user ruling 2026-08-12) ────────────────
@@ -31080,6 +31460,20 @@ mod tests {
         // handle, and it is drawn without a grip at all.
         assert_eq!(float_grasp(None, Some(FloatPart::Head), false), None);
         assert_eq!(float_grasp(None, Some(FloatPart::Grip), false), None);
+        // **But the carry a peek's header turns into wears the closed fist**
+        // (rule ③, 2026-08-12). The gesture is asked before the hover and before
+        // `pinned`, which is what makes this true without a special case: by the
+        // time the drag exists the window has been promoted anyway, and even a
+        // frame where the two disagreed would be answered by the drag.
+        assert_eq!(
+            float_grasp(
+                Some(FloatDrag::Move { grab: [60.0, 12.0] }),
+                Some(FloatPart::Head),
+                false
+            ),
+            Some(FloatGrasp::Carrying),
+            "a peek being carried off is a hand that has closed on something"
+        );
     }
 
     /// User ruling 2026-08-12, which overturns `M2-tiny-window-priority.md`

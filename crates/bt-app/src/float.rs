@@ -855,6 +855,16 @@ impl FloatHost {
     /// stays exactly as you had unfolded it, at the size and position it is
     /// already at. Reopening it as a new pinned window would reset both, and the
     /// gesture is called "keep this", not "start again".
+    ///
+    /// **Both clocks stop here.** A promoted window is not a peek any more, so
+    /// neither of the two things that could take a peek away is allowed to
+    /// survive the promotion: the dismissal grace, which would close a window the
+    /// user is in the middle of carrying, and a *pending intent*, which would
+    /// mature a moment later and reopen a second float over the one that had just
+    /// been kept. `dismiss` and `wipe` null both for the same reason, and this is
+    /// the third door out of peek-hood — it was the one that only nulled one of
+    /// them (2026-08-12, when the header drag made promotion reachable with an
+    /// intent still in flight).
     pub fn promote(&mut self) -> bool {
         let Some(win) = self.live_mut() else {
             return false;
@@ -865,6 +875,7 @@ impl FloatHost {
         win.mode = FloatMode::Pinned;
         win.focused = true;
         self.closing_at = None;
+        self.disarm();
         true
     }
 
@@ -1745,6 +1756,47 @@ mod tests {
         host.release(false, now);
         assert!(!host.grace_expired(now + FLY_CLOSE_LEFT * 4));
         assert!(host.pinned_is_open(), "and it is still there");
+    }
+
+    /// PIN (user ruling 2026-08-12, rule ②) — **promotion stops both clocks.**
+    ///
+    /// Dragging a peek's header keeps it, and the moment it is kept it stops
+    /// being a peek: nothing that could take a peek away may survive. There are
+    /// two such things and the grace above is only one of them. The other is a
+    /// *pending intent* — the pointer rested on a trigger 180ms ago and the timer
+    /// is still running — and it is newly reachable here, because the drag that
+    /// promotes begins with the pointer somewhere it may well have armed one.
+    ///
+    /// Left alive it would mature a moment later and `open` a second float over
+    /// the window the user had just decided to keep, mid-carry.
+    ///
+    /// Red gate / mutation: delete `self.disarm()` from `promote` and the last
+    /// assertion here hands back a trigger that is about to reopen the window.
+    #[test]
+    fn promoting_stops_the_grace_and_the_intent_alike() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        open_peek(&mut host, TAB, now);
+
+        // Both clocks running: the pointer has left (a grace is armed) and it has
+        // since come to rest on another trigger (an intent is arming).
+        host.release(false, now);
+        host.observe(Some(OTHER), now);
+
+        assert!(host.promote(), "the header drag keeps it");
+        assert!(
+            !host.grace_expired(now + FLY_CLOSE_LEFT * 4),
+            "the grace is out: a window being carried is not one that times out"
+        );
+        assert_eq!(
+            host.take_due(now + FLY_OPEN * 4),
+            None,
+            "and the intent is out: it would have opened a second float over this one"
+        );
+        assert!(
+            host.pinned_is_open(),
+            "leaving exactly the window that was kept"
+        );
     }
 
     /// G91: promotion happens in place, so the tree you unfolded stays unfolded
