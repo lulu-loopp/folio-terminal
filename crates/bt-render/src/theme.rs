@@ -309,6 +309,38 @@ pub struct ChromePalette {
     /// `--ink2` a *list of file names* is set in — because a preview is the one
     /// surface where the content is the point and the chrome is the frame.
     pub preview_body_text: [u8; 3],
+    // ── the read-only view family (mock-up 599-623, 1201-1211, 1638-1644) ──
+    //
+    // Nine entries, and every one of them is a translucent design token
+    // pre-mixed over the ground it actually stands on. Two grounds appear here
+    // rather than one: a preview body is `--termbg`, but a markdown code fence
+    // lays `--panel` over it and everything inside the fence stands on *that*.
+    // `--ink3` over the body and `--ink3` over a fence are different colours,
+    // and only one of them is what a browser would have shown.
+    /// `.pv-table th, .pv-table td { border: 1px solid var(--border-soft) }` and
+    /// the same hairline anywhere else a preview rules a line, over `--termbg`.
+    pub preview_grid_line: [u8; 3],
+    /// `.md-code { background: var(--panel) }` — opaque, so it is the token.
+    pub preview_code_ground: [u8; 3],
+    /// `.md-code { border: 1px solid var(--border-soft) }`, over the fence's own
+    /// `--panel` ground rather than over the body.
+    pub preview_code_border: [u8; 3],
+    /// The fence's body — `--ink2`, standing on [`Self::preview_code_ground`].
+    pub preview_code_text: [u8; 3],
+    /// `.md-code .lang` — `--ink3` on the same ground.
+    pub preview_code_lang: [u8; 3],
+    /// `.pv-diff .dadd { background: color-mix(in srgb, var(--ok) 13%, transparent) }`
+    /// resolved over `--termbg`.
+    pub preview_diff_add: [u8; 3],
+    /// `.pv-diff .ddel { … var(--err) 10% … }`, likewise.
+    pub preview_diff_del: [u8; 3],
+    /// `.pv-diff .dhunk { color: var(--accent) }` — opaque, so it is the token,
+    /// named separately because a hunk marker is not the unread dot and the two
+    /// are free to part company.
+    pub preview_diff_hunk: [u8; 3],
+    /// `.pv-table th { color: var(--ink) }`, standing on the head row's own
+    /// `--hover` fill rather than on the bare body.
+    pub preview_table_head_text: [u8; 3],
     // ── the file tree's rows, mixed over the one ground a files body has ──
     //
     // A files pane's body is `--termbg` and nothing else (B15/U11), so unlike
@@ -746,6 +778,24 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // — the same value the selected row's ink resolves to, arrived at over the
     // bare body rather than over the selection fill.
     preview_body_text: [0xe4, 0xe4, 0xe4],
+    // `--border-soft` (white .06) over `--termbg` 27: 27 + 228×.06 = 40.7.
+    preview_grid_line: [0x29, 0x29, 0x29],
+    // `--panel #252525` = 37, and the same hairline over *it*:
+    // 37 + 218×.06 = 50.1.
+    preview_code_ground: [0x25, 0x25, 0x25],
+    preview_code_border: [0x32, 0x32, 0x32],
+    // `--ink2` (white .55) and `--ink3` (white .38) over that 37:
+    // 37 + 218×.55 = 156.9, 37 + 218×.38 = 119.8.
+    preview_code_text: [0x9d, 0x9d, 0x9d],
+    preview_code_lang: [0x78, 0x78, 0x78],
+    // `--ok #57ab5a` at 13% over 27: (34.8, 45.7, 35.2).
+    preview_diff_add: [0x23, 0x2e, 0x23],
+    // `--err #c50f1f` at 10% over 27: (44.0, 25.8, 27.4).
+    preview_diff_del: [0x2c, 0x1a, 0x1b],
+    preview_diff_hunk: [0x7a, 0x99, 0xff],
+    // `--ink` (white .87) over `--hover` over `--termbg`: 27 + 228×.055 = 39.5,
+    // then 39.5 + 215.5×.87 = 227.0.
+    preview_table_head_text: [0xe3, 0xe3, 0xe3],
     // The file tree's three grounds on `--termbg #1B1B1B`:
     //   `--hover`  white .055 → 27 + 228×.055 = 39.5
     //   `--active` white .09  → 27 + 228×.09  = 47.5
@@ -909,6 +959,23 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // `--ink rgba(55,53,47,.87)` is opaque enough to be itself in the mock-up's
     // own light palette, and `--termbg` here is `#FFFFFF`, so this is `--ink`.
     preview_body_text: [0x37, 0x35, 0x2f],
+    // `--border-soft` (black .055) over `--termbg #FFFFFF`: 255×.945 = 241.0.
+    preview_grid_line: [0xf1, 0xf1, 0xf1],
+    // `--panel #F7F7F5`, and the same hairline over it:
+    // (247, 247, 245)×.945 = (233.4, 233.4, 231.5).
+    preview_code_ground: [0xf7, 0xf7, 0xf5],
+    preview_code_border: [0xe9, 0xe9, 0xe8],
+    // `--ink2` (.65) and `--ink3` (.45) of `rgb(55,53,47)` over that panel:
+    // (122.2, 120.9, 116.3) and (160.6, 159.7, 155.9).
+    preview_code_text: [0x7a, 0x79, 0x74],
+    preview_code_lang: [0xa1, 0xa0, 0x9c],
+    // `--ok #1a7f37` at 13% over white: (225.2, 238.4, 229.0).
+    preview_diff_add: [0xe1, 0xee, 0xe5],
+    // `--err #c50f1f` at 10% over white: (249.2, 231.0, 232.6).
+    preview_diff_del: [0xf9, 0xe7, 0xe9],
+    preview_diff_hunk: [0x30, 0x59, 0xd8],
+    // `--ink #37352F` is opaque on this canvas, so the head row's ink is itself.
+    preview_table_head_text: [0x37, 0x35, 0x2f],
     // The file tree's three grounds on `--termbg #FFFFFF`. The inks here are
     // rgb(55,53,47), so each channel steps down by {200,202,208}×alpha:
     //   `--hover`  .055 → (244.0, 243.9, 243.6)

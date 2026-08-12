@@ -262,6 +262,7 @@ dependencies = [
  "bt-render",
  "bt-term",
  "bt-transcript",
+ "bt-unicode",
  "bt-viewport",
  "pollster",
  "winit",

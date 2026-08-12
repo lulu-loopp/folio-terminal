@@ -19,6 +19,12 @@
 #   .\ui-probe.ps1 capture -Pid <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
 #                                                                    region beyond the window (IME popups
 #                                                                    are separate windows and live outside)
+#   .\ui-probe.ps1 wheel -Pid <pid> -X 900 -Y 400 -Delta -6 [-Mods s]
+#                                                              → a notch where the pointer is put;
+#                                                                -Mods holds ctrl/shift/alt down
+#                                                                around the run, which is the only
+#                                                                way to reach a horizontal scroller
+#                                                                from a mouse with no tilt wheel
 #   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20               → left click at window+(X,Y) physical px
 #   .\ui-probe.ps1 dblclick -Pid <pid> -X 100 -Y 20 [-GapMs 90] → two presses inside the multi-click
 #                                                                interval, from one process — two separate
@@ -280,11 +286,37 @@ public class Probe {
      safety law as typing: foreground-verified before anything is sent. */
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  public static void Wheel(int notches) {
+  public static void Wheel(int notches) { WheelWithMods(notches, false, false, false); }
+  /* The wheel with modifiers held down around it.
+
+     Shift+wheel is how every horizontal scroller on this desktop is reached
+     from a mouse without a tilt wheel, so a probe that can only send a bare
+     notch cannot test one. The modifiers are pressed and released around the
+     whole run rather than around each notch, because that is what a hand does
+     and because an app that reads the modifier state at the event would see it
+     flicker otherwise. */
+  public static void WheelWithMods(int notches, bool ctrl, bool shift, bool alt) {
+    var hold = new System.Collections.Generic.List<INPUT>();
+    var drop = new System.Collections.Generic.List<INPUT>();
+    if (ctrl)  { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = 0 }; hold.Add(d);
+                 var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = KEYEVENTF_KEYUP }; drop.Add(u); }
+    if (shift) { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = 0 }; hold.Add(d);
+                 var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = KEYEVENTF_KEYUP }; drop.Add(u); }
+    if (alt)   { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = 0 }; hold.Add(d);
+                 var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = KEYEVENTF_KEYUP }; drop.Add(u); }
+    if (hold.Count > 0) {
+      SendInput((uint)hold.Count, hold.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+      System.Threading.Thread.Sleep(40);
+    }
     int dir = notches < 0 ? -120 : 120;
     for (int i = 0; i < System.Math.Abs(notches); i++) {
       mouse_event(0x0800, 0, 0, dir, UIntPtr.Zero);
       System.Threading.Thread.Sleep(60);
+    }
+    if (drop.Count > 0) {
+      System.Threading.Thread.Sleep(40);
+      drop.Reverse();
+      SendInput((uint)drop.Count, drop.ToArray(), Marshal.SizeOf(typeof(INPUT)));
     }
   }
   /* Buttons travel the same road the wheel does, and reach winit for the same
@@ -485,8 +517,11 @@ switch ($Cmd) {
     }
     [Probe]::SetCursorPos($px, $py) | Out-Null
     Start-Sleep -Milliseconds 150
-    [Probe]::Wheel($Delta)   # positive = scroll up (into history), negative = down
-    "wheeled $Delta notches at ($px, $py) on pid=$ProcId (foreground verified)"
+    # positive = scroll up (into history), negative = down. -Mods holds
+    # ctrl/shift/alt down around the run, which is how a horizontal scroller is
+    # reached from a mouse that has no tilt wheel.
+    [Probe]::WheelWithMods($Delta, ($Mods -match "c"), ($Mods -match "s"), ($Mods -match "a"))
+    "wheeled $Delta notches mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
   }
   "click" {
     $h = Get-AppWindow $ProcId

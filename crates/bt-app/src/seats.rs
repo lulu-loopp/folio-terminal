@@ -8828,16 +8828,19 @@ pub fn clamp_files_scroll(body: [f32; 4], rows: usize, scroll_px: f32, scale: f3
     scroll_px.clamp(0.0, max_scroll)
 }
 
-// ── the preview seat's text body (mock-up 597-604) ──────────────────────────
+// ── the preview seat's read-only view family ────────────────────────────────
 //
-// `.pv-edit { font: 12.5px/1.5 Consolas, "Cascadia Mono", monospace; padding:
-// 10px 12px; white-space: pre; tab-size: 4 }`. Five numbers, and every one of
-// them is here rather than at the call site for the reason `FILES_ROW_*` are:
-// the painter and the wheel and the hit test have to be laying out the same
-// lines, and a constant with two copies is a list whose click lands on the row
-// above the one you can see.
+// Four bodies, three geometries and one rule they all obey: **the painter, the
+// wheel and the hit test read the same derivation.** A constant with two copies
+// is a list whose click lands on the row above the one you can see, and this
+// module has paid for that once already (`FilesTreeGeometry`).
+//
+// Every number below is the mock-up's, cited where it lives. The two places the
+// mock-up has no number are the browser defaults it silently inherits — a
+// paragraph's `1em` margin and a list's indent — and those are chosen here, in
+// the open, rather than left to a layout engine this window does not have.
 
-/// `.pv-edit`'s type size, in logical pixels.
+/// `.pv-edit`'s type size, in logical pixels (mock-up 602).
 pub const PREVIEW_TEXT_FONT_LOGICAL_PX: f32 = 12.5;
 /// `.pv-edit`'s line box, as a ratio of the type size — CSS `12.5px/1.5`.
 pub const PREVIEW_TEXT_LINE_HEIGHT_RATIO: f32 = 1.5;
@@ -8845,115 +8848,357 @@ pub const PREVIEW_TEXT_LINE_HEIGHT_RATIO: f32 = 1.5;
 pub const PREVIEW_TEXT_PADDING_X_LOGICAL_PX: f32 = 12.0;
 /// `.pv-edit { padding: 10px 12px }`, vertical half.
 pub const PREVIEW_TEXT_PADDING_Y_LOGICAL_PX: f32 = 10.0;
-/// `.pv-edit { tab-size: 4 }`.
-///
-/// Expanded into spaces on the way to the shaper rather than shaped as a tab,
-/// because a tab is a *stop* and cosmic-text has no tab stops: what the CSS
-/// property names is a column grid, and in a monospace face a column grid is
-/// exactly N spaces.
-pub const PREVIEW_TEXT_TAB_WIDTH: usize = 4;
+/// `.pv-diff { font: 12.5px/1.65 var(--mono) }` (mock-up 1639).
+pub const PREVIEW_DIFF_LINE_HEIGHT_RATIO: f32 = 1.65;
+/// `.pv-diff .dline { padding: 0 16px }`.
+pub const PREVIEW_DIFF_PADDING_X_LOGICAL_PX: f32 = 16.0;
+/// `.pv-diff { padding: 12px 0 }`.
+pub const PREVIEW_DIFF_PADDING_Y_LOGICAL_PX: f32 = 12.0;
+/// `.pv-diff .dhunk { margin-top: 8px }`.
+pub const PREVIEW_DIFF_HUNK_MARGIN_LOGICAL_PX: f32 = 8.0;
 
-/// Where a preview's text body puts its lines.
+/// The metrics one monospace body is set in.
 ///
-/// The twin of [`FilesTreeGeometry`], and one authority for the same three
-/// things: how tall a line is, how tall the content is, and how far it may be
-/// scrolled at all.
+/// Two callers, two answers, one shape: a source file and a patch differ in
+/// their line box and their padding and in nothing else, so they share every
+/// line of arithmetic below rather than each carrying a copy of it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PreviewTextGeometry {
+pub struct PreviewMonoMetrics {
+    pub font_size: f32,
+    pub line_height: f32,
+    pub padding_x: f32,
+    pub padding_y: f32,
+}
+
+/// `.pv-edit`'s metrics.
+pub fn preview_text_metrics(scale: f32) -> PreviewMonoMetrics {
+    let font_size = PREVIEW_TEXT_FONT_LOGICAL_PX * scale;
+    PreviewMonoMetrics {
+        font_size,
+        line_height: (font_size * PREVIEW_TEXT_LINE_HEIGHT_RATIO)
+            .round()
+            .max(1.0),
+        padding_x: (PREVIEW_TEXT_PADDING_X_LOGICAL_PX * scale).round(),
+        padding_y: (PREVIEW_TEXT_PADDING_Y_LOGICAL_PX * scale).round(),
+    }
+}
+
+/// `.pv-diff`'s metrics.
+pub fn preview_diff_metrics(scale: f32) -> PreviewMonoMetrics {
+    let font_size = PREVIEW_TEXT_FONT_LOGICAL_PX * scale;
+    PreviewMonoMetrics {
+        font_size,
+        line_height: (font_size * PREVIEW_DIFF_LINE_HEIGHT_RATIO)
+            .round()
+            .max(1.0),
+        padding_x: (PREVIEW_DIFF_PADDING_X_LOGICAL_PX * scale).round(),
+        padding_y: (PREVIEW_DIFF_PADDING_Y_LOGICAL_PX * scale).round(),
+    }
+}
+
+/// Where a monospace body puts its lines, and how far it may be scrolled.
+///
+/// The twin of [`FilesTreeGeometry`], with one axis more. One authority for four
+/// things: how tall a line is, how tall and how *wide* the content is, and how
+/// far it may be scrolled at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewMonoGeometry {
     /// The body rectangle the lines are drawn into and clipped to.
     pub viewport: [f32; 4],
-    pub scroll_px: f32,
+    /// `[x, y]`, in physical pixels.
+    pub scroll: [f32; 2],
     pub line_height: f32,
     pub font_size: f32,
+    pub content_width: f32,
     pub content_height: f32,
-    pub max_scroll: f32,
+    /// `[x, y]`, the far end of each axis.
+    pub max_scroll: [f32; 2],
     left: f32,
     top: f32,
 }
 
-impl PreviewTextGeometry {
-    /// The layout box of the line at `index`, scroll already applied.
+impl PreviewMonoGeometry {
+    /// The layout box of the row that starts `offset` into the content, both
+    /// scrolls already applied.
     ///
-    /// The right edge is deliberately the body's own and not a measured one: a
-    /// line wider than the pane runs past it and is cropped, which is
-    /// `white-space: pre` rather than the reflow it forbids. A generous box that
-    /// the clip then cuts is how the shaper is told "do not fit this".
-    pub fn line_rect(&self, index: usize) -> [f32; 4] {
-        let top = self.top - self.scroll_px + self.line_height * index as f32;
+    /// An offset rather than an index, because a diff's rows are not all the
+    /// same height: `.dhunk { margin-top: 8px }` (mock-up 1643) puts a gap in
+    /// front of every hunk marker, so "which row is this" and "how far down is
+    /// it" stopped being the same question the moment the diff arrived.
+    ///
+    /// The right edge is the content's own, not the pane's: a line wider than
+    /// the body runs past it and is cropped, which is `white-space: pre` rather
+    /// than the reflow it forbids.
+    pub fn row_rect(&self, offset: f32) -> [f32; 4] {
+        let top = self.top - self.scroll[1] + offset;
+        let left = self.left - self.scroll[0];
         [
-            self.left,
+            left,
             top,
-            // Room for a line far wider than the pane, so nothing is squeezed;
-            // the clip is what decides how much of it is seen.
-            self.left + (self.viewport[2] - self.viewport[0]).max(1.0) * 64.0,
+            left + self.content_width.max(self.viewport[2] - self.viewport[0]),
+            top + self.line_height,
+        ]
+    }
+
+    /// The layout box of the line at `index`, for a body whose rows are uniform.
+    pub fn line_rect(&self, index: usize) -> [f32; 4] {
+        self.row_rect(self.line_height * index as f32)
+    }
+
+    /// The tint band behind the line at `index`.
+    ///
+    /// **Full width, always** — and that is P108's named double bug: the
+    /// mock-up's `.pv-diff` is `width: max-content; min-width: 100%` precisely so
+    /// that a line's colour spans the whole scroll width rather than stopping
+    /// where its own text does. A band derived from the text would be a green
+    /// stripe that ends mid-pane on every short addition, and would slide
+    /// sideways under a horizontal scroll. This one is the viewport's, so it
+    /// cannot do either.
+    pub fn band_rect(&self, offset: f32) -> [f32; 4] {
+        let top = self.top - self.scroll[1] + offset;
+        [
+            self.viewport[0],
+            top,
+            self.viewport[2],
             top + self.line_height,
         ]
     }
 }
 
-/// Lay out a preview's text body.
-pub fn preview_text_geometry(
+/// Lay out a monospace body.
+///
+/// `columns` is the widest line's width in cells and `advance` is what one cell
+/// measures, which together are the only honest content width for a grid:
+/// measuring two thousand lines with the shaper every frame would put the file's
+/// size into the frame budget, and in a monospace face the product is exact.
+pub fn preview_mono_geometry(
     body: [f32; 4],
-    lines: usize,
-    scroll_px: f32,
-    scale: f32,
-) -> PreviewTextGeometry {
-    let font_size = PREVIEW_TEXT_FONT_LOGICAL_PX * scale;
-    let line_height = (font_size * PREVIEW_TEXT_LINE_HEIGHT_RATIO)
-        .round()
-        .max(1.0);
-    let padding_x = (PREVIEW_TEXT_PADDING_X_LOGICAL_PX * scale).round();
-    let padding_y = (PREVIEW_TEXT_PADDING_Y_LOGICAL_PX * scale).round();
-    let content_height = padding_y * 2.0 + line_height * lines as f32;
-    PreviewTextGeometry {
+    metrics: PreviewMonoMetrics,
+    rows_height: f32,
+    columns: usize,
+    advance: f32,
+    scroll: [f32; 2],
+) -> PreviewMonoGeometry {
+    let content_height = metrics.padding_y * 2.0 + rows_height;
+    let content_width = metrics.padding_x * 2.0 + advance * columns as f32;
+    PreviewMonoGeometry {
         viewport: body,
-        scroll_px,
-        line_height,
-        font_size,
+        scroll,
+        line_height: metrics.line_height,
+        font_size: metrics.font_size,
+        content_width,
         content_height,
-        max_scroll: (content_height - (body[3] - body[1])).max(0.0),
-        left: body[0] + padding_x,
-        top: body[1] + padding_y,
+        max_scroll: [
+            (content_width - (body[2] - body[0])).max(0.0),
+            (content_height - (body[3] - body[1])).max(0.0),
+        ],
+        left: body[0] + metrics.padding_x,
+        top: body[1] + metrics.padding_y,
     }
 }
 
-/// The only scroll a preview body is allowed to hold, given what there is to
-/// see.
+/// The only scroll a monospace body is allowed to hold, on both axes.
 ///
-/// [`clamp_files_scroll`]'s twin, with the same contract: every write of the
-/// stored offset goes through here, so a buffer that got shorter — a re-read, a
-/// pane grown taller, a switch to a smaller file — cannot leave the body parked
-/// past its own end.
+/// [`clamp_files_scroll`]'s twin, with the same contract and now with two
+/// numbers: every write of the stored offset goes through here, so a buffer that
+/// got shorter — or *narrower*, which a switch to another file usually is —
+/// cannot leave the body parked past its own end on either axis.
 #[must_use]
-pub fn clamp_preview_scroll(body: [f32; 4], lines: usize, scroll_px: f32, scale: f32) -> f32 {
-    let max_scroll = preview_text_geometry(body, lines, 0.0, scale).max_scroll;
-    scroll_px.clamp(0.0, max_scroll)
+pub fn clamp_preview_scroll(
+    body: [f32; 4],
+    metrics: PreviewMonoMetrics,
+    rows_height: f32,
+    columns: usize,
+    advance: f32,
+    scroll: [f32; 2],
+) -> [f32; 2] {
+    let max =
+        preview_mono_geometry(body, metrics, rows_height, columns, advance, [0.0, 0.0]).max_scroll;
+    [scroll[0].clamp(0.0, max[0]), scroll[1].clamp(0.0, max[1])]
 }
 
-/// Expand tab stops the way `tab-size: 4` does.
+// ── the csv grid (mock-up 610-613) ──────────────────────────────────────────
+
+/// `.pv-table { padding: 12px }`.
+const PREVIEW_TABLE_PADDING_LOGICAL_PX: f32 = 12.0;
+/// `.pv-table th, td { padding: 4px 10px }`.
+const PREVIEW_TABLE_CELL_PADDING_X_LOGICAL_PX: f32 = 10.0;
+const PREVIEW_TABLE_CELL_PADDING_Y_LOGICAL_PX: f32 = 4.0;
+/// `.pv-table table { font-size: 12px }`.
+const PREVIEW_TABLE_FONT_LOGICAL_PX: f32 = 12.0;
+
+/// Where a csv's grid puts its cells.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewTableGeometry {
+    pub viewport: [f32; 4],
+    pub scroll: [f32; 2],
+    pub font_size: f32,
+    pub row_height: f32,
+    pub border: f32,
+    pub padding_x: f32,
+    pub padding_y: f32,
+    /// One outer width per column, borders included.
+    pub column_widths: Vec<f32>,
+    pub content_width: f32,
+    pub content_height: f32,
+    pub max_scroll: [f32; 2],
+    left: f32,
+    top: f32,
+}
+
+impl PreviewTableGeometry {
+    /// The outer box of one cell, borders included.
+    pub fn cell_rect(&self, row: usize, column: usize) -> [f32; 4] {
+        let x: f32 =
+            self.left - self.scroll[0] + self.column_widths.iter().take(column).sum::<f32>();
+        let y = self.top - self.scroll[1] + self.row_height * row as f32;
+        [
+            x,
+            y,
+            x + self.column_widths.get(column).copied().unwrap_or(0.0),
+            y + self.row_height,
+        ]
+    }
+
+    /// The whole of one row, which is what the heading's fill stands on.
+    pub fn row_rect(&self, row: usize) -> [f32; 4] {
+        let y = self.top - self.scroll[1] + self.row_height * row as f32;
+        let left = self.left - self.scroll[0];
+        [left, y, left + self.content_width, y + self.row_height]
+    }
+
+    /// Where the text of one cell starts, inside its padding and border.
+    pub fn cell_text_rect(&self, row: usize, column: usize) -> [f32; 4] {
+        let cell = self.cell_rect(row, column);
+        [
+            cell[0] + self.border + self.padding_x,
+            cell[1] + self.border + self.padding_y,
+            cell[2] - self.padding_x,
+            cell[3] - self.padding_y,
+        ]
+    }
+}
+
+/// Lay out a csv grid from the widths of its own cells.
 ///
-/// **Column-aware, not a blind replace.** `tab-size` advances to the next
-/// multiple of four *columns*, so a tab after two characters is worth two
-/// spaces and a tab at the start of a line is worth four. Replacing each tab
-/// with four spaces is the thing that misaligns every continuation line in an
-/// indented file, which is precisely what a preview of source code is for.
-pub fn expand_tabs(line: &str) -> String {
-    if !line.contains('\t') {
-        return line.to_owned();
+/// `column_columns` is each column's widest cell in monospace cells — the table
+/// is set in `Consolas, monospace` (mock-up 611), so a column's width is exact
+/// arithmetic rather than a measuring pass over every cell in the file.
+pub fn preview_table_geometry(
+    body: [f32; 4],
+    column_columns: &[usize],
+    rows: usize,
+    advance: f32,
+    scale: f32,
+    scroll: [f32; 2],
+) -> PreviewTableGeometry {
+    let font_size = PREVIEW_TABLE_FONT_LOGICAL_PX * scale;
+    let border = (scale.round()).max(1.0);
+    let padding_x = (PREVIEW_TABLE_CELL_PADDING_X_LOGICAL_PX * scale).round();
+    let padding_y = (PREVIEW_TABLE_CELL_PADDING_Y_LOGICAL_PX * scale).round();
+    let outer = (PREVIEW_TABLE_PADDING_LOGICAL_PX * scale).round();
+    let line = (font_size * CHROME_LINE_HEIGHT).round().max(1.0);
+    let row_height = border + padding_y * 2.0 + line;
+    let column_widths: Vec<f32> = column_columns
+        .iter()
+        .map(|cells| border + padding_x * 2.0 + advance * *cells as f32)
+        .collect();
+    // The closing border on the far edge belongs to the table, not to the last
+    // cell: `border-collapse: collapse` draws one hairline between neighbours
+    // and one more at each end.
+    let content_width = column_widths.iter().sum::<f32>() + border;
+    let content_height = row_height * rows as f32 + border;
+    PreviewTableGeometry {
+        viewport: body,
+        scroll,
+        font_size,
+        row_height,
+        border,
+        padding_x,
+        padding_y,
+        column_widths,
+        content_width,
+        content_height,
+        max_scroll: [
+            (content_width + outer * 2.0 - (body[2] - body[0])).max(0.0),
+            (content_height + outer * 2.0 - (body[3] - body[1])).max(0.0),
+        ],
+        left: body[0] + outer,
+        top: body[1] + outer,
     }
-    let mut out = String::with_capacity(line.len());
-    let mut column = 0usize;
-    for ch in line.chars() {
-        if ch == '\t' {
-            let advance = PREVIEW_TEXT_TAB_WIDTH - column % PREVIEW_TEXT_TAB_WIDTH;
-            out.extend(std::iter::repeat_n(' ', advance));
-            column += advance;
-        } else {
-            out.push(ch);
-            column += 1;
-        }
+}
+
+// ── the markdown render (mock-up 608-609, 1201-1211) ────────────────────────
+
+/// `.pv-md { font-size: 13px }`.
+pub const PREVIEW_MD_FONT_LOGICAL_PX: f32 = 13.0;
+/// `.pv-md { padding: 12px 16px }`.
+pub const PREVIEW_MD_PADDING_X_LOGICAL_PX: f32 = 16.0;
+pub const PREVIEW_MD_PADDING_Y_LOGICAL_PX: f32 = 12.0;
+/// `.md-code .lang { font-size: 9.5px; letter-spacing: .08em }`.
+pub const PREVIEW_MD_LANG_FONT_LOGICAL_PX: f32 = 9.5;
+pub const PREVIEW_MD_LANG_TRACKING_EM: f32 = 0.08;
+
+/// The metrics a rendered markdown body is set in.
+///
+/// **Two of these are not in the mock-up**, and are chosen here rather than
+/// inherited: `paragraph_gap` is a `<p>`'s `1em` margin and `list_indent` is a
+/// `<ul>`'s indent, both of which the prototype gets free from a browser's
+/// default stylesheet and neither of which this window has one of. They are
+/// written down at the values that reproduce what the mock-up draws, so that the
+/// day they are wrong there is a number to argue with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewMarkdownMetrics {
+    pub font_size: f32,
+    pub line_height: f32,
+    pub padding_x: f32,
+    pub padding_y: f32,
+    /// `.pv-md .md-h { margin: 2px 0 2px }` — the 8px top of `.md-h` (1201) is
+    /// overridden to 2px inside a preview (609), which is the one place the two
+    /// rules disagree and the more specific one wins.
+    pub heading_margin: f32,
+    /// `.md-h { font-weight: 600 }` sets no size, so a heading is body size in
+    /// the heavier weight — the mock-up's headings are *emphasis*, not scale.
+    pub heading_font: f32,
+    /// `.md-code { margin: 6px 0 }`.
+    pub code_margin: f32,
+    /// `.md-code { padding: 8px 12px }`.
+    pub code_padding_x: f32,
+    pub code_padding_y: f32,
+    /// `.md-code { border-radius: 7px }`, carried for the day the fill pass
+    /// grows rounded corners; the fence is a square block today.
+    pub code_radius: f32,
+    pub code_border: f32,
+    pub lang_font: f32,
+    /// `.md-code .lang { top: 5px; right: 9px }`.
+    pub lang_inset_top: f32,
+    pub lang_inset_right: f32,
+    /// A `<p>`'s `1em` margin, collapsed between siblings. Chosen, see above.
+    pub paragraph_gap: f32,
+    /// A `<ul>`'s indent, with room for the bullet. Chosen, see above.
+    pub list_indent: f32,
+}
+
+pub fn preview_markdown_metrics(scale: f32) -> PreviewMarkdownMetrics {
+    let font_size = PREVIEW_MD_FONT_LOGICAL_PX * scale;
+    PreviewMarkdownMetrics {
+        font_size,
+        line_height: (font_size * CHROME_LINE_HEIGHT).round().max(1.0),
+        padding_x: (PREVIEW_MD_PADDING_X_LOGICAL_PX * scale).round(),
+        padding_y: (PREVIEW_MD_PADDING_Y_LOGICAL_PX * scale).round(),
+        heading_margin: (2.0 * scale).round(),
+        heading_font: font_size,
+        code_margin: (6.0 * scale).round(),
+        code_padding_x: (12.0 * scale).round(),
+        code_padding_y: (8.0 * scale).round(),
+        code_radius: (7.0 * scale).round(),
+        code_border: scale.round().max(1.0),
+        lang_font: PREVIEW_MD_LANG_FONT_LOGICAL_PX * scale,
+        lang_inset_top: (5.0 * scale).round(),
+        lang_inset_right: (9.0 * scale).round(),
+        paragraph_gap: font_size.round(),
+        list_indent: (20.0 * scale).round(),
     }
-    out
 }
 
 // ── the "no preview" card (mock-up 614-623, 4984-4988) ──────────────────────
@@ -12556,65 +12801,114 @@ mod tests {
 
     // ── the preview seat's text body and its "no preview" card ──────────────
 
-    /// PIN — `.pv-edit { white-space: pre; tab-size: 4 }` (mock-up 599-604).
+    /// PIN — R2 乙案, on the preview body, **on both axes**.
     ///
-    /// A tab is a *stop*, not four characters: it advances to the next multiple
-    /// of four columns. Replacing each with four spaces is what misaligns every
-    /// continuation line of an indented file, which is precisely the thing a
-    /// preview of source code exists to show.
-    ///
-    /// Mutation: `out.extend(std::iter::repeat_n(' ', PREVIEW_TEXT_TAB_WIDTH))`
-    /// instead of the computed advance.
-    #[test]
-    fn a_tab_advances_to_the_next_stop_rather_than_to_four_more_spaces() {
-        assert_eq!(expand_tabs("\tfn main() {"), "    fn main() {");
-        assert_eq!(expand_tabs("ab\tc"), "ab  c", "two columns in, two to go");
-        assert_eq!(
-            expand_tabs("abcd\te"),
-            "abcd    e",
-            "a full stop is skipped"
-        );
-        assert_eq!(expand_tabs("a\t\tb"), "a       b", "stops compose");
-        assert_eq!(expand_tabs("no tabs here"), "no tabs here");
-    }
-
-    /// PIN — R2 乙案, on the preview body. **One authority for the bound.**
-    ///
-    /// The clamp reads its ceiling off [`preview_text_geometry`], so a body that
+    /// The clamp reads its ceiling off [`preview_mono_geometry`], so a body that
     /// holds its whole document cannot be scrolled at all and one that does not
-    /// stops exactly where the content does. The line boxes are the same
-    /// arithmetic the painter uses, which is what makes "the line you see is the
-    /// line you scrolled to" true by construction.
+    /// stops exactly where the content does. The horizontal axis is the one this
+    /// slice added and the one that is easy to leave unbounded: a line that runs
+    /// off the edge invites a scroller that never ends.
     ///
-    /// Mutation: drop the `.max(0.0)` from `max_scroll`, which lets a short file
-    /// scroll upward off its own top.
+    /// Mutation: drop either `.max(0.0)` from `max_scroll`, which lets a body
+    /// scroll off its own top or its own left edge.
     #[test]
-    fn a_preview_body_scrolls_exactly_as_far_as_it_has_content() {
+    fn a_preview_body_scrolls_exactly_as_far_as_it_has_content_on_both_axes() {
         let body = [0.0, 100.0, 400.0, 300.0];
-        let geometry = preview_text_geometry(body, 4, 0.0, 1.0);
-        // 12.5 × 1.5 = 18.75, rounded to 19; padding 10 top and bottom.
-        assert_eq!(geometry.line_height, 19.0);
-        assert_eq!(geometry.content_height, 20.0 + 19.0 * 4.0);
+        let metrics = preview_text_metrics(1.0);
+        // 12.5 × 1.5 = 18.75, rounded to 19; padding 10 and 12.
+        assert_eq!(metrics.line_height, 19.0);
+        let short = preview_mono_geometry(body, metrics, 19.0 * 4.0, 10, 8.0, [0.0, 0.0]);
+        assert_eq!(short.content_height, 20.0 + 19.0 * 4.0);
+        assert_eq!(short.content_width, 24.0 + 80.0);
         assert_eq!(
-            geometry.max_scroll, 0.0,
-            "four lines fit in two hundred pixels, so there is nowhere to go"
+            short.max_scroll,
+            [0.0, 0.0],
+            "four short lines fit in four hundred by two hundred"
         );
-        assert_eq!(clamp_preview_scroll(body, 4, 500.0, 1.0), 0.0);
 
-        let long = preview_text_geometry(body, 100, 0.0, 1.0);
-        assert_eq!(long.max_scroll, 20.0 + 19.0 * 100.0 - 200.0);
-        assert_eq!(clamp_preview_scroll(body, 100, -30.0, 1.0), 0.0);
+        let long = preview_mono_geometry(body, metrics, 19.0 * 100.0, 120, 8.0, [0.0, 0.0]);
+        assert_eq!(long.max_scroll[1], 20.0 + 19.0 * 100.0 - 200.0);
+        assert_eq!(long.max_scroll[0], 24.0 + 960.0 - 400.0);
         assert_eq!(
-            clamp_preview_scroll(body, 100, 1.0e6, 1.0),
+            clamp_preview_scroll(body, metrics, 19.0 * 100.0, 120, 8.0, [-5.0, -30.0]),
+            [0.0, 0.0]
+        );
+        assert_eq!(
+            clamp_preview_scroll(body, metrics, 19.0 * 100.0, 120, 8.0, [1.0e6, 1.0e6]),
             long.max_scroll,
-            "and never past the last line"
+            "and never past the last line or the widest one"
         );
 
-        let scrolled = preview_text_geometry(body, 100, 38.0, 1.0);
+        let scrolled = preview_mono_geometry(body, metrics, 19.0 * 100.0, 120, 8.0, [40.0, 38.0]);
         assert_eq!(
             scrolled.line_rect(2)[1],
             110.0,
             "two lines of scroll puts the third line where the first one was"
+        );
+        assert_eq!(
+            scrolled.line_rect(2)[0],
+            -28.0,
+            "and forty pixels of it moves the left edge left by forty"
+        );
+    }
+
+    /// PIN — P108's named double bug: **a diff's tint spans the whole width.**
+    ///
+    /// `.pv-diff` is `width: max-content; min-width: 100%` for one reason, and
+    /// the mock-up's own comment says it: half-width tints. A band derived from
+    /// the text stops where the addition stops, and slides sideways the moment
+    /// the body is scrolled horizontally. This one is the viewport's, so it can
+    /// do neither.
+    ///
+    /// Mutation: return `row_rect` from `band_rect`.
+    #[test]
+    fn a_diffs_tint_spans_the_whole_body_at_every_scroll() {
+        let body = [40.0, 100.0, 440.0, 300.0];
+        let metrics = preview_diff_metrics(1.0);
+        // 12.5 × 1.65 = 20.6, rounded to 21.
+        assert_eq!(metrics.line_height, 21.0);
+        for scroll in [[0.0, 0.0], [180.0, 42.0], [1000.0, 0.0]] {
+            let geometry = preview_mono_geometry(body, metrics, 21.0 * 200.0, 300, 8.0, scroll);
+            let band = geometry.band_rect(21.0 * 3.0);
+            assert_eq!(
+                [band[0], band[2]],
+                [body[0], body[2]],
+                "the band is the body's width at scroll {scroll:?}"
+            );
+            let row = geometry.row_rect(21.0 * 3.0);
+            assert_eq!(band[1], row[1], "and it sits on its own line");
+            assert_eq!(band[3] - band[1], metrics.line_height);
+        }
+    }
+
+    /// PIN — the grid's cells are where its own column widths say.
+    ///
+    /// The heading row and the data rows are laid out by one derivation, so a
+    /// column cannot be one width in the head and another in the body — which is
+    /// the way a hand-built table always breaks.
+    ///
+    /// Mutation: drop the border from `row_height` or from `content_width`.
+    #[test]
+    fn a_tables_columns_are_one_width_from_head_to_foot() {
+        let body = [0.0, 0.0, 600.0, 400.0];
+        let geometry = preview_table_geometry(body, &[6, 4, 8], 3, 8.0, 1.0, [0.0, 0.0]);
+        // 1 border + 10 padding on each side + cells × 8.
+        assert_eq!(geometry.column_widths, vec![69.0, 53.0, 85.0]);
+        assert_eq!(geometry.content_width, 69.0 + 53.0 + 85.0 + 1.0);
+        // 1 border + 4 padding each side + round(12 × 1.4).
+        assert_eq!(geometry.row_height, 1.0 + 8.0 + 17.0);
+        for row in 0..3 {
+            let head = geometry.cell_rect(0, 1);
+            let cell = geometry.cell_rect(row, 1);
+            assert_eq!([cell[0], cell[2]], [head[0], head[2]], "row {row}");
+        }
+        let text = geometry.cell_text_rect(0, 0);
+        let cell = geometry.cell_rect(0, 0);
+        assert!(text[0] > cell[0] && text[1] > cell[1] && text[2] < cell[2]);
+        assert_eq!(
+            geometry.row_rect(0)[2] - geometry.row_rect(0)[0],
+            geometry.content_width,
+            "the heading fill runs the width of the table, not of one cell"
         );
     }
 

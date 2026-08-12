@@ -505,6 +505,539 @@ fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
     true
 }
 
+/// The preview body, parsed into what the painter draws — cached.
+///
+/// **Parsing is per content, drawing is per frame.** A markdown document has to
+/// be split into blocks and each block measured against the pane's width before
+/// the first one can be placed, and a 64KB head is some hundreds of blocks; a
+/// wheel notch would otherwise pay for all of it sixty times a second. So the
+/// document is derived once, when the key below changes, and every frame after
+/// that is a walk over what is visible.
+#[derive(Clone, Debug, Default)]
+enum PreviewDocument {
+    #[default]
+    Empty,
+    /// One entry per line, tabs already the spaces they draw as.
+    Text(Vec<String>),
+    Diff(Vec<DiffRow>),
+    Table {
+        rows: Vec<Vec<String>>,
+        /// Each column's widest cell, in monospace cells.
+        column_cells: Vec<usize>,
+    },
+    Markdown {
+        blocks: Vec<preview::MarkdownBlock>,
+        /// One height per block, measured against the pane it will wrap in.
+        heights: Vec<f32>,
+        /// Where each block starts inside the content.
+        tops: Vec<f32>,
+    },
+}
+
+/// One line of a diff, with the offset its hunk margins have pushed it to.
+#[derive(Clone, Debug)]
+struct DiffRow {
+    text: String,
+    kind: preview::DiffLineKind,
+    /// How far down the content this row's box starts. Not `index × line
+    /// height`, because `.dhunk { margin-top: 8px }` means the rows are not all
+    /// the same distance apart.
+    top: f32,
+}
+
+/// What a cached [`PreviewDocument`] was built from.
+///
+/// Everything the parse or the measuring depends on, so that a change to any of
+/// them rebuilds and a change to none of them does not. The body width and the
+/// scale are in it because markdown wraps and a diff's margins are scaled; the
+/// content length stands in for the content itself, which is the cheapest
+/// honest revision counter until slice 3 gives a buffer edits to count.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreviewDocumentKey {
+    path: PathBuf,
+    md_source: bool,
+    content_len: usize,
+    body_width_px: u32,
+    scale_ppm: u32,
+}
+
+// ── the read-only view family, built from a parsed document ─────────────────
+//
+// Four free functions rather than four methods, and the reason is the borrow
+// checker telling the truth about the design: none of them needs the runtime.
+// A body is a pure function of a parsed document, a geometry and a palette, and
+// keeping it that way is what makes each one answerable in a test without a
+// window (`build_preview_diff_body` in particular, which is P108's whole
+// argument in one rectangle).
+
+/// `.pv-meta { font-size: 11.5px }` (mock-up 607).
+const PREVIEW_META_FONT_LOGICAL_PX: f32 = 11.5;
+/// `.pv-image { gap: 10px }` (mock-up 605).
+const PREVIEW_IMAGE_GAP_LOGICAL_PX: f32 = 10.0;
+/// `.pv-image svg { max-width: 86%; max-height: 70% }` (mock-up 606).
+///
+/// **The 30% of height the picture does not take is not slack** — it is the
+/// band the meta line stands in. A fit that used the whole body would leave the
+/// sentence with nowhere to go but on top of the picture.
+const PREVIEW_IMAGE_FIT_WIDTH_FRACTION: f32 = 0.86;
+const PREVIEW_IMAGE_FIT_HEIGHT_FRACTION: f32 = 0.70;
+
+/// The vertical margin one markdown block asks for on each side.
+///
+/// One number per block rather than a top and a bottom, because every rule the
+/// mock-up inherits is symmetric — `.md-h { margin: 2px 0 2px }` inside a
+/// preview (609), `.md-code { margin: 6px 0 }` (1203), and a browser's `1em` on
+/// `<p>` and `<ul>`.
+fn markdown_block_margin(
+    block: &preview::MarkdownBlock,
+    metrics: seats::PreviewMarkdownMetrics,
+) -> f32 {
+    match block {
+        preview::MarkdownBlock::Heading { .. } => metrics.heading_margin,
+        preview::MarkdownBlock::Code { .. } => metrics.code_margin,
+        preview::MarkdownBlock::List(_) | preview::MarkdownBlock::Paragraph(_) => {
+            metrics.paragraph_gap
+        }
+    }
+}
+
+/// One markdown block's spans, as runs the shaper can set.
+fn markdown_runs(
+    spans: &[preview::Span],
+    palette: &bt_render::ChromePalette,
+    heading: bool,
+) -> Vec<bt_render::PreviewRun> {
+    spans
+        .iter()
+        .map(|span| match span.style {
+            // `.md-h { font-weight: 600; color: var(--ink) }` — a heading is
+            // emphasis at body size, not a second type scale (mock-up 1201).
+            preview::SpanStyle::Plain if heading => bt_render::PreviewRun {
+                text: span.text.clone(),
+                color: palette.preview_body_text,
+                mono: false,
+                bold: true,
+            },
+            preview::SpanStyle::Plain => bt_render::PreviewRun {
+                text: span.text.clone(),
+                color: palette.files_row_text,
+                mono: false,
+                bold: false,
+            },
+            preview::SpanStyle::Bold => bt_render::PreviewRun {
+                text: span.text.clone(),
+                color: palette.preview_body_text,
+                mono: false,
+                bold: true,
+            },
+            preview::SpanStyle::Code => bt_render::PreviewRun {
+                text: span.text.clone(),
+                color: palette.preview_code_text,
+                mono: true,
+                bold: heading,
+            },
+        })
+        .collect()
+}
+
+/// One unwrapped monospace line, in one colour.
+fn mono_paragraph(
+    text: String,
+    rect: [f32; 4],
+    font_size_px: f32,
+    line_height_px: f32,
+    color: [u8; 3],
+) -> bt_render::PreviewParagraph {
+    bt_render::PreviewParagraph {
+        runs: vec![bt_render::PreviewRun {
+            text,
+            color,
+            mono: true,
+            bold: false,
+        }],
+        rect,
+        font_size_px,
+        line_height_px,
+        wrap: false,
+        letter_spacing_em: 0.0,
+        align_right: false,
+        align_center: false,
+    }
+}
+
+/// Which lines of a body the pane can actually show.
+fn visible_range(
+    first_top: f32,
+    height: f32,
+    count: usize,
+    clip: [f32; 4],
+) -> std::ops::Range<usize> {
+    if height <= 0.0 || count == 0 {
+        return 0..0;
+    }
+    let above = ((clip[1] - first_top) / height).floor().max(0.0) as usize;
+    let below = (((clip[3] - first_top) / height).ceil().max(0.0) as usize + 1).min(count);
+    above.min(count)..below
+}
+
+/// `.pv-edit`'s body: plain monospace lines, no wrapping.
+fn build_preview_text_body(
+    geometry: &seats::PreviewMonoGeometry,
+    lines: &[String],
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewBody {
+    let clip = geometry.viewport;
+    let range = visible_range(
+        geometry.line_rect(0)[1],
+        geometry.line_height,
+        lines.len(),
+        clip,
+    );
+    bt_render::PreviewBody {
+        clip,
+        quads: Vec::new(),
+        paragraphs: range
+            .map(|index| {
+                mono_paragraph(
+                    lines[index].clone(),
+                    geometry.line_rect(index),
+                    geometry.font_size,
+                    geometry.line_height,
+                    palette.preview_body_text,
+                )
+            })
+            .collect(),
+    }
+}
+
+/// `.pv-diff`'s body: tinted bands under monospace lines.
+fn build_preview_diff_body(
+    geometry: &seats::PreviewMonoGeometry,
+    rows: &[DiffRow],
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewBody {
+    let clip = geometry.viewport;
+    let mut quads = Vec::new();
+    let mut paragraphs = Vec::new();
+    for row in rows {
+        let rect = geometry.row_rect(row.top);
+        if rect[3] <= clip[1] || rect[1] >= clip[3] {
+            continue;
+        }
+        // The band first and the whole width of it: P108's double bug was a
+        // tint that stopped where its own text did.
+        if row.kind.tints() {
+            quads.push(bt_render::PreviewQuad {
+                rect: geometry.band_rect(row.top),
+                color: match row.kind {
+                    preview::DiffLineKind::Add => palette.preview_diff_add,
+                    _ => palette.preview_diff_del,
+                },
+            });
+        }
+        paragraphs.push(mono_paragraph(
+            row.text.clone(),
+            rect,
+            geometry.font_size,
+            geometry.line_height,
+            match row.kind {
+                preview::DiffLineKind::Meta => palette.files_row_muted,
+                preview::DiffLineKind::Hunk => palette.preview_diff_hunk,
+                _ => palette.preview_body_text,
+            },
+        ));
+    }
+    bt_render::PreviewBody {
+        clip,
+        quads,
+        paragraphs,
+    }
+}
+
+/// `.pv-table`'s body: a collapsed grid with a heading row.
+fn build_preview_table_body(
+    geometry: &seats::PreviewTableGeometry,
+    rows: &[Vec<String>],
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewBody {
+    let clip = geometry.viewport;
+    let mut quads = Vec::new();
+    let mut paragraphs = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let box_of_row = geometry.row_rect(index);
+        if box_of_row[3] <= clip[1] || box_of_row[1] >= clip[3] {
+            continue;
+        }
+        // `.pv-table th { background: var(--hover) }` — the heading row's fill
+        // runs the width of the table rather than of its cells, so the hairlines
+        // between the heads sit *on* it.
+        if index == 0 {
+            quads.push(bt_render::PreviewQuad {
+                rect: box_of_row,
+                color: palette.files_row_hover,
+            });
+        }
+        // `border-collapse: collapse`: one hairline along the top of every row
+        // and one down the left of every cell, plus the two closing edges.
+        quads.push(bt_render::PreviewQuad {
+            rect: [
+                box_of_row[0],
+                box_of_row[1],
+                box_of_row[2],
+                box_of_row[1] + geometry.border,
+            ],
+            color: palette.preview_grid_line,
+        });
+        if index + 1 == rows.len() {
+            quads.push(bt_render::PreviewQuad {
+                rect: [
+                    box_of_row[0],
+                    box_of_row[3] - geometry.border,
+                    box_of_row[2],
+                    box_of_row[3],
+                ],
+                color: palette.preview_grid_line,
+            });
+        }
+        for column in 0..geometry.column_widths.len() {
+            let cell = geometry.cell_rect(index, column);
+            quads.push(bt_render::PreviewQuad {
+                rect: [
+                    cell[0],
+                    box_of_row[1],
+                    cell[0] + geometry.border,
+                    box_of_row[3],
+                ],
+                color: palette.preview_grid_line,
+            });
+            if column + 1 == geometry.column_widths.len() {
+                quads.push(bt_render::PreviewQuad {
+                    rect: [
+                        cell[2],
+                        box_of_row[1],
+                        cell[2] + geometry.border,
+                        box_of_row[3],
+                    ],
+                    color: palette.preview_grid_line,
+                });
+            }
+            let Some(text) = row.get(column) else {
+                continue;
+            };
+            let text_box = geometry.cell_text_rect(index, column);
+            paragraphs.push(bt_render::PreviewParagraph {
+                runs: vec![bt_render::PreviewRun {
+                    text: text.clone(),
+                    color: if index == 0 {
+                        palette.preview_table_head_text
+                    } else {
+                        palette.files_row_text
+                    },
+                    mono: true,
+                    bold: index == 0,
+                }],
+                rect: text_box,
+                font_size_px: geometry.font_size,
+                line_height_px: text_box[3] - text_box[1],
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+            });
+        }
+    }
+    bt_render::PreviewBody {
+        clip,
+        quads,
+        paragraphs,
+    }
+}
+
+/// `.pv-md`'s body: the rendered document.
+fn build_preview_markdown_body(
+    body: [f32; 4],
+    metrics: seats::PreviewMarkdownMetrics,
+    scroll: [f32; 2],
+    document: (&[preview::MarkdownBlock], &[f32], &[f32]),
+    palette: &bt_render::ChromePalette,
+) -> bt_render::PreviewBody {
+    let (blocks, heights, tops) = document;
+    let left = body[0] + metrics.padding_x;
+    let right = body[2] - metrics.padding_x;
+    let origin = body[1] + metrics.padding_y - scroll[1];
+    let mut quads = Vec::new();
+    let mut paragraphs = Vec::new();
+    for ((block, height), block_top) in blocks.iter().zip(heights).zip(tops) {
+        let top = origin + block_top;
+        if top + height <= body[1] || top >= body[3] {
+            continue;
+        }
+        match block {
+            preview::MarkdownBlock::Heading { spans, .. } => {
+                paragraphs.push(bt_render::PreviewParagraph {
+                    runs: markdown_runs(spans, palette, true),
+                    rect: [left, top, right, top + height],
+                    font_size_px: metrics.heading_font,
+                    line_height_px: metrics.line_height,
+                    wrap: true,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                });
+            }
+            preview::MarkdownBlock::Paragraph(spans) => {
+                paragraphs.push(bt_render::PreviewParagraph {
+                    runs: markdown_runs(spans, palette, false),
+                    rect: [left, top, right, top + height],
+                    font_size_px: metrics.font_size,
+                    line_height_px: metrics.line_height,
+                    wrap: true,
+                    letter_spacing_em: 0.0,
+                    align_right: false,
+                    align_center: false,
+                });
+            }
+            preview::MarkdownBlock::List(items) => {
+                let mut item_top = top;
+                for spans in items {
+                    let mut runs = vec![bt_render::PreviewRun {
+                        // The marker rides the item's own first run, so a
+                        // wrapped item's second line hangs under its text
+                        // rather than under its bullet.
+                        text: "\u{2022}\u{2007}".to_owned(),
+                        color: palette.files_row_muted,
+                        mono: false,
+                        bold: false,
+                    }];
+                    runs.extend(markdown_runs(spans, palette, false));
+                    let item_height = metrics.line_height;
+                    paragraphs.push(bt_render::PreviewParagraph {
+                        runs,
+                        rect: [
+                            left + metrics.list_indent,
+                            item_top,
+                            right,
+                            item_top + item_height,
+                        ],
+                        font_size_px: metrics.font_size,
+                        line_height_px: metrics.line_height,
+                        wrap: true,
+                        letter_spacing_em: 0.0,
+                        align_right: false,
+                        align_center: false,
+                    });
+                    item_top += item_height;
+                }
+            }
+            preview::MarkdownBlock::Code { lang, text } => {
+                let fence = [left, top, right, top + height];
+                quads.push(bt_render::PreviewQuad {
+                    rect: fence,
+                    color: palette.preview_code_border,
+                });
+                quads.push(bt_render::PreviewQuad {
+                    rect: [
+                        fence[0] + metrics.code_border,
+                        fence[1] + metrics.code_border,
+                        fence[2] - metrics.code_border,
+                        fence[3] - metrics.code_border,
+                    ],
+                    color: palette.preview_code_ground,
+                });
+                let mut line_top = fence[1] + metrics.code_border + metrics.code_padding_y;
+                for line in text.lines() {
+                    paragraphs.push(mono_paragraph(
+                        preview::expand_tabs(line),
+                        [
+                            fence[0] + metrics.code_border + metrics.code_padding_x,
+                            line_top,
+                            fence[2],
+                            line_top + metrics.line_height,
+                        ],
+                        metrics.font_size,
+                        metrics.line_height,
+                        palette.preview_code_text,
+                    ));
+                    line_top += metrics.line_height;
+                }
+                if let Some(lang) = lang {
+                    // `.md-code .lang { position: absolute; top: 5px; right: 9px }`
+                    paragraphs.push(bt_render::PreviewParagraph {
+                        runs: vec![bt_render::PreviewRun {
+                            text: lang.to_uppercase(),
+                            color: palette.preview_code_lang,
+                            mono: false,
+                            bold: false,
+                        }],
+                        rect: [
+                            fence[0],
+                            fence[1] + metrics.lang_inset_top,
+                            fence[2] - metrics.lang_inset_right,
+                            fence[1] + metrics.lang_inset_top + metrics.lang_font * 1.4,
+                        ],
+                        font_size_px: metrics.lang_font,
+                        line_height_px: (metrics.lang_font * 1.4).round().max(1.0),
+                        wrap: false,
+                        letter_spacing_em: seats::PREVIEW_MD_LANG_TRACKING_EM,
+                        align_right: true,
+                        align_center: false,
+                    });
+                }
+            }
+        }
+    }
+    bt_render::PreviewBody {
+        clip: body,
+        quads,
+        paragraphs,
+    }
+}
+
+/// The read-only degradation, pinned to the foot of the body.
+///
+/// Pinned rather than appended, because a notice that scrolled with the content
+/// would be a sentence about the *file* that only appears once you have already
+/// read to the end of what there is — which is exactly the moment it is too late
+/// to be useful. Its family and its ink are the "no preview" card's, so the two
+/// things this window says about a file it cannot fully show say them the same
+/// way.
+fn push_preview_truncation_notice(
+    body: &mut bt_render::PreviewBody,
+    rect: [f32; 4],
+    scale: f32,
+    notice: &str,
+    palette: &bt_render::ChromePalette,
+) {
+    let font_size = PREVIEW_META_FONT_LOGICAL_PX * scale;
+    let line_height = (font_size * 1.4).round().max(1.0);
+    let padding = (6.0 * scale).round();
+    let strip = [
+        rect[0],
+        rect[3] - line_height - padding * 2.0,
+        rect[2],
+        rect[3],
+    ];
+    body.quads.push(bt_render::PreviewQuad {
+        rect: strip,
+        color: palette.files_row_hover,
+    });
+    body.paragraphs.push(bt_render::PreviewParagraph {
+        runs: vec![bt_render::PreviewRun {
+            text: notice.to_owned(),
+            color: palette.body_hint_text,
+            mono: false,
+            bold: false,
+        }],
+        rect: [strip[0], strip[1] + padding, strip[2], strip[3] - padding],
+        font_size_px: font_size,
+        line_height_px: line_height,
+        wrap: false,
+        letter_spacing_em: 0.0,
+        align_right: false,
+        align_center: false,
+    });
+}
+
 /// Where an activated files row goes.
 ///
 /// **One door.** There used to be two — pictures to the preview seat, everything
@@ -1034,12 +1567,22 @@ struct TabState {
     /// it. Mutually exclusive with [`Self::preview_image`] — the seat shows a
     /// picture or a document, and the two doors clear each other on the way in.
     preview_buffer: Option<PathBuf>,
+    /// The parsed body, and what it was parsed from.
+    preview_doc: PreviewDocument,
+    preview_doc_key: Option<PreviewDocumentKey>,
+    /// How wide one monospace cell is at the body's type size, measured when the
+    /// document was parsed. It is what the horizontal extent is derived from.
+    preview_mono_advance: f32,
     /// How far the shown buffer's body is scrolled, in physical pixels.
     ///
     /// A property of the *view*, so it lives beside `preview_buffer` rather than
     /// on the buffer: two panes showing one buffer are one buffer at two scroll
     /// positions, which is the one thing about them that is allowed to differ.
-    preview_scroll: f32,
+    ///
+    /// `[x, y]`: `white-space: pre` means a line that does not fit runs off the
+    /// edge, and a body that can only be scrolled downward would leave the end
+    /// of every long line permanently out of reach.
+    preview_scroll: [f32; 2],
     /// The arc's easing toward the reading it is now showing, if it is moving.
     ring_tween: Option<SweepTween>,
     /// The sweep the ring is displaying, which is also what a state change
@@ -3746,6 +4289,12 @@ struct PreviewImageState {
     /// The decode's native dimensions, once known — shown beside the file name so the title
     /// answers "how big is this really" while the body shows the fitted version.
     native: Option<(u32, u32)>,
+    /// How large the file on disk is, once the worker has said.
+    ///
+    /// The third field of the mock-up's meta line (4955), and the one thing on
+    /// it a decoder cannot answer: a decode knows how many pixels there are, not
+    /// how many bytes they arrived in.
+    bytes: Option<u64>,
     /// The shared resize quiet boundary. Geometry follows every pointer event, but the expensive
     /// exact-size resample is asked only after this instant lands without another resize.
     resize_scale_deadline: Option<Instant>,
@@ -3759,6 +4308,7 @@ impl PreviewImageState {
             raster: None,
             failure: None,
             native: None,
+            bytes: None,
             resize_scale_deadline: None,
         }
     }
@@ -7771,7 +8321,10 @@ fn assemble_tab_state(
         preview_image: None,
         preview_pool: preview::PreviewPool::default(),
         preview_buffer: None,
-        preview_scroll: 0.0,
+        preview_doc: PreviewDocument::Empty,
+        preview_doc_key: None,
+        preview_mono_advance: 0.0,
+        preview_scroll: [0.0, 0.0],
     };
     debug_assert!(
         tab.sessions_match_terminals(),
@@ -11632,14 +12185,24 @@ impl Runtime {
     /// Open the ruled preview seat if necessary, otherwise reuse its geometry, then ask the shared
     /// worker/cache pipeline for this image. Keyboard focus deliberately remains on the terminal.
     fn open_preview_image(&mut self, path: PathBuf) -> Result<()> {
+        // The one field of the meta line no decoder can answer, asked on the
+        // same lane a document's head goes down.
+        let tab = self.id;
+        if !self.preview_worker.request(preview::PreviewRequest {
+            tab,
+            path: path.clone(),
+            want: preview::PreviewWant::Size,
+        }) {
+            self.disable_preview_worker();
+        }
         self.preview_image = Some(PreviewImageState::new(path));
         self.renderer.set_preview_image(None);
         // The document the seat was showing is not what it is showing now. The
         // buffer itself stays in the pool — it belongs to the tab, not to the
         // pane — so switching back finds it whole.
         self.preview_buffer = None;
-        self.preview_scroll = 0.0;
-        self.renderer.set_preview_text(None);
+        self.preview_scroll = [0.0, 0.0];
+        self.renderer.set_preview_body(None);
         if self.seats.preview().is_none() {
             return self.toggle_preview_seat();
         }
@@ -11671,11 +12234,13 @@ impl Runtime {
         let buffer = self.preview_pool.open(path.clone(), name, &shown);
         let wants_read = buffer.wants_head_read();
         self.preview_buffer = Some(path.clone());
-        self.preview_scroll = 0.0;
+        self.preview_scroll = [0.0, 0.0];
         if wants_read
-            && !self
-                .preview_worker
-                .request(preview::HeadRequest { tab, path })
+            && !self.preview_worker.request(preview::PreviewRequest {
+                tab,
+                path,
+                want: preview::PreviewWant::Head,
+            })
         {
             self.disable_preview_worker();
         }
@@ -11696,8 +12261,8 @@ impl Runtime {
     /// guard, so nothing here has anything to confirm.
     fn clear_preview_view(&mut self) {
         self.preview_buffer = None;
-        self.preview_scroll = 0.0;
-        self.renderer.set_preview_text(None);
+        self.preview_scroll = [0.0, 0.0];
+        self.renderer.set_preview_body(None);
     }
 
     /// The buffer the preview seat is showing, if it is showing one.
@@ -11717,18 +12282,51 @@ impl Runtime {
     /// *are* the offset: which of them exist this frame is what scrolling
     /// changes.
     fn scroll_preview_body(&mut self, body: [f32; 4], delta: MouseScrollDelta) -> Result<()> {
-        let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
         let scale = self.renderer.metrics().scale_factor as f32;
-        let lines = self.preview_line_count();
-        let scrolled =
-            seats::clamp_preview_scroll(body, lines, self.preview_scroll - travel, scale);
+        // **Shift turns the wheel sideways**, which is the convention every
+        // horizontal scroller on this desktop already follows and the only one
+        // a mouse without a tilt wheel can reach. The notch is the same notch;
+        // only the axis it is spent on changes.
+        let sideways = self.modifiers.shift_key();
+        let extent = if sideways {
+            body[2] - body[0]
+        } else {
+            body[3] - body[1]
+        };
+        let travel = self.vertical_wheel_travel(delta, extent);
+        let mut wanted = self.preview_scroll;
+        wanted[usize::from(!sideways)] -= travel;
+        let scrolled = self.clamped_preview_scroll(body, scale, wanted);
         if scrolled == self.preview_scroll {
             return Ok(());
         }
         self.preview_scroll = scrolled;
-        self.refresh_preview_text();
+        self.refresh_preview_body();
         self.refresh_chrome();
         self.present_chrome_change()
+    }
+
+    /// The stored offset, put back inside what the document actually has.
+    ///
+    /// Every write of `preview_scroll` goes through here — the wheel, the heal,
+    /// and the reset a new file gets — so a body cannot end up parked past its
+    /// own end on either axis. The two bodies with no scroller of their own (a
+    /// table and a rendered markdown, which fit their pane or overflow it in
+    /// ways slice 2 does not scroll) clamp to nothing, which is the truth.
+    fn clamped_preview_scroll(&self, body: [f32; 4], scale: f32, scroll: [f32; 2]) -> [f32; 2] {
+        let (rows_height, columns) = self.preview_content_extent(scale);
+        let metrics = match self.preview_doc {
+            PreviewDocument::Diff(_) => seats::preview_diff_metrics(scale),
+            _ => seats::preview_text_metrics(scale),
+        };
+        seats::clamp_preview_scroll(
+            body,
+            metrics,
+            rows_height,
+            columns,
+            self.preview_mono_advance,
+            scroll,
+        )
     }
 
     /// Hand the file on the seat to whatever the system has registered for it.
@@ -11784,52 +12382,355 @@ impl Runtime {
         let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
             return;
         };
-        let lines = self.preview_line_count();
-        self.preview_scroll = seats::clamp_preview_scroll(body, lines, self.preview_scroll, scale);
+        self.preview_scroll = self.clamped_preview_scroll(body, scale, self.preview_scroll);
     }
 
-    fn preview_line_count(&self) -> usize {
-        self.current_preview_buffer()
-            .and_then(|buffer| buffer.content.as_deref())
-            .map_or(0, |content| content.lines().count())
-    }
-
-    /// Hand the renderer the lines of the buffer on the seat, laid out and
-    /// scrolled.
+    /// Re-derive the parsed body if what it was parsed from has changed.
     ///
-    /// **Only the visible ones are built.** A 64KB head is some two thousand
-    /// lines and a pane holds perhaps forty; building the rest would put the
-    /// file's size into the frame's cost, which is exactly what the head read
-    /// exists to keep out of it.
-    fn refresh_preview_text(&mut self) {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let body = seats::preview_body_rect(&self.seats, &self.seat_layout, scale);
-        let Some((body, content)) = body.zip(
-            self.current_preview_buffer()
-                .and_then(|buffer| buffer.content.clone()),
-        ) else {
-            self.renderer.set_preview_text(None);
+    /// The content is cloned once here rather than borrowed, which is what lets
+    /// the measuring below hold the renderer: a rebuild happens when a file
+    /// lands or a pane changes width, and paying one copy for that is the whole
+    /// price of never copying on a wheel notch.
+    fn rebuild_preview_document(&mut self, body: [f32; 4], scale: f32) {
+        let key = self
+            .current_preview_buffer()
+            .map(|buffer| PreviewDocumentKey {
+                path: buffer.path.clone(),
+                md_source: buffer.md_source,
+                content_len: buffer.content.as_deref().map_or(0, str::len),
+                body_width_px: (body[2] - body[0]).max(0.0).round() as u32,
+                scale_ppm: (scale * 1_000_000.0).round() as u32,
+            });
+        if key == self.preview_doc_key {
+            return;
+        }
+        self.preview_doc_key = key;
+        let Some((view, content)) = self
+            .current_preview_buffer()
+            .map(|buffer| (buffer.view(), buffer.content.clone().unwrap_or_default()))
+        else {
+            self.preview_doc = PreviewDocument::Empty;
             return;
         };
-        let lines: Vec<&str> = content.lines().collect();
-        let geometry = seats::preview_text_geometry(body, lines.len(), self.preview_scroll, scale);
-        let drawn: Vec<bt_render::PreviewTextLine> = lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| (index, geometry.line_rect(index), line))
-            .filter(|(_, rect, _)| rect[3] > body[1] && rect[1] < body[3])
-            .map(|(_, rect, line)| bt_render::PreviewTextLine {
-                text: seats::expand_tabs(line),
-                rect,
-            })
-            .collect();
-        self.renderer.set_preview_text(Some(bt_render::PreviewText {
+        let text_metrics = seats::preview_text_metrics(scale);
+        self.preview_mono_advance = self.renderer.preview_mono_advance(text_metrics.font_size);
+        self.preview_doc = match view {
+            preview::PreviewView::Text => {
+                PreviewDocument::Text(content.lines().map(preview::expand_tabs).collect())
+            }
+            preview::PreviewView::Diff => {
+                let metrics = seats::preview_diff_metrics(scale);
+                let margin = (seats::PREVIEW_DIFF_HUNK_MARGIN_LOGICAL_PX * scale).round();
+                let mut top = 0.0_f32;
+                let rows = content
+                    .lines()
+                    .map(|line| {
+                        let kind = preview::diff_line_kind(line);
+                        // A hunk marker opens a gap in front of itself, and the
+                        // gap belongs to the rows below it too — which is why
+                        // this is a running offset and not a per-row nudge.
+                        if kind == preview::DiffLineKind::Hunk {
+                            top += margin;
+                        }
+                        let row = DiffRow {
+                            text: preview::expand_tabs(line),
+                            kind,
+                            top,
+                        };
+                        top += metrics.line_height;
+                        row
+                    })
+                    .collect();
+                PreviewDocument::Diff(rows)
+            }
+            preview::PreviewView::Table => {
+                let rows = preview::csv_rows(&content);
+                let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+                let column_cells = (0..columns)
+                    .map(|column| {
+                        rows.iter()
+                            .filter_map(|row| row.get(column))
+                            .map(|cell| bt_unicode::text_width(cell))
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                PreviewDocument::Table { rows, column_cells }
+            }
+            preview::PreviewView::Markdown => {
+                let metrics = seats::preview_markdown_metrics(scale);
+                let blocks = preview::parse_markdown(&content);
+                let width = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+                let mut heights = Vec::with_capacity(blocks.len());
+                let mut tops = Vec::with_capacity(blocks.len());
+                let mut top = 0.0_f32;
+                let mut previous_margin = 0.0_f32;
+                for block in &blocks {
+                    let height = self.measure_markdown_block(block, width, metrics);
+                    let margin = markdown_block_margin(block, metrics);
+                    // **Adjacent margins collapse**, which is the rule the
+                    // prototype gets free from a browser and this window has to
+                    // keep on purpose. Without it a list's bottom margin and a
+                    // heading's top margin add up, and — worse in practice —
+                    // whichever of the two is omitted leaves the heading sitting
+                    // on the last bullet.
+                    top += previous_margin.max(margin);
+                    tops.push(top);
+                    top += height;
+                    previous_margin = margin;
+                    heights.push(height);
+                }
+                PreviewDocument::Markdown {
+                    blocks,
+                    heights,
+                    tops,
+                }
+            }
+            preview::PreviewView::Image | preview::PreviewView::None => PreviewDocument::Empty,
+        };
+    }
+
+    /// How tall one markdown block's own content is — margins excluded, because
+    /// margins collapse between neighbours and a height that had swallowed one
+    /// could not be collapsed with anything.
+    fn measure_markdown_block(
+        &mut self,
+        block: &preview::MarkdownBlock,
+        width: f32,
+        metrics: seats::PreviewMarkdownMetrics,
+    ) -> f32 {
+        let palette = bt_render::chrome_palette();
+        match block {
+            preview::MarkdownBlock::Heading { spans, .. } => {
+                let runs = markdown_runs(spans, &palette, true);
+                self.renderer.measure_preview_paragraph(
+                    &runs,
+                    width,
+                    metrics.heading_font,
+                    metrics.line_height,
+                )
+            }
+            preview::MarkdownBlock::List(items) => {
+                let inner = (width - metrics.list_indent).max(1.0);
+                items
+                    .iter()
+                    .map(|spans| {
+                        let runs = markdown_runs(spans, &palette, false);
+                        self.renderer.measure_preview_paragraph(
+                            &runs,
+                            inner,
+                            metrics.font_size,
+                            metrics.line_height,
+                        )
+                    })
+                    .sum::<f32>()
+            }
+            preview::MarkdownBlock::Code { text, .. } => {
+                // A fence does not wrap: it is a block of code, and code that
+                // reflows is code that lies about its own indentation.
+                let lines = text.lines().count().max(1) as f32;
+                metrics.code_border * 2.0
+                    + metrics.code_padding_y * 2.0
+                    + metrics.line_height * lines
+            }
+            preview::MarkdownBlock::Paragraph(spans) => {
+                let runs = markdown_runs(spans, &palette, false);
+                self.renderer.measure_preview_paragraph(
+                    &runs,
+                    width,
+                    metrics.font_size,
+                    metrics.line_height,
+                )
+            }
+        }
+    }
+
+    /// How tall the parsed document is, and how wide, in the units the scroller
+    /// is clamped in.
+    fn preview_content_extent(&self, scale: f32) -> (f32, usize) {
+        match &self.preview_doc {
+            PreviewDocument::Empty => (0.0, 0),
+            PreviewDocument::Text(lines) => (
+                seats::preview_text_metrics(scale).line_height * lines.len() as f32,
+                self.current_preview_buffer()
+                    .map_or(0, |buffer| buffer.max_columns),
+            ),
+            PreviewDocument::Diff(rows) => (
+                rows.last().map_or(0.0, |row| {
+                    row.top + seats::preview_diff_metrics(scale).line_height
+                }),
+                self.current_preview_buffer()
+                    .map_or(0, |buffer| buffer.max_columns),
+            ),
+            PreviewDocument::Table { .. } | PreviewDocument::Markdown { .. } => (0.0, 0),
+        }
+    }
+
+    /// Hand the renderer the body of whatever the preview seat is showing.
+    ///
+    /// **Only what is visible is built.** A 64KB head is some two thousand lines
+    /// and a pane holds perhaps forty; building the rest would put the file's
+    /// size into the frame's cost, which is exactly what the head read exists to
+    /// keep out of it.
+    fn refresh_preview_body(&mut self) {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+            self.renderer.set_preview_body(None);
+            return;
+        };
+        // A picture's own lane draws the pixels; what is left for this surface
+        // is the sentence under them (mock-up 4955).
+        if self.preview_image.is_some() {
+            let meta = self.preview_image_meta(body, scale);
+            self.renderer.set_preview_body(meta);
+            return;
+        }
+        self.rebuild_preview_document(body, scale);
+        if self.current_preview_buffer().is_none() {
+            self.renderer.set_preview_body(None);
+            return;
+        }
+        let palette = bt_render::chrome_palette();
+        let scroll = self.preview_scroll;
+        let advance = self.preview_mono_advance;
+        let (rows_height, columns) = self.preview_content_extent(scale);
+        let mut built = match &self.preview_doc {
+            PreviewDocument::Text(lines) => build_preview_text_body(
+                &self.preview_doc_text_geometry(body, scale, rows_height, columns, advance),
+                lines,
+                &palette,
+            ),
+            PreviewDocument::Diff(rows) => build_preview_diff_body(
+                &seats::preview_mono_geometry(
+                    body,
+                    seats::preview_diff_metrics(scale),
+                    rows_height,
+                    columns,
+                    advance,
+                    scroll,
+                ),
+                rows,
+                &palette,
+            ),
+            PreviewDocument::Table { rows, column_cells } => build_preview_table_body(
+                &seats::preview_table_geometry(
+                    body,
+                    column_cells,
+                    rows.len(),
+                    advance,
+                    scale,
+                    scroll,
+                ),
+                rows,
+                &palette,
+            ),
+            PreviewDocument::Markdown {
+                blocks,
+                heights,
+                tops,
+            } => build_preview_markdown_body(
+                body,
+                seats::preview_markdown_metrics(scale),
+                scroll,
+                (blocks, heights, tops),
+                &palette,
+            ),
+            PreviewDocument::Empty => bt_render::PreviewBody {
+                clip: body,
+                quads: Vec::new(),
+                paragraphs: Vec::new(),
+            },
+        };
+        // The read-only degradation, at the end of whatever was shown: a body
+        // that stops at 64KB without saying so is a body quietly claiming the
+        // file stops there too.
+        if let Some(notice) = self
+            .current_preview_buffer()
+            .and_then(preview::PreviewBuffer::truncation_notice)
+        {
+            push_preview_truncation_notice(&mut built, body, scale, notice, &palette);
+        }
+        self.renderer.set_preview_body(Some(built));
+    }
+
+    fn preview_doc_text_geometry(
+        &self,
+        body: [f32; 4],
+        scale: f32,
+        rows_height: f32,
+        columns: usize,
+        advance: f32,
+    ) -> seats::PreviewMonoGeometry {
+        seats::preview_mono_geometry(
+            body,
+            seats::preview_text_metrics(scale),
+            rows_height,
+            columns,
+            advance,
+            self.preview_scroll,
+        )
+    }
+
+    /// `.pv-meta` — "1280 × 800 · PNG · 214 KB" under the picture (mock-up 4955).
+    ///
+    /// Everything it can say and nothing it cannot: a field the window does not
+    /// know yet is left out rather than printed as a placeholder, so the line
+    /// grows as the decoder and the worker answer instead of flickering through
+    /// three shapes.
+    fn preview_image_meta(&self, body: [f32; 4], scale: f32) -> Option<bt_render::PreviewBody> {
+        let image = self.preview_image.as_ref()?;
+        let mut fields = Vec::new();
+        if let Some((width, height)) = image.native {
+            fields.push(format!("{width} \u{00d7} {height}"));
+        }
+        let extension = image
+            .path
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_uppercase())
+            .filter(|ext| !ext.is_empty());
+        if let Some(extension) = extension {
+            fields.push(extension);
+        }
+        if let Some(bytes) = image.bytes {
+            fields.push(preview::format_byte_size(bytes));
+        }
+        if fields.is_empty() {
+            return None;
+        }
+        let palette = bt_render::chrome_palette();
+        let font_size = PREVIEW_META_FONT_LOGICAL_PX * scale;
+        let line_height = (font_size * 1.4).round().max(1.0);
+        let gap = (PREVIEW_IMAGE_GAP_LOGICAL_PX * scale).round();
+        // Under the picture that is actually on screen, not under the box it was
+        // fitted into. A small picture does not fill its fit, and a sentence
+        // pinned to the fit would float half a pane below the thing it is about;
+        // `.pv-image` is a centred *column* of two items, so the gap belongs
+        // between them and not between one of them and a margin.
+        let drawn_height = image
+            .raster
+            .as_ref()
+            .map(|raster| raster.height_px as f32)
+            .unwrap_or((body[3] - body[1]) * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION);
+        let top = (body[1] + body[3] + drawn_height) / 2.0 + gap;
+        Some(bt_render::PreviewBody {
             clip: body,
-            lines: drawn,
-            font_size_px: geometry.font_size,
-            line_height_px: geometry.line_height,
-            color: bt_render::chrome_palette().preview_body_text,
-        }));
+            quads: Vec::new(),
+            paragraphs: vec![bt_render::PreviewParagraph {
+                runs: vec![bt_render::PreviewRun {
+                    text: fields.join(" \u{b7} "),
+                    color: palette.files_row_muted,
+                    mono: false,
+                    bold: false,
+                }],
+                rect: [body[0], top, body[2], top + line_height],
+                font_size_px: font_size,
+                line_height_px: line_height,
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: true,
+            }],
+        })
     }
 
     fn defer_preview_resample(&mut self, observed_at: Instant) {
@@ -11854,11 +12755,12 @@ impl Runtime {
     /// Refit the current image to the solver's latest preview body. Decodes stay on the decoration
     /// worker and Lanczos3 runs on its independent scale lane; this method only routes shared data.
     fn refresh_preview_for_layout(&mut self) {
-        // The document lane's half of the same refit, and asked first because it
-        // is total: a seat that has gone away wants both surfaces cleared, and
-        // `refresh_preview_text` answers that case itself.
+        // The document lane's half of the same refit. `refresh_preview_body`
+        // rebuilds the parsed document first, so the heal below is clamping
+        // against the extent this frame actually has rather than the last one's
+        // — which is what makes a pane grown taller give its scroll back.
+        self.refresh_preview_body();
         self.heal_preview_scroll();
-        self.refresh_preview_text();
         let Some(preview_seat) = self.seats.preview() else {
             self.renderer.set_preview_image(None);
             return;
@@ -11941,15 +12843,18 @@ impl Runtime {
             }
             return;
         };
-        // Breathing room: fit against an inset body so the picture never touches the seat's
-        // edges. A body too small to afford the margin gets the full rectangle instead — the
-        // margin exists to serve the picture, not to starve it.
-        let inset = (PREVIEW_BODY_INSET_LOGICAL_PX * scale).round().max(0.0) as u32;
-        let (fit_width, fit_height) = if body.width > inset * 4 && body.height > inset * 4 {
-            (body.width - 2 * inset, body.height - 2 * inset)
-        } else {
-            (body.width, body.height)
-        };
+        // `.pv-image svg { max-width: 86%; max-height: 70% }` (mock-up 606).
+        //
+        // **The 30% of height the picture gives up is not slack** — it is where
+        // the meta line under it stands, and the mock-up's `.pv-image` column is
+        // the picture and that sentence with a 10px gap between them. Fitting to
+        // the whole body would leave the line nowhere to go but on top of the
+        // picture. A body too small to afford the fractions still gets them:
+        // they are fractions, so they cannot starve it the way a fixed inset
+        // could.
+        let _ = PREVIEW_BODY_INSET_LOGICAL_PX;
+        let fit_width = ((body.width as f32 * PREVIEW_IMAGE_FIT_WIDTH_FRACTION) as u32).max(1);
+        let fit_height = ((body.height as f32 * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION) as u32).max(1);
         let Some((display_width, display_height)) =
             preview_image_extent(fit_width, fit_height, native_width, native_height)
         else {
@@ -12340,13 +13245,33 @@ impl Runtime {
                         continue;
                     };
                     let tab = &mut self.tabs[index];
-                    let Some(buffer) = tab.preview_pool.get_mut(&response.path) else {
-                        continue;
-                    };
-                    buffer.accept(response.outcome);
-                    changed |= index == self.active_tab
-                        && self.tabs[index].preview_buffer.as_deref()
-                            == Some(response.path.as_path());
+                    match response.answer {
+                        preview::PreviewAnswer::Head(outcome) => {
+                            let Some(buffer) = tab.preview_pool.get_mut(&response.path) else {
+                                continue;
+                            };
+                            buffer.accept(outcome);
+                            changed |= index == self.active_tab
+                                && self.tabs[index].preview_buffer.as_deref()
+                                    == Some(response.path.as_path());
+                        }
+                        // A picture's byte count, for the meta line under it.
+                        // Filed against the image state rather than the pool,
+                        // because a picture's buffer is not what is on screen —
+                        // the decode lane is.
+                        preview::PreviewAnswer::Size(bytes) => {
+                            if tab
+                                .preview_image
+                                .as_ref()
+                                .is_some_and(|image| image.path == response.path)
+                            {
+                                if let Some(image) = tab.preview_image.as_mut() {
+                                    image.bytes = bytes;
+                                }
+                                changed |= index == self.active_tab;
+                            }
+                        }
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -32681,6 +33606,200 @@ mod tests {
             state.open.is_empty(),
             "a folder that is its own ancestor refuses to open"
         );
+    }
+
+    // ── slice 2: the read-only view family ──────────────────────────────
+
+    /// PIN — P108, at the rectangle. **Only additions and deletions are
+    /// tinted, and every tint is the width of the body.**
+    ///
+    /// The mock-up's own comment names the double bug this pins: half-width
+    /// tints, from a band derived out of the text, and a mid-pane scrollbar. A
+    /// diff read at a horizontal scroll is where both show, so the assertion is
+    /// made at one.
+    ///
+    /// Mutation: tint `Context` as well, or build the band from `row_rect`
+    /// instead of `band_rect`.
+    #[test]
+    fn only_the_changed_lines_of_a_diff_are_tinted_and_the_tints_are_full_width() {
+        let palette = bt_render::chrome_palette();
+        let body = [40.0, 100.0, 440.0, 400.0];
+        let metrics = seats::preview_diff_metrics(1.0);
+        let source = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-was\n+now\n keep\n";
+        let mut top = 0.0_f32;
+        let rows: Vec<DiffRow> = source
+            .lines()
+            .map(|line| {
+                let kind = preview::diff_line_kind(line);
+                if kind == preview::DiffLineKind::Hunk {
+                    top += 8.0;
+                }
+                let row = DiffRow {
+                    text: line.to_owned(),
+                    kind,
+                    top,
+                };
+                top += metrics.line_height;
+                row
+            })
+            .collect();
+        let geometry = seats::preview_mono_geometry(body, metrics, top, 400, 8.0, [260.0, 0.0]);
+        let built = build_preview_diff_body(&geometry, &rows, &palette);
+
+        assert_eq!(built.quads.len(), 2, "one deletion and one addition");
+        for quad in &built.quads {
+            assert_eq!(
+                [quad.rect[0], quad.rect[2]],
+                [body[0], body[2]],
+                "a tint is the body's width even at 260px of horizontal scroll"
+            );
+        }
+        assert_eq!(built.quads[0].color, palette.preview_diff_del);
+        assert_eq!(built.quads[1].color, palette.preview_diff_add);
+
+        // And the inks: the header is quiet, the hunk marker is the accent, the
+        // rest is body text.
+        let ink = |index: usize| built.paragraphs[index].runs[0].color;
+        assert_eq!(ink(0), palette.files_row_muted, "diff --git");
+        assert_eq!(ink(1), palette.files_row_muted, "---");
+        assert_eq!(ink(2), palette.files_row_muted, "+++");
+        assert_eq!(ink(3), palette.preview_diff_hunk, "@@");
+        assert_eq!(ink(4), palette.preview_body_text, "-was");
+        assert_eq!(ink(6), palette.preview_body_text, " keep");
+        // `.dhunk { margin-top: 8px }` pushes the hunk and everything under it.
+        assert_eq!(
+            built.paragraphs[3].rect[1] - built.paragraphs[2].rect[1],
+            metrics.line_height + 8.0
+        );
+    }
+
+    /// PIN — the grid's first row is its heading, in ink and in ground.
+    ///
+    /// Mutation: fill every row rather than the first, or give the data rows
+    /// the heading's ink.
+    #[test]
+    fn a_tables_heading_row_stands_on_its_own_fill() {
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 600.0, 400.0];
+        let rows = preview::csv_rows("case,cols\ncjk,2\nemoji,2\n");
+        let geometry =
+            seats::preview_table_geometry(body, &[5, 4], rows.len(), 8.0, 1.0, [0.0, 0.0]);
+        let built = build_preview_table_body(&geometry, &rows, &palette);
+
+        let fills: Vec<_> = built
+            .quads
+            .iter()
+            .filter(|quad| quad.color == palette.files_row_hover)
+            .collect();
+        assert_eq!(fills.len(), 1, "one heading fill, not one per row");
+        assert_eq!(fills[0].rect, geometry.row_rect(0));
+        assert!(
+            built
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.preview_grid_line),
+            "and the hairlines are drawn"
+        );
+
+        let head: Vec<_> = built
+            .paragraphs
+            .iter()
+            .filter(|p| p.runs[0].color == palette.preview_table_head_text)
+            .collect();
+        assert_eq!(head.len(), 2, "two heading cells");
+        assert!(head.iter().all(|p| p.runs[0].bold && p.runs[0].mono));
+        let data: Vec<_> = built
+            .paragraphs
+            .iter()
+            .filter(|p| p.runs[0].color == palette.files_row_text)
+            .collect();
+        assert_eq!(data.len(), 4, "two data rows of two cells");
+        assert!(data.iter().all(|p| !p.runs[0].bold));
+    }
+
+    /// PIN — a code fence is a box with a ground, and its language rides the
+    /// top-right corner of that box (mock-up 1202-1211).
+    ///
+    /// Mutation: drop the `align_right` on the language tag, which parks it over
+    /// the first line of the code.
+    #[test]
+    fn a_code_fence_is_a_box_and_its_language_sits_in_the_corner() {
+        let palette = bt_render::chrome_palette();
+        let body = [0.0, 0.0, 600.0, 400.0];
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let blocks = preview::parse_markdown("```rust\nlet x = 1;\n```\n");
+        let height = metrics.code_border * 2.0 + metrics.code_padding_y * 2.0 + metrics.line_height;
+        let built = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            (&blocks, &[height], &[0.0]),
+            &palette,
+        );
+        let border = built
+            .quads
+            .iter()
+            .find(|quad| quad.color == palette.preview_code_border)
+            .expect("the fence has a border");
+        let ground = built
+            .quads
+            .iter()
+            .find(|quad| quad.color == palette.preview_code_ground)
+            .expect("and a ground inside it");
+        assert!(
+            ground.rect[0] > border.rect[0] && ground.rect[2] < border.rect[2],
+            "the ground is inset by the border"
+        );
+        let lang = built
+            .paragraphs
+            .iter()
+            .find(|p| p.runs[0].color == palette.preview_code_lang)
+            .expect("the language tag is drawn");
+        assert_eq!(lang.runs[0].text, "RUST", "and it is upper-cased");
+        assert!(lang.align_right, "in the corner, not over the code");
+        assert_eq!(lang.letter_spacing_em, seats::PREVIEW_MD_LANG_TRACKING_EM);
+        assert_eq!(lang.rect[2], border.rect[2] - metrics.lang_inset_right);
+        assert!(
+            built
+                .paragraphs
+                .iter()
+                .any(|p| p.runs[0].text == "let x = 1;" && p.runs[0].mono),
+            "the code itself is monospace"
+        );
+    }
+
+    /// PIN — the truncation notice is pinned to the foot of the body, not
+    /// appended to the end of the document.
+    ///
+    /// A sentence about the *file* that only appears once you have scrolled to
+    /// the end of what there is arrives at exactly the moment it is too late to
+    /// be useful.
+    ///
+    /// Mutation: place the strip at `rect[1]` instead of against `rect[3]`.
+    #[test]
+    fn the_read_only_notice_is_pinned_to_the_foot_of_the_body() {
+        let palette = bt_render::chrome_palette();
+        let body = [40.0, 100.0, 440.0, 400.0];
+        let mut built = bt_render::PreviewBody {
+            clip: body,
+            quads: Vec::new(),
+            paragraphs: Vec::new(),
+        };
+        push_preview_truncation_notice(
+            &mut built,
+            body,
+            1.0,
+            preview::PREVIEW_TRUNCATED_NOTICE,
+            &palette,
+        );
+        let strip = built.quads[0].rect;
+        assert_eq!(strip[3], body[3], "flush with the floor");
+        assert_eq!([strip[0], strip[2]], [body[0], body[2]]);
+        let line = &built.paragraphs[0];
+        assert_eq!(line.runs[0].text, preview::PREVIEW_TRUNCATED_NOTICE);
+        assert_eq!(line.runs[0].color, palette.body_hint_text);
+        assert!(!line.runs[0].mono, "the card's family, not the file's");
+        assert!(line.rect[1] >= strip[1] && line.rect[3] <= strip[3]);
     }
 
     /// PIN — K156, and the day the second door closed. **Every file opens its

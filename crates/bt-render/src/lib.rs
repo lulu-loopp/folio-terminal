@@ -894,47 +894,81 @@ pub struct PreviewImage {
     pub display_height_px: u32,
 }
 
-/// One visual line of a preview's text body.
+/// One styled run inside a preview paragraph.
 ///
-/// A line and not a paragraph: the mock-up's `.pv-edit` is `white-space: pre`
-/// (4980-4983), so a line of the file is a line on the screen, and wrapping is
-/// something this surface deliberately does not do. The caller has already
-/// decided where each one sits, which is what lets it scroll: scrolling is the
-/// caller subtracting an offset from every `rect[1]`, and nothing here has to
-/// know that happened.
+/// The unit exists because a markdown line is not one typeface: `a **bold**
+/// word` and an inline code span are runs of the same line set in different
+/// faces and weights, and a paragraph split into three labels would be three
+/// boxes that have to be measured and butted together by hand — which is the
+/// wrapping the shaper already does, done worse.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PreviewTextLine {
+pub struct PreviewRun {
     pub text: String,
-    /// `[left, top, right, bottom]`, physical pixels, whole-surface coordinates.
-    ///
-    /// The right edge is the line's *layout* bound and is deliberately generous:
-    /// a long line runs past the body and is cropped by [`PreviewText::clip`],
-    /// which is the horizontal overflow `white-space: pre` asks for rather than
-    /// the reflow it forbids.
-    pub rect: [f32; 4],
+    pub color: [u8; 3],
+    /// Set in the monospace face — a file's own bytes, or an inline code span.
+    pub mono: bool,
+    pub bold: bool,
 }
 
-/// The text body of the preview seat.
+/// One paragraph of a preview body: styled text with a box to sit in.
+///
+/// A "paragraph" and not a "line" because [`Self::wrap`] decides which it is.
+/// The two bodies this surface draws want opposite answers and both are right:
+/// a source file is `white-space: pre` (mock-up 603) so a line that does not fit
+/// runs off the edge and is cropped, while a markdown paragraph reflows to the
+/// pane like any prose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewParagraph {
+    pub runs: Vec<PreviewRun>,
+    /// `[left, top, right, bottom]`, physical pixels, whole-surface coordinates.
+    ///
+    /// When wrapping, the width of this box is the width text reflows inside.
+    /// When not, it is deliberately generous: the crop is
+    /// [`PreviewBody::clip`]'s job, and a bound here would be the reflow
+    /// `white-space: pre` forbids.
+    pub rect: [f32; 4],
+    pub font_size_px: f32,
+    pub line_height_px: f32,
+    pub wrap: bool,
+    /// CSS `letter-spacing` in em — the code fence's language tag is the one
+    /// caller that asks for it (`.md-code .lang`, mock-up 1208-1211).
+    pub letter_spacing_em: f32,
+    /// Right-align inside `rect` rather than left-align.
+    pub align_right: bool,
+    /// Centre horizontally inside `rect`, overriding [`Self::align_right`].
+    ///
+    /// `.pv-image` is a centred column (mock-up 605) and the sentence under the
+    /// picture is the second item in it, which is the one caller today.
+    pub align_center: bool,
+}
+
+/// One flat fill under a preview body's text.
+///
+/// The diff's line tints, the code fence's ground and border, and the table's
+/// grid are all this: rectangles that must land under the text of the very same
+/// body, which is why they ride here rather than going out as seat chrome. A
+/// chrome quad is drawn a whole pass earlier and would sit under the *pane*
+/// rather than under the scrolled document.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewQuad {
+    pub rect: [f32; 4],
+    pub color: [u8; 3],
+}
+
+/// The body of the preview seat: fills, then text, inside one clip.
 ///
 /// The sibling of [`PreviewImage`] and prepared in the same slot of the frame,
 /// because it is the same thing: **content filling a preview seat's body, below
 /// the head that names it.** What differs is only that one arrives as pixels
-/// from a decoder and the other as lines from a file, so one is a textured quad
-/// and this is a shaping run.
+/// from a decoder and the other as a document.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PreviewText {
+pub struct PreviewBody {
     /// The box the body may be seen in — the seat's body, already excluding its
-    /// head, and already intersected with whatever a pane FLIP is cropping it
-    /// to. Every line is clipped to this and to its own `rect`.
+    /// head and already intersected with whatever a pane FLIP is cropping it
+    /// to. Every fill and every paragraph is clipped to this.
     pub clip: [f32; 4],
-    pub lines: Vec<PreviewTextLine>,
-    pub font_size_px: f32,
-    /// The line box each `rect` was laid out with, which is also the advance
-    /// between consecutive lines. Kept here rather than derived from
-    /// `font_size_px` because the mock-up's ratio (1.5) is the *caller's* ruling
-    /// and this surface should not hold a second copy of it.
-    pub line_height_px: f32,
-    pub color: [u8; 3],
+    pub quads: Vec<PreviewQuad>,
+    pub paragraphs: Vec<PreviewParagraph>,
 }
 
 /// Fit an image inside a preview body while preserving aspect ratio and never enlarging it beyond
@@ -1969,7 +2003,7 @@ pub struct Renderer {
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
     preview_image: Option<PreviewImage>,
-    preview_text: Option<PreviewText>,
+    preview_body: Option<PreviewBody>,
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
@@ -2979,7 +3013,7 @@ impl Renderer {
             cursor_blink_visible: true,
             peek_overlay: None,
             preview_image: None,
-            preview_text: None,
+            preview_body: None,
             trace_perf,
             perf_frame: 0,
         })
@@ -3114,15 +3148,73 @@ impl Renderer {
         changed
     }
 
-    /// Replace the preview seat's text body. Returns whether anything changed.
+    /// Replace the preview seat's body. Returns whether anything changed.
     ///
     /// The whole body, every frame it differs, rather than a placement door
-    /// beside it: a text body's rectangles are recomputed from the seat and the
+    /// beside it: a document's rectangles are recomputed from the seat and the
     /// scroll offset by the caller anyway, so there is no cheaper half to move.
-    pub fn set_preview_text(&mut self, text: Option<PreviewText>) -> bool {
-        let changed = self.preview_text != text;
-        self.preview_text = text;
+    pub fn set_preview_body(&mut self, body: Option<PreviewBody>) -> bool {
+        let changed = self.preview_body != body;
+        self.preview_body = body;
         changed
+    }
+
+    /// How tall a paragraph will be when wrapped into `width_px`.
+    ///
+    /// The caller lays a document out top to bottom and cannot know where the
+    /// second block starts without knowing how many lines the first took — and
+    /// how many lines a paragraph takes is a question only the shaper can
+    /// answer. Its twin is [`Self::measure_chrome_text`], and it exists for the
+    /// same reason that one does.
+    pub fn measure_preview_paragraph(
+        &mut self,
+        runs: &[PreviewRun],
+        width_px: f32,
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        if runs.iter().all(|run| run.text.is_empty()) {
+            return line_height_px;
+        }
+        let mut buffer = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size_px, line_height_px),
+        );
+        buffer.set_wrap(Wrap::WordOrGlyph);
+        buffer.set_size(Some(width_px.max(1.0)), None);
+        set_preview_runs(&mut buffer, runs, 0.0);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.layout_runs().count().max(1) as f32 * line_height_px
+    }
+
+    /// How wide one cell of the monospace face is at `font_size_px`.
+    ///
+    /// Measured over a run of cells and divided rather than asked of one: a
+    /// single advance carries the face's own rounding, and a document three
+    /// hundred columns wide would end up three hundred roundings away from where
+    /// its own scroller thinks it ends.
+    pub fn preview_mono_advance(&mut self, font_size_px: f32) -> f32 {
+        const CELLS: usize = 32;
+        let sample = "M".repeat(CELLS);
+        let line_height = font_size_px * 1.4;
+        let mut buffer = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(font_size_px, line_height),
+        );
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(None, Some(line_height));
+        buffer.set_text(
+            &sample,
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        let width = buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max);
+        width / CELLS as f32
     }
 
     /// **U8 — move the preview seat's picture to where its pane is drawn this
@@ -3622,10 +3714,41 @@ impl Renderer {
                 &chrome_layouts,
             )
             .is_ok();
-        let preview_text_layouts = self
-            .preview_text
+        let preview_body_rects: Vec<RectInstance> = self
+            .preview_body
             .as_ref()
-            .map(|text| shape_preview_text(&mut self.font_system, text))
+            .map(|body| {
+                body.quads
+                    .iter()
+                    .filter(|quad| quad.rect[3] > body.clip[1] && quad.rect[1] < body.clip[3])
+                    .map(|quad| {
+                        // Cropped to the body here rather than by a scissor,
+                        // because the pass is in whole-surface coordinates and a
+                        // second scissor would have to be set and unset around
+                        // two draws that are otherwise one.
+                        let rect = [
+                            quad.rect[0].max(body.clip[0]),
+                            quad.rect[1].max(body.clip[1]),
+                            quad.rect[2].min(body.clip[2]),
+                            quad.rect[3].min(body.clip[3]),
+                        ];
+                        surface_pixel_rect(rect, quad.color, self.config.width, self.config.height)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let preview_body_rect_buffer = (!preview_body_rects.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("preview body fills"),
+                    contents: bytemuck::cast_slice(preview_body_rects.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let preview_text_layouts = self
+            .preview_body
+            .as_ref()
+            .map(|body| shape_preview_body(&mut self.font_system, body))
             .unwrap_or_default();
         let preview_text_prepared = !preview_text_layouts.is_empty()
             && prepare_chrome_text_atlas(
@@ -3896,7 +4019,7 @@ impl Renderer {
             // seat-local one: these coordinates are already the window's, and
             // every line carries its own clip box, so a pane FLIP crops them
             // without the pass having to.
-            if preview_text_prepared {
+            if preview_text_prepared || preview_body_rect_buffer.is_some() {
                 pass.set_viewport(
                     0.0,
                     0.0,
@@ -3906,9 +4029,20 @@ impl Renderer {
                     1.0,
                 );
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
-                self.preview_text_renderer
-                    .render(&self.atlas, &self.chrome_viewport, &mut pass)
-                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                // Fills first: a diff's line tint, a fence's ground, a table's
+                // grid — every one of them is *under* the text of the very same
+                // body, and both are drawn in the document's own scrolled
+                // coordinates.
+                if let Some(buffer) = preview_body_rect_buffer.as_ref() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, 0..preview_body_rects.len() as u32);
+                }
+                if preview_text_prepared {
+                    self.preview_text_renderer
+                        .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                }
             }
             // The hover-peek flyout, over every seat, over seat chrome and over a
             // preview's picture — a floating window is not a child of the pane it
@@ -5373,57 +5507,108 @@ fn shape_chrome_labels(
         .collect()
 }
 
-/// Shape a preview's text body — one buffer per visible line, in the monospace
-/// face.
+/// The shaping attributes one preview run is set with.
 ///
-/// **The face is the difference.** Chrome text is the window talking about
-/// itself and is set in the sans face; this is a file's own bytes, and a file's
-/// bytes were written in a grid. `Family::Monospace` resolves to the same
-/// `PRIMARY_FONT_FAMILY` the terminal grid is set in, so the preview of a source
-/// file and the terminal beside it agree about how wide a character is — which
-/// is the whole of the mock-up's `font: 12.5px/1.5 Consolas, "Cascadia Mono",
-/// monospace` (4980-4983).
+/// **The face is the difference from chrome text.** Chrome is the window talking
+/// about itself and is set in the sans face; a preview body is a document, and a
+/// document's own bytes were written in a grid. `Family::Monospace` resolves to
+/// the same family the terminal grid is set in, so the preview of a source file
+/// and the terminal beside it agree about how wide a character is — the whole of
+/// the mock-up's `font: 12.5px/1.5 Consolas, "Cascadia Mono", monospace`.
+fn preview_run_attrs(mono: bool, bold: bool, letter_spacing_em: f32) -> Attrs<'static> {
+    let mut attrs = Attrs::new()
+        .family(if mono {
+            Family::Monospace
+        } else {
+            Family::SansSerif
+        })
+        .weight(if bold {
+            Weight::SEMIBOLD
+        } else {
+            Weight::NORMAL
+        });
+    if letter_spacing_em != 0.0 {
+        attrs = attrs.letter_spacing(letter_spacing_em);
+    }
+    attrs
+}
+
+/// Fill a buffer with one paragraph's styled runs.
 ///
-/// **No width bound and no wrapping.** `white-space: pre` means a line that does
-/// not fit runs off the edge and is cropped, not reflowed, so the buffer is
-/// given no width to fit into and the crop is left to `clip`.
-fn shape_preview_text(font_system: &mut FontSystem, text: &PreviewText) -> Vec<ChromeTextLayout> {
-    let attrs = Attrs::new()
-        .family(Family::Monospace)
-        .weight(Weight::NORMAL);
-    let [r, g, b] = text.color;
-    text.lines
+/// One buffer per paragraph and not per run, which is what lets the shaper wrap
+/// a mixed line: `a **bold** word` may break between any two of its words, and
+/// three buffers butted together could only ever break between the three.
+fn set_preview_runs(buffer: &mut Buffer, runs: &[PreviewRun], letter_spacing_em: f32) {
+    let default = preview_run_attrs(false, false, letter_spacing_em);
+    buffer.set_rich_text(
+        runs.iter().map(|run| {
+            let [r, g, b] = run.color;
+            (
+                run.text.as_str(),
+                preview_run_attrs(run.mono, run.bold, letter_spacing_em)
+                    .color(Color::rgba(r, g, b, 255)),
+            )
+        }),
+        &default,
+        Shaping::Advanced,
+        None,
+    );
+}
+
+/// Shape a preview body — one buffer per visible paragraph.
+fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<ChromeTextLayout> {
+    body.paragraphs
         .iter()
-        .filter(|line| !line.text.is_empty())
-        // A line wholly above or below the body is not drawn at all, which is
-        // what keeps a 64KB file's cost proportional to the pane rather than to
-        // the file — the same rule `push_files_tree` applies to its rows.
-        .filter(|line| line.rect[3] > text.clip[1] && line.rect[1] < text.clip[3])
-        .map(|line| {
+        .filter(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()))
+        // A paragraph wholly above or below the body is not drawn at all, which
+        // is what keeps a 64KB file's cost proportional to the pane rather than
+        // to the file — the same rule `push_files_tree` applies to its rows.
+        .filter(|paragraph| paragraph.rect[3] > body.clip[1] && paragraph.rect[1] < body.clip[3])
+        .map(|paragraph| {
+            let width = (paragraph.rect[2] - paragraph.rect[0]).max(1.0);
             let mut buffer = Buffer::new(
                 font_system,
-                Metrics::new(text.font_size_px, text.line_height_px),
+                Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
             );
-            buffer.set_wrap(Wrap::None);
-            buffer.set_size(None, Some(text.line_height_px));
-            buffer.set_text(&line.text, &attrs, Shaping::Advanced, None);
+            if paragraph.wrap {
+                buffer.set_wrap(Wrap::WordOrGlyph);
+                buffer.set_size(Some(width), None);
+            } else {
+                buffer.set_wrap(Wrap::None);
+                buffer.set_size(None, Some(paragraph.line_height_px));
+            }
+            set_preview_runs(&mut buffer, &paragraph.runs, paragraph.letter_spacing_em);
             buffer.shape_until_scroll(font_system, false);
-            // Clipped to the body *and* to the line's own box, so a partly
+            let left = if paragraph.align_center || paragraph.align_right {
+                let text_width = buffer
+                    .layout_runs()
+                    .map(|run| run.line_w)
+                    .fold(0.0_f32, f32::max);
+                if paragraph.align_center {
+                    (paragraph.rect[0] + (width - text_width) / 2.0).max(paragraph.rect[0])
+                } else {
+                    (paragraph.rect[2] - text_width).max(paragraph.rect[0])
+                }
+            } else {
+                paragraph.rect[0]
+            };
+            // Clipped to the body *and* to the paragraph's own box, so a partly
             // visible first or last line is cut by the body edge rather than
             // drawn over the head above it.
             let clip = [
-                line.rect[0].max(text.clip[0]),
-                line.rect[1].max(text.clip[1]),
-                line.rect[2].min(text.clip[2]),
-                line.rect[3].min(text.clip[3]),
+                paragraph.rect[0].max(body.clip[0]),
+                paragraph.rect[1].max(body.clip[1]),
+                paragraph.rect[2].min(body.clip[2]),
+                paragraph.rect[3].min(body.clip[3]),
             ];
+            let [r, g, b] = paragraph.runs.first().map_or([0, 0, 0], |run| run.color);
             ChromeTextLayout {
                 buffer,
-                left: line.rect[0],
+                left,
                 // The line box's top, not a cap-height axis: body text sits on
                 // consecutive baselines a line height apart, which is what the
                 // metrics already encode.
-                top: line.rect[1],
+                top: paragraph.rect[1],
                 bounds: TextBounds {
                     left: clip[0].floor() as i32,
                     top: clip[1].floor() as i32,
