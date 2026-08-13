@@ -257,14 +257,15 @@ pub enum SpanStyle {
     Bold,
     /// `` `like this` `` — set in the monospace face.
     Code,
-    /// `[text](url)` — **the text only**, in the accent colour.
+    /// `[text](url)` — **the text only** is printed, in the accent colour; the
+    /// target rides beside it in [`Span::target`].
     ///
-    /// Not clickable, and that is a scope line rather than an oversight: what a
-    /// click on a link *does* is a decision about opening browsers and relative
-    /// paths that belongs to the day the preview grows a navigation model. What
-    /// is decided now is only that a link stops looking like four punctuation
-    /// marks around a word, and that the URL is not printed — printing it is the
-    /// one behaviour that is wrong under every future ruling.
+    /// It used to be printed and nothing else: "what a click on a link *does*
+    /// is a decision about opening browsers and relative paths that belongs to
+    /// the day the preview grows a navigation model." That day is 2026-08-13
+    /// and the decision is [`link_action`]. What has not changed is that the
+    /// URL is never *printed* — that was wrong under every future ruling and it
+    /// is still wrong under this one.
     Link,
 }
 
@@ -273,34 +274,43 @@ pub enum SpanStyle {
 pub struct Span {
     pub text: String,
     pub style: SpanStyle,
+    /// Where a [`SpanStyle::Link`] points, exactly as the document wrote it.
+    ///
+    /// **Unresolved.** A relative target means nothing without the document it
+    /// was written in, and the parser does not know which file it is reading —
+    /// so it keeps the author's string and [`link_action`] does the resolving,
+    /// where the document's own path is in hand. `None` for every other style,
+    /// which is what makes "a run that answers a click" a thing the type can
+    /// state rather than a convention two modules have to agree on.
+    pub target: Option<String>,
 }
 
 impl Span {
-    pub fn plain(text: &str) -> Self {
+    fn styled(text: &str, style: SpanStyle) -> Self {
         Self {
             text: text.to_owned(),
-            style: SpanStyle::Plain,
+            style,
+            target: None,
         }
+    }
+
+    pub fn plain(text: &str) -> Self {
+        Self::styled(text, SpanStyle::Plain)
     }
 
     pub fn bold(text: &str) -> Self {
-        Self {
-            text: text.to_owned(),
-            style: SpanStyle::Bold,
-        }
+        Self::styled(text, SpanStyle::Bold)
     }
 
     pub fn code(text: &str) -> Self {
-        Self {
-            text: text.to_owned(),
-            style: SpanStyle::Code,
-        }
+        Self::styled(text, SpanStyle::Code)
     }
 
-    pub fn link(text: &str) -> Self {
+    pub fn link(text: &str, target: &str) -> Self {
         Self {
             text: text.to_owned(),
             style: SpanStyle::Link,
+            target: Some(target.to_owned()),
         }
     }
 }
@@ -390,10 +400,10 @@ pub fn parse_inline(line: &str) -> Vec<Span> {
 
 /// The second pass: `[text](url)` inside whatever the code pass left plain.
 ///
-/// The label is emitted as one run and the target is dropped. A label carrying
-/// its own emphasis (`[**a**](b)`) keeps the asterisks visible rather than
-/// nesting two styles in one run — a deliberate floor, because the alternative
-/// is a span model with a stack in it and the case is vanishing.
+/// The label is emitted as one run and the target rides beside it, unresolved.
+/// A label carrying its own emphasis (`[**a**](b)`) keeps the asterisks visible
+/// rather than nesting two styles in one run — a deliberate floor, because the
+/// alternative is a span model with a stack in it and the case is vanishing.
 fn push_link_runs(text: &str, spans: &mut Vec<Span>) {
     let mut rest = text;
     while let Some(open) = rest.find('[') {
@@ -418,7 +428,10 @@ fn push_link_runs(text: &str, spans: &mut Vec<Span>) {
             continue;
         }
         push_bold_runs(&rest[..open], spans);
-        spans.push(Span::link(&rest[open + 1..label_end]));
+        spans.push(Span::link(
+            &rest[open + 1..label_end],
+            rest[target_open + 1..target_end].trim(),
+        ));
         rest = &rest[target_end + 1..];
     }
     push_bold_runs(rest, spans);
@@ -1650,6 +1663,200 @@ pub fn take_preview_worker_notice(notice_pending: &mut bool) -> Option<&'static 
     }
 }
 
+/// What a click on a markdown link does (user ruling, 2026-08-13).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkAction {
+    /// A file, resolved — it opens **here**, in this window's own preview.
+    Preview(PathBuf),
+    /// A web address, for the system browser.
+    Browse(String),
+    /// Nothing this window will act on.
+    Nowhere,
+}
+
+/// Resolve a link target written in `document` into what pressing it does.
+///
+/// # The ruling
+///
+/// **A link that points at a file is a way of pointing at a file**, and this
+/// window has exactly one answer for that: show it in the preview. It is the
+/// same sentence [`crate::files_row_activation`] makes about a row in the tree
+/// and the file menu makes about its first item — 指到文件=预览它 — and a
+/// third answer for the third door would be three things to keep in step.
+/// Anything the preview cannot read is *still* previewed: it lands on the seat
+/// as an unknown buffer and the card offers 「Open in default app」, which is
+/// the escape hatch chosen rather than the fork fallen down.
+///
+/// `http`/`https` keep going to the system browser, which is where the web
+/// has always gone. **Every other scheme is refused** — `mailto:`, `ftp:`,
+/// `javascript:` and whatever else a document may carry — for the reason the
+/// terminal's own OSC-8 handler refuses them: a document is untrusted text, and
+/// handing an arbitrary scheme to `ShellExecute` is handing it whatever the
+/// machine has registered for that scheme.
+///
+/// **「Open the containing folder」 is not here**, deliberately. That is the
+/// foot's Reveal button and it stays the foot's: a link names a *file*, and
+/// answering it with its parent directory is answering a question nobody asked.
+///
+/// Resolution rules, in order:
+///
+/// * an empty target, or a bare `#fragment`, is nothing — there is no
+///   within-document navigation to do yet, and jumping to the top would be a
+///   worse answer than none;
+/// * a trailing `#fragment` is **cut** off a path first: `DESIGN.md#7.1.2`
+///   names `DESIGN.md`, and the anchor is simply a part of the address this
+///   window cannot honour yet;
+/// * `file:` is unwrapped to the path it carries, percent-escapes and all;
+/// * anything else carrying a `scheme:` is refused, *except* that a bare
+///   Windows drive letter (`C:\x`) is a path and not a scheme — one letter
+///   before the colon cannot be a scheme, and RFC 3986 says so too;
+/// * an absolute path is taken as it stands; a relative one is resolved
+///   against the **document's own directory**, which is the only frame a
+///   relative link has ever meant.
+#[must_use]
+pub fn link_action(target: &str, document: &Path) -> LinkAction {
+    let target = target.trim();
+    if target.is_empty() || target.starts_with('#') {
+        return LinkAction::Nowhere;
+    }
+    let lower = target.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return LinkAction::Browse(target.to_owned());
+    }
+    let path = if lower.starts_with("file:") {
+        let Some(path) = file_url_path(target) else {
+            return LinkAction::Nowhere;
+        };
+        path
+    } else if let Some(scheme) = scheme_of(target) {
+        // A drive letter is not a scheme; every real scheme left here is one
+        // this window does not open.
+        if scheme.len() > 1 {
+            return LinkAction::Nowhere;
+        }
+        PathBuf::from(strip_fragment(target))
+    } else {
+        PathBuf::from(strip_fragment(target))
+    };
+    if path.as_os_str().is_empty() {
+        return LinkAction::Nowhere;
+    }
+    if path.is_absolute() {
+        return LinkAction::Preview(normalized(&path));
+    }
+    match document.parent() {
+        Some(directory) => LinkAction::Preview(normalized(&directory.join(path))),
+        // A document with no directory is one with no relative frame; there is
+        // nowhere for the link to be relative *to*.
+        None => LinkAction::Nowhere,
+    }
+}
+
+/// Fold `.` and `..` out of a path, **textually**.
+///
+/// # Why lexically, and why at all (user report, 2026-08-13)
+///
+/// The first version left the climb in — `…\preview-samples\../../docs/DESIGN.md`
+/// — on the reasoning that the file system resolves `..` anyway and folding it
+/// here would be guessing about symlinks. Opening the file worked. Everything
+/// *else* did not: the foot printed that string at the user, and Explorer's
+/// `/select` was handed it and quietly opened the wrong folder. A path that
+/// leaves this window — into a caption, into another program's command line —
+/// has to be the path a person would have written.
+///
+/// **Lexically is the correct algorithm here, not a shortcut.** A markdown link
+/// is resolved the way a URL reference is (RFC 3986 §5.2.4 removes `..`
+/// segments by pure string surgery, before anything is dereferenced), so
+/// folding the text *is* what the author meant. `canonicalize` would be the
+/// wrong tool twice over: it asks the disk, so it fails for a link to a file
+/// that does not exist yet, and it returns a `\\?\` extended path that no
+/// caption should ever show.
+fn normalized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // A `..` climbs over a real name; one at the root has nothing
+                // above it to climb, and one already following a `..` is part
+                // of the same climb rather than the end of it.
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else if out.has_root() {
+                    // Above the root there is nothing. Windows agrees: `C:\..`
+                    // is `C:\`.
+                } else {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// The `scheme` of `scheme:rest`, when the text in front of the first colon
+/// looks like one (RFC 3986: a letter, then letters, digits, `+`, `-`, `.`).
+fn scheme_of(target: &str) -> Option<&str> {
+    let colon = target.find(':')?;
+    let scheme = &target[..colon];
+    let mut characters = scheme.chars();
+    let first = characters.next()?;
+    (first.is_ascii_alphabetic()
+        && characters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    .then_some(scheme)
+}
+
+/// Everything before a trailing `#anchor`.
+fn strip_fragment(target: &str) -> &str {
+    target.split_once('#').map_or(target, |(path, _)| path)
+}
+
+/// The path inside a `file:` URL — `file:///C:/a/b`, `file://host/share/a` and
+/// the abbreviated `file:/C:/a` alike, with percent-escapes undone.
+fn file_url_path(target: &str) -> Option<PathBuf> {
+    let rest = strip_fragment(target).get("file:".len()..)?;
+    // `file://host/share` is a UNC path and keeps its two leading slashes;
+    // `file:///C:/x` and `file:/C:/x` are local and lose all of theirs.
+    let local = rest.strip_prefix("//").map_or(rest, |authority| {
+        authority.strip_prefix('/').unwrap_or(authority)
+    });
+    let text = if rest.starts_with("//") && !rest.starts_with("///") {
+        format!(r"\\{}", percent_decode(local))
+    } else {
+        percent_decode(local.trim_start_matches('/'))
+    };
+    (!text.is_empty()).then(|| PathBuf::from(text.replace('/', r"\")))
+}
+
+/// `%20` and its kin, undone. A `%` that does not begin a valid escape is a
+/// literal `%`, which is what every lenient reader does and what a hand-written
+/// link most often means.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escape = (bytes[index] == b'%')
+            .then(|| {
+                text.get(index + 1..index + 3)
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            })
+            .flatten();
+        match escape {
+            Some(byte) => {
+                out.push(byte);
+                index += 3;
+            }
+            None => {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
 /// How thick the bar under a too-wide block is *drawn*.
 pub const BLOCK_SCROLL_THICKNESS_LOGICAL_PX: f32 = 2.0;
 /// How thick it is to a **hand** — the divider's `SEAT_DIVIDER_HIT_LOGICAL_PX`
@@ -2231,21 +2438,23 @@ mod tests {
         );
     }
 
-    /// PIN — `[text](url)` renders its text and **never its url**, and the three
-    /// inline passes keep their order.
+    /// PIN — `[text](url)` renders its text and **never its url**, keeps that
+    /// url to answer a press with, and the three inline passes keep their order.
     ///
     /// MUTATION ①: emit `text (url)` and the second assertion goes red — which
     /// is the one failure mode a link renderer must not have, because a printed
-    /// URL is wrong under every future ruling about what a click does.
+    /// URL is wrong under every ruling about what a click does.
     /// MUTATION ②: run the link pass before the code pass and the third
     /// assertion goes red: a bracket inside a code span stops being literal.
+    /// MUTATION ③: drop the target on the floor again (`target: None`) and the
+    /// first assertion goes red — the press would have nothing to resolve.
     #[test]
-    fn a_link_renders_its_label_and_drops_its_target() {
+    fn a_link_renders_its_label_and_keeps_its_target_unprinted() {
         assert_eq!(
             parse_inline("see [the design](docs/DESIGN.md) first"),
             vec![
                 Span::plain("see "),
-                Span::link("the design"),
+                Span::link("the design", "docs/DESIGN.md"),
                 Span::plain(" first"),
             ]
         );
@@ -2266,6 +2475,100 @@ mod tests {
             vec![Span::plain("a [TODO] note")]
         );
         assert_eq!(parse_inline("[unclosed"), vec![Span::plain("[unclosed")]);
+    }
+
+    /// PIN (user ruling, 2026-08-13) — **a link that names a file opens it in
+    /// our own preview**; the web still goes to the browser; nothing else goes
+    /// anywhere.
+    ///
+    /// The report was that pressing a file link opened the containing folder in
+    /// Explorer. It could not have: nothing in this build read a preview link
+    /// at all — [`push_link_runs`] threw the target away, so there was no click
+    /// handler for one and could not be. What the user reached was the foot's
+    /// Reveal, which opens a folder because that is Reveal's whole job. The
+    /// ruling settles both halves: the link gets the tree's own answer (指到
+    /// 文件=预览它), and 「open the containing folder」 stays with the foot.
+    ///
+    /// MUTATIONS:
+    /// ① answer a file link with its parent directory — the first assertion
+    ///    goes red, and that is the reported behaviour written down;
+    /// ② resolve a relative target against the process's working directory
+    ///    rather than the document's — the second goes red, and every link in
+    ///    every document read from anywhere else points at nothing;
+    /// ③ let any scheme through to the browser — the `mailto:` assertion goes
+    ///    red and a document gets to name a handler;
+    /// ④ stop folding the climb out (`directory.join(path)` raw) and the first
+    ///    assertion goes red — which is the second half of the same report: the
+    ///    file opened, but the foot printed
+    ///    `…\preview-samples\../../docs/DESIGN.md` at the user and Explorer's
+    ///    `/select` was handed it and opened the wrong folder.
+    #[test]
+    fn a_file_link_opens_in_the_preview_and_only_the_web_leaves_the_window() {
+        let document = Path::new(r"D:\repo\test-assets\preview-samples\stress.md");
+        let here = Path::new(r"D:\repo\test-assets\preview-samples");
+
+        // ① A relative file link, resolved against the document's own folder —
+        //    and the climb folded out, because this path is about to be printed
+        //    in a caption and handed to another program.
+        assert_eq!(
+            link_action("../../docs/DESIGN.md", document),
+            LinkAction::Preview(PathBuf::from(r"D:\repo\docs\DESIGN.md")),
+            "a file link is a way of pointing at a file, and this window \
+             previews files"
+        );
+        assert_eq!(
+            link_action("./sample.csv", document),
+            LinkAction::Preview(here.join("sample.csv")),
+            "and a `.` is not part of anybody's idea of a path"
+        );
+        assert_eq!(
+            link_action(r"..\sample.csv", document),
+            LinkAction::Preview(PathBuf::from(r"D:\repo\test-assets\sample.csv")),
+            "a backslash-written link is a link too"
+        );
+        assert_eq!(
+            link_action("../../../../../../x.md", document),
+            LinkAction::Preview(PathBuf::from(r"D:\x.md")),
+            "and a climb past the root stops at the root, as Windows does"
+        );
+
+        // ② An absolute one stands as it is; a `file:` URL is unwrapped.
+        assert_eq!(
+            link_action(r"C:\notes\a.md", document),
+            LinkAction::Preview(PathBuf::from(r"C:\notes\a.md")),
+            "a drive letter is a path, not a scheme"
+        );
+        assert_eq!(
+            link_action("file:///C:/notes/a%20b.md", document),
+            LinkAction::Preview(PathBuf::from(r"C:\notes\a b.md")),
+            "unwrapped, and its escapes undone"
+        );
+
+        // ③ The web leaves the window, and nothing else does.
+        assert_eq!(
+            link_action("https://example.com/x", document),
+            LinkAction::Browse("https://example.com/x".to_owned())
+        );
+        for refused in [
+            "mailto:someone@example.com",
+            "ftp://example.com/x",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                link_action(refused, document),
+                LinkAction::Nowhere,
+                "{refused}: a document does not get to name a handler"
+            );
+        }
+
+        // ④ An anchor is cut off a path, and an anchor alone goes nowhere —
+        //    there is no within-document navigation to do yet.
+        assert_eq!(
+            link_action("DESIGN.md#7.1.2", document),
+            LinkAction::Preview(here.join("DESIGN.md"))
+        );
+        assert_eq!(link_action("#section", document), LinkAction::Nowhere);
+        assert_eq!(link_action("   ", document), LinkAction::Nowhere);
     }
 
     /// PIN (user ruling, 2026-08-13) — **a hard-wrapped source paragraph is one

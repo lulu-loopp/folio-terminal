@@ -861,6 +861,59 @@ fn markdown_list_marker(
     }
 }
 
+/// A markdown link the painter has laid down, before anyone has measured it.
+///
+/// Where it is *in the body* rather than where it is on screen — which is all
+/// the builder can honestly say. A link is a run inside a paragraph of
+/// proportional text that has already wrapped, so where it landed is a question
+/// only the shaper answers; [`measure_preview_links`] asks it, one paragraph at
+/// a time, where a `&mut Renderer` is in hand.
+#[derive(Clone, Debug)]
+struct PreviewLinkSite {
+    /// The scrolling block it stands in, or `None` for the page itself.
+    block: Option<usize>,
+    paragraph: usize,
+    run: usize,
+    target: String,
+}
+
+/// A markdown link, boxed where it was actually drawn.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewLink {
+    rect: [f32; 4],
+    target: String,
+}
+
+/// Everything one pass over a rendered document produces.
+///
+/// The links ride beside the body rather than inside it because they are not
+/// something to draw: `bt_render` is told what a page looks like, and "this run
+/// answers a press, and here is where it points" is what the *window* knows.
+struct BuiltMarkdown {
+    body: bt_render::PreviewBody,
+    links: Vec<PreviewLinkSite>,
+}
+
+/// Note every link in `spans` against the paragraph about to be pushed.
+///
+/// `first_run` is where the spans start inside that paragraph's runs — zero
+/// everywhere except a list item, whose marker rides in front of them as a run
+/// of its own.
+fn note_link_sites(
+    sites: &mut Vec<PreviewLinkSite>,
+    spans: &[preview::Span],
+    (block, paragraph, first_run): (Option<usize>, usize, usize),
+) {
+    sites.extend(spans.iter().enumerate().filter_map(|(index, span)| {
+        span.target.as_ref().map(|target| PreviewLinkSite {
+            block,
+            paragraph,
+            run: first_run + index,
+            target: target.clone(),
+        })
+    }));
+}
+
 /// One list item's runs, marker included.
 fn markdown_item_runs(
     spans: &[preview::Span],
@@ -1362,12 +1415,13 @@ fn build_preview_markdown_body(
     bars: BlockScrollPaint<'_>,
     document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
     palette: &bt_render::ChromePalette,
-) -> bt_render::PreviewBody {
+) -> BuiltMarkdown {
     let BlockScrollPaint {
         offsets: block_scroll,
         lit,
         scale,
     } = bars;
+    let mut links: Vec<PreviewLinkSite> = Vec::new();
     let (blocks, layout) = document;
     // **The page has no horizontal axis; the wide blocks have their own** (user
     // ruling, 2026-08-13, overturning the same day's earlier "the whole page
@@ -1420,7 +1474,25 @@ fn build_preview_markdown_body(
                 },
                 (index, offset, placed.width),
             ));
-            (left - offset, right - offset, scrollers.len())
+            // **The frame a scrolling block is built in is its own content's
+            // width, placed at the offset** (user report, 2026-08-13).
+            //
+            // It used to be `right - offset` — the *page's* width, sliding left
+            // over the content. Every rectangle built inside it inherited that,
+            // so a box as wide as the frame walked bodily out of the block's
+            // clip as the offset grew: a code fence, which is one paragraph
+            // spanning its whole line, narrowed to a sliver against the left
+            // edge and then vanished, because `crop_to` correctly declines to
+            // draw a rectangle that no longer meets its window. The table
+            // escaped only because `push_markdown_table` lays its cells out
+            // from this origin and never reads the right edge at all.
+            //
+            // Cropping belongs at the draw, and that is where it happens —
+            // `shape_preview_body` and the quad pass both intersect against
+            // `clip` above, which does *not* move. Nothing here is a promise
+            // that the content fits; it is a statement of how wide the content
+            // is, which is the only thing a layout can honestly say.
+            (left - offset, left - offset + placed.width, scrollers.len())
         } else {
             (left, right, 0)
         };
@@ -1433,8 +1505,11 @@ fn build_preview_markdown_body(
                 (&mut block.quads, &mut block.paragraphs)
             }
         };
+        // Which list of paragraphs the sites below are counting into.
+        let region = into.checked_sub(1);
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
+                note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
                 paragraphs.push(bt_render::PreviewParagraph {
                     runs: markdown_runs(spans, palette, true),
                     rect: [left, top, right, top + height],
@@ -1447,6 +1522,7 @@ fn build_preview_markdown_body(
                 });
             }
             preview::MarkdownBlock::Paragraph(spans) => {
+                note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
                 paragraphs.push(bt_render::PreviewParagraph {
                     runs: markdown_runs(spans, palette, false),
                     rect: [left, top, right, top + height],
@@ -1469,6 +1545,9 @@ fn build_preview_markdown_body(
                         .get(index)
                         .copied()
                         .unwrap_or(metrics.line_height);
+                    // The marker rides in front of the spans as a run of its
+                    // own, so the first span is the paragraph's *second* run.
+                    note_link_sites(&mut links, spans, (region, paragraphs.len(), 1));
                     paragraphs.push(bt_render::PreviewParagraph {
                         runs: markdown_item_runs(spans, *ordered, index, palette),
                         rect: [
@@ -1502,6 +1581,7 @@ fn build_preview_markdown_body(
                         .get(index)
                         .copied()
                         .unwrap_or(metrics.line_height);
+                    note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
                     paragraphs.push(bt_render::PreviewParagraph {
                         runs: markdown_runs(spans, palette, false),
                         rect: [
@@ -1528,8 +1608,12 @@ fn build_preview_markdown_body(
             }
             preview::MarkdownBlock::Table { rows } => {
                 push_markdown_table(
-                    quads,
-                    paragraphs,
+                    MarkdownSink {
+                        quads,
+                        paragraphs,
+                        links: &mut links,
+                        region,
+                    },
                     rows,
                     placed,
                     [left, top],
@@ -1598,13 +1682,62 @@ fn build_preview_markdown_body(
     for (block, indicator) in &mut scrollers {
         push_block_scroll_indicator(block, *indicator, lit, scale, palette);
     }
-    bt_render::PreviewBody {
-        clip: body,
-        quads,
-        paragraphs,
-        blocks: scrollers.into_iter().map(|(block, _)| block).collect(),
-        foot: None,
+    BuiltMarkdown {
+        body: bt_render::PreviewBody {
+            clip: body,
+            quads,
+            paragraphs,
+            blocks: scrollers.into_iter().map(|(block, _)| block).collect(),
+            foot: None,
+        },
+        links,
     }
+}
+
+/// Ask the shaper where each link actually landed.
+///
+/// Lazily and only for the paragraphs that carry one, so a document of a
+/// thousand paragraphs costs a measurement for none of them. A link that wraps
+/// across two lines comes back as the two boxes it is drawn as — a hit test
+/// given one box spanning both would claim the margin between them, which is
+/// the empty half of the pane on the right of a short last line.
+fn measure_preview_links(
+    renderer: &mut bt_render::Renderer,
+    body: &bt_render::PreviewBody,
+    sites: &[PreviewLinkSite],
+) -> Vec<PreviewLink> {
+    let mut links = Vec::new();
+    for site in sites {
+        let paragraphs = match site.block {
+            Some(block) => match body.blocks.get(block) {
+                Some(block) => &block.paragraphs,
+                None => continue,
+            },
+            None => &body.paragraphs,
+        };
+        let Some(paragraph) = paragraphs.get(site.paragraph) else {
+            continue;
+        };
+        // Cropped to whatever window the paragraph is seen through, so a link
+        // scrolled out of its own block's bank is not clickable where it is not
+        // drawn — the same intersection `shape_preview_body` paints under.
+        let window = match site.block {
+            Some(block) => body.blocks[block].clip,
+            None => body.clip,
+        };
+        links.extend(
+            renderer
+                .measure_preview_run_boxes(paragraph)
+                .into_iter()
+                .filter(|boxed| boxed.run == site.run)
+                .filter_map(|boxed| bt_render::crop_to(boxed.rect, window))
+                .map(|rect| PreviewLink {
+                    rect,
+                    target: site.target.clone(),
+                }),
+        );
+    }
+    links
 }
 
 /// `.md-block::-webkit-scrollbar` in the only shape this window has for one: a
@@ -1769,6 +1902,21 @@ fn markdown_table_columns(
         .collect()
 }
 
+/// The three lists a block's painter writes into, and which region they belong
+/// to.
+///
+/// One value rather than four parameters because they are one subject — the
+/// place this block is being drawn — and because a painter reached eight
+/// parameters the moment links joined the fills and the text, which is one
+/// parameter past where a call site stops being readable at a glance.
+struct MarkdownSink<'a> {
+    quads: &'a mut Vec<bt_render::PreviewQuad>,
+    paragraphs: &'a mut Vec<bt_render::PreviewParagraph>,
+    links: &'a mut Vec<PreviewLinkSite>,
+    /// The scrolling block being filled, or `None` for the page itself.
+    region: Option<usize>,
+}
+
 /// One markdown table, drawn in the csv grid's own chrome.
 ///
 /// A free function rather than a branch inline, because it is the one block that
@@ -1776,14 +1924,19 @@ fn markdown_table_columns(
 /// of a match arm list. The geometry it reads was all decided by
 /// [`Runtime::measure_markdown_table`]; nothing here computes a width.
 fn push_markdown_table(
-    quads: &mut Vec<bt_render::PreviewQuad>,
-    paragraphs: &mut Vec<bt_render::PreviewParagraph>,
+    sink: MarkdownSink<'_>,
     rows: &[preview::TableRow],
     placed: &MarkdownBlockLayout,
     origin: [f32; 2],
     metrics: seats::PreviewMarkdownMetrics,
     palette: &bt_render::ChromePalette,
 ) {
+    let MarkdownSink {
+        quads,
+        paragraphs,
+        links,
+        region,
+    } = sink;
     let border = metrics.table_border;
     let width: f32 = placed.columns.iter().sum::<f32>() + border;
     let mut row_top = origin[1];
@@ -1833,6 +1986,7 @@ fn push_markdown_table(
                 });
             }
             if let Some(cell) = row.get(column) {
+                note_link_sites(links, cell, (region, paragraphs.len(), 0));
                 let mut runs = markdown_runs(cell, palette, index == 0);
                 if index == 0 {
                     // A heading cell is set in the heading ink whatever its own
@@ -2655,6 +2809,16 @@ struct TabState {
     preview_block_drag: Option<PreviewBlockDrag>,
     /// The block whose thumb is lit because the pointer is over it.
     preview_block_hover: Option<usize>,
+    /// Every markdown link on screen, boxed where it was drawn (user ruling,
+    /// 2026-08-13).
+    ///
+    /// A paint artifact rather than state: rebuilt with the body, because a
+    /// link's rectangle is a fact about this frame's layout and nothing else.
+    preview_links: Vec<PreviewLink>,
+    /// The link under the pointer, held **by its box** rather than by an index
+    /// into the list above — so a rebuild that moves or removes it simply stops
+    /// matching, and there is no stale subscript to invalidate.
+    preview_link_hover: Option<[f32; 4]>,
     /// Where the caret is in the buffer on the seat, and what it has selected.
     ///
     /// Beside the scroll offset and for the same reason: both are the *view's*,
@@ -7728,10 +7892,18 @@ fn pointer_cursor(
     dragging_tab: bool,
     float: Option<FloatGrasp>,
     divider_axis: Option<bt_layout::Axis>,
+    over_link: bool,
 ) -> winit::window::CursorIcon {
     use winit::window::CursorIcon;
     if dragging_tab {
         return CursorIcon::Default;
+    }
+    // A markdown link is the one thing in the preview's body that answers a
+    // press, and the pointing finger is how every reader on the desk says so.
+    // Under the float's grasps, because a window standing over the document
+    // covers what the pointer would otherwise be aiming at.
+    if float.is_none() && over_link {
+        return CursorIcon::Pointer;
     }
     match float {
         Some(FloatGrasp::Grip) => return CursorIcon::NwseResize,
@@ -9603,6 +9775,8 @@ fn assemble_tab_state(
         preview_selecting: false,
         preview_block_drag: None,
         preview_block_hover: None,
+        preview_links: Vec::new(),
+        preview_link_hover: None,
     };
     debug_assert!(
         tab.sessions_match_terminals(),
@@ -13671,6 +13845,11 @@ impl Runtime {
         // that is not there any more.
         self.preview_block_drag = None;
         self.preview_block_hover = None;
+        // The next document's links are measured with its body; what a hand was
+        // resting on in this one is not a fact about that one, and a stale box
+        // would keep the pointing finger over prose that answers nothing.
+        self.preview_links.clear();
+        self.preview_link_hover = None;
         self.preview_notice = None;
     }
 
@@ -13815,11 +13994,14 @@ impl Runtime {
         else {
             return Ok(());
         };
-        // The *folder*, because that is what "reveal" means: Explorer opening on
-        // a text file would run it, and the one door out already refuses that —
-        // so this asks for the directory and lets the file be found in it.
-        let folder = path.parent().unwrap_or(&path).to_path_buf();
-        if !self.open_local_path(&folder) {
+        // **The file itself, highlighted** (user ruling, 2026-08-13). This used
+        // to hand Explorer the *parent folder*, because the only door out was
+        // `open_local_path` and asking that to open a text file would have run
+        // it. `reveal_in_explorer` is the door that asks Explorer to point at
+        // something rather than to open it, so the foot can finally name what
+        // it prints: in a folder of two hundred rows, "the directory it is in"
+        // is not an answer to "where is this file".
+        if !self.reveal_in_explorer(&path) {
             return Ok(());
         }
         self.revealed_foot = Some((RevealedFoot::Preview(seat), Instant::now()));
@@ -14004,6 +14186,72 @@ impl Runtime {
         self.preview_block_drag
             .map(|drag| (drag.index, true))
             .or(self.preview_block_hover.map(|index| (index, false)))
+    }
+
+    /// The markdown link under the pointer, if there is one.
+    fn preview_link_at(&self, position: PhysicalPosition<f64>) -> Option<&PreviewLink> {
+        let (x, y) = (position.x as f32, position.y as f32);
+        self.preview_links.iter().find(|link| {
+            x >= link.rect[0] && x <= link.rect[2] && y >= link.rect[1] && y <= link.rect[3]
+        })
+    }
+
+    /// A press on a markdown link (user ruling, 2026-08-13).
+    ///
+    /// Returns whether the press was the link's. Asked before the block thumbs
+    /// and before the edit surface for the reason the thumb is asked before the
+    /// text: a link is a control standing *in* the content, and a press on a
+    /// control was never a press on what it is standing on.
+    fn press_preview_link(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(target) = self
+            .preview_link_at(position)
+            .map(|link| link.target.clone())
+        else {
+            return Ok(false);
+        };
+        let Some(document) = self
+            .current_preview_buffer()
+            .map(|buffer| buffer.path.clone())
+        else {
+            return Ok(false);
+        };
+        match preview::link_action(&target, &document) {
+            // §7.1.3's one door, the same one the tree's Enter and the file
+            // menu's first row go through — so a file reached by pointing at it
+            // in prose lands exactly where a file reached any other way does,
+            // pool and all. Anything unreadable arrives as the "no preview"
+            // card, which carries its own way out to the system.
+            preview::LinkAction::Preview(path) => self.open_preview(path),
+            preview::LinkAction::Browse(url) => {
+                let result = window_hwnd(&self.window).and_then(|hwnd| {
+                    bt_platform::shell_execute(hwnd, &url)
+                        .map_err(|error| anyhow!(error))
+                        .context("open a markdown link in the system browser")
+                });
+                if let Err(error) = result {
+                    eprintln!("recoverable markdown link open failure: {error:#}");
+                }
+                Ok(())
+            }
+            // A scheme this window does not open, or an anchor it cannot yet
+            // honour. The press is still the link's: it landed on a control,
+            // and letting it fall through would put a caret in the prose.
+            preview::LinkAction::Nowhere => Ok(()),
+        }
+        .map(|()| true)
+    }
+
+    /// Light the link under the pointer, or put the last one out.
+    fn note_preview_link_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
+        let over = position
+            .and_then(|position| self.preview_link_at(position))
+            .map(|link| link.rect);
+        if over == self.preview_link_hover {
+            return Ok(());
+        }
+        self.preview_link_hover = over;
+        self.apply_pointer_cursor();
+        self.repaint_preview()
     }
 
     /// A press on a block's scroll thumb takes hold of it.
@@ -15279,6 +15527,7 @@ impl Runtime {
         let advance = self.preview_mono_advance;
         let lit = self.preview_block_lit();
         let (rows_height, columns) = self.preview_content_extent(scale);
+        let mut sites = Vec::new();
         let mut built = match &self.preview_doc {
             PreviewDocument::Text { lines, wrap } => {
                 let geometry =
@@ -15310,18 +15559,22 @@ impl Runtime {
                 rows,
                 &palette,
             ),
-            PreviewDocument::Markdown { blocks, layout, .. } => build_preview_markdown_body(
-                body,
-                seats::preview_markdown_metrics(scale),
-                scroll,
-                BlockScrollPaint {
-                    offsets: &self.preview_md_block_scroll,
-                    lit,
-                    scale,
-                },
-                (blocks, layout),
-                &palette,
-            ),
+            PreviewDocument::Markdown { blocks, layout, .. } => {
+                let rendered = build_preview_markdown_body(
+                    body,
+                    seats::preview_markdown_metrics(scale),
+                    scroll,
+                    BlockScrollPaint {
+                        offsets: &self.preview_md_block_scroll,
+                        lit,
+                        scale,
+                    },
+                    (blocks, layout),
+                    &palette,
+                );
+                sites = rendered.links;
+                rendered.body
+            }
             PreviewDocument::Empty => bt_render::PreviewBody {
                 clip: body,
                 quads: Vec::new(),
@@ -15357,6 +15610,20 @@ impl Runtime {
             .map(str::to_owned)
         {
             push_preview_truncation_notice(&mut built, body, scale, &notice, &palette);
+        }
+        // The links last, because measuring one asks the shaper where a
+        // paragraph landed and that answer is only true of the body as it now
+        // stands. The hover's rule is drawn from the same boxes, so the line
+        // under a link cannot be anywhere but under it.
+        self.preview_links = measure_preview_links(&mut self.renderer, &built, &sites);
+        if let Some(hovered) = self.preview_link_hover
+            && self.preview_links.iter().any(|link| link.rect == hovered)
+        {
+            let thickness = (scale).round().max(1.0);
+            built.quads.push(bt_render::PreviewQuad {
+                rect: [hovered[0], hovered[3] - thickness, hovered[2], hovered[3]],
+                color: palette.accent,
+            });
         }
         self.renderer.set_preview_body(Some(built));
     }
@@ -17396,15 +17663,11 @@ impl Runtime {
         if root.is_empty() {
             return Ok(());
         }
-        // Failure is deliberately not an error path: this is a courtesy, and a
-        // window that refuses to keep working because a file manager would not
-        // start is a worse answer than a button that quietly did nothing. The
-        // confirmation is withheld in that case, which is the honest report.
-        if std::process::Command::new("explorer.exe")
-            .arg(&root)
-            .spawn()
-            .is_ok()
-        {
+        // Through the same audited door the other two feet use, rather than
+        // spawning `explorer.exe` itself as this once did: one verb printed on
+        // three strips is one verb, and a bridge that only one of the three
+        // goes around is a bridge with a hole in it.
+        if self.reveal_in_explorer(Path::new(&root)) {
             self.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
@@ -17428,10 +17691,11 @@ impl Runtime {
         if root.is_empty() {
             return Ok(());
         }
-        // The refusal path is `open_local_path`'s own — it speaks the one-line
-        // notice — and a failure to reach Explorer withholds the confirmation
-        // rather than claiming one, which is the honest report.
-        if !self.open_local_path(Path::new(&root)) {
+        // A root is a *place*, so it is opened rather than selected — see
+        // `bt_platform::reveal_arguments` for why `/select` on a folder is one
+        // level too far out. A failure to reach Explorer withholds the
+        // confirmation rather than claiming one, which is the honest report.
+        if !self.reveal_in_explorer(Path::new(&root)) {
             return Ok(());
         }
         self.revealed_foot = Some((RevealedFoot::Column(seat), Instant::now()));
@@ -18315,6 +18579,34 @@ impl Runtime {
                 self.files_notice = Some((FILES_PROGRAM_REFUSED_NOTICE.to_owned(), Instant::now()));
             }
             eprintln!("recoverable files row open failure: {error:#}");
+            return false;
+        }
+        true
+    }
+
+    /// Show a path in Explorer — **the one door all three feet go through**
+    /// (user ruling, 2026-08-13).
+    ///
+    /// The three used to answer differently: the preview's foot opened the
+    /// file's *parent folder*, the column's opened its root through
+    /// `open_local_path`, and the float's spawned `explorer.exe` itself, past
+    /// the audited bridges entirely. One verb printed on three strips has to be
+    /// one verb, and now it is: [`bt_platform::reveal_in_explorer`], which
+    /// highlights a file inside its folder and opens a folder as itself.
+    ///
+    /// Reported, because a foot confirms in place and a confirmation printed
+    /// over a reveal that never happened is the one thing worse than silence.
+    fn reveal_in_explorer(&mut self, path: &Path) -> bool {
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::reveal_in_explorer(hwnd, path)
+                .map_err(|error| anyhow!(error))
+                .context("show a path in File Explorer")
+        });
+        if let Err(error) = result {
+            // A courtesy, not an error path: a window that refuses to keep
+            // working because a file manager would not start is a worse answer
+            // than a button that quietly did nothing.
+            eprintln!("recoverable reveal failure: {error:#}");
             return false;
         }
         true
@@ -20499,6 +20791,7 @@ impl Runtime {
             && self.dirty_gate_layout().is_none()
             && self.chrome_target_at(position).is_none();
         self.note_preview_block_hover(free.then_some(position))?;
+        self.note_preview_link_hover(free.then_some(position))?;
         // The overlay owns the pointer the way it owns the next click: no chrome
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
         if let Some(layout) = self.settings_layout() {
@@ -21082,8 +21375,12 @@ impl Runtime {
                 _ => None,
             }
         });
-        self.window
-            .set_cursor(pointer_cursor(self.drag.is_some(), grasp, divider_axis));
+        self.window.set_cursor(pointer_cursor(
+            self.drag.is_some(),
+            grasp,
+            divider_axis,
+            self.preview_link_hover.is_some(),
+        ));
     }
 
     /// Put the frame already on screen back in the slot so a pure chrome change
@@ -22267,6 +22564,11 @@ impl Runtime {
             // every terminal leaf answers for itself; see [`press_reaches_no_grid`]
             // for the primary-seat version this replaced and what it cost.
             self.tab_clicks.interrupt();
+            // A link is a control standing in the prose and answers before the
+            // prose does.
+            if self.press_preview_link(position)? {
+                return Ok(true);
+            }
             // The bar under a wide block is a scrollbar and answers first: it
             // stands over the block it scrolls, so a press on it was never a
             // press in the content beneath.
@@ -36376,13 +36678,16 @@ mod tests {
         // K113. "The cursor changing shape mid-drag would say something happened
         // when nothing did" (mock-up 1710-1711).
         use winit::window::CursorIcon;
-        assert_eq!(pointer_cursor(false, None, None), CursorIcon::Default);
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Row)),
+            pointer_cursor(false, None, None, false),
+            CursorIcon::Default
+        );
+        assert_eq!(
+            pointer_cursor(false, None, Some(bt_layout::Axis::Row), false),
             CursorIcon::EwResize
         );
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Col)),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Col), false),
             CursorIcon::NsResize
         );
         for axis in [None, Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
@@ -36392,13 +36697,35 @@ mod tests {
                 Some(FloatGrasp::Head),
                 Some(FloatGrasp::Carrying),
             ] {
-                assert_eq!(
-                    pointer_cursor(true, grasp, axis),
-                    CursorIcon::Default,
-                    "a tab drag crossing a divider or a float must not flicker into another shape"
-                );
+                for over_link in [false, true] {
+                    assert_eq!(
+                        pointer_cursor(true, grasp, axis, over_link),
+                        CursorIcon::Default,
+                        "a tab drag crossing a divider, a float or a link must \
+                         not flicker into another shape"
+                    );
+                }
             }
         }
+    }
+
+    /// A markdown link says it answers a press the way every reader on the desk
+    /// says it (user ruling, 2026-08-13) — and gives way to a window standing
+    /// over it, because what a float covers is not what you are aiming at.
+    #[test]
+    fn a_markdown_link_wears_the_pointing_finger() {
+        use winit::window::CursorIcon;
+        assert_eq!(pointer_cursor(false, None, None, true), CursorIcon::Pointer);
+        assert_eq!(
+            pointer_cursor(false, None, Some(bt_layout::Axis::Row), true),
+            CursorIcon::Pointer,
+            "and over a divider it is still the link the pointer is on"
+        );
+        assert_eq!(
+            pointer_cursor(false, Some(FloatGrasp::Head), None, true),
+            CursorIcon::Grab,
+            "but a window over the document takes the pointer with it"
+        );
     }
 
     /// The two shapes a pinned float names for itself: `nwse-resize` on
@@ -36409,20 +36736,20 @@ mod tests {
     fn a_pinned_float_wears_the_diagonal_arrow_on_its_grip() {
         use winit::window::CursorIcon;
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Grip), None),
+            pointer_cursor(false, Some(FloatGrasp::Grip), None, false),
             CursorIcon::NwseResize
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Head), None),
+            pointer_cursor(false, Some(FloatGrasp::Head), None, false),
             CursorIcon::Grab
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Carrying), None),
+            pointer_cursor(false, Some(FloatGrasp::Carrying), None, false),
             CursorIcon::Grabbing
         );
         for axis in [Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
             assert_eq!(
-                pointer_cursor(false, Some(FloatGrasp::Grip), axis),
+                pointer_cursor(false, Some(FloatGrasp::Grip), axis, false),
                 CursorIcon::NwseResize,
                 "the window is drawn over the divider, so the divider is not what you are aiming at"
             );
@@ -37187,7 +37514,7 @@ mod tests {
         let blocks = preview::parse_markdown("- one\n- two\n- three\n");
         let heights = vec![line, line * 3.0, line * 2.0];
         let layout = vec![MarkdownBlockLayout::rows(heights.clone(), 0.0)];
-        let built = build_preview_markdown_body(
+        let built = markdown_body(
             body,
             metrics,
             [0.0, 0.0],
@@ -37237,7 +37564,7 @@ mod tests {
             quote_rows.clone(),
             metrics.quote_padding_y * 2.0,
         )];
-        let built = build_preview_markdown_body(
+        let built = markdown_body(
             body,
             metrics,
             [0.0, 0.0],
@@ -37554,7 +37881,7 @@ mod tests {
         ];
         let overflow = wide - page;
         let prose_left = |offsets: &[f32]| {
-            let built = build_preview_markdown_body(
+            let built = markdown_body(
                 body,
                 metrics,
                 [0.0, 0.0],
@@ -37570,7 +37897,7 @@ mod tests {
                 .rect[0]
         };
         let fence_left = |offsets: &[f32]| {
-            let built = build_preview_markdown_body(
+            let built = markdown_body(
                 body,
                 metrics,
                 [0.0, 0.0],
@@ -37614,7 +37941,7 @@ mod tests {
                 ..MarkdownBlockLayout::solid(metrics.line_height * 3.0)
             },
         ];
-        let built = build_preview_markdown_body(
+        let built = markdown_body(
             body,
             metrics,
             [0.0, 1000.0],
@@ -37682,7 +38009,7 @@ mod tests {
         };
 
         // ① The thumb a hand finds is the thumb the painter drew.
-        let built = build_preview_markdown_body(
+        let built = markdown_body(
             body,
             metrics,
             [0.0, 0.0],
@@ -37736,6 +38063,230 @@ mod tests {
             dragged_to(on_thumb[0] - 400.0),
             0.0,
             "and at its own start — the wheel's two clamps, exactly"
+        );
+    }
+
+    /// The document hands out every link it drew, addressed by the run it drew
+    /// it as (user ruling, 2026-08-13).
+    ///
+    /// The address is the whole of this: a link is a *run inside a paragraph*,
+    /// and where that run landed is a question only the shaper answers
+    /// ([`bt_render::Renderer::measure_preview_run_boxes`]). What the painter
+    /// owes is the subscript, and the one that is easy to get wrong is a list
+    /// item's — its bullet rides in front of the text as a run of its own, so
+    /// the first span of an item is the paragraph's *second* run. Off by one
+    /// there and the pointer underlines the bullet and opens nothing.
+    ///
+    /// MUTATIONS: pass `0` as a list item's first run and the second assertion
+    /// goes red; note the sites after pushing the paragraph rather than before,
+    /// and every subscript is one too far.
+    #[test]
+    fn a_document_hands_out_every_link_it_drew_with_the_run_that_drew_it() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let blocks = [
+            preview::MarkdownBlock::Paragraph(vec![
+                preview::Span::plain("see "),
+                preview::Span::link("the design", "../../docs/DESIGN.md"),
+                preview::Span::plain(" first"),
+            ]),
+            preview::MarkdownBlock::List {
+                ordered: None,
+                items: vec![vec![preview::Span::link("a note", "notes.md")]],
+            },
+        ];
+        let layout = [
+            MarkdownBlockLayout::solid(metrics.line_height),
+            MarkdownBlockLayout {
+                top: metrics.line_height + metrics.paragraph_gap,
+                ..MarkdownBlockLayout::rows(vec![metrics.line_height], 0.0)
+            },
+        ];
+        let rendered = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &layout),
+            &palette,
+        );
+        let sites: Vec<_> = rendered
+            .links
+            .iter()
+            .map(|site| (site.block, site.paragraph, site.run, site.target.as_str()))
+            .collect();
+        assert_eq!(
+            sites,
+            vec![
+                (None, 0, 1, "../../docs/DESIGN.md"),
+                (None, 1, 1, "notes.md"),
+            ],
+            "the prose link is its paragraph's second run, and the item's link \
+             is the item's second run because the bullet is its first"
+        );
+        // And the subscripts address the runs that were actually built.
+        for (block, paragraph, run, target) in sites {
+            assert!(block.is_none());
+            let drawn = &rendered.body.paragraphs[paragraph].runs[run];
+            assert_eq!(drawn.color, palette.accent, "a link is set in the accent");
+            assert!(
+                !drawn.text.contains(target),
+                "and never prints where it points"
+            );
+        }
+    }
+
+    /// PIN (user report, 2026-08-13) — **a block is built at its own full width
+    /// and cropped when it is drawn.**
+    ///
+    /// The report: drag a code fence's thumb to the right and the fence goes
+    /// blank but for a sliver of glyphs against its left edge. The cause was
+    /// that a scrolling block's inner frame was **one page wide and slid left**
+    /// (`right - offset`), so every rectangle inside it was laid out in a
+    /// window that walked off its own clip. A fence is one paragraph spanning
+    /// the whole line, so its single box left the clip bodily and
+    /// `shape_preview_body`'s `crop_to` — correctly — drew nothing of it. A
+    /// table survived the same offset only because [`push_markdown_table`] lays
+    /// its cells out from the block's *origin* and never reads the frame's
+    /// right edge at all: a reprieve its structure happened to grant, not a
+    /// rule, which is why both are asserted here.
+    ///
+    /// The frame is now the content's width placed at the offset, and the
+    /// cropping is where cropping belongs — at the draw, in `crop_to`, which
+    /// stays exactly as it is. That gate is for inverted and `NaN` boxes; a
+    /// block scrolled to its own end is neither, and it was never the thing
+    /// `crop_to` was put there to stop.
+    ///
+    /// MUTATION: put the crop back at build time — restore `right - offset` as
+    /// the frame's right edge — and ① and ② both go red.
+    #[test]
+    fn a_scrolled_block_keeps_its_whole_width_and_is_cropped_only_when_drawn() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 300.0, 400.0];
+        let page = body[2] - body[0] - metrics.padding_x * 2.0;
+        let wide = page + 400.0;
+        let overflow = wide - page;
+        let line = "a fence line far wider than the page it is standing on";
+        let cells = |text: &str| {
+            vec![
+                vec![preview::Span::plain("head")],
+                vec![preview::Span::plain(text)],
+            ]
+        };
+        let blocks = [
+            preview::MarkdownBlock::Code {
+                lang: None,
+                text: line.to_owned(),
+            },
+            preview::MarkdownBlock::Table {
+                rows: vec![cells("first"), cells("last")],
+            },
+        ];
+        let fence_height =
+            metrics.code_border * 2.0 + metrics.code_padding_y * 2.0 + metrics.line_height;
+        let layout = [
+            MarkdownBlockLayout {
+                width: wide,
+                ..MarkdownBlockLayout::solid(fence_height)
+            },
+            MarkdownBlockLayout {
+                width: wide,
+                top: fence_height + metrics.paragraph_gap,
+                columns: vec![80.0, wide - 80.0],
+                ..MarkdownBlockLayout::rows(
+                    vec![metrics.line_height, metrics.line_height],
+                    metrics.table_border,
+                )
+            },
+        ];
+        let render = |offsets: &[f32]| {
+            markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                rested_bars(offsets),
+                (&blocks, &layout),
+                &palette,
+            )
+        };
+        let fence_line = |built: &bt_render::PreviewBody| {
+            built.blocks[0]
+                .paragraphs
+                .iter()
+                .find(|paragraph| {
+                    paragraph
+                        .runs
+                        .iter()
+                        .any(|run| run.text.contains("fence line"))
+                })
+                .expect("a fence draws its line")
+                .clone()
+        };
+        // Both blocks driven to the far end of their own travel — the gesture
+        // the report is about — against the same document at rest.
+        let at_rest = render(&[0.0, 0.0]);
+        let built = render(&[overflow, overflow]);
+        let region = |index: usize| {
+            built
+                .blocks
+                .get(index)
+                .unwrap_or_else(|| panic!("block {index} is wide and scrolls inside itself"))
+        };
+
+        // ① The fence's line is still there, whole, and covering the window.
+        let fence = region(0);
+        let drawn = fence_line(&built);
+        assert_eq!(
+            drawn.runs[0].text, line,
+            "and it is the whole line — the text is never cut to what fits"
+        );
+        let visible = bt_render::crop_to(drawn.rect, fence.clip)
+            .expect("its box still meets the block's own rectangle");
+        assert_eq!(
+            [visible[0], visible[2]],
+            [fence.clip[0], fence.clip[2]],
+            "covering the window edge to edge, rather than surviving as a sliver"
+        );
+        // And what stands at the window's left edge is the far end of the line:
+        // the box has travelled its whole overflow, and only translated —
+        // nothing about it narrowed on the way.
+        let resting = fence_line(&at_rest);
+        assert_eq!(
+            resting.rect[0] - drawn.rect[0],
+            overflow,
+            "the line has travelled its whole overflow"
+        );
+        assert_eq!(
+            drawn.rect[2] - drawn.rect[0],
+            resting.rect[2] - resting.rect[0],
+            "and it is the same box that set out — a translation, not a squeeze"
+        );
+        assert!(
+            drawn.rect[0] < fence.clip[0] && drawn.rect[2] >= fence.clip[2],
+            "so the window is looking into the middle of it, with the tail \
+             still reaching the far edge"
+        );
+
+        // ② The table, at the same offset, by the same rule — it looked right
+        //    before only by the accident of being made of small boxes.
+        let table = region(1);
+        let last = table
+            .paragraphs
+            .iter()
+            .find(|paragraph| paragraph.runs.iter().any(|run| run.text == "last"))
+            .expect("the last row's wide cell is still drawn");
+        assert!(
+            bt_render::crop_to(last.rect, table.clip).is_some(),
+            "and it stands inside the window a scroll to the end opened on it"
+        );
+
+        // ③ At rest, nothing has been glued open: the window starts at the
+        //    line's own beginning.
+        assert!(
+            resting.rect[0] >= at_rest.blocks[0].clip[0],
+            "an unscrolled fence begins inside its own window"
         );
     }
 
@@ -37861,7 +38412,7 @@ mod tests {
         for x in [0.0, overrun / 2.0, overrun] {
             let offsets = vec![x; layout.len()];
             for y in [0.0, max[1] / 2.0, max[1]] {
-                let built = build_preview_markdown_body(
+                let built = markdown_body(
                     body,
                     metrics,
                     [0.0, y],
@@ -38369,6 +38920,20 @@ mod tests {
         assert!(!closing_this_pane_strands_the_pool(false, 0));
     }
 
+    /// Just the pixels a document renders to, for the tests that are about
+    /// pixels. The links beside them are measured by the shaper and asked for
+    /// where a `Renderer` is, which is not here.
+    fn markdown_body(
+        body: [f32; 4],
+        metrics: seats::PreviewMarkdownMetrics,
+        scroll: [f32; 2],
+        bars: BlockScrollPaint<'_>,
+        document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
+        palette: &bt_render::ChromePalette,
+    ) -> bt_render::PreviewBody {
+        build_preview_markdown_body(body, metrics, scroll, bars, document, palette).body
+    }
+
     /// The bars at rest: the offsets under test, nothing lit, one device pixel
     /// to the logical one.
     fn rested_bars(offsets: &[f32]) -> BlockScrollPaint<'_> {
@@ -38396,7 +38961,7 @@ mod tests {
         let metrics = seats::preview_markdown_metrics(1.0);
         let blocks = preview::parse_markdown("```rust\nlet x = 1;\n```\n");
         let height = metrics.code_border * 2.0 + metrics.code_padding_y * 2.0 + metrics.line_height;
-        let built = build_preview_markdown_body(
+        let built = markdown_body(
             body,
             metrics,
             [0.0, 0.0],

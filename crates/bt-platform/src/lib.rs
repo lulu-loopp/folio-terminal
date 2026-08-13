@@ -98,6 +98,40 @@ pub fn logical_px_for_dpi(logical_px: u32, dpi: u32) -> i32 {
     scaled.min(i32::MAX as u64) as i32
 }
 
+/// The parameters `explorer.exe` is handed to **reveal** a path (user ruling,
+/// 2026-08-13).
+///
+/// # 「Show me where this is」, not 「open the folder it is in」
+///
+/// Every foot in this window carries a path and offers to take you to it. What
+/// that used to mean was `ShellExecute("open", <the parent folder>)` — Explorer
+/// opened on a directory and the file the foot was actually naming was one of
+/// two hundred rows, indistinguishable from the rest. `/select` is the verb
+/// that means what the foot says: the folder opens **with that item
+/// highlighted**.
+///
+/// A directory keeps the old answer, and that is a judgement rather than a
+/// limitation: `/select` on a folder opens its *parent* with the folder
+/// highlighted, which is one level further out than a foot pointing at a root
+/// is offering. Looking *inside* it is the natural reading of a tree's own
+/// root, so a directory is opened and a file is selected.
+///
+/// Pure, because the one thing that can be wrong here is the string — Explorer
+/// parses `/select,<path>` as a single token and wants the path quoted, and a
+/// command line that is a quote out is a command line that silently opens
+/// `Documents` instead.
+#[must_use]
+pub fn reveal_arguments(path: &std::path::Path, is_directory: bool) -> std::ffi::OsString {
+    let mut arguments = std::ffi::OsString::new();
+    if !is_directory {
+        arguments.push("/select,");
+    }
+    arguments.push("\"");
+    arguments.push(path.as_os_str());
+    arguments.push("\"");
+    arguments
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use std::{
@@ -581,6 +615,54 @@ mod windows_impl {
                 PCWSTR(operation.as_ptr()),
                 PCWSTR(target.as_ptr()),
                 PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code <= 32 {
+            Err(format!("ShellExecuteW failed with code {code}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Open Explorer on a path, with a file **highlighted** inside its folder
+    /// (user ruling, 2026-08-13).
+    ///
+    /// **A third bridge, and deliberately not a widening of the second.**
+    /// [`open_local_path`] hands a path to *whatever the machine has registered
+    /// for it* — which is why it reads `PATHEXT` and refuses programs, since
+    /// the whole risk there is that opening a thing runs it. This one hands the
+    /// path to `explorer.exe` **as text to look at**, and never executes the
+    /// target at all: a `.exe` revealed is a `.exe` sitting highlighted in a
+    /// folder window, which is precisely what somebody asking "where is this"
+    /// wants to see and is not a way to start it. So the extension gate is
+    /// absent on purpose, and the shape gate — absolute, nameable, no embedded
+    /// NUL — is exactly the one its neighbour keeps.
+    ///
+    /// The one program this can ever launch is Explorer.
+    pub fn reveal_in_explorer(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
+        validate_openable_path(path)?;
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
+        operation.push(0);
+        let mut program = "explorer.exe".encode_utf16().collect::<Vec<_>>();
+        program.push(0);
+        let mut arguments = super::reveal_arguments(path, path.is_dir())
+            .encode_wide()
+            .collect::<Vec<_>>();
+        arguments.push(0);
+        // SAFETY: the target is a path this process enumerated or was given by
+        // the user, `validate_openable_path` has refused any embedded NUL, all
+        // three buffers stay live and NUL-terminated across this synchronous
+        // call, and the only program named is Explorer.
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(program.as_ptr()),
+                PCWSTR(arguments.as_ptr()),
                 PCWSTR::null(),
                 SW_SHOWNORMAL,
             )
@@ -1706,9 +1788,71 @@ pub use windows_impl::{
     CustomWindowFrame, FolderPicker, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
     client_area_animation_enabled, clipboard_text, get_dpi_for_window, get_window_rect,
     get_work_area, install_window_class_background, is_window_minimized, open_local_file,
-    open_local_path, request_window_close, set_clipboard_text, set_window_outer_rect,
-    shell_execute, wheel_scroll_amount,
+    open_local_path, request_window_close, reveal_in_explorer, set_clipboard_text,
+    set_window_outer_rect, shell_execute, wheel_scroll_amount,
 };
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// PIN (user ruling, 2026-08-13) — **a foot reveals the thing it names**,
+    /// which for a file means Explorer opens with that file highlighted.
+    ///
+    /// The old answer was to open the containing folder, and against a folder
+    /// of two hundred rows that is not an answer: the path the foot was
+    /// printing arrived indistinguishable from everything beside it. `/select`
+    /// is the verb that means what the foot says.
+    ///
+    /// The quoting is the whole of what can be wrong here. Explorer parses
+    /// `/select,<path>` as one token and wants the path quoted; a command line
+    /// one quote out opens `Documents` and reports success, which is the worst
+    /// shape a failure can take.
+    ///
+    /// MUTATIONS:
+    /// ① go back to a bare folder open — drop `/select,` — and the first
+    ///    assertion goes red, which is the reported behaviour written down;
+    /// ② drop the quotes and the third goes red: every path with a space in it
+    ///    silently reveals the wrong thing.
+    #[test]
+    fn a_file_is_revealed_by_selecting_it_and_a_folder_by_opening_it() {
+        let file = Path::new(r"C:\repo\test-assets\preview-samples\stress.md");
+        let arguments = reveal_arguments(file, false);
+        let text = arguments.to_string_lossy();
+        assert!(
+            text.starts_with("/select,"),
+            "a file is highlighted where it lives, not merely surrounded: {text}"
+        );
+        assert!(
+            text.contains(&*file.to_string_lossy()),
+            "and it is that file that is named: {text}"
+        );
+        assert_eq!(
+            text,
+            format!("/select,\"{}\"", file.display()),
+            "as one quoted token, which is the only form Explorer parses"
+        );
+
+        // A directory is opened rather than selected: `/select` on a folder
+        // opens its *parent*, one level further out than a root is offering.
+        let folder = Path::new(r"C:\repo\test-assets\preview-samples");
+        let opened = reveal_arguments(folder, true);
+        let text = opened.to_string_lossy();
+        assert!(
+            !text.contains("/select"),
+            "a tree's own root is a place to look inside: {text}"
+        );
+        assert_eq!(text, format!("\"{}\"", folder.display()));
+
+        // A path with a space survives, which is what the quotes are for.
+        let spaced = Path::new(r"C:\My Documents\a file.md");
+        assert_eq!(
+            reveal_arguments(spaced, false).to_string_lossy(),
+            "/select,\"C:\\My Documents\\a file.md\""
+        );
+    }
+}
 
 #[cfg(test)]
 mod custom_frame_tests {

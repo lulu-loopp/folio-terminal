@@ -942,6 +942,19 @@ pub struct PreviewParagraph {
     pub align_center: bool,
 }
 
+/// Where one of a paragraph's runs actually came to rest, once shaped.
+///
+/// One entry per run **per visual line**: a link that wraps is two boxes,
+/// because it is two boxes — a single box spanning both would claim the margin
+/// between them, and a hit test or an underline built from it would answer for
+/// text that is not there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewRunBox {
+    /// Which entry of [`PreviewParagraph::runs`] this belongs to.
+    pub run: usize,
+    pub rect: [f32; 4],
+}
+
 /// One flat fill under a preview body's text.
 ///
 /// The diff's line tints, the code fence's ground and border, and the table's
@@ -3270,6 +3283,73 @@ impl Renderer {
             .layout_runs()
             .map(|run| run.line_w)
             .fold(0.0_f32, f32::max)
+    }
+
+    /// Where each of a paragraph's runs landed once the shaper had it.
+    ///
+    /// The third of [`Self::measure_preview_paragraph`]'s family, and the one
+    /// that answers a *pointer* rather than a layout: a markdown link is a run
+    /// inside a paragraph of proportional text that has already wrapped, so
+    /// where it is on screen is not something the caller can add up from
+    /// character counts — only the shaper knows, and it is the same shaper that
+    /// drew it. Asked lazily, one paragraph at a time, so a document of a
+    /// thousand paragraphs costs nothing until a pointer is over one of them.
+    ///
+    /// The buffer is built exactly as [`shape_preview_body`] builds it and the
+    /// pen origin comes from the same [`preview_paragraph_left`], because a box
+    /// measured any other way is a box in a different place than the glyphs.
+    pub fn measure_preview_run_boxes(
+        &mut self,
+        paragraph: &PreviewParagraph,
+    ) -> Vec<PreviewRunBox> {
+        let mut buffer = Buffer::new(
+            &mut self.font_system,
+            Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
+        );
+        if paragraph.wrap {
+            buffer.set_wrap(Wrap::WordOrGlyph);
+            buffer.set_size(Some((paragraph.rect[2] - paragraph.rect[0]).max(1.0)), None);
+        } else {
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(None, Some(paragraph.line_height_px));
+        }
+        set_preview_runs(&mut buffer, &paragraph.runs, paragraph.letter_spacing_em);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        let left = preview_paragraph_left(paragraph, &buffer);
+        let top = paragraph.rect[1];
+        // The runs are concatenated into one line before shaping, so a glyph
+        // says which run it came from by where its cluster starts.
+        let mut ends = Vec::with_capacity(paragraph.runs.len());
+        let mut total = 0usize;
+        for run in &paragraph.runs {
+            total += run.text.len();
+            ends.push(total);
+        }
+        let mut boxes: Vec<PreviewRunBox> = Vec::new();
+        for line in buffer.layout_runs() {
+            for glyph in line.glyphs {
+                let Some(run) = ends.iter().position(|end| glyph.start < *end) else {
+                    continue;
+                };
+                let rect = [
+                    left + glyph.x,
+                    top + line.line_top,
+                    left + glyph.x + glyph.w,
+                    top + line.line_top + paragraph.line_height_px,
+                ];
+                // Glyphs arrive in visual order, so one run broken across a
+                // line — or across a bidi boundary — comes back as the several
+                // boxes it is drawn as.
+                match boxes.last_mut() {
+                    Some(last) if last.run == run && (last.rect[1] - rect[1]).abs() < 0.5 => {
+                        last.rect[0] = last.rect[0].min(rect[0]);
+                        last.rect[2] = last.rect[2].max(rect[2]);
+                    }
+                    _ => boxes.push(PreviewRunBox { run, rect }),
+                }
+            }
+        }
+        boxes
     }
 
     /// How wide one cell of the monospace face is at `font_size_px`.
@@ -5710,6 +5790,30 @@ fn set_preview_runs(buffer: &mut Buffer, runs: &[PreviewRun], letter_spacing_em:
     );
 }
 
+/// The x the pen starts at for a shaped paragraph.
+///
+/// A free function because two callers need the *same* answer and for the same
+/// reason the hit test and the paint of every other surface share their
+/// geometry: [`shape_preview_body`] draws from it and
+/// [`Renderer::measure_preview_run_boxes`] reports boxes against it, and a
+/// centred caption whose runs were measured from its left edge would hand back
+/// boxes half a paragraph away from its own glyphs.
+fn preview_paragraph_left(paragraph: &PreviewParagraph, buffer: &Buffer) -> f32 {
+    if !paragraph.align_center && !paragraph.align_right {
+        return paragraph.rect[0];
+    }
+    let width = (paragraph.rect[2] - paragraph.rect[0]).max(1.0);
+    let text_width = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    if paragraph.align_center {
+        (paragraph.rect[0] + (width - text_width) / 2.0).max(paragraph.rect[0])
+    } else {
+        (paragraph.rect[2] - text_width).max(paragraph.rect[0])
+    }
+}
+
 /// Shape a preview body — one buffer per visible paragraph.
 fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<ChromeTextLayout> {
     let content = body
@@ -5757,19 +5861,7 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
             }
             set_preview_runs(&mut buffer, &paragraph.runs, paragraph.letter_spacing_em);
             buffer.shape_until_scroll(font_system, false);
-            let left = if paragraph.align_center || paragraph.align_right {
-                let text_width = buffer
-                    .layout_runs()
-                    .map(|run| run.line_w)
-                    .fold(0.0_f32, f32::max);
-                if paragraph.align_center {
-                    (paragraph.rect[0] + (width - text_width) / 2.0).max(paragraph.rect[0])
-                } else {
-                    (paragraph.rect[2] - text_width).max(paragraph.rect[0])
-                }
-            } else {
-                paragraph.rect[0]
-            };
+            let left = preview_paragraph_left(paragraph, &buffer);
             let [r, g, b] = paragraph.runs.first().map_or([0, 0, 0], |run| run.color);
             ChromeTextLayout {
                 buffer,
