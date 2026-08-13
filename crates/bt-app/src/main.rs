@@ -885,6 +885,19 @@ impl PreviewViewStore {
     fn restore(&self, path: &Path) -> PreviewViewState {
         self.views.get(path).copied().unwrap_or_default()
     }
+
+    /// Another tab's memory, arriving with that tab's pool.
+    ///
+    /// **The incumbent wins on a collision**, which is
+    /// [`preview::PreviewPool::merge_buffer`]'s tie rule read for the thing that
+    /// hangs off a buffer rather than for the buffer: this tab remembers where
+    /// *you* were in that file when you were last in this tab, and an arrival
+    /// overwriting it would move a place you had marked.
+    fn absorb(&mut self, other: PreviewViewStore) {
+        for (path, view) in other.views {
+            self.views.entry(path).or_insert(view);
+        }
+    }
 }
 
 /// The key one buffer earns at one width and scale.
@@ -10741,8 +10754,16 @@ fn pane_into_new_tab(
         // Same argument on the preview side, and it holds for the same reason:
         // `pane_can_become_a_tab` lets only a Terminal seat through, so the new
         // tab has no preview leaf to show anything on and no pool to show it
-        // from. The day a preview pane may be torn out to the strip, the buffer
-        // migration §7.1.3 §168 describes arrives here beside this session.
+        // from.
+        //
+        // §7.1.3's cross-tab migration is **written and reachable**, just not
+        // through this door: [`absorb_tab_sessions`] is where a preview pane
+        // actually changes tabs today, and it carries the pane's whole view and
+        // merges the two pools under [`preview::PreviewPool::merge_buffer`]. What
+        // is missing here is not the law but the *gesture* — a strip entry with
+        // no shell behind it is I106's crash, and the day files/preview tabs land
+        // (§7.1.3 P128) this call site hands over `migrate` instead of `default`
+        // and the law it calls is already the one above.
         preview::PreviewPool::default(),
         PreviewPanes::default(),
         key,
@@ -10893,25 +10914,55 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
         if let Some(cache) = source.file_trees.remove(was) {
             target.file_trees.insert(*now, cache);
         }
-        // The picture a preview leaf was showing crosses with it, re-keyed the
-        // same way. Only the picture: a document is a *buffer*, and buffers live
-        // in the tab's pool (§7.1.3) which does not migrate — a pane arriving
-        // with a path the target has never opened would name a buffer nobody
-        // holds. The decode lane is per path and per window, so the image needs
-        // nothing but its new address.
-        if let Some(image) = source
-            .preview_panes
-            .remove(PreviewSurface::Seat(*was))
-            .and_then(|pane| pane.image)
-        {
+        // **P126/§7.1.3 「pane 拆出/被顶出时携带其当前缓冲(同一对象)」 — the whole
+        // view crosses with the seat, re-keyed the same way.**
+        //
+        // This used to carry the picture and nothing else, on the argument that
+        // "a document is a buffer, and buffers live in the tab's pool which does
+        // not migrate". The second half of that sentence was the gap, not the
+        // reason: §7.1.3 rules that the pool migrates too, and the pool half of
+        // this gesture is done below. With it done, a preview pane changing tabs
+        // arrives holding what it held — which buffer, how far that body is
+        // scrolled, where the caret sits in it, whether markdown is being read as
+        // source or as page — for the same reason the shell beside it keeps its
+        // scrollback and the files column keeps its open folders: **the pane is
+        // moving, not being rebuilt.**
+        if let Some(pane) = source.preview_panes.remove(PreviewSurface::Seat(*was)) {
             let arrived = PreviewSurface::Seat(*now);
-            target.preview_panes.entry(arrived).image = Some(image);
+            let brought_a_picture = pane.image.is_some();
+            *target.preview_panes.entry(arrived) = pane;
             // The texture lane if it was free, and not otherwise: a picture the
             // target was already showing does not lose its pixels to one that has
-            // just moved in (`TabState::preview_raster`).
-            target.preview_raster.get_or_insert(arrived);
+            // just moved in (`TabState::preview_raster`). The decode lane is per
+            // path and per window, so the image needs nothing but its new address.
+            if brought_a_picture {
+                target.preview_raster.get_or_insert(arrived);
+            }
         }
     }
+    // **P121/P122/P127 — the pool travels, and the two pools become one.**
+    //
+    // A merge takes *every* seat the source had, so its last preview pane is
+    // leaving by construction and §7.1.3's "若是原 tab 最后一个预览 pane 则整池
+    // 随行" is the whole of the answer here. It is `take`n rather than cloned
+    // because that ruling's own argument is about reachability — an orphaned
+    // dirty buffer must stay findable *somewhere*, and a second copy left behind
+    // on a tab that is about to stop existing is the opposite of somewhere.
+    //
+    // The arriving buffers meet the target's own under the one-buffer-per-file
+    // law ([`preview::PreviewPool::merge_buffer`]): dirty wins, a tie stays with
+    // the tab that was already holding it. Panes on either side need no
+    // redirecting, because a surface names its buffer by path.
+    target
+        .preview_pool
+        .merge_from(std::mem::take(&mut source.preview_pool));
+    // And what those buffers looked like the last time somebody was on them. A
+    // pool that arrived without its view memory would put every switch back to a
+    // migrated file at the top of the file, which is the "only the picture" bug
+    // above in miniature.
+    target
+        .preview_views
+        .absorb(std::mem::take(&mut source.preview_views));
     if let Some((_, now)) = arrived.iter().find(|(was, _)| *was == source.focused_leaf) {
         target.seats.set_focus(*now);
         if target.sessions.contains_key(now) {
@@ -21261,13 +21312,13 @@ impl Runtime {
     /// wherever you are, and sending it home would be the app deciding for you
     /// where you meant to put it.
     ///
-    /// So the **buffer** may have to move house, and that is the one case in this
-    /// build where one does. The rule on a path collision is **dirty wins**: an
-    /// incoming buffer with unsaved work replaces the target's copy, and a clean
-    /// incoming one gives way to a dirty copy already there. Nothing is ever
-    /// merged and nothing dirty is ever dropped. The full pool-merge law (P122)
-    /// is slice 7's; this is the two-tab case of it, written where the two tabs
-    /// actually meet.
+    /// So the **buffer** may have to move house. The rule on a path collision is
+    /// P122's and it is asked of P122's own function
+    /// ([`preview::PreviewPool::merge_buffer`]): one buffer per file, dirty wins,
+    /// a tie stays with the tab that was already holding it. It used to be spelt
+    /// out here as its own two-tab case, which was the same sentence in a second
+    /// place — and the two would have parted company the first time either was
+    /// amended.
     fn dock_preview_float(&mut self, id: float::FloatId) -> Result<()> {
         let Some(origin) = self
             .float
@@ -21297,14 +21348,7 @@ impl Runtime {
             && let Some(path) = pane.buffer.clone()
             && let Some(incoming) = self.tabs[from].preview_pool.take(&path)
         {
-            let stands = self.tabs[active]
-                .preview_pool
-                .get(&path)
-                .is_some_and(|existing| existing.dirty)
-                && !incoming.dirty;
-            if !stands {
-                self.tabs[active].preview_pool.insert(incoming);
-            }
+            self.tabs[active].preview_pool.merge_buffer(incoming);
         }
         *self.preview_pane_mut(landing) = pane;
         if let PreviewSurface::Seat(seat) = landing {
@@ -31328,47 +31372,66 @@ mod tests {
     }
 
     /// **A window too narrow for its restored tree degrades explicitly, and the
-    /// terminal is not quietly crushed.**
+    /// terminal is the last thing it gives up** (§2.6.1 L3, 用户裁决
+    /// 2026-08-13).
     ///
     /// Two preview panes and a terminal want 980 logical pixels of floor plus two
-    /// dividers, and a restored 960-wide window has not got it. What the user
-    /// sees is a terminal reduced to a strip — and this pins *what that strip
-    /// is*: `Presentation::Collapsed`, the ruled §2.6.3 degradation (a clickable
-    /// title bar, still in the tree, still focusable), reached by the collapse
-    /// order's own rule that the focus seat falls last. It is not a seat handed
-    /// some arbitrary width below its minimum.
+    /// dividers, and a restored 960-wide window has not got it. Two things are
+    /// pinned here and they are separate. *What* a fold is:
+    /// `Presentation::Collapsed`, the ruled §2.6.3 degradation (a clickable title
+    /// bar, still in the tree, still focusable) at exactly `COLLAPSED_EXTENT` —
+    /// not a seat handed some arbitrary width below its own minimum. And *who*
+    /// folds: the case 7 capture had the **terminal** reduced to a strip, because
+    /// distance alone chose and the focus happened to sit on a preview at the far
+    /// end. The class now leads the distance, so what gives way is a preview —
+    /// a quick look at a file that is still on disk — and the pane running
+    /// somebody's shell keeps its rectangle.
     ///
     /// Red gate: give a seat a width between `COLLAPSED_EXTENT` and its own
     /// minimum and the `Collapsed` assertion fails — which is the difference
-    /// between an honest fold and a crush.
+    /// between an honest fold and a crush. Take `collapse_rank` out of
+    /// `collapse_order` and the terminal is the one wearing the bar again.
     #[test]
-    fn a_restore_too_narrow_for_its_tree_folds_a_pane_rather_than_crushing_it() {
+    fn a_restore_too_narrow_for_its_tree_folds_a_preview_and_never_the_terminal() {
         let (seats, metrics, viewport) = restored_two_previews_and_a_terminal();
         let terminal = seats.terminal();
+        let focus = seats.focus();
         let layout = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("the concession chain has an answer for this window");
         assert_eq!(
             presentation_of(&layout, terminal),
-            bt_layout::Presentation::Collapsed(bt_layout::AxisSet::ROW),
-            "the farthest non-focus seat folds; it is not given a sliver"
+            bt_layout::Presentation::Full,
+            "the terminal is the last non-focus seat to fall, and it did not have to"
+        );
+        assert!(
+            logical_width(&layout, terminal) >= bt_layout::MIN_PANE_W.floor_px(),
+            "and it kept a whole pane's width: {}",
+            logical_width(&layout, terminal)
+        );
+
+        let folded: Vec<SeatId> = seats
+            .preview_seats()
+            .into_iter()
+            .filter(|seat| {
+                presentation_of(&layout, *seat)
+                    == bt_layout::Presentation::Collapsed(bt_layout::AxisSet::ROW)
+            })
+            .collect();
+        assert_eq!(folded.len(), 1, "one fold was enough to pay for the window");
+        assert_ne!(
+            folded[0], focus,
+            "W2: the focus seat is never the one folded"
         );
         assert_eq!(
-            logical_width(&layout, terminal),
+            logical_width(&layout, folded[0]),
             bt_layout::COLLAPSED_EXTENT.floor_px(),
             "and a fold is exactly the ruled extent, not whatever was left over"
         );
-        for seat in seats.preview_seats() {
-            assert_eq!(
-                presentation_of(&layout, seat),
-                bt_layout::Presentation::Full,
-                "what the fold bought is two whole preview panes"
-            );
-            assert!(
-                logical_width(&layout, seat) >= bt_layout::MIN_PREVIEW_W.floor_px(),
-                "each of them at or above its own floor — that is what law means"
-            );
-        }
+        assert!(
+            logical_width(&layout, focus) >= bt_layout::MIN_PREVIEW_W.floor_px(),
+            "what the fold bought is the pane you were reading, at or above its floor"
+        );
     }
 
     /// **A hand on the divider outranks a preview's floor** (最小值主权,
@@ -31410,25 +31473,44 @@ mod tests {
             "the edit has always honoured the hand — it writes the ratio asked for"
         );
 
-        // What the window used to do with that ratio, and why the drag looked
-        // dead: under law the floors take it all back.
+        // What law does with that same tree, and why the hand's rectangles must
+        // not go through this door: the tree still does not fit, so law pays for
+        // the window by **rearranging** it — a pane becomes a §2.6.3 bar. That is
+        // not an answer to "make this divider move"; it is the program deciding
+        // the user asked for one pane fewer.
+        //
+        // (Before the 2026-08-13 collapse-order ruling the bar was the
+        // *terminal's* and this line read `logical_width(terminal) ==
+        // COLLAPSED_EXTENT` — the divider looked dead because the seat the hand
+        // was enlarging was the very seat law folded. Law now folds a preview
+        // instead, which is a better layout and still a layout nobody asked for.)
         let lawful = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("still solvable");
         assert_eq!(
-            logical_width(&lawful, terminal),
-            bt_layout::COLLAPSED_EXTENT.floor_px(),
-            "the ratio the hand wrote buys nothing while the minima are law"
+            seats
+                .preview_seats()
+                .into_iter()
+                .filter(
+                    |seat| presentation_of(&lawful, *seat).is_collapsed_along(bt_layout::Axis::Row)
+                )
+                .count(),
+            1,
+            "law buys the room by turning a pane into a bar"
         );
 
-        // And what it does now: past the floors, the floors give way together.
+        // And what it does now: nothing folds at all, and past the floors the
+        // floors give way together.
         let sovereign = seats
             .solve(viewport, &metrics, SizePolicy::Sovereign)
             .expect("sovereign cannot refuse");
-        assert_eq!(
-            presentation_of(&sovereign, terminal),
-            bt_layout::Presentation::Full,
-            "the terminal is a pane again, not a strip"
+        assert!(
+            seats
+                .preview_seats()
+                .into_iter()
+                .chain([terminal])
+                .all(|seat| presentation_of(&sovereign, seat) == bt_layout::Presentation::Full),
+            "under the hand every pane stays a pane — there are no bars on this road"
         );
         assert!(
             logical_width(&sovereign, terminal) > 200,
@@ -43677,6 +43759,311 @@ mod tests {
         assert!(
             target.sessions.contains_key(&landed_terminal),
             "and the shell beside it moved the same way"
+        );
+    }
+
+    /// A buffer with a body already in it, so a test can talk about content
+    /// without a disk. `dirty` is the caller's — it is the field every clause of
+    /// the migration law turns on.
+    fn buffer_saying(path: &str, name: &str, body: &str) -> preview::PreviewBuffer {
+        let mut buffer = preview::PreviewBuffer::new(PathBuf::from(path), name.to_owned());
+        buffer.accept(preview::HeadOutcome::Read {
+            text: body.to_owned(),
+            truncated: false,
+            mtime: None,
+        });
+        buffer
+    }
+
+    /// A tab of one terminal and one preview pane, the pane showing the **first**
+    /// buffer of the pool it is handed and the rest of the pool standing behind
+    /// it as history.
+    fn tab_with_a_preview(id: u64, buffers: Vec<preview::PreviewBuffer>) -> (TabState, SeatId) {
+        let mut seats = seats::Seats::lone_terminal();
+        let preview_seat = seats
+            .add_preview(&cross_metrics())
+            .expect("the preview seat lands");
+        let focused = seats.terminal();
+        let mut pool = preview::PreviewPool::default();
+        let showing = buffers.first().map(|buffer| buffer.path.clone());
+        for buffer in buffers {
+            pool.insert(buffer);
+        }
+        let mut panes = PreviewPanes::default();
+        panes.entry(PreviewSurface::Seat(preview_seat)).buffer = showing;
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(id),
+            BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            pool,
+            panes,
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+        (tab, preview_seat)
+    }
+
+    /// Every seat of `tab`, paired with the id it will answer to after the
+    /// renumbering — the `arrived` list a real merge hands over.
+    fn arriving_as(tab: &TabState, first: u64) -> Vec<(SeatId, SeatId)> {
+        tab.seats
+            .tree()
+            .seats_in_order()
+            .iter()
+            .enumerate()
+            .map(|(index, seat)| (seat.id, SeatId(first + index as u64)))
+            .collect()
+    }
+
+    /// **P126/P168 — a preview pane crossing into another tab arrives holding
+    /// the edit it left with.**
+    ///
+    /// The comment this replaces said the opposite in as many words: "only the
+    /// picture: a document is a buffer, and buffers live in the tab's pool which
+    /// does not migrate". §7.1.3 rules that it does, and what the old behaviour
+    /// cost is exactly this test — a pane with unsaved work in it changed tabs
+    /// and arrived pointing at a path its new tab had no buffer for, so the
+    /// edits were still in memory and nothing on screen could reach them.
+    ///
+    /// The **same object**, which is what the ruling asks for and what these
+    /// assertions are: the body, the dirty bit and the revision are the ones that
+    /// left, not a fresh read of the same file. And the view goes with the
+    /// surface (ruling 8⑧) — scroll, caret and the markdown flip are the pane's,
+    /// so they travel with the pane rather than being reset by the move.
+    ///
+    /// MUTATION ①: carry only `pane.image` across (the pre-slice behaviour) and
+    /// every content assertion goes red while the terminal beside it stays green
+    /// — which is exactly how the bug reached a release.
+    #[test]
+    fn a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with() {
+        let path = PathBuf::from(r"D:\notes\todo.txt");
+        let mut edited = buffer_saying(r"D:\notes\todo.txt", "todo.txt", "milk\nbread\n");
+        edited.dirty = true;
+        let revision_before = edited.revision;
+
+        let (mut source, seat) = tab_with_a_preview(1, vec![edited]);
+        {
+            let pane = source.preview_panes.entry(PreviewSurface::Seat(seat));
+            pane.scroll = [0.0, 96.0];
+            pane.caret.anchor = 6;
+            pane.caret.caret = 6;
+            pane.md_source = true;
+        }
+        let arrived = arriving_as(&source, 90);
+        let landed = arrived
+            .iter()
+            .find(|(was, _)| *was == seat)
+            .map(|(_, now)| *now)
+            .expect("the preview seat is in the tree");
+
+        let mut target = cross_tab(2, &["ALPHA"]);
+        absorb_tab_sessions(&mut source, &mut target, &arrived);
+
+        let pane = target
+            .preview_panes
+            .get(PreviewSurface::Seat(landed))
+            .expect("the view arrived under the id the pane now answers to");
+        assert_eq!(
+            pane.buffer.as_deref(),
+            Some(path.as_path()),
+            "the pane still knows which file it was on"
+        );
+        assert_eq!(pane.scroll, [0.0, 96.0], "and how far down it was in it");
+        assert_eq!(pane.caret.caret, 6, "and where the caret was");
+        assert!(pane.md_source, "and which face of the file it was reading");
+
+        let buffer = target
+            .preview_pool
+            .get(&path)
+            .expect("the buffer it names is in the pool it arrived in");
+        assert!(
+            buffer.dirty,
+            "the unsaved work is still unsaved, not re-read"
+        );
+        assert_eq!(buffer.content.as_deref(), Some("milk\nbread\n"));
+        assert_eq!(
+            buffer.revision, revision_before,
+            "the same object: an uncontested arrival is not a content change"
+        );
+        assert!(
+            source
+                .preview_panes
+                .get(PreviewSurface::Seat(seat))
+                .is_none(),
+            "and nothing of it is left behind to be shown twice"
+        );
+    }
+
+    /// **P121/§7.1.3 「若是原 tab 最后一个预览 pane 则整池随行」.**
+    ///
+    /// A merge takes every seat the source had, so its last preview pane is
+    /// leaving by construction. The two buffers no pane was showing are the point
+    /// of the clause: they are the tab's *history*, one of them dirty, and the
+    /// ruling's own argument is that an orphaned dirty buffer must stay reachable
+    /// somewhere. Left behind on a tab that is about to stop existing, it is
+    /// reachable nowhere — and the dirty gate that would have named it goes down
+    /// with the same tab.
+    ///
+    /// MUTATION ②: drop the `merge_from` line from `absorb_tab_sessions` and the
+    /// count goes to 0 while the source keeps all three — the pool stranded on a
+    /// dissolving tab, which is the shape of the bug.
+    #[test]
+    fn the_last_preview_pane_leaving_a_tab_takes_the_whole_pool_with_it() {
+        let shown = buffer_saying(r"D:\notes\todo.txt", "todo.txt", "milk\n");
+        let history = buffer_saying(r"D:\notes\README.md", "README.md", "# hi\n");
+        let mut stranded = buffer_saying(r"D:\notes\draft.txt", "draft.txt", "half a thought");
+        stranded.dirty = true;
+
+        let (mut source, _) = tab_with_a_preview(1, vec![shown, history, stranded]);
+        let arrived = arriving_as(&source, 90);
+        let mut target = cross_tab(2, &["ALPHA"]);
+        absorb_tab_sessions(&mut source, &mut target, &arrived);
+
+        assert_eq!(
+            target.preview_pool.len(),
+            3,
+            "the whole pool moved, not just the buffer on screen"
+        );
+        assert_eq!(
+            target.preview_pool.dirty_names(None).collect::<Vec<_>>(),
+            vec!["draft.txt"],
+            "so the gate that speaks for the unsaved one still has it to name"
+        );
+        assert_eq!(
+            source.preview_pool.len(),
+            0,
+            "and it moved — a second copy on a dissolving tab is the fork the law forbids"
+        );
+    }
+
+    /// **P122/P127 — two pools become one: one buffer per file, dirty wins, a
+    /// tie stays with the tab that was already holding it.**
+    ///
+    /// Asserted through the gesture rather than only on the pool, because the
+    /// second half of the clause is about *panes*: "在显 loser 的 pane 重指向
+    /// winner". Both tabs here have a pane on `notes.md`, and after the merge
+    /// there is one buffer and both panes read it.
+    ///
+    /// MUTATION ③: make the arrival win unconditionally (drop the
+    /// `incoming.dirty && !twin.dirty` guard in `merge_buffer`) and the clean
+    /// copy walks over the target's unsaved work — the `y` assertions go red.
+    #[test]
+    fn merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins() {
+        let notes = PathBuf::from(r"D:\notes\notes.md");
+        let plan = PathBuf::from(r"D:\notes\plan.md");
+
+        let mut arriving_notes = buffer_saying(r"D:\notes\notes.md", "notes.md", "ARRIVING EDIT");
+        arriving_notes.dirty = true;
+        let arriving_plan = buffer_saying(r"D:\notes\plan.md", "plan.md", "clean arrival");
+        let (mut source, _) = tab_with_a_preview(1, vec![arriving_notes, arriving_plan]);
+
+        let staying_notes = buffer_saying(r"D:\notes\notes.md", "notes.md", "on disk");
+        let mut staying_plan = buffer_saying(r"D:\notes\plan.md", "plan.md", "STAYING EDIT");
+        staying_plan.dirty = true;
+        let (mut target, host) = tab_with_a_preview(2, vec![staying_notes, staying_plan]);
+        let host_revision = target
+            .preview_pool
+            .get(&notes)
+            .expect("the host is holding it")
+            .revision;
+
+        let arrived = arriving_as(&source, 90);
+        absorb_tab_sessions(&mut source, &mut target, &arrived);
+
+        assert_eq!(
+            target.preview_pool.len(),
+            2,
+            "two files, two buffers — one each, not four"
+        );
+        let merged = target.preview_pool.get(&notes).expect("notes.md survived");
+        assert_eq!(
+            merged.content.as_deref(),
+            Some("ARRIVING EDIT"),
+            "dirty wins: the unsaved copy is the one that stands"
+        );
+        assert!(merged.dirty);
+        assert!(
+            merged.revision > host_revision,
+            "and every surface on that path is told the body under it changed"
+        );
+
+        let held = target.preview_pool.get(&plan).expect("plan.md survived");
+        assert_eq!(
+            held.content.as_deref(),
+            Some("STAYING EDIT"),
+            "and a clean arrival never walks over unsaved work already here"
+        );
+        assert!(held.dirty);
+
+        assert_eq!(
+            target
+                .preview_panes
+                .get(PreviewSurface::Seat(host))
+                .and_then(|pane| pane.buffer.clone()),
+            Some(notes.clone()),
+            "the host's own pane was on the loser and now reads the winner — a \
+             surface names its buffer by path, so one buffer per file *is* the \
+             redirect"
+        );
+    }
+
+    /// The law itself, on the pool alone — every branch, including the two the
+    /// gesture above cannot reach in one merge.
+    ///
+    /// A tie between two dirty copies is the case §7.1.3 declines to arbitrate
+    /// ("同文件跨 tab 的并发编辑留给产品端磁盘冲突检测"), and the honest answer
+    /// until that detection exists is to keep the copy that is already here
+    /// rather than to overwrite unsaved work with unsaved work.
+    #[test]
+    fn the_pool_merge_law_prefers_dirt_then_the_incumbent_and_appends_the_rest() {
+        let mut target = preview::PreviewPool::default();
+        target.insert(buffer_saying(r"D:\a.txt", "a.txt", "clean here"));
+        target.insert(buffer_saying(r"D:\b.txt", "b.txt", "also clean here"));
+
+        // Two clean copies: nothing is at stake, so nothing moves — not even the
+        // revision, which would make every pane on it rebuild for no reason.
+        let untouched = target.get(Path::new(r"D:\a.txt")).unwrap().revision;
+        target.merge_buffer(buffer_saying(r"D:\a.txt", "a.txt", "clean there"));
+        let a = target.get(Path::new(r"D:\a.txt")).unwrap();
+        assert_eq!(a.content.as_deref(), Some("clean here"));
+        assert_eq!(a.revision, untouched);
+
+        // Two dirty copies: the one already here stands.
+        let mut here = buffer_saying(r"D:\b.txt", "b.txt", "DIRTY HERE");
+        here.dirty = true;
+        target.insert(here);
+        let mut there = buffer_saying(r"D:\b.txt", "b.txt", "DIRTY THERE");
+        there.dirty = true;
+        target.merge_buffer(there);
+        assert_eq!(
+            target
+                .get(Path::new(r"D:\b.txt"))
+                .unwrap()
+                .content
+                .as_deref(),
+            Some("DIRTY HERE"),
+            "a tie stays with the incumbent, so nobody's unsaved work is discarded"
+        );
+
+        // A file this pool has never seen is simply history it now has.
+        target.merge_buffer(buffer_saying(r"D:\c.txt", "c.txt", "new to me"));
+        assert_eq!(target.len(), 3);
+
+        // And the winner keeps the loser's place in the history, rather than
+        // jumping to the front of a list the switcher reads in order.
+        let mut winner = buffer_saying(r"D:\a.txt", "a.txt", "DIRTY THERE");
+        winner.dirty = true;
+        target.merge_buffer(winner);
+        assert_eq!(
+            target
+                .buffers()
+                .map(|buffer| buffer.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt", "c.txt"]
         );
     }
 

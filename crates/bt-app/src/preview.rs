@@ -1305,6 +1305,71 @@ impl PreviewPool {
         }
     }
 
+    /// **P122 — one buffer arriving from another tab's pool, merged in under the
+    /// law: one buffer per file, dirty wins, a tie stays with the incumbent.**
+    ///
+    /// The single-buffer form because there are two callers and they differ only
+    /// in how many buffers they hand over: a whole tab merging in gives its whole
+    /// pool ([`Self::merge_from`]), a float docking into a tab it was not born in
+    /// gives exactly the one it is carrying. Writing the law twice is how the two
+    /// gestures would come to disagree about what "dirty wins" means.
+    ///
+    /// **Why a tie leaves the incumbent standing.** Two clean copies of a file
+    /// are the same file, so nothing is at stake and the cheapest correct answer
+    /// is to change nothing — and two *dirty* copies are the one case §7.1.3
+    /// declines to arbitrate ("共享范围到 tab 为止,同文件跨 tab 的并发编辑留给
+    /// 产品端磁盘冲突检测"). Preferring the arrival there would silently discard
+    /// unsaved work that has been sitting in this tab, which is the one outcome
+    /// the whole dirty-gate apparatus exists to prevent.
+    ///
+    /// **The winner takes the loser's place in the list, not the end of it.** The
+    /// order is the history the switcher lists (see the type's own note), and it
+    /// is the *staying* tab's history: a file that has been open here all along
+    /// does not jump to the front because a copy of it walked in.
+    ///
+    /// **The revision is bumped past both.** A revision counts changes to *one*
+    /// buffer's body, so two buffers' counters mean nothing to each other — and a
+    /// surface showing this path caches its parsed document against
+    /// `(path, revision)`. Without the bump, an arrival whose counter happens to
+    /// match the buffer it replaced would leave every pane on that file drawing
+    /// the body it no longer holds.
+    ///
+    /// Panes need no redirecting afterwards, and that falls out of the port
+    /// rather than being arranged: a surface names its buffer **by path**
+    /// ([`crate::PreviewPane::buffer`] is a `PathBuf`), so "one buffer per file"
+    /// and "every pane showing the loser now reads the winner" are the same
+    /// sentence here. The mock-up needed a redirect pass because its panes held
+    /// object references.
+    pub fn merge_buffer(&mut self, mut incoming: PreviewBuffer) {
+        let Some(index) = self.index_of(&incoming.path) else {
+            self.buffers.push(incoming);
+            return;
+        };
+        let twin = &self.buffers[index];
+        let (twin_is_dirty, twin_revision) = (twin.dirty, twin.revision);
+        if incoming.dirty && !twin_is_dirty {
+            incoming.revision = incoming.revision.max(twin_revision) + 1;
+            self.buffers[index] = incoming;
+        }
+    }
+
+    /// **P122/P127 — a whole pool arriving, buffer by buffer.**
+    ///
+    /// Taken **by value** because that is the ruling: the pool travels, it is not
+    /// copied. §7.1.3's "整池随行" is about orphaned dirty buffers staying
+    /// reachable somewhere, and a source left holding a second copy of everything
+    /// would be exactly the fork the one-buffer-per-file law forbids — with the
+    /// added cruelty that the copy nobody can reach is the one the dirty gates
+    /// would go on asking about.
+    ///
+    /// In pool order, so the arriving tab's own history keeps its shape among the
+    /// entries this tab has never seen.
+    pub fn merge_from(&mut self, incoming: PreviewPool) {
+        for buffer in incoming.buffers {
+            self.merge_buffer(buffer);
+        }
+    }
+
     fn index_of(&self, path: &Path) -> Option<usize> {
         self.buffers.iter().position(|buffer| buffer.path == path)
     }

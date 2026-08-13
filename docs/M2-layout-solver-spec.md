@@ -241,7 +241,7 @@ Col 分配只有最后一行(纵向无 fixed 类):`avail = h - DIVIDER`,`a = ava
 | L0 | 正常求解(§2.3) | `demand(root, axis) <= 可用` |
 | L1 | **fixed 列收缩**:每个 files 座位从其 `fixed_extent`(默认 240)线性收至 `FILES_W_MIN = 170` | 收完仍不够则进 L2 |
 | L2 | **flex 等比压缩**:全部 flex 座位按各自 share 等比缩,下限是各自 kind 的 min(终端 260 / 预览 360) | 触底仍不够则进 L3 / L2′ |
-| L3 | **折叠非焦点座位**(§2.6.3),按**离焦点最远优先**的确定序 | 折到只剩焦点仍不够则进 L4 |
+| L3 | **折叠非焦点座位**(§2.6.3),按**内容类优先、类内离焦点最远优先**的确定序 | 折到只剩焦点仍不够则进 L4 |
 | L4 | **焦点最后倒下**:焦点座位也放不下 → 返回 `LayoutError::Unsatisfiable`,由上层显式呈现 | — |
 | **L2′** | **地板等比松开**:全部座位的 min **一起**按同一个 ppm 线性松向 0,取「刚好够」的最小松开量 | 松到 0 仍不够 = 仅剩 divider,矩形退化但不反转 |
 
@@ -278,6 +278,19 @@ pub enum SizePolicy { Sovereign, Lawful }
   任何答案都会在对称布局上暴露遍历顺序(违反 W3)。
 - **L3 的「离焦点最远」按树距离定义**(根到两座位路径的公共前缀之外的边数),距离相同时按
   in-order 位次,**再相同不可能**(id 唯一)。这是一个全序,所以 L3 是确定的。
+
+- **【2026-08-13 用户裁决】L3 的第一把尺子是内容类,不是距离:先 preview、再 files、
+  终端最后。** 真机(Preview 块切片 7 案 7)照出了旧序的代价:960 逻辑宽的窗放不下
+  `preview + preview + 终端`,焦点恰在最左的 preview 上,于是「离焦点最远」选中了**终端**——
+  房子里唯一跑着别人工作的那一格,被折成了 24px 的签子。折叠条本身是可逆而诚实的呈现态,
+  但「谁变成条」问的是「你更愿意先看不见什么」,那不是一个树几何能回答的问题。
+  裁决给出的类序:**preview → files → 终端**——preview 是对一份仍在盘上的文档的一瞥,
+  files 列是回到它的路,而终端里的输出没有任何别的面能重现。**类内不变**:仍按离焦点最远
+  优先,所以 L3 依旧是全序、依旧确定(类 → 距离 → in-order 位次)。
+  `SeatKind::Placeholder` 排在三者之前,这一格是**推论而非裁决**:一个本 build 不认识 kind 的
+  叶什么也没画,是树上最便宜的一条签子。钉死名
+  `a_narrowing_window_folds_the_preview_before_the_files_column_and_the_terminal_last`、
+  `within_one_content_class_the_farthest_from_the_focus_still_folds_first`。
 
 #### 2.6.2 三条不变量(结构)
 

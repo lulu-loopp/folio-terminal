@@ -5,7 +5,7 @@
 
 use crate::geom::Axis;
 use crate::metrics::SeatMetrics;
-use crate::tree::{LayoutNode, Ratio, Seat, SeatId, SplitId};
+use crate::tree::{LayoutNode, Ratio, Seat, SeatId, SeatKind, SplitId};
 use crate::{COLLAPSED_EXTENT, DIVIDER, LogicalPx, RATIO_DENOM_PPM};
 
 /// Fold a per-leaf valuation up the tree the way the allocator adds lengths:
@@ -302,20 +302,58 @@ pub fn tree_distance(root: &LayoutNode, x: SeatId, y: SeatId) -> Option<usize> {
     Some((px.len() - common) + (py.len() - common))
 }
 
-/// Non-focus seats ordered farthest-from-focus first: by tree distance, then by
+/// Which content class gives way first (§2.6.1 L3, **用户裁决 2026-08-13**).
+///
+/// Distance alone used to decide the whole order, and the real machine showed
+/// what that costs: a window too narrow for its tree folded the *terminal* —
+/// the one seat in the house running somebody's work — because it happened to
+/// be the seat farthest from a preview that held the focus. A collapsed bar is
+/// reversible and honest, but "which pane becomes a bar" is a question about
+/// what the user would rather stop seeing, and that is not a question about
+/// tree geometry.
+///
+/// So the class leads and the distance follows: **preview first, files next,
+/// the terminal last**. A preview is a quick look at a document that is still
+/// on disk; a files column is a way back to it; a terminal holds output no
+/// other surface can reproduce. Within one class the old rule stands unchanged
+/// — farthest from the focus gives way first.
+///
+/// [`SeatKind::Placeholder`] ranks ahead of all three, and that rank is
+/// reasoning rather than ruling: a leaf whose kind this build does not
+/// recognise is drawing nothing anybody can work in, so it is the cheapest
+/// thing in the tree to turn into a bar. Written as four arms rather than a
+/// `_` so a fifth kind has to answer this question on the way in.
+fn collapse_rank(kind: SeatKind) -> u8 {
+    match kind {
+        SeatKind::Placeholder => 0,
+        SeatKind::Preview => 1,
+        SeatKind::Files => 2,
+        SeatKind::Terminal => 3,
+    }
+}
+
+/// Non-focus seats in the order they give way: by content class first
+/// ([`collapse_rank`]), then farthest-from-focus by tree distance, then by
 /// in-order position, and no further — seat ids are unique, so this is a total
 /// order and the L3 concession is therefore deterministic.
 #[must_use]
 pub fn collapse_order(root: &LayoutNode, focus: SeatId) -> Vec<SeatId> {
-    let mut ranked: Vec<(usize, usize, SeatId)> = root
+    let mut ranked: Vec<(u8, usize, usize, SeatId)> = root
         .seats_in_order()
         .iter()
         .enumerate()
         .filter(|(_, s)| s.id != focus)
-        .map(|(i, s)| (tree_distance(root, focus, s.id).unwrap_or(0), i, s.id))
+        .map(|(i, s)| {
+            (
+                collapse_rank(s.kind),
+                tree_distance(root, focus, s.id).unwrap_or(0),
+                i,
+                s.id,
+            )
+        })
         .collect();
-    ranked.sort_unstable_by(|l, r| r.0.cmp(&l.0).then(l.1.cmp(&r.1)));
-    ranked.into_iter().map(|(_, _, id)| id).collect()
+    ranked.sort_unstable_by(|l, r| l.0.cmp(&r.0).then(r.1.cmp(&l.1)).then(l.2.cmp(&r.2)));
+    ranked.into_iter().map(|(_, _, _, id)| id).collect()
 }
 
 /// The ratio a split in a balanced run takes: its two sides' column counts.

@@ -657,6 +657,79 @@ fn a_collapsed_seat_keeps_a_clickable_bar_and_its_place_in_the_tree() {
     );
 }
 
+fn preview(id: u64) -> LayoutNode {
+    seat(id, SeatKind::Preview)
+}
+
+/// §2.6.1 L3, **用户裁决 2026-08-13**: the class leads the distance.
+///
+/// The order this asserts is the whole ruling — preview, then files, then the
+/// terminal — and the tree is arranged so that *distance alone would answer the
+/// other way round*: the focus sits on the preview at the far left, so the
+/// terminal is the seat farthest from it and the old order folded exactly the
+/// pane holding somebody's work.
+///
+/// Red gate: drop `collapse_rank` out of `collapse_order`'s sort key and this
+/// goes red on the first element.
+#[test]
+fn a_narrowing_window_folds_the_preview_before_the_files_column_and_the_terminal_last() {
+    // preview(1) | ( files(2) | ( preview(3) | terminal(4) ) )
+    let tree = row(1, preview(1), row(2, files(2), row(3, preview(3), term(4))));
+
+    assert_eq!(
+        collapse_order(&tree, SeatId(1)),
+        vec![SeatId(3), SeatId(2), SeatId(4)],
+        "previews first (farthest of them leading), then files, then the terminal"
+    );
+
+    // And the same order is what the rectangles say. Wide enough for everything,
+    // then narrowed a step at a time: each step must take the next seat on the
+    // list and no other.
+    let folded = |width: i64| -> Vec<SeatId> {
+        let layout = solve(
+            &tree,
+            viewport(width, 700),
+            &m(),
+            SeatId(1),
+            LayoutMode::Parallel,
+            SizePolicy::Lawful,
+        )
+        .expect("a fold is an answer, not a failure");
+        layout
+            .rects
+            .iter()
+            .filter(|p| p.presentation.is_collapsed_along(Axis::Row))
+            .map(|p| p.id)
+            .collect()
+    };
+
+    assert_eq!(folded(1400), Vec::<SeatId>::new(), "room for all four");
+    assert_eq!(folded(1100), vec![SeatId(3)], "the far preview folds first");
+    assert_eq!(
+        folded(800),
+        vec![SeatId(2), SeatId(3)],
+        "then the files column"
+    );
+    assert_eq!(
+        folded(560),
+        vec![SeatId(2), SeatId(3), SeatId(4)],
+        "the terminal is the last non-focus seat to fall"
+    );
+}
+
+/// The class order does not replace the old rule, it sits above it: inside one
+/// class, farthest-from-focus still decides, which is what keeps L3 a total
+/// order and therefore deterministic (§2.6.1's third reading note).
+#[test]
+fn within_one_content_class_the_farthest_from_the_focus_still_folds_first() {
+    let tree = row(1, term(1), row(2, term(2), row(3, term(3), term(4))));
+    assert_eq!(
+        collapse_order(&tree, SeatId(1)),
+        vec![SeatId(3), SeatId(4), SeatId(2)],
+        "one class, so distance alone decides — and ties break by in-order position"
+    );
+}
+
 /// A tree with two axes to give on, squeezed on both.
 fn dual_axis_tree() -> LayoutNode {
     col(1, term(1), row(2, term(2), term(3)))
