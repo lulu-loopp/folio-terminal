@@ -506,14 +506,34 @@ pub fn float_opening_size(
 ) -> [f32; 2] {
     let px = |logical: f32| logical * scale;
     let margin = px(FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX);
-    let viewport_height = (viewport[3] - viewport[1] - margin * 2.0).max(0.0);
-    let cap = (viewport_height * sizing.max_height_fraction).min(px(sizing.max_height));
+    let cap = float_height_cap(viewport, scale, sizing);
     let floor = px(FLOAT_WINDOW_MIN_STRIP_LOGICAL_PX);
     let width = px(sizing.width).min((viewport[2] - viewport[0] - margin * 2.0).max(floor));
     [
         width.round(),
         content_height.clamp(floor, cap.max(floor)).round(),
     ]
+}
+
+/// `max-height: min(62vh, 460px)` — the tallest a float of this tenant may open,
+/// in physical pixels.
+///
+/// Extracted from [`float_opening_size`] rather than restated, because it is now
+/// asked a second question: **how tall does a window open when its content is
+/// not yet known?** A tree read on a worker has no rows on the frame it is
+/// summoned (`place_float` builds every float with an empty `DirCache`), and a
+/// window sized to the one `Loading` row standing in for them is the bare strip
+/// in the corner the user reported on 2026-08-13. The kind's own maximum is the
+/// honest opening size for an unknown amount of content: it is the biggest this
+/// window is ever allowed to be, so no arriving row can make it *grow* — and
+/// `FloatWin::self_sizing` shrinks it to the rows the moment they land, through
+/// the one sizing path that was always there.
+#[must_use]
+pub fn float_height_cap(viewport: [f32; 4], scale: f32, sizing: FloatSizing) -> f32 {
+    let px = |logical: f32| logical * scale;
+    let margin = px(FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX);
+    let viewport_height = (viewport[3] - viewport[1] - margin * 2.0).max(0.0);
+    (viewport_height * sizing.max_height_fraction).min(px(sizing.max_height))
 }
 
 /// The natural height of a float whose body wants `body_height` pixels.

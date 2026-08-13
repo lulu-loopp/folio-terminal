@@ -644,6 +644,55 @@ impl Seats {
         self.tree.find_seat(seat).and_then(|seat| seat.fixed_extent)
     }
 
+    /// **P61 — the stand-in.** Put a fresh terminal where this seat stands, and
+    /// answer with its id.
+    ///
+    /// The mock-up's `floatFilesPane` reached this the hard way and wrote down
+    /// why (3838-3843): "pop-out removes the pane, and *remove the last pane*
+    /// means the tab goes too… the one case it cannot do is the LAST pane of the
+    /// LAST tab, where `closeTab` refuses to empty the strip: **there a plain
+    /// default shell takes the tab's place while the tree floats free**. Without
+    /// this the pane stayed docked AND floated — the window duplicated itself."
+    ///
+    /// [`Self::close_seat`] is the refusal that makes this necessary and it is
+    /// the right refusal: a tree may not be emptied (G84). What it cannot say on
+    /// its own is what a *pop-out* means when the pane leaving is the only one —
+    /// because a pop-out is a move rather than a close, the pane genuinely does
+    /// leave, and the honest tree it leaves behind is not an empty one but the
+    /// one the tab would have had if you had never opened the preview at all.
+    /// So the seat is **replaced**, not closed, and the tab goes on being a tab
+    /// with a shell in it (I106).
+    ///
+    /// It mints a Terminal seat and nothing else — which profile that shell runs
+    /// and how it is spawned is the window's business, one layer up, exactly as
+    /// it is for a split.
+    pub fn stand_in_terminal(&mut self, metrics: &SeatMetrics, seat: SeatId) -> Option<SeatId> {
+        let id = SeatId(self.next_seat);
+        let outcome = apply(
+            &self.tree,
+            metrics,
+            &Edit::ReplaceSeat {
+                target: seat,
+                arriving: LayoutNode::seat(Seat::new(id, SeatKind::Terminal)),
+            },
+        )
+        .ok()?;
+        self.tree = outcome.tree;
+        self.next_seat += 1;
+        // The identity shell's rectangle may have been the one that just left.
+        if !self.tree.contains(self.terminal) {
+            self.terminal = id;
+        }
+        if self.focus == seat {
+            self.focus = id;
+        }
+        // One leaf for another: no rectangle moved, and the same argument
+        // `CenterSwap` is counted under applies — the *set* of panes changed, and
+        // everything keyed on which seats exist has to be re-asked.
+        self.structure_revision += 1;
+        Some(id)
+    }
+
     /// Close one seat, promoting its sibling. Refused for the last seat: an
     /// empty tree is not a state the solver can represent, and the last pane
     /// closing is the *tab* closing (§7.1.4), which this slice does not host.
@@ -891,6 +940,57 @@ impl Seats {
             arrived,
             next_seat: ids.seat,
             next_split: ids.split,
+        })
+    }
+
+    /// **The plan for a drop that changes no rectangles** — the content verbs
+    /// (L141/L142): "open this file in this preview", "root this tree here".
+    ///
+    /// It is the live tree, solved, with the box drawn on the pane the pointer is
+    /// over. Every word of that is deliberate:
+    ///
+    /// * **The live tree.** These verbs move nothing — a preview showing another
+    ///   file is the same pane in the same place — so the layout the drop would
+    ///   make is the layout that is already there. Producing it through the same
+    ///   [`solve`] the frame ran, rather than lifting the frame's own answer, is
+    ///   the same discipline [`Self::plan_drop`] is held to and for the same
+    ///   reason: a plan is what letting go *would* produce, computed, never a
+    ///   remembered picture.
+    /// * **The box on the target.** [`DropPlan::landed`] is what
+    ///   [`dock_overlay`] traces and where D43 sends the focus, and both answers
+    ///   are the same here: the pane you aimed at is the pane that will be
+    ///   showing your file.
+    /// * **Nothing arrived and nothing was spent.** `arrived` is empty because no
+    ///   identity was minted, and the counters come back untouched, so a plan
+    ///   that is surveyed sixty times a second cannot leak names.
+    ///
+    /// `None` when the tree does not have that seat, or when the solve refuses —
+    /// which for an unchanged tree means the window is already unlawful, and a
+    /// promise drawn over it would be about a layout nobody can be in.
+    pub fn plan_content_drop(
+        &self,
+        metrics: &SeatMetrics,
+        viewport: LogicalRect,
+        target: SeatId,
+    ) -> Option<DropPlan> {
+        self.tree.find_seat(target)?;
+        let layout = solve(
+            &self.tree,
+            viewport,
+            metrics,
+            self.focus,
+            LayoutMode::Parallel,
+            SizePolicy::Lawful,
+        )
+        .ok()
+        .filter(|layout| plan_fits(layout, metrics));
+        Some(DropPlan {
+            tree: self.tree.clone(),
+            layout,
+            landed: vec![target],
+            arrived: Vec::new(),
+            next_seat: self.next_seat,
+            next_split: self.next_split,
         })
     }
 
@@ -24954,5 +25054,132 @@ mod drop_plan_tests {
             Some(focus_index),
             "the pane you were left in is the pane you come back to"
         );
+    }
+
+    // ── L141/L142: the plan for a drop that moves nothing ───────────────────
+
+    /// PIN — **a content drop promises the layout that is already there.**
+    ///
+    /// "Open in this preview" and "Root this tree here" change what one pane is
+    /// *showing*; no rectangle moves. So the plan's tree is the live tree to the
+    /// bit, the box is drawn on the pane the pointer is over, and no identity is
+    /// spent — a survey that ran on every pointer move and minted a seat name
+    /// each time would burn through the counter in a second of hovering.
+    ///
+    /// The alternative this replaced is the bug it exists to prevent: routing
+    /// the centre through `plan_drop` asks for `Edit::ReplaceSeat`, which swaps
+    /// the target leaf for a **fresh** one — a new seat id, the pin lost, and
+    /// the content plane left filed under a pane that no longer exists.
+    ///
+    /// Mutation: build the plan through `plan_drop` with a preview leaf as cargo
+    /// — the tree comes back with a different seat id in it and the first two
+    /// assertions fail together.
+    #[test]
+    fn a_content_drop_plans_the_tree_that_is_already_on_screen() {
+        let seats = window(row(1, term(1), preview(2)));
+        let before = seats.tree().clone();
+        let plan = seats
+            .plan_content_drop(&metrics(), view(), SeatId(2))
+            .expect("the tree has that seat");
+        assert!(plan.fits(), "an unchanged lawful tree is still lawful");
+        assert_eq!(plan.tree, before, "no pane moved, so no pane moved");
+        assert_eq!(
+            plan.landed,
+            vec![SeatId(2)],
+            "the box is traced on the pane you aimed at"
+        );
+        assert!(
+            plan.arrived.is_empty(),
+            "nothing arrived — the file did, and a file is not a seat"
+        );
+        assert_eq!(
+            (plan.next_seat, plan.next_split),
+            (seats.next_seat, seats.next_split),
+            "and no name was spent by a question"
+        );
+        assert!(
+            seats
+                .plan_content_drop(&metrics(), view(), SeatId(99))
+                .is_none(),
+            "a centre aimed at a seat this tree does not have is not a plan"
+        );
+    }
+
+    // ── P61: the stand-in ───────────────────────────────────────────────────
+
+    fn preview(id: u64) -> LayoutNode {
+        LayoutNode::seat(Seat::new(SeatId(id), SeatKind::Preview))
+    }
+
+    /// PIN — **a pop-out never kills a tab, and never leaves it empty either.**
+    ///
+    /// Two facts, and P61 needs both. `close_seat` already refuses to empty a
+    /// tree (G84), which is the first — and on its own it makes the pop-out a
+    /// no-op, so the pane stays docked *and* the window opens, which is exactly
+    /// the duplication the mock-up wrote its stand-in comment about (3838-3843).
+    /// The second is that what takes its place is a **Terminal**: a tab in this
+    /// build is a strip entry with a shell behind it (I106), so a tree left
+    /// holding a lone preview is a tab that cannot be drawn, named or focused.
+    ///
+    /// The identity shell moves too, and that is not incidental: `terminal` is
+    /// the seat this tab's shell draws into, and a `Seats` naming a seat its own
+    /// tree does not have is unsolvable.
+    ///
+    /// Mutation: mint the stand-in as `SeatKind::Preview` instead of `Terminal`
+    /// — the tree is no longer empty and the first assertion still passes, and
+    /// the `terminals()` assertion fails, which is the half that matters.
+    #[test]
+    fn popping_out_the_last_pane_leaves_a_stand_in_shell_rather_than_an_empty_tab() {
+        let mut seats = window(preview(7));
+        seats.terminal = SeatId(7);
+        seats.focus = SeatId(7);
+        assert!(
+            !seats.close_seat(&metrics(), SeatId(7)),
+            "G84: a tree may not be emptied, so the ordinary route refuses"
+        );
+
+        let arrived = seats
+            .stand_in_terminal(&metrics(), SeatId(7))
+            .expect("a seat that is in the tree can be stood in for");
+        assert_eq!(
+            seats.pane_count(),
+            1,
+            "the tab is still a tab: one pane in, one pane out"
+        );
+        assert!(
+            seats.preview().is_none(),
+            "the preview left — that is what a pop-out is"
+        );
+        assert_eq!(
+            seats.terminals(),
+            vec![arrived],
+            "and what stayed is a shell, because a tab without one cannot be drawn (I106)"
+        );
+        assert_eq!(
+            seats.terminal(),
+            arrived,
+            "the identity shell is the one that is actually there"
+        );
+        assert_eq!(seats.focus(), arrived, "focus cannot name a seat that left");
+    }
+
+    /// PIN — the stand-in replaces **one** pane and disturbs nothing else.
+    ///
+    /// The last-pane case is the only one that needs it, and a verb that also
+    /// fires when there is a sibling to promote would turn every pop-out into a
+    /// fresh shell nobody asked for.
+    ///
+    /// Mutation: have `pop_out_preview` call `stand_in_terminal` unconditionally
+    /// rather than only when `close_seat` refuses — this tab comes back with two
+    /// terminals and the preview still in the tree.
+    #[test]
+    fn a_preview_with_a_sibling_pops_out_by_closing_and_mints_nothing() {
+        let mut seats = window(row(1, term(1), preview(2)));
+        assert!(
+            seats.close_seat(&metrics(), SeatId(2)),
+            "with a sibling to promote, the ordinary route is the whole answer"
+        );
+        assert_eq!(seats.terminals(), vec![SeatId(1)]);
+        assert_eq!(seats.pane_count(), 1);
     }
 }

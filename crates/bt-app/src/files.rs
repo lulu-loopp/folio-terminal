@@ -387,6 +387,29 @@ pub struct TreeView {
     pub wanted: Vec<String>,
 }
 
+impl TreeView {
+    /// Whether every row here is a **final** answer about what is in the tree.
+    ///
+    /// A `Loading` row is a placeholder for however many names are on their way,
+    /// so the row count of an unsettled view is not the height of anything — it
+    /// is one line standing in for an unknown number of them. Asking it for a
+    /// content height is what opened a floating tree as a bare title strip in
+    /// the corner (user report, 2026-08-13): every float is born with an empty
+    /// [`DirCache`], so the first frame after `place_float` always had exactly
+    /// one row, and the window sized itself to it and then had to grow.
+    ///
+    /// A folder that is genuinely empty answers `true` here and gets its one
+    /// `Empty` row's height, which is right: that *is* the whole of what it has
+    /// to show.
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        !self
+            .rows
+            .iter()
+            .any(|row| matches!(row.kind, RowKind::Notice(RowNotice::Loading)))
+    }
+}
+
 /// Walk the open directories and produce the visible rows.
 ///
 /// This is `filesVisibleRows` (C38) with the one difference that separates a

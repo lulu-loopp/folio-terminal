@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod file_peek;
 mod files;
 mod float;
 mod input;
@@ -3453,6 +3454,39 @@ struct Runtime {
     /// they cannot both exist: `chrome_mouse_input` routes one press to one
     /// target, and the one it did not choose is cleared.
     pane_press: Option<PanePress>,
+    /// The left press being held on a **files tree row** (P81).
+    ///
+    /// A third field for [`Self::pane_press`]'s reason, and a fourth thing it
+    /// holds: a row press has to remember *which host and which row*, because
+    /// the payload is resolved out of the live tree at the moment the six pixels
+    /// are crossed rather than at the press — a directory that finished loading
+    /// in between has moved every row below it.
+    ///
+    /// **Arming it costs the click nothing**, which is what P81's own sentence
+    /// is about ("startDrag's 6px threshold keeps click/dblclick intact"): the
+    /// press goes on to select the row and toggle the folder exactly as it did,
+    /// and the latch simply waits beside it.
+    row_press: Option<RowPress>,
+    /// The glance card's intent and, once it has matured, the card itself
+    /// (P143-P150).
+    ///
+    /// One at a time and on the *window* rather than on the tab, because there
+    /// is one pointer: "which row is being glanced at" is a singleton for the
+    /// same reason "what is hovered" is.
+    file_peek: Option<FilePeek>,
+    /// The body the glance is reading, for a file the pool does not hold.
+    ///
+    /// **Not in the pool, and that is the whole reason it is a field.** The pool
+    /// is capped at eight and evicts by use (P119); a hover that walked a list
+    /// of names would empty it of every buffer the user actually opened. A
+    /// glance is not an open file — it is a look at one — so it gets a single
+    /// slot that the next glance overwrites, and the read that fills it goes
+    /// down the same worker lane a real open uses.
+    ///
+    /// `None` whenever the pool answers instead, which is P145's "shows the
+    /// tab's POOL buffer when the file is already open, so the glance never lies
+    /// about unsaved edits".
+    peek_buffer: Option<preview::PreviewBuffer>,
     /// The gesture in flight, whatever it is carrying (J111).
     ///
     /// Separate from the presses rather than a further promise state, because
@@ -7922,6 +7956,17 @@ struct OverlayStack {
     /// covered, because it is the only one whose whole job is to explain what is
     /// under it.
     tooltip: Vec<marks::OverlayLayer>,
+    /// `.file-peek { z-index: 70 }` — **above the pinned float** (P143: "z-index
+    /// above the pinned flyout (60) — flyout rows peek too"), and above the tip
+    /// with it, which is the mock-up's own 70-against-60.
+    ///
+    /// It is the one surface here that is never *asked* anything: the card takes
+    /// no input at all (`pointer-events: none`), so standing it in front of
+    /// everything costs nothing that could be pressed. That is the whole
+    /// argument for putting a drawing this large on top — a window it covered
+    /// would still be entirely reachable, because the pointer is what dismisses
+    /// the card.
+    file_peek: Vec<marks::OverlayLayer>,
     /// `z-index: 100` — above even the tip. During a drag, what is under the
     /// pointer *is* the ghost; in practice the two never meet, because a drag
     /// empties the tip's anchor list (J117).
@@ -7939,6 +7984,7 @@ impl OverlayStack {
             modal,
             file_menu,
             tooltip,
+            file_peek,
             drag_ghost,
         } = self;
         [
@@ -7949,6 +7995,7 @@ impl OverlayStack {
             modal,
             file_menu,
             tooltip,
+            file_peek,
             drag_ghost,
         ]
         .into_iter()
@@ -8052,6 +8099,47 @@ fn float_sizing_of(win: &float::FloatWin) -> float::FloatSizing {
     } else {
         float::FloatSizing::files()
     }
+}
+
+/// How tall a floating **tree** wants to be — its rows, or the kind's own
+/// maximum while it still has no idea how many rows there are.
+///
+/// # The bare strip in the corner (user report, 2026-08-13)
+///
+/// Every float is summoned with an empty [`files::DirCache`] — `open_float`
+/// hands `DirCache::default()` in by construction, because a peek is a fresh
+/// throwaway view of a tree (G81) — so on the frame the window is placed,
+/// `tree_view` has exactly one row in it: the `Loading` notice standing in for
+/// however many names the worker is about to send. Sizing to that row opened
+/// every hover peek and every folder button as a title bar with a foot under it
+/// and nothing in between, hard against whichever corner the clamp pushed it
+/// into, until the answer came back.
+///
+/// The fix is **not** a second sizing path and pointedly not a minimum: the one
+/// [`float::float_opening_size`] is still the only thing that turns a content
+/// height into a frame. What changes is the content height it is asked about. A
+/// view that is still loading has no content height to give, and the honest
+/// stand-in for "as many rows as this could turn out to be" is the most rows
+/// this window would ever be allowed to show — [`float::float_height_cap`] —
+/// after which [`Runtime::resize_floats_to_content`] shrinks it to the real
+/// answer through that very same door the moment the rows land. A window that
+/// opens at its cap and settles down is the ordinary shape of `height: auto`
+/// arriving late; a window that opens as a strip and grows is a window that was
+/// never the size it said it was.
+fn files_float_content_height(
+    state: &seats::FilesLeafState,
+    cache: &files::DirCache,
+    viewport: [f32; 4],
+    scale: f32,
+) -> f32 {
+    let view = files::tree_view(state, cache);
+    if !view.settled() {
+        return float::float_height_cap(viewport, scale, float::FloatSizing::files());
+    }
+    float::float_height_for_body(
+        seats::files_tree_content_height(view.rows.len(), scale),
+        scale,
+    )
 }
 
 /// **Diagnostic scaffolding: write this frame's chrome to a file.**
@@ -8274,14 +8362,84 @@ fn pointer_cursor(
 /// a tab and a pane is what a landing does with them, which is not this slice's
 /// question.
 ///
-/// Both variants key on identity rather than on position, for the same reason:
-/// the strip renumbers under a finger that has not moved, and a seat tree can be
-/// re-solved between two pointer moves.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Every variant keys on identity rather than on position, for the same reason:
+/// the strip renumbers under a finger that has not moved, a seat tree can be
+/// re-solved between two pointer moves, and a tree row can be scrolled away
+/// underneath one.
+///
+/// **The third variant is why this stopped being `Copy`** (P81). A tab and a
+/// pane are both a number; a row is a *path*, and the mock-up is emphatic that
+/// the path is the whole of what travels — "a FILE travels as its identity (the
+/// path); **the drop target decides the verb**" (P87, mock-up 6811-6828). A row
+/// drag that carried an index into the visible rows instead would name a
+/// different file the moment the tree above it unfolded.
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum DragSource {
     Tab(TabId),
     /// A pane, taken by its head (J118, mock-up 5835-5840).
     Pane(SeatId),
+    /// A row of a files tree, taken from either host (P81, mock-up 8840-8878).
+    Row(RowPayload),
+}
+
+impl DragSource {
+    /// The pane this drag *is*, for the one question K135 asks — "is that pane
+    /// the one in my hand".
+    fn pane(&self) -> Option<SeatId> {
+        match self {
+            Self::Pane(seat) => Some(*seat),
+            Self::Tab(_) | Self::Row(_) => None,
+        }
+    }
+
+    /// The row payload this drag is carrying, if it is carrying one.
+    fn row(&self) -> Option<&RowPayload> {
+        match self {
+            Self::Row(payload) => Some(payload),
+            Self::Tab(_) | Self::Pane(_) => None,
+        }
+    }
+}
+
+/// **What a tree row carries when it leaves the tree** (P81, mock-up 8840-8878).
+///
+/// `startDrag(e, { kind: "file" | "folder", path, name })`, and nothing else:
+/// the payload is the node's identity, and every verb in the table is a function
+/// of that identity and of what it was let go over. There is deliberately no
+/// `save` here — that flag belongs to a *terminal artifact* (P86), and the
+/// user's ruling of 2026-08-13 is that a tree row never carries a save verb:
+/// "Save into this folder" is a sentence about something the terminal produced,
+/// not about a file that is already on the disk being pointed at.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RowPayload {
+    kind: RowPayloadKind,
+    /// The full path, resolved against whichever host owns the row.
+    path: PathBuf,
+    /// What the ghost says and what a new pane is named after.
+    name: String,
+}
+
+/// Which of the two things a row is — the whole of what decides its verbs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowPayloadKind {
+    /// A file: view verbs only (P82).
+    File,
+    /// A folder: place verbs only (S3).
+    Folder,
+}
+
+impl RowPayloadKind {
+    /// The kind of leaf this payload lands as when it splits a pane open.
+    ///
+    /// One sentence rather than a match at each of the three call sites (the
+    /// plan, the commit and the ghost): a file becomes a page, a folder becomes
+    /// a tree, and there is no third reading of either.
+    fn leaf_kind(self) -> bt_layout::SeatKind {
+        match self {
+            Self::File => bt_layout::SeatKind::Preview,
+            Self::Folder => bt_layout::SeatKind::Files,
+        }
+    }
 }
 
 /// Where a drag would land if the hand opened right now — the engine's entire
@@ -8423,12 +8581,117 @@ impl DropLanding {
     /// Every other zone answers with nothing, and that is a rule rather than an
     /// omission: a word on a box whose shape already said it is a second voice
     /// saying the same thing, and the first one to be believed when they drift.
-    fn caption(self, source: DragSource) -> &'static str {
+    fn caption(self, source: &DragSource) -> &'static str {
         match (self, source) {
             (Self::SeatCentre { .. }, DragSource::Pane(_)) => "Swap panes",
             (Self::SeatCentre { .. }, DragSource::Tab(_)) => "Replace pane",
+            // L141/L142 — a row's centre verbs say their names for exactly the
+            // reason a pane's and a tab's do: the box is the same rectangle and
+            // the outcome is not. "Open in this preview" changes what a page is
+            // showing; "Root this tree here" changes where a column is pointed.
+            // Neither moves a pane, which is precisely why the shape cannot say
+            // it. A refused centre says nothing at all, and it does not have to
+            // be suppressed here — a refusal is a plan with no rectangles, and
+            // `dock_overlay_layers` already prints "" for one.
+            (Self::SeatCentre { .. }, DragSource::Row(payload)) => match payload.kind {
+                RowPayloadKind::File => "Open in this preview",
+                RowPayloadKind::Folder => "Root this tree here",
+            },
             _ => "",
         }
+    }
+}
+
+/// **The drop table** (P82-P85, S3, and the 2026-08-13 ruling that settles it
+/// against the mock-up) — what a row payload means at a landing, stated once.
+///
+/// | | edge / rim | a preview's centre | a tree's centre | any other centre |
+/// |---|---|---|---|---|
+/// | file | split a preview out | show it here | **refused** | refused |
+/// | folder | split a tree out | refused | re-root that column | refused |
+///
+/// **The two refusals that are rulings rather than omissions.**
+///
+/// *A file on a tree's centre.* The mock-up offers `"Save into this folder"`
+/// there (P83, 7204-7221), gated on `drag.save` — a flag only a *terminal
+/// artifact* carries. The 2026-08-13 ruling states the general rule the flag was
+/// standing in for: a save verb is about something the terminal produced and has
+/// nowhere to live yet. A file dragged out of the tree is already on the disk;
+/// "save it into this folder" would be a copy, which is a file-manager verb
+/// nobody asked this gesture for. So a tree row never carries it, and the centre
+/// refuses.
+///
+/// *A folder on a preview's centre.* Symmetric and for the same reason: a
+/// preview shows a document, and a folder is not one. P82's sentence — "every
+/// other centre refuses honestly" — is the whole of both.
+///
+/// Written as a free function over three plain facts so that the table can be
+/// read, and tested, without a window: the drag engine asks it for the *promise*
+/// on screen and the release asks it again for the *commit*, and a table
+/// answered twice from one function is a table that cannot drift between the two
+/// answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowVerb {
+    /// A **space** verb: the aimed pane (or the root) is cut, and a leaf of the
+    /// payload's own kind lands in the new slot.
+    Split,
+    /// A **content** verb: no pane moves at all, and this one changes what it is
+    /// showing — a preview's buffer, or a column's root.
+    Retarget(SeatId),
+    /// M147 — the honest refusal: a traced box over the pane that will not take
+    /// it, and no words.
+    Refused,
+}
+
+/// The leaf a row payload arrives as when it splits a pane open.
+///
+/// The identity is a placeholder and deliberately so: [`seats::Seats::plan_drop`]
+/// renumbers every arriving seat out of its own counters and reports the pairs
+/// in [`seats::DropPlan::arrived`], which is where the commit reads the id that
+/// actually landed. Minting a "real" id here would be spending a name the plan
+/// may never adopt — a drag surveys on every pointer move.
+///
+/// No `fixed_extent` on the folder's seat: a column arriving fresh has no width
+/// to bring, and F75's rule is that the kind's opening width applies. It is
+/// [`seats::Seats::add_files_pane`]'s `None` arm, said the same way.
+/// **P86 — is the hand back where it started?**
+///
+/// A free function for [`landing_for_aim`]'s reason: it is the sentence "this is
+/// a retraction", and separating it from "what is under the pointer" is what
+/// lets each be tested against its own inputs. Inclusive on all four edges,
+/// because the ground a thing was picked up from includes its own border — a
+/// gesture that ended one pixel inside the row it began in is the same gesture
+/// that ended in the middle of it.
+fn over_home_ground(home: Option<[f32; 4]>, position: PhysicalPosition<f64>) -> bool {
+    home.is_some_and(|rect| {
+        let (x, y) = (position.x as f32, position.y as f32);
+        x >= rect[0] && x <= rect[2] && y >= rect[1] && y <= rect[3]
+    })
+}
+
+fn row_arrival_seat(kind: RowPayloadKind) -> bt_layout::Seat {
+    bt_layout::Seat::new(bt_layout::SeatId(0), kind.leaf_kind())
+}
+
+fn row_verb(
+    kind: RowPayloadKind,
+    landing: DropLanding,
+    target_kind: Option<bt_layout::SeatKind>,
+) -> RowVerb {
+    match landing {
+        DropLanding::RootRim { .. } | DropLanding::SeatEdge { .. } => RowVerb::Split,
+        DropLanding::SeatCentre { target } => match (kind, target_kind) {
+            (RowPayloadKind::File, Some(bt_layout::SeatKind::Preview))
+            | (RowPayloadKind::Folder, Some(bt_layout::SeatKind::Files)) => {
+                RowVerb::Retarget(target)
+            }
+            _ => RowVerb::Refused,
+        },
+        // The strip is not this table's surface. A row over it has no landing at
+        // all — see [`Runtime::survey_strip`] for why the tab verbs are held
+        // back — so this arm is unreachable rather than a fifth column of the
+        // table, and it answers the same way an unreachable aim does.
+        DropLanding::StripReorder { .. } | DropLanding::StripExtract { .. } => RowVerb::Refused,
     }
 }
 
@@ -8447,6 +8710,12 @@ enum DragCarry {
     /// J118: the tree is not touched while a pane is in the air. The pane stays
     /// exactly where it is and the ghost is the only thing that moves — which is
     /// also why a pane drag that comes to nothing has nothing to undo.
+    ///
+    /// A **row** is carried the same way and by the same argument, which is why
+    /// it needs no variant of its own: the tree it came out of is not edited,
+    /// the row stays drawn where it is, and the ghost is the whole of what
+    /// travels. A carry is what a source *gives up* while it is in the air, and
+    /// a row gives up nothing.
     Pane,
 }
 
@@ -8495,7 +8764,7 @@ struct TabCarry {
 /// state at all but an exit — `Runtime::cancel_drag` unwinds to idle in one
 /// call, and a "cancelled" resting state would be a drag that has stopped being a
 /// drag while still occupying the field that means one is happening.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Drag {
     source: DragSource,
     carry: DragCarry,
@@ -8505,6 +8774,23 @@ struct Drag {
     pointer: PhysicalPosition<f64>,
     /// What [`Runtime::survey_drop`] answered on the last pointer move.
     landing: Option<DropLanding>,
+    /// **P86 — the ground this drag was picked up from, where letting go is a
+    /// clean "never mind".**
+    ///
+    /// The mock-up's `srcRect`, and the user's own report of what it costs to be
+    /// without it (2026-07-17): with no home rectangle, the pane the thing came
+    /// out of catches the retraction on its own edge zone and splits anyway, so
+    /// there is no gesture at all for "actually, no". K135 is the same sentence
+    /// about a *seat* — a pane held over itself has no landing — and this is it
+    /// generalised from an identity to a rectangle, which is what a payload that
+    /// is not a pane needs.
+    ///
+    /// Physical pixels, read at the press. It can go stale — a tree scrolled
+    /// under a held row moves the row out from under it — and that is the same
+    /// staleness `srcRect` has in the mock-up: a rectangle is where you picked
+    /// the thing up, and where you picked it up does not move just because the
+    /// list did.
+    home: Option<[f32; 4]>,
 }
 
 impl Drag {
@@ -8516,7 +8802,7 @@ impl Drag {
     fn tab(&self) -> Option<TabId> {
         match self.source {
             DragSource::Tab(tab) => Some(tab),
-            DragSource::Pane(_) => None,
+            DragSource::Pane(_) | DragSource::Row(_) => None,
         }
     }
 
@@ -8660,7 +8946,7 @@ enum DragRelease {
 /// window: it is the sentence "who may land on what", and separating it from
 /// "what is under the pointer" is what lets each be tested against its own
 /// inputs.
-fn landing_for_aim(source: DragSource, aim: seats::LayoutAim) -> Option<DropLanding> {
+fn landing_for_aim(source: &DragSource, aim: seats::LayoutAim) -> Option<DropLanding> {
     let (target, landing) = match aim {
         seats::LayoutAim::Rim(edge) => return Some(DropLanding::RootRim { edge }),
         seats::LayoutAim::SeatEdge(target, edge) => {
@@ -8668,7 +8954,7 @@ fn landing_for_aim(source: DragSource, aim: seats::LayoutAim) -> Option<DropLand
         }
         seats::LayoutAim::SeatCentre(target) => (target, DropLanding::SeatCentre { target }),
     };
-    (source != DragSource::Pane(target)).then_some(landing)
+    (source.pane() != Some(target)).then_some(landing)
 }
 
 /// The mock-up's commit table (7202-7231), as one function.
@@ -8955,6 +9241,61 @@ fn sessions_match_terminals(keys: &[SeatId], terminals: &[SeatId]) -> bool {
 struct PanePress {
     seat: SeatId,
     latch: DragLatch,
+}
+
+/// Which surface a files tree is drawn on — the two hosts P81 asks to be wired.
+///
+/// "delegated on both hosts, so re-rendered rows keep working" (P150, mock-up
+/// 8845-8852). A docked column and a floating tree are one list with two homes,
+/// and every gesture that reads a row — the press that begins a drag, the hover
+/// that arms a glance — has to name which one, because a `SeatId` and a
+/// [`float::FloatId`] are both numbers and would silently answer for one
+/// another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowHost {
+    /// `#termhost .files-tree[data-leaf]` — a docked files column.
+    Column(SeatId),
+    /// `#files-flyout` — a floating tree.
+    Float(float::FloatId),
+}
+
+/// A left press being held on one row of a files tree (P81).
+///
+/// [`PanePress`]'s shape with a name attached, and the name is what makes the
+/// six pixels mean something: the payload is resolved *when the drag begins*,
+/// out of the tree as it stands then, so a listing that arrived during the press
+/// cannot make the gesture carry the wrong file.
+#[derive(Clone, Debug)]
+struct RowPress {
+    host: RowHost,
+    /// The row's own key, not its index. An index is what the hit test produced
+    /// and it is stale the moment a directory above it unfolds; the key is the
+    /// node.
+    key: String,
+    /// The row's rectangle at the press — P86's home ground, and the only
+    /// rectangle a row drag has.
+    rect: [f32; 4],
+    latch: DragLatch,
+}
+
+/// The glance card's state: which row it is about, and whether the intent has
+/// matured yet (P145/P146).
+#[derive(Clone, Debug)]
+struct FilePeek {
+    host: RowHost,
+    /// The row's key — **identity, not index**, and P146 is why: "sub-element
+    /// crossings must not reset intent". A pointer moving from a row's triangle
+    /// to its name to its trailing space is three hover events over one row, and
+    /// a peek keyed on anything that those three do not share would restart its
+    /// 350ms on each of them and therefore never fire.
+    key: String,
+    /// The full path this row resolves to, taken when the intent was armed.
+    path: PathBuf,
+    name: String,
+    /// The row's box, which is what the card is placed against.
+    rect: [f32; 4],
+    /// When the 350ms is up; `None` once the card is on screen.
+    due: Option<Instant>,
 }
 
 impl TabState {
@@ -10869,6 +11210,9 @@ impl Runtime {
             last_drawn_rail: None,
             tab_press: None,
             pane_press: None,
+            row_press: None,
+            file_peek: None,
+            peek_buffer: None,
             drag: None,
             drop_preview: None,
             last_drawn_dock_reveal: None,
@@ -11340,7 +11684,7 @@ impl Runtime {
         {
             self.tab_press = None;
         }
-        if self.drag.is_some_and(|drag| {
+        if self.drag.as_ref().is_some_and(|drag| {
             self.tabs
                 .get(index)
                 .is_some_and(|tab| drag.tab() == Some(tab.id))
@@ -11589,8 +11933,9 @@ impl Runtime {
         // the strip exactly as it was.
         let carried = self
             .drag
+            .as_ref()
             .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
-        let grabbed = self.drag.and_then(|drag| {
+        let grabbed = self.drag.as_ref().and_then(|drag| {
             let tab = drag.tab()?;
             self.tabs.iter().position(|candidate| candidate.id == tab)
         });
@@ -12820,6 +13165,7 @@ impl Runtime {
         stack.float = self.float_layer(now);
         stack.file_menu = self.file_menu_layer();
         stack.tooltip = self.tooltip_layer();
+        stack.file_peek = self.file_peek_layer();
         stack.drag_ghost = self.drag_ghost_layer();
         let flattened = stack.flattened();
         dump_overlay_frame(&flattened);
@@ -12887,7 +13233,7 @@ impl Runtime {
     /// has just filled it are the same picture, which is what makes the landing
     /// read as the thing you were dragging coming to rest.
     fn strip_stand_in(&self) -> Option<(usize, seats::TabContent)> {
-        let drag = self.drag?;
+        let drag = self.drag.as_ref()?;
         let DropLanding::StripExtract { slot } = drag.landing? else {
             return None;
         };
@@ -13010,7 +13356,7 @@ impl Runtime {
     /// What the plan on screen must be a function of, or `None` when there is no
     /// dock to draw.
     fn plan_inputs(&self) -> Option<PlanInputs> {
-        self.plan_inputs_for(self.drag?)
+        self.plan_inputs_for(self.drag.as_ref()?)
     }
 
     /// The same question asked of a drag the caller is holding.
@@ -13019,18 +13365,22 @@ impl Runtime {
     /// decides anything — a gesture that has ended must not be in flight while
     /// its own consequences run — so the commit cannot ask `self.drag` what it
     /// was aiming at. It asks the drag it has.
-    fn plan_inputs_for(&self, drag: Drag) -> Option<PlanInputs> {
+    fn plan_inputs_for(&self, drag: &Drag) -> Option<PlanInputs> {
         let landing = drag.landing?;
         // The strip's two landings draw themselves in the strip (K124: "the
         // preview in the strip is the ghost now"), so there is no dock box for
         // them and never was one to fade.
         landing.layout_aim()?;
-        let cargo = match drag.source {
-            DragSource::Pane(_) => None,
+        let cargo = match &drag.source {
+            // A pane and a row both arrive as one leaf, and the leaf is built
+            // where the plan is (see [`Runtime::plan_for`]) — a row has no tree
+            // of its own to carry, which is the whole difference between it and
+            // a tab.
+            DragSource::Pane(_) | DragSource::Row(_) => None,
             DragSource::Tab(id) => Some(
                 self.tabs
                     .iter()
-                    .find(|candidate| candidate.id == id)?
+                    .find(|candidate| candidate.id == *id)?
                     .seats
                     .tree()
                     .clone(),
@@ -13038,7 +13388,7 @@ impl Runtime {
         };
         Some(PlanInputs {
             landing,
-            source: drag.source,
+            source: drag.source.clone(),
             tree: self.seats.tree().clone(),
             cargo,
             viewport: self.seat_viewport,
@@ -13049,13 +13399,46 @@ impl Runtime {
     /// Run the plan (M155/M156).
     fn plan_for(&self, inputs: &PlanInputs) -> Option<seats::DropPlan> {
         let aim = inputs.landing.layout_aim()?;
-        let cargo = match (&inputs.cargo, inputs.source) {
+        // **A row's centre verbs move no rectangles at all**, so the layout the
+        // drop would make is the layout that is already on screen. That is a
+        // *plan* rather than an absence of one, and it has to be: M147 wants the
+        // pane named — with a word on it when the verb is real ("Open in this
+        // preview") and traced and wordless when it is refused — and the whole
+        // of that drawing is `dock_overlay` reading a plan. Running `plan_drop`
+        // here instead would ask for `ReplaceSeat`, which swaps the target leaf
+        // for a *fresh* one: a new seat id, a lost pin, and a content plane left
+        // filed under a pane that no longer exists. Retargeting is not a tree
+        // edit, and the plan must not pretend it is one.
+        if let Some(payload) = inputs.source.row()
+            && let DropLanding::SeatCentre { target } = inputs.landing
+        {
+            let kind = self.seats.tree().find_seat(target).map(|seat| seat.kind);
+            let mut plan =
+                self.seats
+                    .plan_content_drop(&self.seat_metrics(), inputs.viewport, target)?;
+            if row_verb(payload.kind, inputs.landing, kind) != RowVerb::Retarget(target) {
+                plan.refuse();
+            }
+            return Some(plan);
+        }
+        // An edge or a rim is a space verb whichever source asked for it, so a
+        // row arrives here as the one leaf it becomes — a page for a file, a
+        // tree for a folder ([`RowPayloadKind::leaf_kind`]). The seat id is a
+        // placeholder: `plan_drop` renumbers everything that arrives out of its
+        // own counters and reports the pairs in [`seats::DropPlan::arrived`],
+        // which is where the commit reads the identity that actually landed.
+        let arriving = inputs
+            .source
+            .row()
+            .map(|payload| bt_layout::LayoutNode::seat(row_arrival_seat(payload.kind)));
+        let cargo = match (&inputs.cargo, &arriving, &inputs.source) {
             // M156① — a tab arrives as its whole layout.
-            (Some(tree), _) => seats::DropCargo::Layout(tree),
+            (Some(tree), _, _) => seats::DropCargo::Layout(tree),
+            (_, Some(leaf), _) => seats::DropCargo::Layout(leaf),
             // M156② — a pane arrives as the seat it already is, fixed column and
             // all.
-            (None, DragSource::Pane(seat)) => seats::DropCargo::Pane(seat),
-            (None, DragSource::Tab(_)) => return None,
+            (None, None, DragSource::Pane(seat)) => seats::DropCargo::Pane(*seat),
+            (None, None, DragSource::Tab(_) | DragSource::Row(_)) => return None,
         };
         let mut plan = self
             .seats
@@ -13072,7 +13455,7 @@ impl Runtime {
         // as a tab with nothing running in it. Every other landing here moves
         // panes only inside one tree and asks nothing of the strip.
         if let (DropLanding::SeatCentre { target }, DragSource::Tab(_)) =
-            (inputs.landing, inputs.source)
+            (inputs.landing, &inputs.source)
             && !self
                 .seats
                 .tree()
@@ -13124,7 +13507,7 @@ impl Runtime {
             // dashed and empty, and "Swap panes" printed inside an outline that
             // means "this will not happen" is the box arguing with itself.
             if shown.plan.fits() {
-                shown.inputs.landing.caption(shown.inputs.source)
+                shown.inputs.landing.caption(&shown.inputs.source)
             } else {
                 ""
             },
@@ -13151,11 +13534,12 @@ impl Runtime {
     /// invisible layer still costs a text shaping pass and a raster lookup every
     /// frame the pointer moves, and "not drawn" is the same picture either way.
     fn drag_ghost_layer(&mut self) -> Vec<marks::OverlayLayer> {
-        let Some(drag) = self.drag.filter(Drag::ghost_is_shown) else {
+        let Some(drag) = self.drag.as_ref().filter(|drag| drag.ghost_is_shown()) else {
             return Vec::new();
         };
+        let (pointer, source) = (drag.pointer, drag.source.clone());
         let palette = bt_render::chrome_palette();
-        let Some((mark, mark_logical, mark_color, text)) = self.drag_label(drag, palette) else {
+        let Some((mark, mark_logical, mark_color, text)) = self.drag_label(&source, palette) else {
             return Vec::new();
         };
         let scale = self.renderer.metrics().scale_factor as f32;
@@ -13165,7 +13549,7 @@ impl Runtime {
             .renderer
             .measure_chrome_text(&text, bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale);
         let layout = seats::drag_ghost_layout(
-            [drag.pointer.x as f32, drag.pointer.y as f32],
+            [pointer.x as f32, pointer.y as f32],
             mark_logical,
             width,
             scale,
@@ -13186,12 +13570,12 @@ impl Runtime {
     /// since T1.
     fn drag_label(
         &self,
-        drag: Drag,
+        source: &DragSource,
         palette: bt_render::ChromePalette,
     ) -> Option<(marks::ChromeMark, f32, [u8; 3], String)> {
-        match drag.source {
+        match source {
             DragSource::Tab(id) => {
-                let tab = self.tabs.iter().find(|candidate| candidate.id == id)?;
+                let tab = self.tabs.iter().find(|candidate| candidate.id == *id)?;
                 Some((
                     // The tab's own mark, by the same `identityLeaf` rule the
                     // strip draws it with — a ghost is a picture of the tab it
@@ -13204,20 +13588,20 @@ impl Runtime {
                 ))
             }
             DragSource::Pane(seat) => {
-                let kind = self.seats.tree().find_seat(seat)?.kind;
+                let kind = self.seats.tree().find_seat(*seat)?.kind;
                 let (mark, size, colour) = seats::pane_mark(
                     kind,
                     self.sessions
-                        .get(&seat)
+                        .get(seat)
                         .map(|leaf| profiles::PROFILES[leaf.profile].mark),
                     palette,
                 );
                 // The dragged seat's own name, by id — the ghost and the
                 // stand-in it hands off to are two pictures of one pane, so they
                 // read the same door ([`Runtime::strip_stand_in`]).
-                let name = self.terminal_name(seat);
-                let files_name = self.files_head_name(seat);
-                let title = self.preview_head_name(seat);
+                let name = self.terminal_name(*seat);
+                let files_name = self.files_head_name(*seat);
+                let title = self.preview_head_name(*seat);
                 Some((
                     mark,
                     size,
@@ -13230,6 +13614,20 @@ impl Runtime {
                     )
                     .to_owned(),
                 ))
+            }
+            // **P87 — a row travels as its identity, and the target decides the
+            // verb.** So the ghost says what the thing *is* and never what will
+            // become of it: the same label rides the pointer over a preview it
+            // will fill, over an edge it will split and over a terminal that
+            // will refuse it. `dragLabel`'s own comment (6811-6828) is that
+            // sentence, and it is why the mark here is the leaf mark this
+            // payload would land as rather than a fourth glyph invented for
+            // dragging — a page for a file, a folder for a folder, exactly what
+            // the pane it becomes will wear in its head.
+            DragSource::Row(payload) => {
+                let (mark, size, colour) =
+                    seats::pane_mark(payload.kind.leaf_kind(), None, palette);
+                Some((mark, size, colour, payload.name.clone()))
             }
         }
     }
@@ -14508,6 +14906,18 @@ impl Runtime {
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
+        self.open_preview_image_on(surface, path)
+    }
+
+    /// The same, on a surface the caller has already chosen.
+    ///
+    /// **The split is what a drop needed** (P84): "a preview's centre shows it
+    /// here" names the pane, and the landing rule must not be re-asked — the
+    /// pane you aimed at is the pane that takes the file, whether or not it is
+    /// the one an ordinary open would have chosen. The reuse rule and the
+    /// *filling* of a surface were one function until this slice, which meant
+    /// every door had to accept `landing_preview()`'s answer.
+    fn open_preview_image_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
         // The one field of the meta line no decoder can answer, asked on the
         // same lane a document's head goes down.
         let tab = self.id;
@@ -14558,6 +14968,26 @@ impl Runtime {
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
+        self.open_preview_file_on(surface, path)
+    }
+
+    /// **Which door a path goes through, on a named surface** — the drop's own
+    /// opener.
+    ///
+    /// [`Self::open_preview`]'s split, minus the landing rule: a picture goes
+    /// down the decode lane and everything else goes through the tab's pool,
+    /// exactly as they do for a double-click, and the surface is the caller's.
+    fn open_preview_onto(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
+        if path_is_previewable_image(&path) {
+            self.open_preview_image_on(surface, path)
+        } else {
+            self.open_preview_file_on(surface, path)
+        }
+    }
+
+    /// [`Self::open_preview_file`] on a surface the caller has already chosen —
+    /// see [`Self::open_preview_image_on`] for why the two are separable.
+    fn open_preview_file_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
         let name = files_row_display_name(&path);
         // The picture on this surface, if there was one, is not what it is
         // showing any more. Cleared before the buffer lands so no frame between
@@ -17363,6 +17793,21 @@ impl Runtime {
                     match response.answer {
                         preview::PreviewAnswer::Head(outcome) => {
                             let Some(buffer) = tab.preview_pool.get_mut(&response.path) else {
+                                // **The glance's own slot** (P145): a hover
+                                // read is not an open file and never enters the
+                                // pool, so its answer lands here or nowhere.
+                                // Matched by path, exactly as the pool's is —
+                                // the pointer may have moved on to another row
+                                // during the read, and that is the cancellation
+                                // §7.1.3 asks for, arriving as a dropped result.
+                                if let Some(peek) = self
+                                    .peek_buffer
+                                    .as_mut()
+                                    .filter(|peek| peek.path == response.path)
+                                {
+                                    peek.accept(outcome);
+                                    changed |= index == self.active_tab;
+                                }
                                 continue;
                             };
                             buffer.accept(outcome);
@@ -17714,6 +18159,409 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    // ── P81: a tree row is a drag source ────────────────────────────────────
+
+    /// The row geometry of whichever host this is — **one answer for two
+    /// surfaces** (P150).
+    ///
+    /// Both hosts draw the same list with the same row height and the same
+    /// scroll, and both the hit test and the paint already go through
+    /// [`seats::files_tree_geometry`]. Asking it once here is what lets the drag
+    /// source, the glance card and the press all measure a row the same way; a
+    /// second derivation would be a rectangle that disagrees with the one under
+    /// the pointer, which is the whole class of bug the hit test's own note is
+    /// about.
+    fn row_geometry(&mut self, host: RowHost) -> Option<seats::FilesTreeGeometry> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        match host {
+            RowHost::Column(seat) => {
+                let trees = self.files_trees(Instant::now());
+                seats::files_tree_geometry_of(&self.seat_layout, &trees, scale, seat)
+            }
+            RowHost::Float(id) => {
+                let tools = self.float_head_tools(id);
+                let dock_label = self.float_dock_label_width(scale);
+                let now = Instant::now();
+                let win = self.float.drawn().find(|win| win.epoch == id)?;
+                let files = win.files()?;
+                let rows = files::tree_view(&files.files, &files.cache).rows.len();
+                let scroll = files.cache.scroll_px;
+                let geometry = float::float_geometry(
+                    risen_frame(win.frame, self.float_fade_of(win, now, scale)),
+                    win.mode,
+                    scale,
+                    dock_label,
+                    tools,
+                );
+                Some(seats::files_tree_geometry(
+                    geometry.body,
+                    rows,
+                    scroll,
+                    scale,
+                ))
+            }
+        }
+    }
+
+    /// The rows one host is showing, and the root they hang off.
+    fn host_rows(&mut self, host: RowHost) -> Option<(String, Vec<files::TreeRow>)> {
+        match host {
+            RowHost::Column(seat) => {
+                let root = self.files_state(seat).root;
+                let trees = self.files_trees(Instant::now());
+                let rows = trees.get(&seat)?.rows.clone();
+                Some((root, rows))
+            }
+            RowHost::Float(id) => {
+                let files = self.float.live(id)?.files()?;
+                let view = files::tree_view(&files.files, &files.cache);
+                Some((files.files.root.clone(), view.rows))
+            }
+        }
+    }
+
+    /// The payload one row would travel as, or `None` for a row that is not a
+    /// node (P81, and [`files::TreeRow::is_node`]'s own rule).
+    ///
+    /// A notice row is a *sentence* — "Loading …", "Empty", a permission fault —
+    /// and it has no identity to carry. A cycle row is a directory that refuses
+    /// to open, and it is a real place, so it travels as one.
+    fn row_payload(&mut self, host: RowHost, key: &str) -> Option<RowPayload> {
+        let (root, rows) = self.host_rows(host)?;
+        let row = rows.iter().find(|row| row.key == key)?;
+        let kind = match row.kind {
+            files::RowKind::File => RowPayloadKind::File,
+            files::RowKind::Directory { .. } | files::RowKind::Cycle => RowPayloadKind::Folder,
+            files::RowKind::Notice(_) => return None,
+        };
+        // An unrooted column can draw rows but cannot say where they are, and a
+        // payload without a path is a drag that has nothing to hand over.
+        (!root.is_empty()).then(|| RowPayload {
+            kind,
+            path: files::full_path(&root, key),
+            name: row.name.clone(),
+        })
+    }
+
+    /// Arm the six pixels on a tree row, whichever host it is in (P81).
+    ///
+    /// **It consumes nothing and decides nothing**, which is exactly the
+    /// mock-up's arrangement and the reason the threshold is quoted in P81's own
+    /// text: the press goes on to select the row, fold the folder and count
+    /// towards a double-click, and the latch waits beside all three. A row that
+    /// is not a node arms nothing, so a press on "Loading …" cannot become a
+    /// drag of a sentence.
+    fn arm_row_press(&mut self, host: RowHost, index: usize, position: PhysicalPosition<f64>) {
+        self.tab_press = None;
+        self.pane_press = None;
+        let Some((_, rows)) = self.host_rows(host) else {
+            return;
+        };
+        let Some(row) = rows.get(index).filter(|row| row.is_node()) else {
+            return;
+        };
+        let key = row.key.clone();
+        let Some(rect) = self.row_geometry(host).map(|tree| tree.row_rect(index)) else {
+            return;
+        };
+        self.row_press = Some(RowPress {
+            host,
+            key,
+            rect,
+            latch: DragLatch::new(position),
+        });
+    }
+
+    /// The press on a row has travelled six pixels, so the row is in the air
+    /// (P81).
+    ///
+    /// The payload is resolved **here** rather than at the press, and against
+    /// the tree as it stands now: a directory that finished loading while the
+    /// button was down has moved every row below it, and a payload taken at the
+    /// press would name the file that used to be under the pointer.
+    fn begin_row_drag(&mut self, press: RowPress, position: PhysicalPosition<f64>) -> Result<()> {
+        let Some(payload) = self.row_payload(press.host, &press.key) else {
+            return Ok(());
+        };
+        self.begin_drag(
+            DragSource::Row(payload),
+            DragCarry::Pane,
+            position,
+            Some(press.rect),
+        )
+    }
+
+    /// **The content verbs** (L141/L142) — the drop that moves no pane.
+    ///
+    /// Two sentences, and each is the verb that surface already has: a file
+    /// lands on a preview through the same door the tree's own double-click uses
+    /// ([`Self::open_preview_onto`]), and a folder re-roots a column through the
+    /// same door the root menu uses ([`Self::reroot_files_column`]). Neither is
+    /// re-implemented here, and that is what makes "dropping a file on a preview
+    /// is the same as opening it there" true rather than nearly true — the pool
+    /// lookup, the view memory and the expansion-set reset all come along
+    /// without being remembered a second time.
+    fn retarget_row_drop(&mut self, payload: &RowPayload, target: SeatId) -> Result<()> {
+        match payload.kind {
+            RowPayloadKind::File => {
+                self.open_preview_onto(PreviewSurface::Seat(target), payload.path.clone())
+            }
+            RowPayloadKind::Folder => {
+                let root = payload.path.display().to_string();
+                self.reroot_files_column(target, &root)
+            }
+        }
+    }
+
+    /// **The space verb's second half** — the leaf the plan just landed is
+    /// empty, and this is what it was landed for.
+    ///
+    /// Split out from the commit because the *tree* edit and the *content* it
+    /// carries are two different failures: a plan that does not fit never
+    /// reaches here, and a file that cannot be read still leaves a pane the user
+    /// asked for, with the preview's own refusal card in it.
+    fn fill_row_leaf(&mut self, payload: &RowPayload, seat: SeatId) -> Result<()> {
+        match payload.kind {
+            RowPayloadKind::File => {
+                self.open_preview_onto(PreviewSurface::Seat(seat), payload.path.clone())
+            }
+            RowPayloadKind::Folder => {
+                let root = payload.path.display().to_string();
+                let active = self.active_tab;
+                self.tabs[active].files.insert(
+                    seat,
+                    seats::FilesLeafState {
+                        root,
+                        ..seats::FilesLeafState::default()
+                    },
+                );
+                self.tabs[active].file_trees.remove(&seat);
+                self.mark_session_dirty(Instant::now());
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    // ── P143-P150: the glance card ──────────────────────────────────────────
+
+    /// The pointer is resting on this row — arm the 350ms, or leave a running
+    /// intent alone (P146).
+    ///
+    /// Three refusals, and each is one of the mock-up's own lines:
+    ///
+    /// * **A directory row does not glance** (`row.dataset.dir === "1"` →
+    ///   `hideFilePeek()`): there is nothing to show of a folder that the row
+    ///   itself is not already showing.
+    /// * **The same row does not restart the intent** (`row === fpeekRow`):
+    ///   crossing from a row's triangle to its name to its trailing space is
+    ///   three hover events over one row, and an intent that restarted on each
+    ///   would never mature.
+    /// * **A drag arms nothing**, which is the first line of `showFilePeek`'s
+    ///   guard and the same rule every hover in this window follows.
+    ///
+    /// Answers whether a card that was **on screen** came down, which the caller
+    /// owes a frame for. Arming an intent owes nothing — nothing is drawn for
+    /// 350ms — and that asymmetry is the whole of what this returns: the paint
+    /// debt is for the card, not for the timer.
+    fn observe_file_peek(&mut self, host: Option<(RowHost, usize)>, now: Instant) -> bool {
+        let Some((host, index)) = host.filter(|_| self.drag.is_none()) else {
+            return self.hide_file_peek();
+        };
+        let Some((root, rows)) = self.host_rows(host) else {
+            return self.hide_file_peek();
+        };
+        let Some(row) = rows
+            .get(index)
+            .filter(|row| matches!(row.kind, files::RowKind::File))
+        else {
+            return self.hide_file_peek();
+        };
+        if self
+            .file_peek
+            .as_ref()
+            .is_some_and(|peek| peek.host == host && peek.key == row.key)
+        {
+            return false;
+        }
+        let taken = self.hide_file_peek();
+        if root.is_empty() {
+            return taken;
+        }
+        let Some(rect) = self.row_geometry(host).map(|tree| tree.row_rect(index)) else {
+            return taken;
+        };
+        let (key, name) = (row.key.clone(), row.name.clone());
+        self.file_peek = Some(FilePeek {
+            host,
+            path: files::full_path(&root, &key),
+            key,
+            name,
+            rect,
+            due: Some(now + Duration::from_millis(file_peek::PEEK_INTENT_MS)),
+        });
+        taken
+    }
+
+    /// The intent has matured: read what the card will show (P147).
+    ///
+    /// **The pool answers first**, and that is P145's "shows the tab's POOL
+    /// buffer when the file is already open, so the glance never lies about
+    /// unsaved edits". Only when the pool has never heard of the file does the
+    /// glance take a body of its own — one slot, off the pool entirely, so that
+    /// running the pointer down a list of names cannot evict the eight buffers
+    /// the user actually opened (P119).
+    ///
+    /// Returns whether anything changed.
+    fn mature_file_peek(&mut self, now: Instant) -> bool {
+        let Some(peek) = self.file_peek.as_ref() else {
+            return false;
+        };
+        if peek.due.is_none_or(|due| due > now) {
+            return false;
+        }
+        let (path, name) = (peek.path.clone(), peek.name.clone());
+        if let Some(peek) = self.file_peek.as_mut() {
+            peek.due = None;
+        }
+        if self.preview_pool.get(&path).is_some() {
+            self.peek_buffer = None;
+            return true;
+        }
+        let buffer = preview::PreviewBuffer::new(path.clone(), name);
+        let wants_read = buffer.wants_head_read();
+        self.peek_buffer = Some(buffer);
+        if wants_read {
+            let tab = self.id;
+            if !self.preview_worker.request(preview::PreviewRequest {
+                tab,
+                path,
+                want: preview::PreviewWant::Head,
+            }) {
+                self.disable_preview_worker();
+            }
+        }
+        true
+    }
+
+    /// **Every way the glance ends** (P149): leave, press, scroll, drag, and the
+    /// window losing focus.
+    ///
+    /// One door, because "gone on leave/press/scroll/drag" is one sentence about
+    /// one card, and four call sites each clearing two of the three fields is
+    /// how a card outlives the row it was about.
+    ///
+    /// Answers whether a card that was **showing** came down — a matured peek,
+    /// not a timer — because that is the only case that owes a frame.
+    fn hide_file_peek(&mut self) -> bool {
+        let showing = self
+            .file_peek
+            .as_ref()
+            .is_some_and(|peek| peek.due.is_none());
+        self.file_peek = None;
+        self.peek_buffer = None;
+        showing
+    }
+
+    /// What the card is saying, or `None` while the intent is still running.
+    ///
+    /// The body is derived here, on the frame that draws it, rather than stored
+    /// when the peek was armed: a head read that lands two frames later has to
+    /// reach a card that is already on screen, and a buffer being edited in a
+    /// pane behind the card has to reach it too. Both are the same fact — the
+    /// glance is a *view* of a buffer, never a copy of one.
+    fn file_peek_content(&self) -> Option<(file_peek::PeekContent, [f32; 4])> {
+        let peek = self.file_peek.as_ref()?;
+        if peek.due.is_some() {
+            return None;
+        }
+        // The pool's copy wins whenever there is one — the glance shows the file
+        // as this tab has it, edits and all.
+        let buffer = self
+            .preview_pool
+            .get(&peek.path)
+            .or(self.peek_buffer.as_ref())?;
+        let ftype = preview::preview_ftype(&peek.name);
+        let body = match ftype {
+            preview::PreviewFtype::Image => file_peek::PeekBody::Image,
+            preview::PreviewFtype::Unknown => file_peek::PeekBody::Refused,
+            _ => match buffer.refusal() {
+                // A network path or a type this window will not read says so in
+                // the card's own one line, exactly as the preview pane's unknown
+                // card does — the refusal is the preview's judgement, borrowed.
+                Some(_) => file_peek::PeekBody::Refused,
+                None => {
+                    let content = buffer.content.as_deref().unwrap_or_default();
+                    let mut lines: Vec<String> = content
+                        .lines()
+                        .take(file_peek::PEEK_BODY_LINES)
+                        .map(preview::expand_tabs)
+                        .collect();
+                    // "…" when there was more, which is the mock-up's own tail
+                    // (6410) and the only thing the card says about the rest of
+                    // the file.
+                    if content.lines().nth(file_peek::PEEK_BODY_LINES).is_some() {
+                        lines.push("…".to_owned());
+                    }
+                    file_peek::PeekBody::Lines(lines)
+                }
+            },
+        };
+        Some((
+            file_peek::PeekContent {
+                name: peek.name.clone(),
+                ftype: ftype.label().to_owned(),
+                dirty: buffer.dirty,
+                body,
+            },
+            peek.rect,
+        ))
+    }
+
+    /// The 350ms is up — put the card on screen (P145).
+    fn advance_file_peek(&mut self, now: Instant) -> Result<()> {
+        if !self.mature_file_peek(now) {
+            return Ok(());
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The card's layer, or nothing when no glance is up.
+    fn file_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some((content, row)) = self.file_peek_content() else {
+            return Vec::new();
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        // Only the font knows how wide a line is, so the measuring happens here,
+        // beside the renderer, exactly as the tip's and the ghost's do.
+        let name_width = self
+            .renderer
+            .measure_chrome_text(&content.name, file_peek::PEEK_HEAD_FONT_LOGICAL_PX * scale);
+        let ftype_width = self
+            .renderer
+            .measure_chrome_text(&content.ftype, file_peek::PEEK_TYPE_FONT_LOGICAL_PX * scale);
+        let layout = file_peek::layout(
+            &content,
+            row,
+            (width as f32, height as f32),
+            name_width,
+            ftype_width,
+            scale,
+        );
+        vec![file_peek::build(
+            &layout,
+            &content,
+            &bt_render::chrome_palette(),
+            scale,
+        )]
     }
 
     /// How wide each files head's name is drawn (B15).
@@ -18287,6 +19135,30 @@ impl Runtime {
         ))
     }
 
+    /// **Which tree row the pointer is on, on whichever host owns it** (P150).
+    ///
+    /// The floats first and topmost first, then the docked columns, which is the
+    /// order every other pointer question in this window is asked in: a window
+    /// is drawn over the panes, so a point inside a floating tree standing
+    /// across a column belongs to the window.
+    ///
+    /// [`Self::file_row_under`] answers the *context menu's* question, which is
+    /// narrower on purpose — it wants a `RowActivation` and it declines folders.
+    /// This one answers "which row", because the glance card has its own rules
+    /// about which kinds of row it will show and the drag has different ones
+    /// again.
+    fn row_under(&mut self, position: PhysicalPosition<f64>) -> Option<(RowHost, usize)> {
+        if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
+            return Some((RowHost::Float(id), index));
+        }
+        match self.chrome_target_at(position) {
+            Some(seats::ChromeTarget::FilesRow { seat, index }) => {
+                Some((RowHost::Column(seat), index))
+            }
+            _ => None,
+        }
+    }
+
     /// The file menu's own level of the overlay stack, or nothing when none is
     /// up.
     fn file_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
@@ -18676,7 +19548,12 @@ impl Runtime {
             float::FloatPart::Foot => self.reveal_float_root(id)?,
             float::FloatPart::Save => self.save_preview_on(PreviewSurface::Float(id))?,
             float::FloatPart::Flip => self.flip_preview_source_on(PreviewSurface::Float(id))?,
-            float::FloatPart::Row(index) => self.press_float_row(id, index)?,
+            float::FloatPart::Row(index) => {
+                // The float's rows are drag sources on the same terms the
+                // column's are — P150's "delegated on both hosts".
+                self.arm_row_press(RowHost::Float(id), index, position);
+                self.press_float_row(id, index)?;
+            }
             float::FloatPart::Head => {
                 let frame = self.float.live(id).map(|win| win.frame).unwrap_or_default();
                 let grab = [position.x as f32 - frame[0], position.y as f32 - frame[1]];
@@ -18977,10 +19854,8 @@ impl Runtime {
                 // `height: auto` is the tree's; a buffer float is sized by its
                 // own opening rule and has no row count to follow.
                 let files = win.files()?;
-                let rows = files::tree_view(&files.files, &files.cache).rows.len();
-                let body = seats::files_tree_content_height(rows, scale);
                 let size = float::float_opening_size(
-                    float::float_height_for_body(body, scale),
+                    files_float_content_height(&files.files, &files.cache, viewport, scale),
                     viewport,
                     scale,
                     float::FloatSizing::files(),
@@ -19696,10 +20571,8 @@ impl Runtime {
         self.root_menu.close();
         let scale = self.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
-        let rows = files::tree_view(&state, &cache).rows.len();
-        let body = seats::files_tree_content_height(rows, scale);
         let size = float::float_opening_size(
-            float::float_height_for_body(body, scale),
+            files_float_content_height(&state, &cache, viewport, scale),
             viewport,
             scale,
             float::FloatSizing::files(),
@@ -19958,9 +20831,51 @@ impl Runtime {
         }
         let pane = self.preview_panes.remove(surface).unwrap_or_default();
         let metrics = self.seat_metrics();
+        // **The pane leaves either way** (P61). Closing is the ordinary route and
+        // it is refused for exactly one tree — the one with nothing else in it
+        // (G84) — where the honest reading of a *move* is not "then nothing
+        // happens" but "then the tab keeps a shell": `stand_in_terminal` puts a
+        // default profile where the preview stood, and the buffer floats free.
+        // Leaving the no-op there is what made the mock-up's window duplicate
+        // itself (3838-3843), docked and floating at once.
         if !self.seats.close_seat(&metrics, seat) {
-            *self.preview_panes.entry(surface) = pane;
-            return Ok(());
+            // **The shell is spawned before the tree is touched**, against the
+            // slot the preview is standing in this very frame — which is the slot
+            // the stand-in inherits unchanged, because `ReplaceSeat` swaps the
+            // leaf inside the slot and moves no rectangle. Nothing here is
+            // invented (L10): it is the rectangle already on screen, and
+            // `settle_seat_set_change` below re-solves and tells the shell its
+            // real columns the ordinary way. Doing it in this order is what keeps
+            // the failure clean — a `create_leaf_session` that cannot start a
+            // ConPTY leaves the pane exactly where it was.
+            let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+            else {
+                *self.preview_panes.entry(surface) = pane;
+                return Ok(());
+            };
+            let proxy = self.event_proxy.clone();
+            let wake: OutputWake = Arc::new(move || {
+                let _ = proxy.send_event(AppEvent::PtyOutput);
+            });
+            let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
+            // The **default** profile, which is what a stand-in is: it is not
+            // inherited from anything, because the pane it replaces was never
+            // running a shell to inherit from.
+            let session = create_leaf_session(
+                &self.renderer,
+                body,
+                wake,
+                None,
+                &LeafSeed::default(),
+                &self.profile_programs,
+                formulas,
+            )?;
+            let Some(arrived) = self.seats.stand_in_terminal(&metrics, seat) else {
+                *self.preview_panes.entry(surface) = pane;
+                return Ok(());
+            };
+            self.sessions.insert(arrived, session);
+            self.focused_leaf = arrived;
         }
         // The texture lane is a seat's ([`TabState::preview_raster`]), so a
         // picture carried into a window keeps its head, its foot and its meta
@@ -22546,6 +23461,19 @@ impl Runtime {
                 .expect("a press that travelled is a press")
                 .seat;
             self.begin_pane_drag(seat, position)?;
+        } else if self
+            .row_press
+            .as_mut()
+            .is_some_and(|press| press.latch.travelled(position, scale))
+        {
+            // P81/J113 — the third source crosses the same six pixels, through
+            // the same latch, in the same `else if` chain: one press is in the
+            // hand at a time, and which one it is was decided at the press.
+            let press = self
+                .row_press
+                .clone()
+                .expect("a press that travelled is a press");
+            self.begin_row_drag(press, position)?;
         }
         // A drag owns the pointer outright, exactly as a divider drag does:
         // hover, the peek flyout, the hyperlink underline and the terminal's own
@@ -22575,6 +23503,22 @@ impl Runtime {
         };
         self.float.observe(trigger, Instant::now());
         self.drive_float_hover(position)?;
+        // P146/P150 — the glance's intent, armed by the row under the pointer
+        // on **either** host, and disarmed by everything else. Asked here for
+        // the flyout intent's own reason one line up: it is the hit tests that
+        // say which row — if any — is under the pointer, and the answer has to
+        // be this frame's. Every path that owns the pointer has returned above,
+        // so a drag, a divider and a float carry cannot arm one.
+        let row = self.row_under(position);
+        // The card is taken down **here**, on the move that left the row, and the
+        // frame it owes is paid here too: the chrome hover above has already
+        // presented by the time this runs, so a card retired without its own
+        // repaint would stay on the glass until some unrelated event redrew it —
+        // which under a hand that has come to rest is never (real-machine
+        // capture, 2026-08-13: the glance survived the move onto a folder row).
+        if self.observe_file_peek(row, Instant::now()) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
         // Below every gesture that owns the pointer and beside the hover it
         // follows: the anchors under a drag or a divider were never reached, and
         // each of those paths returned above having said so. An open picker also
@@ -23012,9 +23956,10 @@ impl Runtime {
         // comes back up, which is why `dblclick` is a release-time event;
         // counting the press as well would pair each click with itself and turn
         // the very first one into a double.
-        // One button, one press: whichever source the router chose, the other is
-        // not being held.
+        // One button, one press: whichever source the router chose, the others
+        // are not being held.
         self.pane_press = None;
+        self.row_press = None;
         self.tab_press = Some(if index == self.active_tab {
             TabPress::settled(tab, position, now)
         } else {
@@ -23134,6 +24079,11 @@ impl Runtime {
                 home,
             }),
             position,
+            // A tab is carried *inside* the strip, so "back where it came from"
+            // is a slot rather than a rectangle, and J120's settle already puts
+            // it there. A home rectangle would be a second, coarser answer to a
+            // question the run answers exactly.
+            None,
         )
     }
 
@@ -23160,7 +24110,11 @@ impl Runtime {
         // condition that is always false would be inventing the guard rather than
         // implementing it. It belongs with the Focus-Mode slice, which is where
         // the state it reads is born.
-        self.begin_drag(DragSource::Pane(seat), DragCarry::Pane, position)
+        // K135 covers a pane already, and by identity rather than by geometry:
+        // a pane held over its own rectangle has no landing however that
+        // rectangle has moved since the press. A home rectangle here would be
+        // the same rule stated worse.
+        self.begin_drag(DragSource::Pane(seat), DragCarry::Pane, position, None)
     }
 
     /// Everything a drag does on the way in, whatever it is carrying (J112).
@@ -23174,16 +24128,22 @@ impl Runtime {
         source: DragSource,
         carry: DragCarry,
         position: PhysicalPosition<f64>,
+        home: Option<[f32; 4]>,
     ) -> Result<()> {
         // `hidePeek()` is the first line of `startDrag` (6482), and L135 is why:
         // a schematic left hanging under a thing that is now moving would be
         // describing where that thing used to be.
         self.hide_layout_peek()?;
+        // And the glance card, for the same sentence one surface further in: a
+        // row that is now travelling is not a row the pointer is resting on
+        // (P145 — "gone on leave/press/scroll/**drag**").
+        self.hide_file_peek();
         self.drag = Some(Drag {
             source,
             carry,
             pointer: position,
             landing: None,
+            home,
         });
         // Hover goes quiet for the whole gesture: while something is in your hand
         // the chrome has nothing to offer the pointer, and a `×` lighting up
@@ -23206,7 +24166,7 @@ impl Runtime {
     /// you are holding cannot be carried out over the caption buttons, off the
     /// window's left edge, or past the rail's head or foot.
     fn track_grabbed(&self, position: PhysicalPosition<f64>) -> Option<f32> {
-        let drag = self.drag?;
+        let drag = self.drag.as_ref()?;
         let (tab, carry) = (drag.tab()?, drag.tab_carry()?);
         let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
         let run = self.tab_run(Instant::now())?;
@@ -23255,17 +24215,27 @@ impl Runtime {
     /// pointer move, on a strip of at most a few dozen tabs.
     fn survey_drop(
         &self,
-        source: DragSource,
+        source: &DragSource,
+        home: Option<[f32; 4]>,
         position: PhysicalPosition<f64>,
     ) -> Option<DropLanding> {
         let scale = self.renderer.metrics().scale_factor as f32;
+        // **P86 — home ground, asked before anything else.** A payload let go
+        // over the very rectangle it was picked up from has landed nowhere, in
+        // any zone and on any surface. It is K135's sentence for a source that
+        // is not a pane, and it is asked first for K135's reason: "is this where
+        // I picked it up" is a fact about the hand, and no amount of geometry
+        // underneath can make a retraction mean something else.
+        if over_home_ground(home, position) {
+            return None;
+        }
         if let Some(run) = self.tab_run(Instant::now())
             && run.contains(position.x, position.y)
         {
             return self.survey_strip(source, &run, position);
         }
         // K129 — dragging the active tab onto its own layout is meaningless.
-        if source == DragSource::Tab(self.tabs[self.active_tab].id) {
+        if *source == DragSource::Tab(self.tabs[self.active_tab].id) {
             return None;
         }
         let aim = seats::aim_at_layout(
@@ -23295,13 +24265,14 @@ impl Runtime {
     /// coordinate all arrive already projected onto the axis that run is on.
     fn survey_strip(
         &self,
-        source: DragSource,
+        source: &DragSource,
         run: &seats::TabRun,
         position: PhysicalPosition<f64>,
     ) -> Option<DropLanding> {
         let slot_mids = run.mids();
         match source {
             DragSource::Tab(tab) => {
+                let tab = *tab;
                 let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
                 let half = run.half(index)?;
                 let mid = *slot_mids.get(index)?;
@@ -23332,7 +24303,7 @@ impl Runtime {
             // the user watches and the slot the release inserts at are one
             // number — see [`strip_insert_slot`].
             DragSource::Pane(seat) => {
-                self.tear_out_is_hostable(seat)
+                self.tear_out_is_hostable(*seat)
                     .then(|| DropLanding::StripExtract {
                         slot: strip_insert_slot(
                             seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
@@ -23340,6 +24311,29 @@ impl Runtime {
                         ),
                     })
             }
+            // **P85/S3's tab-strip verbs are held back, and the reason is
+            // structural rather than a preference** (recorded 2026-08-13).
+            //
+            // The mock-up's `fileToTab` makes "a fresh workspace holding one
+            // preview pane" and `folderToTab` makes one holding a files column.
+            // Neither is representable here: a `TabState` requires a non-empty
+            // `sessions` map and a `focused_leaf` naming one of them, and the
+            // three layers that enforce it are written out at length above
+            // [`only_a_terminal_pane_can_become_a_tab_of_its_own`] — a hundred
+            // `Deref` sites that resolve to *the focused shell*, a `Seats` that
+            // carries a mandatory `terminal: SeatId`, and a strip whose identity
+            // paths are all built out of a shell. That is the files-tab slice,
+            // and it is the same wall `pane_can_become_a_tab` has been standing
+            // at since I106.
+            //
+            // So the strip **offers nothing** rather than offering something it
+            // cannot perform. It is exactly what a non-hostable pane already
+            // gets one arm up, and M147 is satisfied the same way it is there:
+            // the strip has no dashed form to wear, so the honest refusal is to
+            // draw no insertion caret at all (6789's `paneCount > 1` guard is
+            // one sentence about a different limit). The ghost stays under the
+            // pointer saying what is in the hand, and letting go sends it home.
+            DragSource::Row(_) => None,
         }
     }
 
@@ -23407,14 +24401,14 @@ impl Runtime {
     /// the hand is and a hand that has moved has moved whether or not anything is
     /// willing to receive it.
     fn drive_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(mut drag) = self.drag else {
+        let Some(mut drag) = self.drag.clone() else {
             return Ok(false);
         };
         // What is in the hand can go away underneath the gesture — a background
         // shell exits and `reap_exited_tabs` closes its tab, or a seat is closed
         // by a verb this window ran for some other reason. There is then nothing
         // left to drag, and the state must not survive the thing it points at.
-        if !self.drag_source_lives(drag.source) {
+        if !self.drag_source_lives(&drag.source) {
             self.drag = None;
             self.apply_pointer_cursor();
             if self.refresh_chrome() {
@@ -23424,7 +24418,7 @@ impl Runtime {
         }
         drag.pointer = position;
         self.leave_strip(&mut drag, position)?;
-        drag.landing = self.survey_drop(drag.source, position);
+        drag.landing = self.survey_drop(&drag.source, drag.home, position);
         if let (Some(DropLanding::StripReorder { slot }), Some(tab), Some(carry)) =
             (drag.landing, drag.tab(), drag.tab_carry())
         {
@@ -23444,10 +24438,17 @@ impl Runtime {
     }
 
     /// Whether the thing this drag is carrying is still in the window.
-    fn drag_source_lives(&self, source: DragSource) -> bool {
+    fn drag_source_lives(&self, source: &DragSource) -> bool {
         match source {
-            DragSource::Tab(tab) => self.tabs.iter().any(|candidate| candidate.id == tab),
-            DragSource::Pane(seat) => self.seats.tree().contains(seat),
+            DragSource::Tab(tab) => self.tabs.iter().any(|candidate| candidate.id == *tab),
+            DragSource::Pane(seat) => self.seats.tree().contains(*seat),
+            // A row's payload is a *path*, and a path does not stop existing
+            // because the list it was read out of was rebuilt — which is the
+            // whole reason the payload is the identity rather than an index
+            // (P87). Whether the file is still on the disk is the drop's
+            // question and it is asked where it can be answered: the read that
+            // fills the buffer, or the walk that fills the column.
+            DragSource::Row(_) => true,
         }
     }
 
@@ -23632,6 +24633,7 @@ impl Runtime {
         // A gesture is not a click, and it is not half of one either.
         self.tab_press = None;
         self.pane_press = None;
+        self.row_press = None;
         self.tab_clicks.interrupt();
         match release_verdict(drag.landing) {
             DragRelease::Commit => {
@@ -23655,16 +24657,16 @@ impl Runtime {
             // the pointer's answer is a function of a tree and a viewport, and
             // both can move under a still hand — has landed nowhere, which is
             // exactly what J120 is for. One outcome, reached two ways.
-            DragRelease::Land if self.commit_layout_drop(drag)? => {}
+            DragRelease::Land if self.commit_layout_drop(&drag)? => {}
             // N157, and the same "one outcome, reached two ways" above it: a
             // tear-out the tree refuses between the survey and the release (the
             // pane's sibling closed under a still hand, so G84 now applies) has
             // landed nowhere. A pane going home is a no-op by construction — the
             // tree was never touched — which is why this can be tried and
             // abandoned safely.
-            DragRelease::Extract { slot } if self.commit_pane_extract(drag, slot)? => {}
+            DragRelease::Extract { slot } if self.commit_pane_extract(&drag, slot)? => {}
             DragRelease::Extract { .. } | DragRelease::Land | DragRelease::Home => {
-                self.settle_home(drag)
+                self.settle_home(&drag)
             }
         }
         self.finish_drag()
@@ -23690,7 +24692,7 @@ impl Runtime {
     /// leaf all reach disk through the one channel that already carries them.
     ///
     /// Answers whether the tree changed.
-    fn commit_layout_drop(&mut self, drag: Drag) -> Result<bool> {
+    fn commit_layout_drop(&mut self, drag: &Drag) -> Result<bool> {
         let Some(inputs) = self.plan_inputs_for(drag) else {
             return Ok(false);
         };
@@ -23710,8 +24712,41 @@ impl Runtime {
         // here even though it is the same kind of before-and-after question. It
         // belongs beside the N160① that would overwrite it, which is
         // [`absorb_tab_into_layout`] — where a test can run the two in order.
+        // **A row's centre verb is committed before anything is adopted, and
+        // there is nothing to adopt.** `plan_for` built the *live* tree for it
+        // (see [`seats::Seats::plan_content_drop`]), so `adopt_drop` would
+        // install the layout that is already installed and move the focus for a
+        // gesture that moved no pane. What the drop actually is, is one sentence
+        // about one pane's content — and the verb table decides which.
+        if let Some(payload) = drag.source.row() {
+            let target_kind = inputs
+                .landing
+                .aimed_at()
+                .and_then(|seat| self.seats.tree().find_seat(seat))
+                .map(|seat| seat.kind);
+            match row_verb(payload.kind, inputs.landing, target_kind) {
+                // M147 — the box said so while the hand was open, and the
+                // release says the same thing by doing nothing at all.
+                RowVerb::Refused => return Ok(false),
+                RowVerb::Retarget(target) => {
+                    self.retarget_row_drop(payload, target)?;
+                    return Ok(true);
+                }
+                RowVerb::Split => {}
+            }
+        }
         let arrived = plan.arrived.clone();
-        let displaced = match (inputs.landing, drag.source) {
+        // **The seat the plan minted for a row**, read before `adopt_drop`
+        // consumes the plan. `arrived` is the renumbering's own record and a row
+        // arrives as exactly one leaf, so the single pair in it is the identity
+        // the payload has to be filed under — derived from the plan rather than
+        // re-found in the new tree, which is the same argument N159's remapping
+        // already makes.
+        let landed_row = drag
+            .source
+            .row()
+            .and_then(|_| arrived.first().map(|(_, landed)| *landed));
+        let displaced = match (inputs.landing, &drag.source) {
             (DropLanding::SeatCentre { target }, DragSource::Tab(_)) => {
                 self.seats.tree().find_seat(target).cloned()
             }
@@ -23719,6 +24754,13 @@ impl Runtime {
         };
         if self.seats.adopt_drop(plan).is_none() {
             return Ok(false);
+        }
+        if let (Some(payload), Some(seat)) = (drag.source.row(), landed_row) {
+            // The pane exists and is empty; filling it is the same verb the
+            // ordinary doors run, on a surface named rather than chosen.
+            self.settle_seat_set_change()?;
+            self.fill_row_leaf(&payload.clone(), seat)?;
+            return Ok(true);
         }
         if let Some(source) = drag.tab() {
             self.absorb_tab(source, &arrived, displaced)?;
@@ -23824,7 +24866,7 @@ impl Runtime {
     /// Answers whether anything moved. `false` leaves the gesture to J120's slide
     /// home, which for a pane is a no-op — the tree was untouched for the whole
     /// drag.
-    fn commit_pane_extract(&mut self, drag: Drag, slot: usize) -> Result<bool> {
+    fn commit_pane_extract(&mut self, drag: &Drag, slot: usize) -> Result<bool> {
         let DragSource::Pane(seat) = drag.source else {
             return Ok(false);
         };
@@ -23891,8 +24933,9 @@ impl Runtime {
         };
         self.tab_press = None;
         self.pane_press = None;
+        self.row_press = None;
         self.tab_clicks.interrupt();
-        self.settle_home(drag);
+        self.settle_home(&drag);
         self.finish_drag()
     }
 
@@ -23905,7 +24948,7 @@ impl Runtime {
     /// already is, and the honest implementation of going home is to do nothing.
     /// That is not a gap — it is the reason a pane drag is safe to abandon at any
     /// moment.
-    fn settle_home(&mut self, drag: Drag) {
+    fn settle_home(&mut self, drag: &Drag) {
         let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry()) else {
             return;
         };
@@ -24095,7 +25138,7 @@ impl Runtime {
             // A pane press that never travelled has nothing to settle: D40 moved
             // the focus on the way down and that is all a press on a head has
             // ever meant. Dropping it is the whole of letting go.
-            let held_pane = self.pane_press.take().is_some();
+            let held_pane = self.pane_press.take().is_some() | self.row_press.take().is_some();
             if let Some(press) = self.tab_press.take() {
                 self.release_tab_press(press, target)?;
                 return Ok(true);
@@ -24106,6 +25149,15 @@ impl Runtime {
             return Ok(target.is_some());
         }
         let target = self.chrome_target_at(position);
+        // **P149 — the glance is gone on press**, whatever the press turns out to
+        // mean and before it means it. A card that survived the button going
+        // down would be standing over the pane the press just opened.
+        if self.hide_file_peek() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        // A press that lands on something other than a row leaves no row press
+        // behind. The arms below that *are* rows arm their own, after this.
+        self.row_press = None;
         // D40, above the router and consuming nothing: every press inside a pane
         // moves the layout focus there, whatever else the press goes on to mean.
         // Above the rename guard too — clicking into another pane is a blur, and
@@ -24311,6 +25363,11 @@ impl Runtime {
             }
             seats::ChromeTarget::FilesRow { seat, index } => {
                 self.tab_clicks.interrupt();
+                // P81, in the mock-up's own order: the row is armed as a drag
+                // source *and* pressed. Arming first, because `press_files_row`
+                // can unfold a directory and rebuild the list under the very
+                // index this is about.
+                self.arm_row_press(RowHost::Column(seat), index, position);
                 self.press_files_row(seat, index)?;
             }
             // B24 — the strip is one button and pressing it hands the folder to
@@ -25224,6 +26281,14 @@ impl Runtime {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // **P149's `document scroll`, capture: true** — "including the tree's
+        // own scrolling". Said once, above every branch below, because that is
+        // what a capturing listener on the document *is*: whatever this notch
+        // turns out to scroll, the card was placed against a row that is about
+        // to be somewhere else.
+        if self.hide_file_peek() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
         // A notch behind the scrim is nobody's — scrolling the terminal under a
         // modal is the same violation as clicking it. But the dialog's content
         // no longer always fits: `max-height` plus `overflow-y` is a scroller,
@@ -26667,6 +27732,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                     .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
                 runtime.tab_press = None;
                 runtime.pane_press = None;
+                runtime.row_press = None;
+                // P149's `window blur`: a glance is about where the pointer is,
+                // and a window that is not listening has no pointer.
+                runtime.hide_file_peek();
                 runtime.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                 // Commit during this transition, and the product decision is to accept it.
@@ -26788,6 +27857,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        // The glance card's own 350ms, beside the layout peek's and for the same
+        // reason it stands where it does: it is a *peek*, and a peek that has
+        // matured is already on screen when everything above it asks.
+        if let Err(error) = runtime.advance_file_peek(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // The float's two clocks and its entrance. After the tip's, because a
         // maturing intent can *open* a window over whatever the tip was about to
         // explain, and the frame both are due on should show that in the order
@@ -26867,6 +27943,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
             runtime.layout_peek.deadline(),
+            // The glance's 350ms while one is settling, and nothing afterwards:
+            // like the schematic it has no fade, so a card on screen is finished
+            // and asks for no frames at all.
+            runtime.file_peek.as_ref().and_then(|peek| peek.due),
             // The intent's 180ms, the grace's 220/420, and the entrance's own
             // frames until it lands. A window with no float and no hovered
             // trigger reports nothing and costs no wake-ups at all.
@@ -28523,7 +29603,8 @@ mod tests {
             modal: mark(5),
             file_menu: mark(6),
             tooltip: mark(7),
-            drag_ghost: mark(8),
+            file_peek: mark(8),
+            drag_ghost: mark(9),
         };
         let order: Vec<u8> = stack
             .flattened()
@@ -28532,8 +29613,8 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![1, 2, 3, 4, 5, 6, 7, 8],
-            "bottom to top: rail, ground, schematic, float, modal, file menu, tip, ghost"
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "bottom to top: rail, ground, schematic, float, modal, file menu, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -28555,6 +29636,14 @@ mod tests {
         assert!(
             at(7) > at(5) && at(7) > at(4),
             "the tip is covered by nothing"
+        );
+        // P143 — `.file-peek { z-index: 70 }` against `#files-flyout`'s 60: the
+        // glance card is drawn over the pinned window, because "flyout rows peek
+        // too" and a card that its own host covered would be unreadable in the
+        // very place the ruling names.
+        assert!(
+            at(8) > at(4) && at(8) > at(7),
+            "the glance card stands over the float it may have been raised from"
         );
     }
 
@@ -38461,7 +39550,6 @@ mod tests {
     /// invariant rather than a choice any caller makes.
     fn drag_of(source: DragSource, landing: Option<DropLanding>) -> Drag {
         Drag {
-            source,
             carry: match source {
                 DragSource::Tab(tab) => DragCarry::Tab(TabCarry {
                     grab: 0.0,
@@ -38470,10 +39558,12 @@ mod tests {
                     moved: false,
                     home: tab,
                 }),
-                DragSource::Pane(_) => DragCarry::Pane,
+                DragSource::Pane(_) | DragSource::Row(_) => DragCarry::Pane,
             },
+            source,
             pointer: PhysicalPosition::new(0.0, 0.0),
             landing,
+            home: None,
         }
     }
 
@@ -38613,19 +39703,19 @@ mod tests {
             seats::LayoutAim::SeatCentre(mine),
         ] {
             assert_eq!(
-                landing_for_aim(held, aim),
+                landing_for_aim(&held, aim),
                 None,
                 "a pane held over its own rectangle has no landing: {aim:?}"
             );
         }
         assert_eq!(
-            landing_for_aim(held, seats::LayoutAim::SeatCentre(other)),
+            landing_for_aim(&held, seats::LayoutAim::SeatCentre(other)),
             Some(DropLanding::SeatCentre { target: other }),
             "a neighbour is a target like any other"
         );
         assert_eq!(
             landing_for_aim(
-                DragSource::Tab(TabId(1)),
+                &DragSource::Tab(TabId(1)),
                 seats::LayoutAim::SeatCentre(mine)
             ),
             Some(DropLanding::SeatCentre { target: mine }),
@@ -38647,7 +39737,7 @@ mod tests {
         for edge in seats::DropEdge::NEAREST_FIRST {
             assert_eq!(
                 landing_for_aim(
-                    DragSource::Pane(bt_layout::SeatId(1)),
+                    &DragSource::Pane(bt_layout::SeatId(1)),
                     seats::LayoutAim::Rim(edge)
                 ),
                 Some(DropLanding::RootRim { edge })
@@ -43218,10 +44308,10 @@ mod tests {
 
     // ── U6: the plan, its cache, and the word in the box (M148, M155, L137) ──
 
-    fn inputs_of(landing: DropLanding, source: DragSource) -> PlanInputs {
+    fn inputs_of(landing: DropLanding, source: &DragSource) -> PlanInputs {
         PlanInputs {
             landing,
-            source,
+            source: source.clone(),
             tree: LayoutNode::seat(bt_layout::Seat::new(
                 bt_layout::SeatId(1),
                 bt_layout::SeatKind::Terminal,
@@ -43248,33 +44338,33 @@ mod tests {
             target: bt_layout::SeatId(2),
             edge: seats::DropEdge::Right,
         };
-        let base = inputs_of(landing, pane);
-        assert_eq!(base, inputs_of(landing, pane), "the same question, twice");
+        let base = inputs_of(landing, &pane);
+        assert_eq!(base, inputs_of(landing, &pane), "the same question, twice");
 
         let moved_zone = inputs_of(
             DropLanding::SeatEdge {
                 target: bt_layout::SeatId(2),
                 edge: seats::DropEdge::Left,
             },
-            pane,
+            &pane,
         );
         assert_ne!(
             base, moved_zone,
             "the other side of the same pane is a new plan"
         );
 
-        let mut resized = inputs_of(landing, pane);
+        let mut resized = inputs_of(landing, &pane);
         resized.viewport = LogicalRect::from_px(1200, 900);
         assert_ne!(
             base, resized,
             "a resize re-plans without the pointer moving"
         );
 
-        let mut rescaled = inputs_of(landing, pane);
+        let mut rescaled = inputs_of(landing, &pane);
         rescaled.scale_ppm = 1_500_000;
         assert_ne!(base, rescaled, "and so does a DPI change");
 
-        let mut edited = inputs_of(landing, pane);
+        let mut edited = inputs_of(landing, &pane);
         edited.tree = LayoutNode::split(
             bt_layout::SplitId(1),
             Axis::Row,
@@ -43289,7 +44379,7 @@ mod tests {
         );
         assert_ne!(base, edited, "a tree that changed under the drag re-plans");
 
-        let carried = inputs_of(landing, DragSource::Tab(TabId(7)));
+        let carried = inputs_of(landing, &DragSource::Tab(TabId(7)));
         assert_ne!(
             base, carried,
             "the same zone means a different thing depending on what is in the hand"
@@ -43308,11 +44398,11 @@ mod tests {
         let pane = DragSource::Pane(bt_layout::SeatId(1));
         let tab = DragSource::Tab(TabId(1));
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(pane),
+            DropLanding::SeatCentre { target }.caption(&pane),
             "Swap panes"
         );
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(tab),
+            DropLanding::SeatCentre { target }.caption(&tab),
             "Replace pane"
         );
         for landing in [
@@ -43327,11 +44417,11 @@ mod tests {
             DropLanding::StripReorder { slot: 0 },
         ] {
             assert_eq!(
-                landing.caption(pane),
+                landing.caption(&pane),
                 "",
                 "{landing:?} draws its own meaning"
             );
-            assert_eq!(landing.caption(tab), "");
+            assert_eq!(landing.caption(&tab), "");
         }
     }
 
@@ -43345,7 +44435,7 @@ mod tests {
             seats::LayoutAim::SeatEdge(seat, seats::DropEdge::Left),
             seats::LayoutAim::SeatCentre(seat),
         ] {
-            let landing = landing_for_aim(DragSource::Tab(TabId(1)), aim)
+            let landing = landing_for_aim(&DragSource::Tab(TabId(1)), aim)
                 .expect("a tab may land on any of them");
             assert_eq!(landing.layout_aim(), Some(aim));
         }
@@ -43538,5 +44628,377 @@ mod tests {
         panes.entry(float).scroll = [0.0, 20.0];
         assert_eq!(panes.get(seat).expect("a view").scroll, [0.0, 10.0]);
         assert_eq!(panes.get(float).expect("a view").scroll, [0.0, 20.0]);
+    }
+
+    // ── P81-P88: the row drag and its verb table ───────────────────────────
+
+    fn file_row(name: &str) -> RowPayload {
+        RowPayload {
+            kind: RowPayloadKind::File,
+            path: PathBuf::from("C:\\work").join(name),
+            name: name.to_owned(),
+        }
+    }
+
+    fn folder_row(name: &str) -> RowPayload {
+        RowPayload {
+            kind: RowPayloadKind::Folder,
+            path: PathBuf::from("C:\\work").join(name),
+            name: name.to_owned(),
+        }
+    }
+
+    const TARGET: bt_layout::SeatId = bt_layout::SeatId(2);
+
+    fn centre() -> DropLanding {
+        DropLanding::SeatCentre { target: TARGET }
+    }
+
+    /// PIN — **P82: "A FILE drag carries only VIEW verbs."**
+    ///
+    /// The whole ruling of 2026-07-17's second pass, as a table: edges split out
+    /// a preview, a preview's centre shows it there, and **every other centre
+    /// refuses honestly**. The refusal on a terminal's centre is the one the
+    /// ruling is really about — the earlier design inserted the path there, and
+    /// it was cut because it "made one gesture speak two languages (space verbs
+    /// vs text verbs)".
+    ///
+    /// The refusal on a *files* centre is this build's own addition and the
+    /// 2026-08-13 ruling: the mock-up offers "Save into this folder" there, but
+    /// only for a payload carrying `drag.save`, which is a flag a **terminal
+    /// artifact** has and a tree row does not. A file dragged out of the tree is
+    /// already on the disk.
+    ///
+    /// Mutation: make the `SeatCentre` arm answer `Retarget` for any target kind
+    /// — the terminal and the files column both accept a file, and two of these
+    /// four assertions fail at once.
+    #[test]
+    fn a_file_row_splits_at_an_edge_shows_in_a_preview_and_is_refused_everywhere_else() {
+        for landing in [
+            DropLanding::SeatEdge {
+                target: TARGET,
+                edge: seats::DropEdge::Left,
+            },
+            DropLanding::RootRim {
+                edge: seats::DropEdge::Bottom,
+            },
+        ] {
+            assert_eq!(
+                row_verb(
+                    RowPayloadKind::File,
+                    landing,
+                    Some(bt_layout::SeatKind::Terminal)
+                ),
+                RowVerb::Split,
+                "an edge is a space verb whatever pane it was aimed at: {landing:?}"
+            );
+        }
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::File,
+                centre(),
+                Some(bt_layout::SeatKind::Preview)
+            ),
+            RowVerb::Retarget(TARGET),
+            "a preview's centre shows it here"
+        );
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::File,
+                centre(),
+                Some(bt_layout::SeatKind::Terminal)
+            ),
+            RowVerb::Refused,
+            "P82: a terminal's centre refuses honestly — path insertion is the row menu's"
+        );
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::File,
+                centre(),
+                Some(bt_layout::SeatKind::Files)
+            ),
+            RowVerb::Refused,
+            "2026-08-13: a tree row carries no save verb, so a tree's centre refuses too"
+        );
+    }
+
+    /// PIN — **S3: a folder carries place verbs, and only place verbs.**
+    ///
+    /// The mirror image of the file's table and the same shape: edges split out
+    /// a tree, a *tree's* centre re-roots that column ("Root this tree here",
+    /// 7187-7202), and everything else refuses. A folder on a preview's centre
+    /// is refused for the file-on-a-tree case's reason read backwards: a preview
+    /// shows a document, and a folder is not one.
+    ///
+    /// Mutation: let the folder's `Retarget` arm accept `SeatKind::Preview` as
+    /// well — the third assertion fails, and a preview pane would be asked to
+    /// open a directory as a file.
+    #[test]
+    fn a_folder_row_splits_at_an_edge_roots_a_tree_and_is_refused_everywhere_else() {
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::Folder,
+                DropLanding::SeatEdge {
+                    target: TARGET,
+                    edge: seats::DropEdge::Right,
+                },
+                Some(bt_layout::SeatKind::Preview)
+            ),
+            RowVerb::Split
+        );
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::Folder,
+                centre(),
+                Some(bt_layout::SeatKind::Files)
+            ),
+            RowVerb::Retarget(TARGET),
+            "S3's third verb: the centre of a tree re-roots it"
+        );
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::Folder,
+                centre(),
+                Some(bt_layout::SeatKind::Preview)
+            ),
+            RowVerb::Refused,
+            "a page is not a place"
+        );
+        assert_eq!(
+            row_verb(
+                RowPayloadKind::Folder,
+                centre(),
+                Some(bt_layout::SeatKind::Terminal)
+            ),
+            RowVerb::Refused
+        );
+        assert_eq!(
+            row_verb(RowPayloadKind::Folder, centre(), None),
+            RowVerb::Refused,
+            "a centre aimed at a seat the tree does not have is not a verb either"
+        );
+    }
+
+    /// PIN — the leaf a payload lands as is the leaf its own kind names.
+    ///
+    /// A file splits out a **preview** and a folder splits out a **files**
+    /// column, and getting this backwards is the whole gesture inverted: the
+    /// edge drop would open a directory in a page and a file in a tree.
+    ///
+    /// Mutation: swap the two arms of `leaf_kind` — every edge drop lands the
+    /// wrong kind of pane, and both assertions fail.
+    #[test]
+    fn a_file_lands_as_a_page_and_a_folder_lands_as_a_tree() {
+        assert_eq!(
+            row_arrival_seat(RowPayloadKind::File).kind,
+            bt_layout::SeatKind::Preview
+        );
+        assert_eq!(
+            row_arrival_seat(RowPayloadKind::Folder).kind,
+            bt_layout::SeatKind::Files
+        );
+        assert_eq!(
+            row_arrival_seat(RowPayloadKind::Folder).fixed_extent,
+            None,
+            "F75: a column arriving fresh has no width to bring, so it opens at its kind's"
+        );
+    }
+
+    /// PIN — **L141/L142: a row's centre says its name.**
+    ///
+    /// The centre box is the same blue rectangle for four different outcomes,
+    /// and the two a row can ask for are content verbs that move nothing at all
+    /// — so the shape has *even less* to say than it does for a pane swap. An
+    /// edge, a rim and the strip stay silent, because their shapes already
+    /// spoke.
+    ///
+    /// Mutation: give both row kinds one shared caption — the second assertion
+    /// fails, and a folder over a tree would be promising to open a document.
+    #[test]
+    fn a_rows_centre_says_which_of_its_two_verbs_it_means() {
+        let file = DragSource::Row(file_row("notes.md"));
+        let folder = DragSource::Row(folder_row("src"));
+        assert_eq!(centre().caption(&file), "Open in this preview");
+        assert_eq!(centre().caption(&folder), "Root this tree here");
+        for landing in [
+            DropLanding::SeatEdge {
+                target: TARGET,
+                edge: seats::DropEdge::Top,
+            },
+            DropLanding::RootRim {
+                edge: seats::DropEdge::Left,
+            },
+            DropLanding::StripExtract { slot: 0 },
+        ] {
+            assert_eq!(
+                landing.caption(&file),
+                "",
+                "{landing:?} draws its own meaning"
+            );
+        }
+    }
+
+    /// PIN — **K135 belongs to panes, and a row is nobody's pane.**
+    ///
+    /// The "never onto yourself" test is an identity comparison against the
+    /// *seat* in the hand, and a row has none: every zone of every pane is open
+    /// to it, including the centre of the very column it was dragged out of —
+    /// where it is then refused by the verb table rather than by the aim. Two
+    /// different sentences about two different things, and folding them would
+    /// make a file dropped on its own tree silently indistinguishable from a
+    /// file dropped on open air.
+    ///
+    /// Mutation: have `DragSource::pane()` answer `Some` for a row — the row
+    /// loses whichever pane that names, and the drag develops a blind spot
+    /// nothing in the table explains.
+    #[test]
+    fn a_row_is_no_ones_pane_so_every_zone_is_open_to_it() {
+        let row = DragSource::Row(file_row("main.rs"));
+        assert_eq!(row.pane(), None);
+        for aim in [
+            seats::LayoutAim::SeatCentre(TARGET),
+            seats::LayoutAim::SeatEdge(TARGET, seats::DropEdge::Left),
+            seats::LayoutAim::Rim(seats::DropEdge::Top),
+        ] {
+            assert!(
+                landing_for_aim(&row, aim).is_some(),
+                "a row has a landing in every zone: {aim:?}"
+            );
+        }
+    }
+
+    /// PIN — **P86: letting go where you picked it up is a clean "never mind".**
+    ///
+    /// The user's report of 2026-07-17 is what this is for: without a home
+    /// rectangle, retracting a drag lands it on the source's own edge zone and
+    /// splits a pane anyway, so there is no gesture at all for "actually, no".
+    /// It is K135's sentence generalised from a seat identity to a rectangle,
+    /// which is what a payload that is not a pane needs — and it is the seam an
+    /// inline image drag plugs its `srcRect` into unchanged (P86's second half).
+    ///
+    /// Mutation: make the bounds exclusive on the far edges — a release on the
+    /// row's own last pixel column stops being a retraction, which is the one
+    /// place a hand that has travelled exactly six pixels tends to end up.
+    #[test]
+    fn a_payload_let_go_over_its_own_ground_lands_nowhere() {
+        let home = Some([100.0, 200.0, 300.0, 220.0]);
+        assert!(over_home_ground(home, at(150.0, 210.0)), "inside");
+        assert!(over_home_ground(home, at(100.0, 200.0)), "its own corner");
+        assert!(over_home_ground(home, at(300.0, 220.0)), "and its far one");
+        assert!(!over_home_ground(home, at(301.0, 210.0)), "just outside");
+        assert!(
+            !over_home_ground(None, at(150.0, 210.0)),
+            "a source with no home ground retracts nowhere: a tab goes back to its slot"
+        );
+    }
+
+    /// PIN — a row payload travels as its identity (P87).
+    ///
+    /// "a FILE travels as its identity (the path); **the drop target decides the
+    /// verb** — reference(terminal), view(preview), split(edge)". So the payload
+    /// carries the path and the name and nothing about what will happen to it,
+    /// and the two are not interchangeable: two files called `main.rs` in two
+    /// folders are two payloads.
+    ///
+    /// Mutation: key `RowPayload`'s equality on the name alone — the second
+    /// assertion fails, and a drop would open whichever `main.rs` the pool
+    /// happened to hold.
+    #[test]
+    fn two_files_with_one_name_are_two_payloads() {
+        let a = RowPayload {
+            kind: RowPayloadKind::File,
+            path: PathBuf::from("C:\\a\\main.rs"),
+            name: "main.rs".to_owned(),
+        };
+        let b = RowPayload {
+            kind: RowPayloadKind::File,
+            path: PathBuf::from("C:\\b\\main.rs"),
+            name: "main.rs".to_owned(),
+        };
+        assert_eq!(a.name, b.name);
+        assert_ne!(a, b, "the path is the identity, not the name");
+        assert_ne!(
+            DragSource::Row(a.clone()),
+            DragSource::Row(b),
+            "and the drag carries the identity"
+        );
+        assert_eq!(DragSource::Row(a.clone()).row(), Some(&a));
+        assert_eq!(DragSource::Pane(TARGET).row(), None);
+    }
+
+    // ── the bare strip in the corner (user report 2026-08-13) ───────────────
+
+    fn listing(names: &[(&str, bool)]) -> files::DirOutcome {
+        files::DirOutcome::Listed(files::DirListing {
+            entries: names
+                .iter()
+                .map(|(name, is_dir)| files::DirEntry {
+                    name: (*name).to_owned(),
+                    is_dir: *is_dir,
+                    is_symlink: false,
+                })
+                .collect(),
+            omitted: 0,
+            canonical: None,
+        })
+    }
+
+    /// PIN — **a floating tree that has not been read yet opens at its kind's
+    /// full height, not as a title strip.**
+    ///
+    /// The report: every hover peek and every folder button came up as a bare
+    /// bar hard against a corner. The cause is one line — `place_float` sized
+    /// the window from `tree_view(...).rows.len()`, and every float is summoned
+    /// with an empty [`files::DirCache`], so that count is *one* on the opening
+    /// frame: the `Loading` notice standing in for however many names the worker
+    /// is about to send.
+    ///
+    /// Both halves are pinned here, because the fix is worthless if it only ever
+    /// opens tall: an unread tree takes the cap, and a tree whose rows are in
+    /// hand takes its rows.
+    ///
+    /// Mutation: delete the `settled()` guard in `files_float_content_height` so
+    /// the pending view is measured by its row count — the unread window comes
+    /// back one row tall, which is the strip, and this fails on the first
+    /// assertion.
+    #[test]
+    fn a_tree_that_is_still_loading_opens_at_the_kinds_height_and_shrinks_when_it_lands() {
+        let viewport = [0.0, 0.0, 1200.0, 900.0];
+        let scale = 1.0;
+        let state = seats::FilesLeafState {
+            root: "C:\\work".to_owned(),
+            ..seats::FilesLeafState::default()
+        };
+        let cap = float::float_height_cap(viewport, scale, float::FloatSizing::files());
+
+        // Nobody has answered yet: the one row on screen is a placeholder for an
+        // unknown number of them, so the window opens as tall as it is allowed.
+        let pending =
+            files_float_content_height(&state, &files::DirCache::default(), viewport, scale);
+        assert!(
+            pending >= cap,
+            "an unread tree must not be measured by its Loading row: {pending} < {cap}"
+        );
+        let opened =
+            float::float_opening_size(pending, viewport, scale, float::FloatSizing::files());
+        assert!(
+            (opened[1] - cap).abs() < 1.0,
+            "the opening frame is the kind's own maximum, not a strip: {opened:?}"
+        );
+
+        // The rows land, and the same door answers with their height instead —
+        // `self_sizing` then walks the window down to it.
+        let mut cache = files::DirCache::default();
+        cache.accept("", listing(&[("a.rs", false), ("b.rs", false)]));
+        let settled = files_float_content_height(&state, &cache, viewport, scale);
+        assert!(
+            settled < pending,
+            "a tree that has been read is measured by its rows: {settled} !< {pending}"
+        );
+        assert_eq!(
+            settled,
+            float::float_height_for_body(seats::files_tree_content_height(2, scale), scale),
+            "and by nothing else — two rows are two rows"
+        );
     }
 }

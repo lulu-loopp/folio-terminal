@@ -80,6 +80,25 @@ pub enum PreviewFtype {
     Unknown,
 }
 
+impl PreviewFtype {
+    /// The word the type chip prints (P147, mock-up 6422).
+    ///
+    /// The mock-up interpolates the ftype string itself into `.fpeek-type`, so
+    /// the chip says exactly what the classifier calls the file and there is no
+    /// second, prettier vocabulary to keep in step with it. These are those five
+    /// strings.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Markdown => "markdown",
+            Self::Table => "table",
+            Self::Text => "text",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Extensions that name a picture — the mock-up's list (3090).
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"];
 
