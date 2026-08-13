@@ -698,6 +698,168 @@ struct PreviewViewState {
     scroll: [f32; 2],
 }
 
+/// **Which surface is showing a preview.**
+///
+/// The identity slice 5 is built on, and the answer to the question slice 4
+/// could not ask: "whose scroll is this?". A preview is shown by a *leaf of the
+/// tree* or by a *torn-off float*, and those are the two containers `DESIGN.md`
+/// §7.1 gives a piece of content that can hold one — the pane and the 小窗. They
+/// are one enum rather than two fields because every question the content plane
+/// answers ("what is this surface showing", "how far is it scrolled", "does it
+/// hold the caret") has exactly one answer per surface and does not care which
+/// of the two kinds asked it.
+///
+/// A `SeatId` and a [`float::FloatId`] are both `u64`-shaped and would silently
+/// answer for one another if either were used bare, which is the whole reason
+/// this is a type and not a number.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum PreviewSurface {
+    /// A `SeatKind::Preview` leaf of this tab's layout tree.
+    Seat(SeatId),
+    /// A preview float — the second tenant of the `.float-win` chassis.
+    Float(float::FloatId),
+}
+
+/// Everything **one** preview surface is showing, and how it is being looked at.
+///
+/// # Why this is a struct now (slice 5)
+///
+/// Slice 4 built the pin: a preview pane that stops being the reuse target, so
+/// the next file "opens a fresh preview beside it" (P95). It could not finish,
+/// and `open_preview_file` said so in as many words — the buffer on screen, its
+/// parsed document, its caret, its scroll and its notice were *one set of fields
+/// on the tab*, so a second preview leaf would have drawn two heads with one
+/// file's name in them. This is that set of fields, made plural.
+///
+/// # What is in here, and what deliberately is not
+///
+/// In: the **content** (which buffer, its parsed body, the measurement that body
+/// was parsed at) and the **view of it** (scroll, per-block scroll, the caret,
+/// the links measured this frame, the sentence the foot owes). Two panes on one
+/// buffer are one buffer at two scroll positions — the one thing they are
+/// allowed to disagree about (ruling 8⑧) — and that disagreement is exactly the
+/// width of this struct.
+///
+/// Out: the **pool**, which is the tab's by the 2026-07-17 ruling (a file open in
+/// two panes must not become two buffers), the per-path view memory, which is
+/// about buffers rather than about surfaces, and every piece of *input* state —
+/// there is one pointer and one keyboard, so "who is being dragged in", "who
+/// holds the caret" and "what is hovered" are singletons that name a surface
+/// rather than fields each surface owns a copy of. A per-surface `is_focused`
+/// would be three booleans that can all say yes.
+#[derive(Default)]
+struct PreviewPane {
+    /// The picture on this surface, if it is showing one. Mutually exclusive
+    /// with [`Self::buffer`] — the two doors clear each other on the way in.
+    image: Option<PreviewImageState>,
+    /// Which buffer this surface is showing, by path.
+    ///
+    /// A path rather than an index or a reference: the pool is a `Vec` whose
+    /// order is its history, and an index into a list that evicts is an index
+    /// that goes stale between the frame that took it and the frame that reads
+    /// it.
+    buffer: Option<PathBuf>,
+    /// The parsed body, and what it was parsed from.
+    doc: PreviewDocument,
+    doc_key: Option<PreviewDocumentKey>,
+    /// How wide one monospace cell is at the body's type size, measured when the
+    /// document was parsed. It is what the horizontal extent is derived from.
+    mono_advance: f32,
+    /// How far this surface's body is scrolled, in physical pixels.
+    ///
+    /// `[x, y]`: `white-space: pre` means a line that does not fit runs off the
+    /// edge, and a body that can only be scrolled downward would leave the end
+    /// of every long line permanently out of reach.
+    scroll: [f32; 2],
+    /// How far each markdown block that is wider than the page has been scrolled
+    /// inside itself (user ruling, 2026-08-13). One entry per block, by index.
+    md_block_scroll: Vec<f32>,
+    /// Every markdown link on screen, boxed where it was drawn — a paint
+    /// artifact rather than state, rebuilt with the body.
+    links: Vec<PreviewLink>,
+    /// Where the caret is in this surface's buffer, and what it has selected.
+    caret: preview_edit::EditCaret,
+    /// The sentence this surface's body owes about its last save, and when it
+    /// was said.
+    notice: Option<(String, Instant)>,
+    /// Whether this surface is showing a markdown buffer's **source** rather
+    /// than its render (P28).
+    ///
+    /// **The flip is the view's, ruled 2026-08-13**, and it lived on the buffer
+    /// until real-machine capture found what that meant: the pool is the tab's,
+    /// so flipping one surface flipped every surface on that file, and a float
+    /// torn off to read a page turned into raw markdown because a pane behind it
+    /// was flipped to source. Reading the rendered page in one place while
+    /// editing the source of the same file in another is a legitimate thing to
+    /// want, and it is the same argument ruling 8⑧ already made for the scroll
+    /// and the caret: the *file* is shared, the way you are looking at it is not.
+    ///
+    /// What stays on the buffer is everything that is genuinely the file's — its
+    /// body, its dirty bit, its revision — so an edit made through the source
+    /// face is still one edit, seen by both surfaces at once.
+    md_source: bool,
+}
+
+/// Every preview surface this tab has, and what each is showing.
+///
+/// A `Vec` of pairs rather than a `HashMap`, and the reason is the frame: the
+/// bodies handed to `bt_render` are a *list*, and a list built by iterating a
+/// hash map is a list whose order changes between runs — which is a diff against
+/// last frame that never settles and a repaint that never stops. Here the order
+/// is insertion order, which is stable, and the count is at most one per pane
+/// plus one per float: a linear scan of half a dozen entries is cheaper than
+/// hashing a path-sized key, and it is the same argument
+/// [`preview::PreviewPool`] already makes for itself.
+#[derive(Default)]
+struct PreviewPanes {
+    panes: Vec<(PreviewSurface, PreviewPane)>,
+}
+
+impl PreviewPanes {
+    /// What this surface is showing, if it has ever shown anything.
+    fn get(&self, surface: PreviewSurface) -> Option<&PreviewPane> {
+        self.panes
+            .iter()
+            .find(|(id, _)| *id == surface)
+            .map(|(_, pane)| pane)
+    }
+
+    /// The same, mutably — **vivifying**, because a surface that exists is a
+    /// surface with a view, and the alternative is every caller writing the same
+    /// three lines of "insert if absent" and one of them getting it wrong.
+    fn entry(&mut self, surface: PreviewSurface) -> &mut PreviewPane {
+        if let Some(index) = self.panes.iter().position(|(id, _)| *id == surface) {
+            return &mut self.panes[index].1;
+        }
+        self.panes.push((surface, PreviewPane::default()));
+        &mut self.panes.last_mut().expect("just pushed").1
+    }
+
+    /// The surface's view, taken away — the pane closed, or the float did.
+    fn remove(&mut self, surface: PreviewSurface) -> Option<PreviewPane> {
+        let index = self.panes.iter().position(|(id, _)| *id == surface)?;
+        Some(self.panes.remove(index).1)
+    }
+
+    /// Every surface, in the order they were first shown.
+    fn iter(&self) -> impl Iterator<Item = (PreviewSurface, &PreviewPane)> {
+        self.panes.iter().map(|(id, pane)| (*id, pane))
+    }
+
+    /// Every surface, mutably.
+    fn iter_mut(&mut self) -> impl Iterator<Item = (PreviewSurface, &mut PreviewPane)> {
+        self.panes.iter_mut().map(|(id, pane)| (*id, pane))
+    }
+
+    /// Which surfaces are showing this path right now.
+    fn showing(&self) -> Vec<PathBuf> {
+        self.panes
+            .iter()
+            .filter_map(|(_, pane)| pane.buffer.clone())
+            .collect()
+    }
+}
+
 /// What each buffer looked like the last time a pane was on it.
 ///
 /// Keyed by path, exactly as the pool is, so a buffer and the view of it are
@@ -731,13 +893,14 @@ impl PreviewViewStore {
 /// same-length edit rebuilds" as a property rather than as a screenshot.
 fn preview_document_key(
     buffer: &preview::PreviewBuffer,
+    md_source: bool,
     body_width_px: f32,
     scale: f32,
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
             path: buffer.path.clone(),
-            md_source: buffer.md_source,
+            md_source,
             revision: buffer.revision,
             scale_ppm: (scale * 1_000_000.0).round() as u32,
         },
@@ -1180,12 +1343,16 @@ fn build_preview_text_body(
                 Some(preedit) => {
                     let left = box_of_row[0] + advance * preedit.column as f32;
                     let right = left + advance * preedit.columns as f32;
-                    // The ground first — this surface is not a cell grid, so the
-                    // document's own text is still under these letters.
-                    quads.push(bt_render::PreviewQuad {
-                        rect: [left, box_of_row[1], right, box_of_row[3]],
-                        color: palette.seat_body,
-                    });
+                    // **No ground quad.** There used to be one, in the pane's own
+                    // ink, to hide the document under letters that were drawn on
+                    // top of it — because the row was laid out as though nothing
+                    // were being typed. It hid only the cells the composition
+                    // itself covered, so the rest of the word stayed where it was
+                    // and the line read as gibberish (real-machine capture,
+                    // 2026-08-13); and on a float, whose body stands on the
+                    // window's face rather than a pane's, the patch was the wrong
+                    // colour as well. The row is split below instead, which is
+                    // what a `<textarea>` does and leaves nothing to mask.
                     quads.push(bt_render::PreviewQuad {
                         rect: [left, box_of_row[3] - edit.caret_width, right, box_of_row[3]],
                         color: palette.preview_body_text,
@@ -1201,27 +1368,59 @@ fn build_preview_text_body(
             });
         }
     }
+    let composing = edit.and_then(|edit| edit.preedit.as_ref());
     let mut paragraphs: Vec<_> = range
-        .filter_map(|row| {
-            let (line, from, to) = wrap.row_span(row)?;
-            let text = lines.get(line)?;
+        .flat_map(|row| {
+            let Some((line, from, to)) = wrap.row_span(row) else {
+                return Vec::new();
+            };
+            let Some(text) = lines.get(line) else {
+                return Vec::new();
+            };
+            let box_of_row = geometry.line_rect(row);
             // The columns this row draws, cut out of the line by column and
             // not by byte: the surface is a cell grid and a wide character
             // occupies two of its cells.
-            let start = preview_edit::byte_at_column(text, from);
-            let end = preview_edit::byte_at_column(text, to);
-            Some(mono_paragraph(
-                text[start..end].to_owned(),
-                geometry.line_rect(row),
-                geometry.font_size,
-                geometry.line_height,
-                palette.preview_body_text,
-            ))
+            let cut = |first: usize, last: usize| {
+                let start = preview_edit::byte_at_column(text, first);
+                let end = preview_edit::byte_at_column(text, last.max(first));
+                text[start..end].to_owned()
+            };
+            let run = |text: String, left: f32| {
+                mono_paragraph(
+                    text,
+                    [left, box_of_row[1], box_of_row[2].max(left), box_of_row[3]],
+                    geometry.font_size,
+                    geometry.line_height,
+                    palette.preview_body_text,
+                )
+            };
+            // **A composition displaces the text it is being typed into.**
+            //
+            // The row it lands in is drawn as two runs with the composition's own
+            // width of clear space between them, exactly as a `<textarea>` reflows
+            // around an active IME. Drawing the row whole and painting the
+            // letters over it — which is what this did — leaves every character
+            // after the caret where it was, so the composition and the rest of
+            // the word occupy the same cells and neither can be read.
+            let split = composing
+                .filter(|preedit| preedit.row == row)
+                .map(|preedit| (from + preedit.column, preedit.columns))
+                .filter(|(at, _)| (from..=to).contains(at));
+            let Some((at, width)) = split else {
+                return vec![run(cut(from, to), box_of_row[0])];
+            };
+            let tail_left = box_of_row[0] + advance * ((at - from) + width) as f32;
+            vec![
+                run(cut(from, at), box_of_row[0]),
+                run(cut(at, to), tail_left),
+            ]
         })
         .collect();
-    // Last, so the composition's letters stand over the document's — the ground
-    // and the rule under them were pushed with the quads, which are drawn first.
-    if let Some(preedit) = edit.and_then(|edit| edit.preedit.as_ref()) {
+    // Last, so the composition's letters stand over nothing at all: the space it
+    // is drawn into was opened for it above, and the rule under it was pushed
+    // with the quads, which are drawn first.
+    if let Some(preedit) = composing {
         let box_of_row = geometry.line_rect(preedit.row);
         let left = box_of_row[0] + advance * preedit.column as f32;
         paragraphs.push(mono_paragraph(
@@ -2170,7 +2369,7 @@ fn push_preview_truncation_notice(
 /// tall, a hairline of `--border` along its top, an opaque ground in the pane's
 /// own colour, 11px `--ink3` text inset 12px. The height is not decoration: it
 /// comes off the body before a single block is laid out
-/// ([`Runtime::preview_content_body_rect`]), so the scroll extent ends where the
+/// ([`Runtime::preview_surface_body_rect`]), so the scroll extent ends where the
 /// bar begins and nothing can be scrolled under it.
 ///
 /// It appears **only for a truncated buffer**, which is also why it can afford
@@ -2758,7 +2957,29 @@ struct TabState {
     /// landed there. Stored beside the layout because it is the other half of
     /// the same answer and is derived by the same pass (§4.3).
     seat_overflow: Option<seats::FitOverflow>,
-    preview_image: Option<PreviewImageState>,
+    /// Every preview surface in this tab, and what each one is showing.
+    ///
+    /// **Slice 5's change, and the whole of it.** These were one buffer, one
+    /// document, one caret and one scroll on the tab, which made "the preview
+    /// pane" a singleton by construction rather than by ruling — so a pin, which
+    /// exists precisely to let a *second* preview stand beside the first, had
+    /// nothing to give the second one. Now the surface is the key and the view is
+    /// the value, and the singleton lives where it was always ruled to live: in
+    /// `Seats::landing_preview`, which answers "which pane would a newly opened
+    /// file replace" and is free to answer "none of them".
+    preview_panes: PreviewPanes,
+    /// **Whose picture is on the texture lane** — the one surface whose image is
+    /// actually rasterised this frame.
+    ///
+    /// This build rasterises one preview picture at a time, and this field names
+    /// whose. Every *identity* a picture has is per surface already
+    /// ([`PreviewPane::image`]), so a second picture keeps its head, its foot and
+    /// its meta line and loses only its pixels; what it cannot have is the
+    /// texture, because `bt_render` holds one `set_preview_image` slot. Making
+    /// that lane plural is a `bt-render` change of its own and is not this
+    /// slice's — so the limit is written down here rather than hidden in
+    /// whichever call site happened to win the race.
+    preview_raster: Option<PreviewSurface>,
     /// This tab's shared pool of live preview buffers (`DESIGN.md` §7.1.3).
     ///
     /// **On the tab, because that is who owns it.** The 2026-07-17 ruling moved
@@ -2767,83 +2988,39 @@ struct TabState {
     /// re-introduce the fork the ruling exists to forbid. It is content, so red
     /// line L1 keeps it out of the layout tree and out of `seats` entirely.
     preview_pool: preview::PreviewPool,
-    /// Which buffer the preview seat is showing, by path.
-    ///
-    /// A path rather than an index or a reference: the pool is a `Vec` whose
-    /// order is its history, and an index into a list that evicts is an index
-    /// that goes stale between the frame that took it and the frame that reads
-    /// it. Mutually exclusive with [`Self::preview_image`] — the seat shows a
-    /// picture or a document, and the two doors clear each other on the way in.
-    preview_buffer: Option<PathBuf>,
-    /// The parsed body, and what it was parsed from.
-    preview_doc: PreviewDocument,
-    preview_doc_key: Option<PreviewDocumentKey>,
-    /// How wide one monospace cell is at the body's type size, measured when the
-    /// document was parsed. It is what the horizontal extent is derived from.
-    preview_mono_advance: f32,
-    /// How far the shown buffer's body is scrolled, in physical pixels.
-    ///
-    /// A property of the *view*, so it lives beside `preview_buffer` rather than
-    /// on the buffer: two panes showing one buffer are one buffer at two scroll
-    /// positions, which is the one thing about them that is allowed to differ.
-    ///
-    /// `[x, y]`: `white-space: pre` means a line that does not fit runs off the
-    /// edge, and a body that can only be scrolled downward would leave the end
-    /// of every long line permanently out of reach.
-    preview_scroll: [f32; 2],
-    /// How far each markdown block that is wider than the page has been scrolled
-    /// inside itself (user ruling, 2026-08-13).
-    ///
-    /// One entry per block of the parsed document, by index, and **kept across a
-    /// rebuild**: a pane that got narrower does not forget where you were reading
-    /// in a table, it clamps you back into what is left. A `Vec` and not a map
-    /// because the index is the block's identity, which is the same identity the
-    /// layout beside it is walked by.
-    preview_md_block_scroll: Vec<f32>,
     /// A block's scroll thumb in hand (user report, 2026-08-12).
     ///
-    /// Only the block's identity and where in the thumb the hand took hold: the
-    /// bar's geometry is re-read from the current frame on every move, which is
-    /// [`DividerDrag`]'s discipline and its reason — the answer to "where is
-    /// this thumb" must not be a second copy of the layout.
+    /// Only the surface, the block's identity and where in the thumb the hand
+    /// took hold: the bar's geometry is re-read from the current frame on every
+    /// move, which is [`DividerDrag`]'s discipline and its reason — the answer to
+    /// "where is this thumb" must not be a second copy of the layout.
+    ///
+    /// **Tab-level and not per surface, because there is one pointer.** A field
+    /// on every pane would be three answers to a question that has one, and the
+    /// two that said "no" would be saying it about a hand they cannot see.
     preview_block_drag: Option<PreviewBlockDrag>,
-    /// The block whose thumb is lit because the pointer is over it.
-    preview_block_hover: Option<usize>,
-    /// Every markdown link on screen, boxed where it was drawn (user ruling,
-    /// 2026-08-13).
-    ///
-    /// A paint artifact rather than state: rebuilt with the body, because a
-    /// link's rectangle is a fact about this frame's layout and nothing else.
-    preview_links: Vec<PreviewLink>,
-    /// The link under the pointer, held **by its box** rather than by an index
-    /// into the list above — so a rebuild that moves or removes it simply stops
-    /// matching, and there is no stale subscript to invalidate.
-    preview_link_hover: Option<[f32; 4]>,
-    /// Where the caret is in the buffer on the seat, and what it has selected.
-    ///
-    /// Beside the scroll offset and for the same reason: both are the *view's*,
-    /// not the buffer's (ruling 8⑧).
-    preview_caret: preview_edit::EditCaret,
-    /// Whether the quick edit holds the keyboard.
+    /// The surface and block whose thumb is lit because the pointer is over it.
+    preview_block_hover: Option<(PreviewSurface, usize)>,
+    /// The surface and link under the pointer, the link held **by its box**
+    /// rather than by an index into that surface's list — so a rebuild that moves
+    /// or removes it simply stops matching, and there is no stale subscript to
+    /// invalidate.
+    preview_link_hover: Option<(PreviewSurface, [f32; 4])>,
+    /// Which surface's quick edit holds the keyboard.
     ///
     /// **This is `InputOwner::PreviewEdit`** (`docs/DESIGN.md` §7.1.5), the
     /// third member of that enum to get a body, and it is read through
     /// [`Runtime::preview_edit_focus`] rather than directly so that every way it
-    /// can go stale — the seat closed, the buffer became a picture, the markdown
-    /// flipped back to its render — is healed at the read, exactly as
-    /// `files_keyboard_seat` heals its own.
-    preview_edit_focused: bool,
+    /// can go stale — the surface went away, the buffer became a picture, the
+    /// markdown flipped back to its render — is healed at the read, exactly as
+    /// `files_keyboard_seat` heals its own. An `Option<PreviewSurface>` rather
+    /// than a `bool` on each pane for the keyboard's own reason: there is one,
+    /// and a per-pane flag can say three things at once.
+    preview_edit_focus: Option<PreviewSurface>,
     /// What every buffer looked like the last time a pane was on it.
     preview_views: PreviewViewStore,
-    /// The sentence the body owes about the last save, and when it was said.
-    ///
-    /// `Saved` expires on its own after [`FOOT_REVEAL_FEEDBACK`] (ruling 6: all
-    /// four mock-up durations are 1300ms); a conflict does not, because it is
-    /// not an acknowledgement of something that happened but a report of
-    /// something that did *not*, and it stands until the next save answers it.
-    preview_notice: Option<(String, Instant)>,
-    /// Whether the pointer is drawing a selection across the edit surface.
-    preview_selecting: bool,
+    /// Which surface the pointer is drawing a selection across.
+    preview_selecting: Option<PreviewSurface>,
     /// The arc's easing toward the reading it is now showing, if it is moving.
     ring_tween: Option<SweepTween>,
     /// The sweep the ring is displaying, which is also what a state change
@@ -3331,14 +3508,20 @@ struct Runtime {
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
     /// of P133: one close path, so the chevron can never be stranded flipped.
     preview_menu: profiles::PreviewMenu,
-    /// How wide each preview head's file name was last *drawn*.
+    /// What each preview head was last laid out with — **by seat**.
     ///
     /// Beside [`Self::files_name_widths`] and for the identical reason: the hit
     /// test has to agree with the paint about where the switcher's pill ends,
-    /// and only something holding a font can say.
-    preview_name_width: f32,
-    /// And how wide the pool-count badge's digits were drawn.
-    preview_count_width: f32,
+    /// and only something holding a font can say. Keyed by seat for the reason
+    /// [`seats::ChromeContent::preview_heads`] gives about the paint — a tab can
+    /// hold several preview panes, they show different files with different
+    /// names, and a second head laid out with the first one's string widths puts
+    /// every button to the right of the name somewhere it is not drawn.
+    ///
+    /// Written by [`Runtime::dress_preview_head`] as each head is measured and
+    /// retired by [`Runtime::sweep_preview_panes`], so an entry cannot outlive
+    /// the seat it measures.
+    preview_head_measures: BTreeMap<SeatId, seats::PreviewHeadTools>,
     /// The file row's context menu, and the row it was raised on (K143).
     ///
     /// It holds the *path*, not the row — an index into a list the tree may
@@ -3869,6 +4052,25 @@ impl TabState {
         cwd_leaf(Path::new(&state.root))
     }
 
+    /// The head's caption for a preview pane: the file **that seat** is showing.
+    ///
+    /// [`Self::files_head_name`]'s opposite number, and asked by id for the same
+    /// reason: a tab can hold several preview panes, so "the preview's name" is
+    /// not a question with one answer. Both doors fill it (P36) — a picture's
+    /// title when the seat is showing one, the buffer's name otherwise — and
+    /// `None` falls through to the kind's own word exactly as a rootless column
+    /// does.
+    fn preview_head_name(&self, seat: SeatId) -> Option<String> {
+        let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
+        match pane.image.as_ref() {
+            Some(image) => Some(image.title()),
+            None => self
+                .preview_pool
+                .get(pane.buffer.as_deref()?)
+                .map(|buffer| buffer.name.clone()),
+        }
+    }
+
     /// Every files column of this tab, named for its head.
     ///
     /// The files half of [`Self::terminal_names`], resolved the same way and
@@ -4186,6 +4388,11 @@ impl DerefMut for TabState {
 /// that is no longer there.
 #[derive(Clone, Copy, Debug)]
 struct PreviewBlockDrag {
+    /// Which surface's document the block belongs to. A thumb is a control
+    /// standing in one pane's body, so the index below means nothing without
+    /// the pane it indexes into — two previews on one markdown file are two
+    /// block lists at two offsets (ruling 8⑧).
+    surface: PreviewSurface,
     /// Which block of the parsed document, the same index its offset is stored
     /// under.
     index: usize,
@@ -7833,6 +8040,147 @@ fn float_viewport_rect(width: u32, height: u32, scale: f32) -> [f32; 4] {
 /// function because the hit test and the paint must agree on it exactly: a window
 /// hit-tested where it will be and drawn where it is would swallow clicks along a
 /// five-pixel seam for the whole of its entrance.
+/// Which dimension set this window is held to, chosen by **who is inside it**.
+///
+/// A free function beside [`risen_frame`] rather than a method, for the same
+/// reason [`float::FloatSizing`] is a struct: "which tenant is this" is one
+/// question with one answer, and the placement, the grip and the re-clamp all
+/// have to be reading the same one.
+fn float_sizing_of(win: &float::FloatWin) -> float::FloatSizing {
+    if win.preview().is_some() {
+        float::FloatSizing::preview()
+    } else {
+        float::FloatSizing::files()
+    }
+}
+
+/// **Diagnostic scaffolding: write this frame's chrome to a file.**
+///
+/// Off unless `BT_CHROME_DUMP` names a path, and then every rebuild of the seat
+/// chrome appends one block to it: each quad's rectangle and ink, each sprite's
+/// mark, rectangle, ink and opacity, each label's rectangle, ink and text. Run
+/// the window with it set, reproduce whatever is on screen that should not be,
+/// and the offending channel names itself — a colour that is in no palette entry,
+/// or a mark drawn in a box that belongs to another pane.
+///
+/// It exists because a picture cannot be grepped. The maroon chip reported over
+/// the files tree on 2026-08-13 was chased through the palette, the tooltip, the
+/// selection inks and every `ChromeMark` variant by reading code, and none of
+/// them matched the pixels — at which point the honest move is to make the frame
+/// say what it contains rather than to keep guessing at it.
+///
+/// Appends rather than truncates, so the frames either side of a gesture are both
+/// in the file; a run that wants a clean one deletes it first. Failures are
+/// swallowed whole: a diagnostic that can take the window down with it is a
+/// second bug wearing the first one's clothes.
+fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
+    let Some(path) = std::env::var_os("BT_CHROME_DUMP") else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let ink = |color: [u8; 3]| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
+    let _ = writeln!(
+        out,
+        "--- chrome frame: {} quads, {} sprites, {} labels",
+        chrome.quads.len(),
+        chrome.sprites.len(),
+        chrome.labels.len()
+    );
+    for quad in &chrome.quads {
+        let _ = writeln!(out, "quad   {:?} {}", quad.rect, ink(quad.color));
+    }
+    for sprite in &chrome.sprites {
+        let _ = writeln!(
+            out,
+            "sprite {:?} {} opacity={:.3} grayscale={} mark={:?}",
+            sprite.rect,
+            ink(sprite.color),
+            sprite.opacity,
+            sprite.grayscale,
+            sprite.mark
+        );
+    }
+    for label in &chrome.labels {
+        let _ = writeln!(
+            out,
+            "label  {:?} {} {:?}",
+            label.rect,
+            ink(label.color),
+            label.text
+        );
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(out.as_bytes());
+    }
+}
+
+/// The same probe, for the overlay stack — see [`dump_chrome_frame`].
+///
+/// Both channels, because "which pass painted this" is half of any answer the
+/// dump is asked for: chrome is drawn under the overlays, so a stray box that is
+/// *behind* a pane head's caption came from the first and one in front of it from
+/// the second, and reading one file with both in it settles that without a second
+/// run.
+fn dump_overlay_frame(layers: &[marks::OverlayLayer]) {
+    let Some(path) = std::env::var_os("BT_CHROME_DUMP") else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let ink = |color: [u8; 3]| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
+    let _ = writeln!(out, "=== overlay frame: {} layers", layers.len());
+    for (index, layer) in layers.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "--- layer {index} opacity={:.3} body={}",
+            layer.opacity,
+            layer.body.is_some()
+        );
+        for quad in &layer.quads {
+            let _ = writeln!(
+                out,
+                "quad   {:?} {} alpha={:.3}",
+                quad.rect,
+                ink(quad.color),
+                quad.alpha
+            );
+        }
+        for sprite in &layer.sprites {
+            let _ = writeln!(
+                out,
+                "sprite {:?} {} opacity={:.3} mark={:?}",
+                sprite.rect,
+                ink(sprite.color),
+                sprite.opacity,
+                sprite.mark
+            );
+        }
+        for label in &layer.labels {
+            let _ = writeln!(
+                out,
+                "label  {:?} {} {:?}",
+                label.rect,
+                ink(label.color),
+                label.text
+            );
+        }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(out.as_bytes());
+    }
+}
+
 fn risen_frame(frame: [f32; 4], fade: float::FloatFade) -> [f32; 4] {
     [
         frame[0],
@@ -9760,22 +10108,14 @@ fn assemble_tab_state(
         seats,
         seat_layout,
         seat_overflow,
-        preview_image: None,
+        preview_panes: PreviewPanes::default(),
+        preview_raster: None,
         preview_pool: preview::PreviewPool::default(),
-        preview_buffer: None,
-        preview_doc: PreviewDocument::Empty,
-        preview_doc_key: None,
-        preview_mono_advance: 0.0,
-        preview_scroll: [0.0, 0.0],
-        preview_md_block_scroll: Vec::new(),
-        preview_caret: preview_edit::EditCaret::default(),
-        preview_edit_focused: false,
+        preview_edit_focus: None,
         preview_views: PreviewViewStore::default(),
-        preview_notice: None,
-        preview_selecting: false,
+        preview_selecting: None,
         preview_block_drag: None,
         preview_block_hover: None,
-        preview_links: Vec::new(),
         preview_link_hover: None,
     };
     debug_assert!(
@@ -9978,7 +10318,11 @@ fn tear_pane_into_tab(
 ///
 /// **The preview image travels with the Preview seat that brought it.** An image
 /// is to a preview seat what a session is to a terminal, so a merge that carried
-/// a preview across and left its picture behind would seat an empty frame.
+/// a preview across and left its picture behind would seat an empty frame. It is
+/// re-keyed along `arrived` exactly as a files column's tree is, which is what
+/// the plural content plane bought: the picture belongs to a *surface*, so the
+/// question "does the target already have one" — the tab-level guard this used to
+/// need — does not arise.
 fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[(SeatId, SeatId)]) {
     for (was, now) in arrived {
         if let Some(mut leaf) = source.sessions.remove(was) {
@@ -10009,6 +10353,24 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
         if let Some(cache) = source.file_trees.remove(was) {
             target.file_trees.insert(*now, cache);
         }
+        // The picture a preview leaf was showing crosses with it, re-keyed the
+        // same way. Only the picture: a document is a *buffer*, and buffers live
+        // in the tab's pool (§7.1.3) which does not migrate — a pane arriving
+        // with a path the target has never opened would name a buffer nobody
+        // holds. The decode lane is per path and per window, so the image needs
+        // nothing but its new address.
+        if let Some(image) = source
+            .preview_panes
+            .remove(PreviewSurface::Seat(*was))
+            .and_then(|pane| pane.image)
+        {
+            let arrived = PreviewSurface::Seat(*now);
+            target.preview_panes.entry(arrived).image = Some(image);
+            // The texture lane if it was free, and not otherwise: a picture the
+            // target was already showing does not lose its pixels to one that has
+            // just moved in (`TabState::preview_raster`).
+            target.preview_raster.get_or_insert(arrived);
+        }
     }
     if let Some((_, now)) = arrived.iter().find(|(was, _)| *was == source.focused_leaf) {
         target.seats.set_focus(*now);
@@ -10017,9 +10379,6 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
         }
     }
     target.pinned |= source.pinned;
-    if target.preview_image.is_none() && target.seats.preview().is_some() {
-        target.preview_image = source.preview_image.take();
-    }
     debug_assert!(
         source.sessions.is_empty(),
         "T226: a merge takes the whole fleet, so no empty tab is left holding shells"
@@ -10520,8 +10879,7 @@ impl Runtime {
             dirty_gate: restore::DirtyGate::default(),
             window_close_requested: false,
             preview_menu: profiles::PreviewMenu::default(),
-            preview_name_width: 0.0,
-            preview_count_width: 0.0,
+            preview_head_measures: BTreeMap::new(),
             file_menu: None,
             float: float::FloatHost::default(),
             float_drag: None,
@@ -11318,14 +11676,26 @@ impl Runtime {
             active_tab += usize::from(active_tab >= slot);
             grabbed = grabbed.map(|index| index + usize::from(index >= slot));
         }
-        // The head's caption comes from whichever door filled the seat. Two
-        // doors, one caption, and only one of them can be open at a time.
-        let preview_title = match self.preview_image.as_ref() {
-            Some(preview) => Some(preview.title()),
-            None => self
-                .current_preview_buffer()
-                .map(|buffer| buffer.name.clone()),
-        };
+        // The caption of **every** preview seat. It comes from whichever door
+        // filled that seat — two doors, one caption, and only one of them can be
+        // open at a time (P36) — and it is asked per seat because a collapsed bar
+        // names the file its own pane is showing, exactly as its head would.
+        let preview_titles: Vec<(SeatId, String)> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| {
+                let surface = PreviewSurface::Seat(seat);
+                let title = match self
+                    .preview_pane(surface)
+                    .and_then(|pane| pane.image.as_ref())
+                {
+                    Some(image) => image.title(),
+                    None => self.preview_buffer_on(surface)?.name.clone(),
+                };
+                Some((seat, title))
+            })
+            .collect();
         // C28, per leaf: every terminal pane head names its *own* shell. Resolved
         // here rather than in `seats`, which knows nothing about sessions (L1).
         let terminal_names = self.terminal_names();
@@ -11345,7 +11715,7 @@ impl Runtime {
         // And the strip along the bottom of each of them, whose caption is cut to
         // the room it has — which only something holding a font can decide.
         self.dress_files_feet(scale, now, &mut files_trees);
-        let preview_message = match (self.preview_image.as_ref(), self.current_preview_buffer()) {
+        let preview_message = match (self.current_preview_image(), self.current_preview_buffer()) {
             (Some(preview), _) => preview.message(),
             // A document on its way: the same sentence a picture uses, because
             // it is the same wait.
@@ -11371,8 +11741,27 @@ impl Runtime {
         // beside the card and for the card's reason: only something holding a
         // font can say how wide a name is drawn, and the hit test reads the
         // number this frame stored rather than measuring for itself.
-        let preview_head = self.dress_preview_head(scale);
-        let preview_foot = self.dress_preview_foot(scale, now);
+        // **One head and one foot per preview seat, and both named by it.**
+        //
+        // A head names the file its own body is showing. Dressing `preview()`
+        // alone and letting the paint use that answer for every preview
+        // placement was a caption belonging to whichever pane happened to be
+        // first in the tree — real-machine capture caught exactly that, two panes
+        // showing two files under one file's name, one file's path and one pin.
+        // The content plane went plural in this slice; the chrome that describes
+        // it has to go plural in the same one.
+        let preview_frames: Vec<(SeatId, PreviewHeadFrame)> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| Some((seat, self.dress_preview_head(seat, scale)?)))
+            .collect();
+        let preview_feet: Vec<(SeatId, (String, bool))> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| Some((seat, self.dress_preview_foot(seat, scale, now)?)))
+            .collect();
         self.preview_button_width = self.renderer.measure_chrome_text(
             preview_open_label,
             seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
@@ -11402,6 +11791,38 @@ impl Runtime {
         // "the button you can press is the button you can see" true by
         // construction rather than by two functions agreeing.
         self.files_name_widths = self.measure_files_names(&files_names);
+        // The two lists the paint looks its placement up in, borrowed off the
+        // owned frames above — the same two-step the head's `name` and `count`
+        // have always taken, once per seat instead of once.
+        let preview_heads: Vec<(SeatId, seats::PreviewHeadContent<'_>)> = preview_frames
+            .iter()
+            .map(|(seat, head)| {
+                (
+                    *seat,
+                    seats::PreviewHeadContent {
+                        name: &head.name,
+                        count: &head.count,
+                        ..head.content
+                    },
+                )
+            })
+            .collect();
+        let preview_feet: Vec<(SeatId, seats::FootStrip<'_>)> = preview_feet
+            .iter()
+            .map(|(seat, (path, revealed))| {
+                (
+                    *seat,
+                    seats::FootStrip {
+                        path,
+                        revealed: *revealed,
+                    },
+                )
+            })
+            .collect();
+        let preview_titles: Vec<(SeatId, &str)> = preview_titles
+            .iter()
+            .map(|(seat, title)| (*seat, title.as_str()))
+            .collect();
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
@@ -11425,7 +11846,7 @@ impl Runtime {
                 // and `seats` holds no clock to work them out for itself.
                 rail: self.sampled_rail(now),
                 rail_scroll: self.rail_scroll,
-                preview_title: preview_title.as_deref(),
+                preview_titles: &preview_titles,
                 float_shown: &float_shown,
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
@@ -11434,17 +11855,8 @@ impl Runtime {
                 files_root_open: self.root_menu.seat(),
                 files_trees: &files_trees,
                 preview_message: preview_message.as_deref(),
-                preview_foot: preview_foot
-                    .as_ref()
-                    .map(|(path, revealed)| seats::FootStrip {
-                        path,
-                        revealed: *revealed,
-                    }),
-                preview_head: preview_head.as_ref().map(|head| seats::PreviewHeadContent {
-                    name: &head.name,
-                    count: &head.count,
-                    ..head.content
-                }),
+                preview_feet: &preview_feet,
+                preview_heads: &preview_heads,
                 preview_card,
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
@@ -11454,6 +11866,7 @@ impl Runtime {
             },
         );
         let seats::WindowChrome { seats, rail } = chrome;
+        dump_chrome_frame(&seats);
         let icons = self.chrome_marks.resolve(&seats.sprites);
         let chrome_changed = self.renderer.set_chrome(seats.quads, seats.labels, icons);
         // The rail floats over the panes, so it is handed on to the overlay
@@ -11841,7 +12254,21 @@ impl Runtime {
         // row of the schematic breathes if *it* is.
         let elapsed = tab.animation_elapsed(now);
         let focus = tab.seats.focus();
-        let preview_title = tab.preview_image.as_ref().map(PreviewImageState::title);
+        // Each preview *seat*'s own caption, because a schematic draws the tab's
+        // tree — a float is not in it, and two preview leaves in one tree are two
+        // rows naming two files. Both doors, as the head reads them (P36): the
+        // picture's title when the seat is showing one, the buffer's name
+        // otherwise.
+        let preview_title = |id: SeatId| {
+            let pane = tab.preview_panes.get(PreviewSurface::Seat(id))?;
+            match pane.image.as_ref() {
+                Some(image) => Some(image.title()),
+                None => tab
+                    .preview_pool
+                    .get(pane.buffer.as_deref()?)
+                    .map(|buffer| buffer.name.clone()),
+            }
+        };
         // The peek reads the caption through the same door the head does, and
         // now out of the same per-seat map, so a schematic can never name a pane
         // something the pane itself does not — nor name two panes alike, which is
@@ -11896,13 +12323,16 @@ impl Runtime {
                     // fourth reader of `seat_short_caption`, beside the drag
                     // ghost, the drop preview and a collapsed bar, and a label
                     // for the same reason all three are.
-                    title: seats::seat_short_caption(
-                        seat.kind,
-                        preview_title.as_deref(),
-                        terminal_names.get(&seat.id).map(String::as_str),
-                        files_names.get(&seat.id).map(String::as_str),
-                    )
-                    .to_owned(),
+                    title: {
+                        let preview_title = preview_title(seat.id);
+                        seats::seat_short_caption(
+                            seat.kind,
+                            preview_title.as_deref(),
+                            terminal_names.get(&seat.id).map(String::as_str),
+                            files_names.get(&seat.id).map(String::as_str),
+                        )
+                        .to_owned()
+                    },
                     focused: seat.id == focus,
                     mark_opacity: mark_opacity(
                         status.is_some_and(|status| status.working),
@@ -12372,11 +12802,13 @@ impl Runtime {
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
-        } else if let Some(layout) = self.preview_menu_layout() {
+        } else if let Some(seat) = self.preview_menu.seat()
+            && let Some(layout) = self.preview_menu_layout()
+        {
             // The fourth arm of the same chain, and it is in the chain for E61's
             // reason: one popup is up at a time, and a chain cannot draw two
             // however the flags are set.
-            let items = self.preview_menu_items();
+            let items = self.preview_menu_items(seat);
             let hover = self.preview_menu.hover();
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
@@ -12389,7 +12821,9 @@ impl Runtime {
         stack.file_menu = self.file_menu_layer();
         stack.tooltip = self.tooltip_layer();
         stack.drag_ghost = self.drag_ghost_layer();
-        let layers = self.settings_marks.resolve_overlay(stack.flattened());
+        let flattened = stack.flattened();
+        dump_overlay_frame(&flattened);
+        let layers = self.settings_marks.resolve_overlay(flattened);
         self.renderer.set_modal_overlay(layers)
     }
 
@@ -12430,6 +12864,7 @@ impl Runtime {
             labels: rail.labels.clone(),
             sprites: rail.sprites.clone(),
             opacity: opacity.clamp(0.0, 1.0),
+            body: None,
         }]
     }
 
@@ -12470,10 +12905,10 @@ impl Runtime {
         // dressed as the word "Files" while the pane it came from says where it
         // is rooted, and the stand-in stops being a picture of the thing.
         let files_name = self.files_head_name(seat);
-        let title = self
-            .preview_image
-            .as_ref()
-            .map(|preview| preview.title().to_owned());
+        // And a preview's, by the same id and the same argument: a pane torn out
+        // wearing a *sibling* preview's file name is the drag pointing at the
+        // wrong document.
+        let title = self.preview_head_name(seat);
         Some((
             slot.min(self.tabs.len()),
             seats::TabContent {
@@ -12782,10 +13217,7 @@ impl Runtime {
                 // read the same door ([`Runtime::strip_stand_in`]).
                 let name = self.terminal_name(seat);
                 let files_name = self.files_head_name(seat);
-                let title = self
-                    .preview_image
-                    .as_ref()
-                    .map(|preview| preview.title().to_owned());
+                let title = self.preview_head_name(seat);
                 Some((
                     mark,
                     size,
@@ -13295,9 +13727,16 @@ impl Runtime {
     /// pane: a closing preview drops its image, a closing files column drops its
     /// root, a split moves the keyboard. Those belong to their verbs. This is
     /// only the part that is true whenever the count of seats changes at all.
+    ///
+    /// The preview sweep **is** true whenever the count changes, which is why it
+    /// is here and not in a verb: a leaf can stop being a preview surface by any
+    /// of a dozen edits (closed, replaced, torn into a tab, restored over), and a
+    /// view left behind is a buffer this tab still believes is on screen — which
+    /// is precisely what the pool's dirty gates read.
     fn settle_seat_set_change(&mut self) -> Result<()> {
         self.seat_pointer = seats::ChromePointer::default();
         self.divider_drag = None;
+        self.sweep_preview_panes();
         self.apply_window_min_inner_size()?;
         self.commit_seat_geometry()
     }
@@ -13307,14 +13746,16 @@ impl Runtime {
     /// the session file all follow it, in that order.
     fn toggle_preview_seat(&mut self) -> Result<()> {
         let metrics = self.seat_metrics();
-        let was_open = self.seats.preview().is_some();
+        // Read before the toggle, because a toggle facing an open pane closes it
+        // and the surface it closed is what has to be emptied.
+        let was_open = self.seats.preview();
         if !self.seats.toggle_preview(&metrics) {
             return Ok(());
         }
-        if was_open {
-            self.preview_image = None;
-            self.renderer.set_preview_image(None);
-            self.clear_preview_view();
+        if let Some(seat) = was_open {
+            let surface = PreviewSurface::Seat(seat);
+            self.clear_preview_image(surface);
+            self.clear_preview_view(surface);
         }
         self.settle_seat_set_change()
     }
@@ -13437,11 +13878,13 @@ impl Runtime {
             return Ok(());
         }
         // A preview seat holds an image the way a terminal holds a session, and
-        // the pane going away is the one taking it.
+        // the pane going away is the one taking it — **that** pane's, not every
+        // preview's: closing one leaf beside a pinned one must leave the pinned
+        // one showing what it was showing.
         if kind == bt_layout::SeatKind::Preview {
-            self.preview_image = None;
-            self.renderer.set_preview_image(None);
-            self.clear_preview_view();
+            let surface = PreviewSurface::Seat(seat);
+            self.clear_preview_image(surface);
+            self.clear_preview_view(surface);
         }
         // A terminal seat holds a shell, and the pane going away takes that too.
         // Closing the pane and leaving the ConPTY alive would leak a process
@@ -13717,9 +14160,354 @@ impl Runtime {
         Ok(())
     }
 
-    /// Open the ruled preview seat if necessary, otherwise reuse its geometry, then ask the shared
-    /// worker/cache pipeline for this image. Keyboard focus deliberately remains on the terminal.
+    // ── the plural content plane (slice 5) ──────────────────────────────────
+
+    /// What this surface is showing, or nothing if it has never shown anything.
+    fn preview_pane(&self, surface: PreviewSurface) -> Option<&PreviewPane> {
+        self.preview_tab(surface)?.preview_panes.get(surface)
+    }
+
+    /// The same, mutably and vivifying — a surface that exists has a view.
+    fn preview_pane_mut(&mut self, surface: PreviewSurface) -> &mut PreviewPane {
+        let index = self.preview_tab_index(surface);
+        self.tabs[index].preview_panes.entry(surface)
+    }
+
+    /// The buffer this surface is on, **mutably**, in its own tab's one pool.
+    ///
+    /// The mutable twin of [`Self::preview_buffer_on`] and it exists for the same
+    /// sentence: the pool a surface edits is the pool it reads. A float carried
+    /// across a tab switch that saved into whichever pool was on screen would be
+    /// writing one file's keystrokes into another tab's copy of it.
+    fn preview_buffer_on_mut(
+        &mut self,
+        surface: PreviewSurface,
+    ) -> Option<&mut preview::PreviewBuffer> {
+        let index = self.preview_tab_index(surface);
+        let path = self.tabs[index]
+            .preview_panes
+            .get(surface)?
+            .buffer
+            .clone()?;
+        self.tabs[index].preview_pool.get_mut(&path)
+    }
+
+    /// The buffer this surface is on, looked up in **its own** tab's one pool.
+    fn preview_buffer_on(&self, surface: PreviewSurface) -> Option<&preview::PreviewBuffer> {
+        let tab = self.preview_tab(surface)?;
+        tab.preview_pool
+            .get(tab.preview_panes.get(surface)?.buffer.as_deref()?)
+    }
+
+    /// Whether this surface is showing its buffer's **source** face (P28).
+    ///
+    /// The view's own answer and not the buffer's — see [`PreviewPane::md_source`]
+    /// for the ruling. A surface that has never been flipped is showing the
+    /// render, which is what `false` means and why the default is right.
+    fn preview_md_source(&self, surface: PreviewSurface) -> bool {
+        self.preview_pane(surface)
+            .is_some_and(|pane| pane.md_source)
+    }
+
+    /// Whether **this surface** has anything to type into.
+    ///
+    /// The buffer's own judgement asked with this surface's face, because that
+    /// is precisely where the two faces of a markdown file differ: one is a
+    /// rendered page with nowhere to put a caret, the other is text. Every gate
+    /// that used to ask the buffer alone asks through here, so two surfaces on
+    /// one file can disagree about it and both be right.
+    fn preview_is_editable(&self, surface: PreviewSurface) -> bool {
+        let md_source = self.preview_md_source(surface);
+        self.preview_buffer_on(surface)
+            .is_some_and(|buffer| buffer.is_editable(md_source))
+    }
+
+    /// **Whose content plane a surface reads from.**
+    ///
+    /// A seat belongs to the tab whose tree it is in, which is the active one at
+    /// every site that can name a seat. A **float does not**: §7.1.2 gives a
+    /// pinned window the run of the whole application — it floats over every tab,
+    /// because that is the point of tearing something off — while `preview_panes`
+    /// and the pool it reads are the *tab's*, by the 2026-07-17 ownership ruling.
+    ///
+    /// So a float's reads go through the tab it was torn out of, and not through
+    /// `Deref`'s active one. Read the other way, a preview float drew an empty
+    /// head, an empty foot and no body the moment you switched tabs — the window
+    /// still there, still yours, and showing nothing.
+    fn preview_tab(&self, surface: PreviewSurface) -> Option<&TabState> {
+        match surface {
+            PreviewSurface::Seat(_) => Some(self),
+            PreviewSurface::Float(id) => {
+                let tab = self.float.live(id)?.preview()?.tab;
+                self.tabs.iter().find(|state| state.id == tab)
+            }
+        }
+    }
+
+    /// The same as an index, for the paths that need it mutably.
+    ///
+    /// Falls back to the active tab, and that fallback is reachable exactly once:
+    /// [`Self::pop_out_preview`] writes the new window's view before the window
+    /// is in the host to be asked about, and the tab it means is the active one
+    /// by construction.
+    fn preview_tab_index(&self, surface: PreviewSurface) -> usize {
+        let PreviewSurface::Float(id) = surface else {
+            return self.active_tab;
+        };
+        self.float
+            .live(id)
+            .and_then(|win| win.preview())
+            .and_then(|preview| self.tabs.iter().position(|state| state.id == preview.tab))
+            .unwrap_or(self.active_tab)
+    }
+
+    /// Every preview surface that exists **right now**, in paint order: the tree's
+    /// preview leaves in seat order, then the floats bottom-to-top.
+    ///
+    /// Derived rather than stored, and that is the discipline this whole slice
+    /// rests on — the layout tree and the float host are the two registers of
+    /// what exists, and a third list beside them is a third thing that can be
+    /// wrong. [`Self::sweep_preview_panes`] is the one place the derived answer
+    /// is used to retire views, so a surface cannot outlive its surface.
+    fn preview_surfaces(&self) -> Vec<PreviewSurface> {
+        let mut surfaces: Vec<PreviewSurface> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .map(PreviewSurface::Seat)
+            .collect();
+        // Every float, not only this tab's: the sweep below reads this list to
+        // decide what has *stopped* existing, and a window torn out of another tab
+        // is still standing. Listing only the active tab's would have every tab
+        // switch retire the other tabs' views.
+        surfaces.extend(
+            self.float
+                .drawn()
+                .filter(|win| win.preview().is_some())
+                .map(|win| PreviewSurface::Float(win.epoch)),
+        );
+        surfaces
+    }
+
+    /// Drop the view of every surface that has stopped existing.
+    ///
+    /// Called from the one door every seat-set change goes through and from every
+    /// float closer, because a view left behind is a buffer this tab still
+    /// believes is on screen — and the pool's dirty gates read exactly that
+    /// belief, so a stale entry is a gate that stops asking about a file nobody
+    /// can see any more.
+    fn sweep_preview_panes(&mut self) {
+        let alive = self.preview_surfaces();
+        // **Every tab's map, not only the active one.** A float is torn out of the
+        // tab that owned the pane and keeps reading that tab's plane wherever you
+        // go ([`Self::preview_tab`]), so the window that closes while you are
+        // somewhere else has to be retired *there*. Seat surfaces are unaffected:
+        // a seat only ever appears in its own tab's map, so the `alive` list —
+        // which carries this tab's seats and every window — leaves the other tabs'
+        // seat entries exactly where they are.
+        let active = self.active_tab;
+        let dropped: Vec<(usize, PreviewSurface)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .flat_map(|(index, tab)| {
+                tab.preview_panes
+                    .iter()
+                    .map(move |(surface, _)| (index, surface))
+            })
+            .filter(|(index, surface)| match surface {
+                // A seat lives in its own tab's map and nowhere else, so only its
+                // own tab's tree can say whether it is gone.
+                PreviewSurface::Seat(_) => *index == active && !alive.contains(surface),
+                PreviewSurface::Float(_) => !alive.contains(surface),
+            })
+            .collect();
+        for (index, surface) in dropped {
+            // Filed and cleared where it actually lives — the window's own tab,
+            // which is not the one on screen whenever a float outlived a switch.
+            self.leave_preview_buffer_in(index, surface);
+            self.tabs[index].preview_panes.remove(surface);
+        }
+        // And this tab's head measurements beside them. A seat id is re-minted
+        // from a counter, so a width left behind for a pane that has gone comes
+        // back as the next preview's head laid out to a name nobody chose for it
+        // — the same argument `close_pane` makes about a files column's cached
+        // root. Only seats have measured heads: a float's head is measured into
+        // its own layer every frame and stored nowhere.
+        self.preview_head_measures
+            .retain(|seat, _| alive.contains(&PreviewSurface::Seat(*seat)));
+        if self
+            .preview_edit_focus
+            .is_some_and(|surface| !alive.contains(&surface))
+        {
+            self.preview_edit_focus = None;
+        }
+        if self
+            .preview_selecting
+            .is_some_and(|surface| !alive.contains(&surface))
+        {
+            self.preview_selecting = None;
+        }
+        if self
+            .preview_block_drag
+            .is_some_and(|drag| !alive.contains(&drag.surface))
+        {
+            self.preview_block_drag = None;
+        }
+        if self
+            .preview_block_hover
+            .is_some_and(|(surface, _)| !alive.contains(&surface))
+        {
+            self.preview_block_hover = None;
+        }
+        if self
+            .preview_link_hover
+            .is_some_and(|(surface, _)| !alive.contains(&surface))
+        {
+            self.preview_link_hover = None;
+        }
+    }
+
+    /// **Where a newly opened file lands** — P69 and P95 in one sentence.
+    ///
+    /// The un-pinned preview pane if the tab has one, and a fresh preview leaf at
+    /// the ruled far-right address if it does not. This is the whole of what the
+    /// pin buys: a pinned pane is not the answer to this question, so the next
+    /// file opens *beside* it rather than over it.
+    ///
+    /// It never lands in a float. A float is somewhere a buffer was carried to by
+    /// hand, and a browsing gesture that replaced what you had torn off would be
+    /// the singleton reaching into a window you took out of its way on purpose.
+    fn preview_landing_surface(&mut self) -> Option<PreviewSurface> {
+        let metrics = self.seat_metrics();
+        let existed = self.seats.landing_preview().is_some();
+        let seat = self.seats.add_preview(&metrics)?;
+        if !existed {
+            self.settle_seat_set_change().ok()?;
+        }
+        Some(PreviewSurface::Seat(seat))
+    }
+
+    /// The box **this surface's document** lives in — its body, less the
+    /// truncation bar when it has one.
+    fn preview_surface_body_rect(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
+        let truncated = self
+            .preview_buffer_on(surface)
+            .and_then(preview::PreviewBuffer::truncation_notice)
+            .is_some();
+        let body = self.preview_surface_pane_rect(surface, scale)?;
+        Some(preview_content_body(body, scale, truncated))
+    }
+
+    /// The **whole** body of a surface, before any of the document's own
+    /// furniture is taken out of it.
+    ///
+    /// [`Self::preview_surface_body_rect`] is this less the truncation bar, and
+    /// is what every question about the *document* asks. This is the rectangle
+    /// the bar itself is drawn in, which is the one thing that has to be told
+    /// about the pane rather than about what is on it.
+    fn preview_surface_pane_rect(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
+        match surface {
+            PreviewSurface::Seat(seat) => {
+                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
+            }
+            PreviewSurface::Float(id) => self.float_body_rect(id, scale),
+        }
+    }
+
+    /// Which surface a point is inside, and the box of the document it is in.
+    ///
+    /// **The floats first, topmost first**, then the tree's preview leaves in
+    /// tree order. A float is drawn over the panes, so a point inside a window
+    /// standing across a preview pane belongs to the window — the same order
+    /// [`Self::float_hit_at`] asks in, and the only one that agrees with what is
+    /// on the glass.
+    ///
+    /// The one door every pointer question about a preview goes through. Before
+    /// slice 5 there was nothing to resolve: "the preview" was a singleton, and
+    /// each gesture asked for its body directly. With the plane plural the
+    /// gesture has to say *whose* body it landed in before it can say anything
+    /// else, and asking that in one place is what stops two of them disagreeing.
+    fn preview_surface_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(PreviewSurface, [f32; 4])> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (x, y) = (position.x as f32, position.y as f32);
+        self.float
+            .hit_order()
+            .filter(|win| win.preview().is_some())
+            .map(|win| PreviewSurface::Float(win.epoch))
+            .chain(
+                self.seats
+                    .preview_seats()
+                    .into_iter()
+                    .map(PreviewSurface::Seat),
+            )
+            .find_map(|surface| {
+                let body = self.preview_surface_body_rect(surface, scale)?;
+                (body[0] <= x && x <= body[2] && body[1] <= y && y <= body[3])
+                    .then_some((surface, body))
+            })
+    }
+
+    /// The preview seat holding **layout focus**, if that is what has it.
+    ///
+    /// `seats.focus()` names a leaf of any kind; this is that leaf when it is a
+    /// preview one. The singleton this replaces asked whether `seats.preview()`
+    /// *was* the focus, which stopped being an answer the moment a tab could
+    /// hold two preview leaves — it would have named the first of them however
+    /// far the focus was from it.
+    fn focused_preview_seat(&self) -> Option<SeatId> {
+        let seat = self.seats.focus();
+        self.seats.preview_seats().contains(&seat).then_some(seat)
+    }
+
+    /// The preview **float** holding window focus, if one does.
+    ///
+    /// `FloatWin::focused` is set the moment a click tore the window off and is
+    /// exclusive across the host, so this is at most one window — the same
+    /// singleton the files tree's own float focus is.
+    fn focused_preview_float(&self) -> Option<float::FloatId> {
+        self.float
+            .live_windows()
+            .find(|win| win.focused && win.preview().is_some())
+            .map(|win| win.epoch)
+    }
+
+    /// **Which surface a keystroke is about.**
+    ///
+    /// Three readings in one order, and the order is the answer to "where is the
+    /// user looking":
+    ///
+    /// 1. the quick edit's surface, when one holds the keyboard — that is
+    ///    `InputOwner::PreviewEdit` naming itself;
+    /// 2. a **focused preview float**, because a window somebody tore off by hand
+    ///    and then clicked into is the thing the keys are for; a docked pane
+    ///    keeping them would be the keystroke going to the pane the window is
+    ///    standing over;
+    /// 3. the focused preview leaf — the browsing half of the same owner (§7.1.5:
+    ///    a focused preview is not a terminal, so its arrows scroll rather than
+    ///    reach a shell).
+    ///
+    /// One question rather than one per key, because the states are set by
+    /// different gestures and a key that consulted only one of them would work
+    /// from a click in the body and not from a click on the head.
+    fn preview_keyboard_surface(&self) -> Option<PreviewSurface> {
+        self.preview_edit_focus()
+            .or_else(|| self.focused_preview_float().map(PreviewSurface::Float))
+            .or_else(|| self.focused_preview_seat().map(PreviewSurface::Seat))
+    }
+
+    /// Land a picture on the surface a newly opened file goes to, then ask the shared
+    /// worker/cache pipeline for it. Keyboard focus deliberately remains on the terminal.
     fn open_preview_image(&mut self, path: PathBuf) -> Result<()> {
+        // Where it lands, before anything is written: `preview_landing_surface`
+        // may have to mint a leaf, and a picture filed against a pane that then
+        // failed to open is a picture nothing will ever draw.
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
         // The one field of the meta line no decoder can answer, asked on the
         // same lane a document's head goes down.
         let tab = self.id;
@@ -13730,22 +14518,20 @@ impl Runtime {
         }) {
             self.disable_preview_worker();
         }
-        self.preview_image = Some(PreviewImageState::new(path));
-        self.renderer.set_preview_image(None);
-        // The document the seat was showing is not what it is showing now. The
-        // buffer itself stays in the pool — it belongs to the tab, not to the
+        // The document this surface was showing is not what it is showing now.
+        // The buffer itself stays in the pool — it belongs to the tab, not to the
         // pane — so switching back finds it whole, and so does the view of it.
-        self.leave_preview_buffer();
-        self.renderer.set_preview_body(None);
-        if self.seats.preview().is_none() {
-            return self.toggle_preview_seat();
-        }
+        self.leave_preview_buffer(surface);
+        self.preview_pane_mut(surface).image = Some(PreviewImageState::new(path));
+        self.preview_raster = Some(surface);
+        self.renderer.set_preview_image(None);
         self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.present_chrome_change()
     }
 
-    /// Open a file in **the** preview seat — the document door.
+    /// Open a file on the surface a newly opened file lands on — the document
+    /// door.
     ///
     /// [`Self::open_preview_image`]'s sibling and its opposite number: one takes
     /// a picture down the decode lane, this takes everything else through the
@@ -13757,24 +14543,39 @@ impl Runtime {
     /// edits intact, whichever pane showed it — so this is a *lookup* that
     /// sometimes reads a disk, never a read that sometimes finds a cache.
     fn open_preview_file(&mut self, path: PathBuf) -> Result<()> {
+        // **The reuse target is `landing_preview()`** — the un-pinned preview
+        // pane, and a fresh leaf beside the pinned one when there is no such
+        // pane. That is the whole of what the pin has meant since slice 4 (P95:
+        // "this pane keeps its buffers and stops being the reuse target — the
+        // NEXT file opens a fresh preview beside it"), and it is the plural
+        // content plane that finally lets it be acted on: a second surface can
+        // hold a second buffer, a second caret and a second scroll, so landing
+        // beside a pinned pane no longer means two heads over one document.
+        //
+        // Resolved before a single field is written, because it may have to mint
+        // a leaf and a buffer filed against a pane that never opened is a buffer
+        // nothing will ever draw.
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
         let name = files_row_display_name(&path);
-        // The picture on the seat, if there was one, is not what the seat is
+        // The picture on this surface, if there was one, is not what it is
         // showing any more. Cleared before the buffer lands so no frame between
         // the two can find both.
-        self.preview_image = None;
-        self.renderer.set_preview_image(None);
+        self.clear_preview_image(surface);
         let tab = self.id;
-        let shown: Vec<PathBuf> = self.preview_buffer.iter().cloned().collect();
+        let shown = self.preview_panes.showing();
         let buffer = self.preview_pool.open(path.clone(), name, &shown);
         let wants_read = buffer.wants_head_read();
         // The outgoing view is filed and the incoming one is found: a caret and
         // a scroll are the pane's memory of a file, and a switch that reset them
         // would make the switcher a thing you pay for using (ruling 8⑧).
-        self.leave_preview_buffer();
+        self.leave_preview_buffer(surface);
         let view = self.preview_views.restore(&path);
-        self.preview_buffer = Some(path.clone());
-        self.preview_caret = view.caret;
-        self.preview_scroll = view.scroll;
+        let pane = self.preview_pane_mut(surface);
+        pane.buffer = Some(path.clone());
+        pane.caret = view.caret;
+        pane.scroll = view.scroll;
         if wants_read
             && !self.preview_worker.request(preview::PreviewRequest {
                 tab,
@@ -13783,26 +14584,6 @@ impl Runtime {
             })
         {
             self.disable_preview_worker();
-        }
-        // **The reuse target is `preview()` and not `landing_preview()`, and that
-        // is a stated limit rather than an oversight.**
-        //
-        // P95 rules that a pinned pane stops being the reuse target and the next
-        // file "opens a fresh preview beside it". The seat layer can already say
-        // which pane that is ([`seats::Seats::landing_preview`]) and the tree can
-        // already hold two Preview leaves. What cannot yet serve two is *this*
-        // module: the buffer on screen, its parsed document, its caret, its
-        // scroll and its notice are one set of fields, and `bt_render` takes one
-        // preview body. Landing a second preview leaf today would draw two heads
-        // with one file's name in them and one body between them, which is worse
-        // than the pin doing less than it says.
-        //
-        // So the pin lands here as durable state, as the header's own two-state
-        // control, and as the seat-level rule that `landing_preview` states and
-        // is tested on; the second *content plane* is the next slice's, and this
-        // is the line it changes.
-        if self.seats.preview().is_none() {
-            return self.toggle_preview_seat();
         }
         self.refresh_preview_for_layout();
         self.refresh_chrome();
@@ -13816,73 +14597,145 @@ impl Runtime {
     /// far down. The pool itself is emptied only by the dirty gates, which are
     /// slice 4's — and until edits exist there is nothing dirty for them to
     /// guard, so nothing here has anything to confirm.
-    fn clear_preview_view(&mut self) {
-        self.leave_preview_buffer();
-        self.renderer.set_preview_body(None);
+    fn clear_preview_view(&mut self, surface: PreviewSurface) {
+        self.leave_preview_buffer(surface);
+        self.refresh_preview_body();
     }
 
-    /// The pane is about to stop showing whatever it is showing. **File the
+    /// Take this surface's picture down, and the texture with it if the texture
+    /// was its.
+    ///
+    /// The raster lane names one surface at a time ([`TabState::preview_raster`]),
+    /// so clearing it is only right when the picture going away is the one that
+    /// filled it — otherwise a second preview closing would blank the first one's
+    /// pixels.
+    fn clear_preview_image(&mut self, surface: PreviewSurface) {
+        self.preview_pane_mut(surface).image = None;
+        if self.preview_raster == Some(surface) {
+            self.preview_raster = None;
+            self.renderer.set_preview_image(None);
+        }
+    }
+
+    /// This surface is about to stop showing whatever it is showing. **File the
     /// view, keep the buffer.**
     ///
     /// One door for the three ways a pane leaves a document — another file, a
     /// picture, the pane closing — because the thing that must not be forgotten
     /// is the same in all three, and a caret remembered in two of them is a
     /// caret that goes missing depending on how you left.
-    fn leave_preview_buffer(&mut self) {
-        if let Some(path) = self.preview_buffer.take() {
+    ///
+    /// The tab's singletons — the hand on a thumb, the hover, the keyboard, the
+    /// selection being drawn — are cleared **only when they name this surface**.
+    /// There is one pointer and one keyboard, so a pane leaving a document has no
+    /// business answering for a gesture that is happening in the pane beside it.
+    fn leave_preview_buffer(&mut self, surface: PreviewSurface) {
+        let index = self.preview_tab_index(surface);
+        self.leave_preview_buffer_in(index, surface);
+    }
+
+    /// The same, told **which tab** the surface's view lives in.
+    ///
+    /// The sweep is the one caller that has to say: it runs after the window has
+    /// already left the host, so [`Self::preview_tab_index`] can no longer be
+    /// asked whose the view was, and filing a torn-off window's caret into
+    /// whichever tab happened to be on screen is how a scroll position ends up
+    /// remembered against the wrong file.
+    fn leave_preview_buffer_in(&mut self, index: usize, surface: PreviewSurface) {
+        // A surface that has never shown anything has no view to file, and
+        // vivifying one here only to empty it would leave a pane behind for the
+        // sweep to retire a moment later.
+        if self.tabs[index].preview_panes.get(surface).is_some() {
+            let pane = self.tabs[index].preview_panes.entry(surface);
+            let left = pane.buffer.take();
             let view = PreviewViewState {
-                caret: self.preview_caret,
-                scroll: self.preview_scroll,
+                caret: pane.caret,
+                scroll: pane.scroll,
             };
-            self.preview_views.remember(&path, view);
+            pane.caret = preview_edit::EditCaret::default();
+            pane.scroll = [0.0, 0.0];
+            pane.doc = PreviewDocument::Empty;
+            pane.doc_key = None;
+            // The block offsets this document was scrolled by mean nothing to
+            // the next one.
+            pane.md_block_scroll.clear();
+            // The next document's links are measured with its body; what a hand
+            // was resting on in this one is not a fact about that one, and a
+            // stale box would keep the pointing finger over prose that answers
+            // nothing.
+            pane.links.clear();
+            pane.notice = None;
+            if let Some(path) = left {
+                // The memory is per buffer and the buffer is the tab's, so it is
+                // filed in the same tab the view came out of.
+                self.tabs[index].preview_views.remember(&path, view);
+            }
         }
-        self.preview_caret = preview_edit::EditCaret::default();
-        self.preview_scroll = [0.0, 0.0];
-        self.preview_edit_focused = false;
-        self.preview_selecting = false;
-        // The block indices this document was scrolled by mean nothing to the
-        // next one, and a thumb held over the swap would be dragging a block
-        // that is not there any more.
-        self.preview_block_drag = None;
-        self.preview_block_hover = None;
-        // The next document's links are measured with its body; what a hand was
-        // resting on in this one is not a fact about that one, and a stale box
-        // would keep the pointing finger over prose that answers nothing.
-        self.preview_links.clear();
-        self.preview_link_hover = None;
-        self.preview_notice = None;
+        if self.preview_edit_focus == Some(surface) {
+            self.preview_edit_focus = None;
+        }
+        if self.preview_selecting == Some(surface) {
+            self.preview_selecting = None;
+        }
+        // A thumb held over the swap would be dragging a block that is not there
+        // any more.
+        if self
+            .preview_block_drag
+            .is_some_and(|drag| drag.surface == surface)
+        {
+            self.preview_block_drag = None;
+        }
+        if self
+            .preview_block_hover
+            .is_some_and(|(hovered, _)| hovered == surface)
+        {
+            self.preview_block_hover = None;
+        }
+        if self
+            .preview_link_hover
+            .is_some_and(|(hovered, _)| hovered == surface)
+        {
+            self.preview_link_hover = None;
+        }
     }
 
     // ── the head's furniture (P11-P31) ──────────────────────────────────────
 
-    /// What the preview head is showing this frame, with both of its strings
-    /// measured.
+    /// What **this seat's** preview head is showing this frame, with both of its
+    /// strings measured.
     ///
     /// **The measurement is stored, not returned twice.** The hit test has to
     /// agree with the paint about where the switcher's pill ends, and it is
     /// `&self` by construction — a pointer moving is not a reason to touch a
     /// renderer — so the two widths land in the runtime here, exactly as the
-    /// files heads' do.
-    fn dress_preview_head(&mut self, scale: f32) -> Option<PreviewHeadFrame> {
-        let seat = self.seats.preview()?;
+    /// files heads' do. Those two widths are still a *singleton* cache, which is
+    /// the one place this slice stops: the chrome layer draws one preview head,
+    /// `refresh_chrome` asks it about `seats.preview()`, and drawing a head per
+    /// preview leaf is a step of its own.
+    fn dress_preview_head(&mut self, seat: SeatId, scale: f32) -> Option<PreviewHeadFrame> {
+        let surface = PreviewSurface::Seat(seat);
         // A picture has a name and no buffer, and it still gets a head: the two
         // doors into this seat fill the same caption (P36's contract), and a head
         // that appeared only for documents would blink out every time you looked
         // at a `.png`.
-        let (name, tools, dirty, flip_to_source) = match self.current_preview_buffer() {
+        let md_source = self.preview_md_source(surface);
+        let (name, tools, dirty, flip_to_source) = match self.preview_buffer_on(surface) {
             Some(buffer) => (
                 buffer.name.clone(),
                 seats::PreviewHeadTools {
-                    save: buffer.is_editable(),
+                    save: buffer.is_editable(md_source),
                     flip: buffer.ftype == preview::PreviewFtype::Markdown,
                     ..seats::PreviewHeadTools::default()
                 },
                 buffer.dirty,
-                !buffer.md_source,
+                // The glyph names the *destination*, and the destination is this
+                // surface's own: a pane showing the render offers "edit source"
+                // while a float on the same file, already flipped, offers "eye".
+                !md_source,
             ),
             None => (
-                self.preview_image
-                    .as_ref()
+                self.preview_pane(surface)
+                    .and_then(|pane| pane.image.as_ref())
                     .map(PreviewImageState::title)
                     .unwrap_or_default(),
                 seats::PreviewHeadTools::default(),
@@ -13893,7 +14746,9 @@ impl Runtime {
         let pool = self.preview_pool.len();
         // `othersDirty` (P19): the pane's own dot already speaks for the buffer on
         // screen, so the badge is the only thing that can speak for the rest.
-        let shown = self.preview_buffer.clone();
+        let shown = self
+            .preview_pane(surface)
+            .and_then(|pane| pane.buffer.clone());
         let others_dirty = self
             .preview_pool
             .dirty_names(shown.as_deref())
@@ -13914,8 +14769,7 @@ impl Runtime {
                 .measure_chrome_text(&count, seats::PREVIEW_COUNT_FONT_LOGICAL_PX * scale),
             ..tools
         };
-        self.preview_name_width = tools.name_width;
-        self.preview_count_width = tools.count_width;
+        self.preview_head_measures.insert(seat, tools);
         Some(PreviewHeadFrame {
             name,
             count,
@@ -13931,17 +14785,23 @@ impl Runtime {
         })
     }
 
-    /// The tools the hit test must lay the head out with — **this frame's**, off
-    /// the widths the paint stored.
-    fn preview_head_tools(&self) -> seats::PreviewHeadTools {
+    /// The tools **this seat's** head must be laid out with — this frame's, off
+    /// the widths the paint stored for that seat.
+    fn preview_head_tools(&self, seat: SeatId) -> seats::PreviewHeadTools {
+        let surface = PreviewSurface::Seat(seat);
         let pool = self.preview_pool.len();
-        let buffer = self.current_preview_buffer();
+        let buffer = self.preview_buffer_on(surface);
+        let measured = self.preview_head_measures.get(&seat).copied();
         seats::PreviewHeadTools {
-            save: buffer.is_some_and(preview::PreviewBuffer::is_editable),
+            save: self.preview_is_editable(surface),
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
             switcher: pool > 1,
-            name_width: self.preview_name_width,
-            count_width: self.preview_count_width,
+            // Zero until this seat's head has been drawn once, which is the
+            // honest answer for a frame the paint has not reached yet: a pill
+            // sized to no name is a pill nothing is inside, and the press it
+            // misses is the press before the first frame.
+            name_width: measured.map_or(0.0, |tools| tools.name_width),
+            count_width: measured.map_or(0.0, |tools| tools.count_width),
         }
     }
 
@@ -13955,14 +14815,19 @@ impl Runtime {
     /// for [`FOOT_REVEAL_FEEDBACK`]. The save's *refusals* do not come here —
     /// a conflict is a sentence, not a word, and it does not expire — so they
     /// keep the body's own notice strip.
-    fn dress_preview_foot(&mut self, scale: f32, now: Instant) -> Option<(String, bool)> {
-        let seat = self.seats.preview()?;
-        let path = match self.current_preview_buffer() {
+    fn dress_preview_foot(
+        &mut self,
+        seat: SeatId,
+        scale: f32,
+        now: Instant,
+    ) -> Option<(String, bool)> {
+        let surface = PreviewSurface::Seat(seat);
+        let path = match self.preview_buffer_on(surface) {
             Some(buffer) => buffer.path.clone(),
-            None => self.preview_image.as_ref()?.path.clone(),
+            None => self.preview_pane(surface)?.image.as_ref()?.path.clone(),
         };
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
-        let saved = self.preview_save_notice(now) == Some(preview::PREVIEW_SAVED_NOTICE);
+        let saved = self.preview_save_notice(surface, now) == Some(preview::PREVIEW_SAVED_NOTICE);
         let text = if revealed {
             FOOT_REVEALED_LABEL.to_owned()
         } else if saved {
@@ -13987,10 +14852,15 @@ impl Runtime {
     /// Show the file on the seat in File Explorer — `.preview-pane .files-foot`
     /// (P32), the same verb and the same confirmation a files column's foot has.
     fn reveal_preview_file(&mut self, seat: SeatId) -> Result<()> {
+        let surface = PreviewSurface::Seat(seat);
         let Some(path) = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .map(|buffer| buffer.path.clone())
-            .or_else(|| self.preview_image.as_ref().map(|image| image.path.clone()))
+            .or_else(|| {
+                self.preview_pane(surface)
+                    .and_then(|pane| pane.image.as_ref())
+                    .map(|image| image.path.clone())
+            })
         else {
             return Ok(());
         };
@@ -14011,27 +14881,45 @@ impl Runtime {
         Ok(())
     }
 
-    /// Turn a markdown buffer over — rendered view ⇄ source (P28).
+    /// Turn a markdown page over — rendered view ⇄ source (P28).
     ///
-    /// The flip is a property of the **buffer**, not of the pane, and that is the
-    /// same ruling the dirty bit follows: a file open in two panes is one buffer
-    /// (§7.1.3), so which face it is showing travels with it.
+    /// **The flip is a property of the view, not of the buffer** (ruling
+    /// 2026-08-13, overturning the reading this carried until then). It followed
+    /// the dirty bit's rule — one buffer per file, so which face it wore
+    /// travelled with it — and the machine showed what that cost: the pool is
+    /// the tab's, so turning one surface over turned every surface on that file
+    /// over, and a float torn off to read a page became raw markdown because a
+    /// pane behind it had been flipped. Reading the render in one place while
+    /// editing the source in another is a legitimate thing to want, and it is
+    /// ruling 8⑧'s line drawn one field further along: the file is shared, the
+    /// way you are looking at it is not.
     fn flip_preview_source(&mut self) -> Result<()> {
-        let Some(path) = self.preview_buffer.clone() else {
+        let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
-        let Some(buffer) = self.preview_pool.get_mut(&path) else {
-            return Ok(());
-        };
-        if buffer.ftype != preview::PreviewFtype::Markdown {
+        self.flip_preview_source_on(surface)
+    }
+
+    /// The same, for a **named** surface — what a head's own flip button
+    /// presses. [`Self::save_preview_on`]'s argument, applied to the other verb.
+    fn flip_preview_source_on(&mut self, surface: PreviewSurface) -> Result<()> {
+        // The *file* decides whether there is a face to turn — only markdown has
+        // two — and the *surface* is what gets turned.
+        if self
+            .preview_buffer_on(surface)
+            .is_none_or(|buffer| buffer.ftype != preview::PreviewFtype::Markdown)
+        {
             return Ok(());
         }
-        buffer.md_source = !buffer.md_source;
+        let pane = self.preview_pane_mut(surface);
+        pane.md_source = !pane.md_source;
         // The keyboard cannot stay in an editor that is no longer on screen. The
         // flag is healed at the read (`preview_edit_focus`), so this is belt and
         // braces — but the caret it would otherwise leave behind is not, and a
         // caret parked in a rendered document is a caret in nothing.
-        self.preview_edit_focused = false;
+        if self.preview_edit_focus == Some(surface) {
+            self.preview_edit_focus = None;
+        }
         self.repaint_preview()
     }
 
@@ -14054,10 +14942,27 @@ impl Runtime {
         Ok(())
     }
 
-    /// The buffer the preview seat is showing, if it is showing one.
+    /// The buffer **the** preview seat is showing, if it is showing one.
+    ///
+    /// [`Self::preview_buffer_on`] asked about [`seats::Seats::preview`], and it
+    /// is kept for exactly the callers that still mean that and nothing plural: a
+    /// tab's caption, a schematic's, and the two hit tests that belong to the
+    /// docked pane's own furniture. Everything that answers a gesture resolves a
+    /// surface first and asks about that one instead — the pane the pointer is in
+    /// is not always the first preview leaf in the tree.
     fn current_preview_buffer(&self) -> Option<&preview::PreviewBuffer> {
-        let path = self.preview_buffer.as_deref()?;
-        self.preview_pool.get(path)
+        self.preview_buffer_on(PreviewSurface::Seat(self.seats.preview()?))
+    }
+
+    /// The picture **the** preview seat is showing, if it is showing one.
+    ///
+    /// [`Self::current_preview_buffer`]'s other door, singular for the same
+    /// callers and the same reason: the two fill one caption (P36), so a tab's
+    /// name and a schematic's ask them as a pair.
+    fn current_preview_image(&self) -> Option<&PreviewImageState> {
+        self.preview_pane(PreviewSurface::Seat(self.seats.preview()?))?
+            .image
+            .as_ref()
     }
 
     /// A wheel notch over a preview's text body.
@@ -14070,7 +14975,12 @@ impl Runtime {
     /// The text surface is rebuilt rather than repainted, because the lines
     /// *are* the offset: which of them exist this frame is what scrolling
     /// changes.
-    fn scroll_preview_body(&mut self, body: [f32; 4], delta: MouseScrollDelta) -> Result<()> {
+    fn scroll_preview_body(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        delta: MouseScrollDelta,
+    ) -> Result<()> {
         let scale = self.renderer.metrics().scale_factor as f32;
         // **Shift turns the wheel sideways**, which is the convention every
         // horizontal scroller on this desktop already follows and the only one
@@ -14087,16 +14997,17 @@ impl Runtime {
         // 2026-08-13). Asked first, because the page has no horizontal axis of
         // its own on this surface and a notch spent on nothing is a notch the
         // user has to spend again.
-        if sideways && self.scroll_preview_block(body, scale, travel)? {
+        if sideways && self.scroll_preview_block(surface, body, scale, travel)? {
             return Ok(());
         }
-        let mut wanted = self.preview_scroll;
+        let scroll = self.preview_pane_mut(surface).scroll;
+        let mut wanted = scroll;
         wanted[usize::from(!sideways)] -= travel;
-        let scrolled = self.clamped_preview_scroll(body, scale, wanted);
-        if scrolled == self.preview_scroll {
+        let scrolled = self.clamped_preview_scroll(surface, body, scale, wanted);
+        if scrolled == scroll {
             return Ok(());
         }
-        self.preview_scroll = scrolled;
+        self.preview_pane_mut(surface).scroll = scrolled;
         self.refresh_preview_body();
         self.refresh_chrome();
         self.present_chrome_change()
@@ -14110,8 +15021,17 @@ impl Runtime {
     /// separate scrolling regions, and the one you are pointing at is the one you
     /// mean — which is what every browser does with a `overflow-x: auto` div and
     /// the only rule that needs no second control to disambiguate.
-    fn scroll_preview_block(&mut self, body: [f32; 4], scale: f32, travel: f32) -> Result<bool> {
-        let PreviewDocument::Markdown { blocks, layout, .. } = &self.preview_doc else {
+    fn scroll_preview_block(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+        travel: f32,
+    ) -> Result<bool> {
+        let Some(pane) = self.preview_pane(surface) else {
+            return Ok(false);
+        };
+        let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
             return Ok(false);
         };
         let Some(pointer) = self.pointer_position else {
@@ -14122,20 +15042,16 @@ impl Runtime {
             return Ok(false);
         }
         let metrics = seats::preview_markdown_metrics(scale);
-        let hit = preview_wide_blocks(body, metrics, self.preview_scroll, (blocks, layout))
+        let hit = preview_wide_blocks(body, metrics, pane.scroll, (blocks, layout))
             .find(|(_, clip, _)| y >= clip[1] && y < clip[3]);
         let Some((index, clip, width)) = hit else {
             return Ok(false);
         };
         let overflow = width - (clip[2] - clip[0]);
-        let current = self
-            .preview_md_block_scroll
-            .get(index)
-            .copied()
-            .unwrap_or(0.0);
+        let current = pane.md_block_scroll.get(index).copied().unwrap_or(0.0);
         // Still the block's notch either way: a table at its own end does not
         // hand the wheel back to a page that has nowhere to go either.
-        self.set_preview_block_scroll(index, (current - travel).clamp(0.0, overflow))?;
+        self.set_preview_block_scroll(surface, index, (current - travel).clamp(0.0, overflow))?;
         Ok(true)
     }
 
@@ -14145,55 +15061,80 @@ impl Runtime {
     /// Reports whether anything moved. The caller does the clamping, because the
     /// two gestures clamp against the same numbers by different arithmetic and
     /// this is not the place to guess which one is asking.
-    fn set_preview_block_scroll(&mut self, index: usize, offset: f32) -> Result<bool> {
+    fn set_preview_block_scroll(
+        &mut self,
+        surface: PreviewSurface,
+        index: usize,
+        offset: f32,
+    ) -> Result<bool> {
+        let offsets = &mut self.preview_pane_mut(surface).md_block_scroll;
         // Grown here rather than at the rebuild, because a document is parsed far
         // more often than a block is scrolled and a vector of zeros per parse is
         // a cost paid for a case that usually does not arise.
-        if self.preview_md_block_scroll.len() <= index {
-            self.preview_md_block_scroll.resize(index + 1, 0.0);
+        if offsets.len() <= index {
+            offsets.resize(index + 1, 0.0);
         }
-        if self.preview_md_block_scroll[index] == offset {
+        if offsets[index] == offset {
             return Ok(false);
         }
-        self.preview_md_block_scroll[index] = offset;
+        offsets[index] = offset;
         self.repaint_preview()?;
         Ok(true)
     }
 
-    /// The bar the pointer is on, asked of the frame as it stands.
+    /// The bar the pointer is on, asked of the frame as it stands — and of
+    /// whichever surface the pointer is in.
     fn preview_block_bar_under(
         &self,
         position: PhysicalPosition<f64>,
-        scale: f32,
-    ) -> Option<(usize, preview::BlockScrollBar)> {
-        let body = self.preview_content_body_rect(scale)?;
-        let PreviewDocument::Markdown { blocks, layout, .. } = &self.preview_doc else {
+    ) -> Option<(PreviewSurface, usize, preview::BlockScrollBar)> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (surface, body) = self.preview_surface_at(position)?;
+        let pane = self.preview_pane(surface)?;
+        let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
             return None;
         };
-        preview_block_bar_at(
+        let (index, bar) = preview_block_bar_at(
             body,
             seats::preview_markdown_metrics(scale),
-            self.preview_scroll,
-            &self.preview_md_block_scroll,
+            pane.scroll,
+            &pane.md_block_scroll,
             (blocks, layout),
             scale,
             [position.x as f32, position.y as f32],
-        )
+        )?;
+        Some((surface, index, bar))
     }
 
-    /// Which thumb is lit this frame, and whether it is in a hand.
-    fn preview_block_lit(&self) -> Option<(usize, bool)> {
+    /// Which of this surface's thumbs is lit this frame, and whether it is in a
+    /// hand.
+    ///
+    /// Asked per surface because the answer is drawn per surface: there is one
+    /// pointer, so at most one pane's thumb is ever lit — and the panes it is not
+    /// in have to be told "none of yours" rather than be handed the other's
+    /// index.
+    fn preview_block_lit(&self, surface: PreviewSurface) -> Option<(usize, bool)> {
         self.preview_block_drag
+            .filter(|drag| drag.surface == surface)
             .map(|drag| (drag.index, true))
-            .or(self.preview_block_hover.map(|index| (index, false)))
+            .or(self
+                .preview_block_hover
+                .filter(|(hovered, _)| *hovered == surface)
+                .map(|(_, index)| (index, false)))
     }
 
-    /// The markdown link under the pointer, if there is one.
-    fn preview_link_at(&self, position: PhysicalPosition<f64>) -> Option<&PreviewLink> {
+    /// The markdown link under the pointer, if there is one, and the surface it
+    /// is drawn on.
+    fn preview_link_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(PreviewSurface, &PreviewLink)> {
         let (x, y) = (position.x as f32, position.y as f32);
-        self.preview_links.iter().find(|link| {
+        let (surface, _) = self.preview_surface_at(position)?;
+        let link = self.preview_pane(surface)?.links.iter().find(|link| {
             x >= link.rect[0] && x <= link.rect[2] && y >= link.rect[1] && y <= link.rect[3]
-        })
+        })?;
+        Some((surface, link))
     }
 
     /// A press on a markdown link (user ruling, 2026-08-13).
@@ -14203,14 +15144,14 @@ impl Runtime {
     /// text: a link is a control standing *in* the content, and a press on a
     /// control was never a press on what it is standing on.
     fn press_preview_link(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(target) = self
+        let Some((surface, target)) = self
             .preview_link_at(position)
-            .map(|link| link.target.clone())
+            .map(|(surface, link)| (surface, link.target.clone()))
         else {
             return Ok(false);
         };
         let Some(document) = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .map(|buffer| buffer.path.clone())
         else {
             return Ok(false);
@@ -14245,7 +15186,7 @@ impl Runtime {
     fn note_preview_link_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
         let over = position
             .and_then(|position| self.preview_link_at(position))
-            .map(|link| link.rect);
+            .map(|(surface, link)| (surface, link.rect));
         if over == self.preview_link_hover {
             return Ok(());
         }
@@ -14261,15 +15202,15 @@ impl Runtime {
     /// press there means the bar, the same way a press on a scrollbar in a text
     /// editor is never a press in the text.
     fn press_preview_block_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let Some((index, bar)) = self.preview_block_bar_under(position, scale) else {
+        let Some((surface, index, bar)) = self.preview_block_bar_under(position) else {
             return Ok(false);
         };
         self.preview_block_drag = Some(PreviewBlockDrag {
+            surface,
             index,
             grab: (position.x as f32 - bar.thumb[0]).clamp(0.0, bar.thumb[2] - bar.thumb[0]),
         });
-        self.preview_block_hover = Some(index);
+        self.preview_block_hover = Some((surface, index));
         self.repaint_preview()?;
         Ok(true)
     }
@@ -14285,21 +15226,22 @@ impl Runtime {
             return Ok(false);
         };
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_content_body_rect(scale) else {
+        // The gesture's own surface, not the one under the pointer: a hand that
+        // has left the pane it took hold in is still holding that pane's thumb.
+        let Some(body) = self.preview_surface_body_rect(drag.surface, scale) else {
             return Ok(true);
         };
-        let offset = self
-            .preview_md_block_scroll
-            .get(drag.index)
-            .copied()
-            .unwrap_or(0.0);
-        let PreviewDocument::Markdown { blocks, layout, .. } = &self.preview_doc else {
+        let Some(pane) = self.preview_pane(drag.surface) else {
+            return Ok(true);
+        };
+        let offset = pane.md_block_scroll.get(drag.index).copied().unwrap_or(0.0);
+        let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
             return Ok(true);
         };
         let found = preview_wide_blocks(
             body,
             seats::preview_markdown_metrics(scale),
-            self.preview_scroll,
+            pane.scroll,
             (blocks, layout),
         )
         .find(|(index, _, _)| *index == drag.index)
@@ -14311,16 +15253,15 @@ impl Runtime {
             return Ok(true);
         };
         let wanted = preview::block_scroll_dragged_to(&bar, position.x as f32, drag.grab);
-        self.set_preview_block_scroll(drag.index, wanted)?;
+        self.set_preview_block_scroll(drag.surface, drag.index, wanted)?;
         Ok(true)
     }
 
     /// Light the thumb under the pointer, or put the last one out.
     fn note_preview_block_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
-        let scale = self.renderer.metrics().scale_factor as f32;
         let over = position
-            .and_then(|position| self.preview_block_bar_under(position, scale))
-            .map(|(index, _)| index);
+            .and_then(|position| self.preview_block_bar_under(position))
+            .map(|(surface, index, _)| (surface, index));
         if over == self.preview_block_hover {
             return Ok(());
         }
@@ -14335,8 +15276,14 @@ impl Runtime {
     /// own end on either axis. The two bodies with no scroller of their own (a
     /// table and a rendered markdown, which fit their pane or overflow it in
     /// ways slice 2 does not scroll) clamp to nothing, which is the truth.
-    fn clamped_preview_scroll(&self, body: [f32; 4], scale: f32, scroll: [f32; 2]) -> [f32; 2] {
-        let max = self.preview_max_scroll(body, scale);
+    fn clamped_preview_scroll(
+        &self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+        scroll: [f32; 2],
+    ) -> [f32; 2] {
+        let max = self.preview_max_scroll(surface, body, scale);
         [scroll[0].clamp(0.0, max[0]), scroll[1].clamp(0.0, max[1])]
     }
 
@@ -14355,13 +15302,16 @@ impl Runtime {
     /// whose columns are derived from its own widest cells is as wide as it is,
     /// and markdown *wraps* to the pane, so a horizontal offset would be an
     /// offset into nothing.
-    fn preview_max_scroll(&self, body: [f32; 4], scale: f32) -> [f32; 2] {
-        let (rows_height, columns) = self.preview_content_extent(scale);
+    fn preview_max_scroll(&self, surface: PreviewSurface, body: [f32; 4], scale: f32) -> [f32; 2] {
+        let Some(pane) = self.preview_pane(surface) else {
+            return [0.0, 0.0];
+        };
+        let (rows_height, columns) = self.preview_content_extent(surface, scale);
         preview_document_max_scroll(
-            &self.preview_doc,
+            &pane.doc,
             body,
             scale,
-            self.preview_mono_advance,
+            pane.mono_advance,
             rows_height,
             columns,
         )
@@ -14416,28 +15366,25 @@ impl Runtime {
     // server. What is here is what a text field has — a caret, a selection, the
     // keys that move them, and one explicit save.
 
-    /// Whether the quick edit holds the keyboard — **`InputOwner::PreviewEdit`**.
+    /// **Which surface's quick edit holds the keyboard** —
+    /// `InputOwner::PreviewEdit`.
     ///
     /// Healed at the read, exactly as [`Self::files_keyboard_seat`] is and for
-    /// the same reason: every way the flag can go stale (the seat closed, the
-    /// document became a picture, the markdown flipped back to its render, the
-    /// file turned out to be truncated and therefore read-only) is answered here
-    /// rather than by remembering to write `false` at each of those places. The
-    /// keyboard falls back to the shell the instant there is nothing to type
+    /// the same reason: every way the answer can go stale (the surface closed,
+    /// the document became a picture, the markdown flipped back to its render,
+    /// the file turned out to be truncated and therefore read-only) is answered
+    /// here rather than by remembering to write `None` at each of those places.
+    /// The keyboard falls back to the shell the instant there is nothing to type
     /// into.
-    fn preview_edit_focus(&self) -> bool {
-        self.preview_edit_focused
-            && self.seats.preview().is_some()
-            && self
-                .current_preview_buffer()
-                .is_some_and(preview::PreviewBuffer::is_editable)
-    }
-
-    /// Whether the preview seat is the focused leaf — the other half of the
-    /// mock-up's global `Ctrl+S` (6139-6150), which saves "from any focus
-    /// state".
-    fn preview_seat_focused(&self) -> bool {
-        self.seats.preview() == Some(self.seats.focus())
+    ///
+    /// The surface has to still *exist*, not merely still have a view: a float
+    /// that closed and a leaf that was taken out of the tree both leave a pane
+    /// behind until the next sweep, and a keyboard parked on one of them would be
+    /// typing into a window nobody can see.
+    fn preview_edit_focus(&self) -> Option<PreviewSurface> {
+        let surface = self.preview_edit_focus?;
+        (self.preview_surfaces().contains(&surface) && self.preview_is_editable(surface))
+            .then_some(surface)
     }
 
     /// What the window's focus looks like to the shortcut table.
@@ -14449,7 +15396,7 @@ impl Runtime {
     /// the "from any focus state" the mock-up's own comment rules out.
     fn shortcut_focus(&self) -> shortcuts::Focus {
         shortcuts::Focus {
-            preview: self.preview_seat_focused() || self.preview_edit_focus(),
+            preview: self.preview_keyboard_surface().is_some(),
         }
     }
 
@@ -14500,7 +15447,7 @@ impl Runtime {
             // `PreviewEdit` — and the preview's read-only browsing, which is the
             // same owner wearing its other state: the arrows scroll the document,
             // so they are not the shell's either.
-            preview: self.preview_edit_focus() || self.preview_seat_focused(),
+            preview: self.preview_keyboard_surface().is_some(),
         }
     }
 
@@ -14519,9 +15466,9 @@ impl Runtime {
     /// 6139-6150) means when the condition is data rather than two call sites
     /// agreeing.
     fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {
-        if !self.preview_edit_focus() {
+        let Some(surface) = self.preview_edit_focus() else {
             return self.preview_browse_key(event);
-        }
+        };
         let command = preview_edit::command(&event.logical_key, self.modifiers);
         // Repeats travel and type; they do not copy, paste or blur. Held Enter is
         // one continuous "again" and a held verb is not — the same line the files
@@ -14542,7 +15489,7 @@ impl Runtime {
             preview_edit::EditCommand::Insert(text) => self.insert_into_preview(&text)?,
             preview_edit::EditCommand::Newline => {
                 let eol = self
-                    .current_preview_buffer()
+                    .preview_buffer_on(surface)
                     .and_then(|buffer| buffer.content.as_deref())
                     .map_or("\n", preview_edit::eol_of);
                 self.insert_into_preview(eol)?;
@@ -14561,14 +15508,14 @@ impl Runtime {
                 self.move_preview_caret(motion, extend)?;
             }
             preview_edit::EditCommand::SelectAll => {
-                let mut caret = self.preview_caret;
+                let mut caret = self.preview_pane_mut(surface).caret;
                 if let Some(content) = self
-                    .current_preview_buffer()
+                    .preview_buffer_on(surface)
                     .and_then(|buffer| buffer.content.as_deref())
                 {
                     preview_edit::select_all(content, &mut caret);
                 }
-                self.preview_caret = caret;
+                self.preview_pane_mut(surface).caret = caret;
                 self.repaint_preview()?;
             }
             preview_edit::EditCommand::Copy => self.copy_preview_selection(),
@@ -14583,7 +15530,7 @@ impl Runtime {
             // which is exactly what §7.1.5's layering says: Esc reaches the child
             // only when the owner is the terminal.
             preview_edit::EditCommand::Release => {
-                self.preview_edit_focused = false;
+                self.preview_edit_focus = None;
                 self.repaint_preview()?;
             }
             preview_edit::EditCommand::Ignore => {}
@@ -14606,11 +15553,11 @@ impl Runtime {
     /// Travel keys honour repeats and nothing else does, which is the same line
     /// the tree draws: holding an arrow is one continuous "further".
     fn preview_browse_key(&mut self, event: &KeyEvent) -> Result<bool> {
-        if !self.preview_seat_focused() {
+        let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
-        }
+        };
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_content_body_rect(scale) else {
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             // A seat with no body to scroll still owns the key: there is no
             // terminal under it either way.
             return Ok(true);
@@ -14631,15 +15578,13 @@ impl Runtime {
             Key::Named(NamedKey::End) => [0.0, f32::MAX],
             _ => return Ok(true),
         };
-        let wanted = [
-            self.preview_scroll[0] + step[0],
-            self.preview_scroll[1] + step[1],
-        ];
-        let scrolled = self.clamped_preview_scroll(body, scale, wanted);
-        if scrolled == self.preview_scroll {
+        let scroll = self.preview_pane_mut(surface).scroll;
+        let wanted = [scroll[0] + step[0], scroll[1] + step[1]];
+        let scrolled = self.clamped_preview_scroll(surface, body, scale, wanted);
+        if scrolled == scroll {
             return Ok(true);
         }
-        self.preview_scroll = scrolled;
+        self.preview_pane_mut(surface).scroll = scrolled;
         self.repaint_preview()?;
         Ok(true)
     }
@@ -14693,17 +15638,16 @@ impl Runtime {
     /// is nothing to switch but the rectangle: the same two calls
     /// ([`Self::apply_ime_cursor_area`]) serve whichever surface is composing.
     fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {
-        if !self.preview_edit_focus() {
-            return None;
-        }
+        let surface = self.preview_edit_focus()?;
         let scale = self.renderer.metrics().scale_factor as f32;
-        let body = self.preview_content_body_rect(scale)?;
-        let (line, column) = self.preview_caret_position()?;
-        let advance = self.preview_mono_advance;
-        let (rows_height, columns) = self.preview_content_extent(scale);
-        let geometry = self.preview_doc_text_geometry(body, scale, rows_height, columns, advance);
+        let body = self.preview_surface_body_rect(surface, scale)?;
+        let (line, column) = self.preview_caret_position(surface)?;
+        let advance = self.preview_pane(surface)?.mono_advance;
+        let (rows_height, columns) = self.preview_content_extent(surface, scale);
+        let geometry =
+            self.preview_doc_text_geometry(surface, body, scale, rows_height, columns, advance);
         let (row, column) = self
-            .preview_wrap()
+            .preview_wrap(surface)
             .map_or((line, column), |wrap| preview_caret_row(wrap, line, column));
         let box_of_row = geometry.line_rect(row);
         // Clamped into the body, for `ime_cursor_area_for_metrics`'s reason: a
@@ -14732,12 +15676,12 @@ impl Runtime {
         }
     }
 
-    /// Type into the buffer on the seat.
+    /// Type into the buffer the keyboard is in.
     fn insert_into_preview(&mut self, text: &str) -> Result<()> {
         self.edit_preview(|content, caret| preview_edit::insert(content, caret, text))
     }
 
-    /// Run one edit against the buffer the seat is showing.
+    /// Run one edit against the buffer the keyboard's surface is showing.
     ///
     /// **The pool's buffer, not a copy of it.** A file open in two panes is one
     /// buffer (§7.1.3), so an edit goes to the pool or it forks — and the caret
@@ -14747,45 +15691,51 @@ impl Runtime {
         &mut self,
         edit: impl FnOnce(&mut String, &mut preview_edit::EditCaret) -> bool,
     ) -> Result<()> {
-        let Some(path) = self.preview_buffer.clone() else {
+        let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
-        let mut caret = self.preview_caret;
-        let Some(buffer) = self.preview_pool.get_mut(&path) else {
-            return Ok(());
-        };
-        if !buffer.is_editable() {
+        let mut caret = self.preview_pane_mut(surface).caret;
+        // Asked of the surface, because the render has nothing to type into and
+        // the source of the same file has.
+        if !self.preview_is_editable(surface) {
             return Ok(());
         }
+        let Some(buffer) = self.preview_buffer_on_mut(surface) else {
+            return Ok(());
+        };
         let changed = buffer.edit_content(|content| edit(content, &mut caret));
-        self.preview_caret = caret;
+        let pane = self.preview_pane_mut(surface);
+        pane.caret = caret;
         if changed {
             // A keystroke answers whatever the last save had to say: a conflict
             // notice still standing over a body that has moved on is a sentence
             // about a state that no longer exists.
-            self.preview_notice = None;
+            pane.notice = None;
         }
-        self.reveal_preview_caret();
+        self.reveal_preview_caret(surface);
         self.repaint_preview()
     }
 
     /// Move the caret, and bring it back into view.
     fn move_preview_caret(&mut self, motion: preview_edit::Motion, extend: bool) -> Result<()> {
+        let Some(surface) = self.preview_keyboard_surface() else {
+            return Ok(());
+        };
         let Some(content) = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.clone())
         else {
             return Ok(());
         };
-        let rows = self.preview_page_rows();
-        let mut caret = self.preview_caret;
+        let rows = self.preview_page_rows(surface);
+        let mut caret = self.preview_pane_mut(surface).caret;
         // **Up and Down walk visual rows; Home and End walk the logical line.**
         // The `<textarea>` convention, and the one a reader expects: on a
         // wrapped line, Down that jumped the whole paragraph would skip most of
         // what is on the screen, while a Home that stopped at the start of the
         // *row* would leave no key that reaches the start of the line at all.
         let stepped = self
-            .preview_wrap()
+            .preview_wrap(surface)
             .filter(|wrap| wrap.wraps())
             .and_then(|wrap| step_preview_caret_by_row(&content, &mut caret, motion, wrap, rows));
         if stepped.is_none() {
@@ -14793,45 +15743,25 @@ impl Runtime {
         } else if !extend {
             caret.anchor = caret.caret;
         }
-        self.preview_caret = caret;
-        self.reveal_preview_caret();
+        self.preview_pane_mut(surface).caret = caret;
+        self.reveal_preview_caret(surface);
         self.repaint_preview()
     }
 
-    /// **The box the document itself lives in** — the seat's body, less the
-    /// truncation bar when there is one.
-    ///
-    /// The one door every question about the preview's geometry now goes
-    /// through: how far it may be scrolled, which row a click named, where the
-    /// caret has to be revealed to, what a page is. `seats::preview_body_rect`
-    /// answers the *pane's* body and is right about that; it is the wrong
-    /// rectangle for a document that has furniture standing in it, and the
-    /// reported bug (2026-08-13) was exactly the difference between the two —
-    /// content laid out to the pane's height, drawn under a caption it could
-    /// never be scrolled out from behind.
-    fn preview_content_body_rect(&self, scale: f32) -> Option<[f32; 4]> {
-        let body = seats::preview_body_rect(&self.seats, &self.seat_layout, scale)?;
-        Some(preview_content_body(
-            body,
-            scale,
-            self.preview_foot_notice().is_some(),
-        ))
-    }
-
-    /// The sentence the truncation bar carries, if it is owed one.
+    /// The sentence this surface's truncation bar carries, if it is owed one.
     ///
     /// Truncation only. The `Saved` flash is *news* and keeps the old floating
     /// strip — and the two cannot collide, because a truncated buffer is
     /// read-only and has no save to report.
-    fn preview_foot_notice(&self) -> Option<&'static str> {
-        self.current_preview_buffer()
+    fn preview_foot_notice(&self, surface: PreviewSurface) -> Option<&'static str> {
+        self.preview_buffer_on(surface)
             .and_then(preview::PreviewBuffer::truncation_notice)
     }
 
-    /// How many lines the edit surface can show — what a page is.
-    fn preview_page_rows(&self) -> usize {
+    /// How many lines this surface's edit surface can show — what a page is.
+    fn preview_page_rows(&self, surface: PreviewSurface) -> usize {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_content_body_rect(scale) else {
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return 1;
         };
         let metrics = seats::preview_text_metrics(scale);
@@ -14844,28 +15774,31 @@ impl Runtime {
     /// the bottom brings the body up by exactly one line rather than recentring,
     /// which is what every text field does and the only behaviour that makes
     /// holding Down look like reading rather than like jumping.
-    fn reveal_preview_caret(&mut self) {
+    fn reveal_preview_caret(&mut self, surface: PreviewSurface) {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_content_body_rect(scale) else {
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return;
         };
-        let Some((line, column)) = self.preview_caret_position() else {
+        let Some((line, column)) = self.preview_caret_position(surface) else {
+            return;
+        };
+        let Some(pane) = self.preview_pane(surface) else {
             return;
         };
         let metrics = seats::preview_text_metrics(scale);
-        let advance = self.preview_mono_advance;
+        let advance = pane.mono_advance;
         // The *drawn* row and the column inside it: on a wrapped surface the
         // caret's line number is not where it is on the glass, and scrolling to
         // a line number would put a caret on the fortieth row of a line off the
         // bottom of a pane that thinks it is showing the first.
-        let (row, column) = self.preview_wrap().map_or((line, column), |wrap| {
+        let (row, column) = self.preview_wrap(surface).map_or((line, column), |wrap| {
             let (row, start) = wrap.row_of(line, column);
             (row, column - start)
         });
         let top = metrics.padding_y + metrics.line_height * row as f32;
         let bottom = top + metrics.line_height;
         let left = metrics.padding_x + advance * column as f32;
-        let mut scroll = self.preview_scroll;
+        let mut scroll = pane.scroll;
         let height = body[3] - body[1];
         let width = body[2] - body[0];
         scroll[1] = scroll[1].min(top).max(bottom - height);
@@ -14874,16 +15807,18 @@ impl Runtime {
         scroll[0] = scroll[0]
             .min(left - metrics.padding_x)
             .max(left + advance + metrics.padding_x - width);
-        self.preview_scroll = self.clamped_preview_scroll(body, scale, scroll);
+        let scrolled = self.clamped_preview_scroll(surface, body, scale, scroll);
+        self.preview_pane_mut(surface).scroll = scrolled;
     }
 
-    /// Which row and column the caret stands on.
-    fn preview_caret_position(&self) -> Option<(usize, usize)> {
+    /// Which row and column this surface's caret stands on.
+    fn preview_caret_position(&self, surface: PreviewSurface) -> Option<(usize, usize)> {
         let content = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.as_deref())?;
+        let caret = self.preview_pane(surface)?.caret;
         let starts = preview_edit::line_starts(content);
-        let caret = preview_edit::normalize(content, self.preview_caret.caret);
+        let caret = preview_edit::normalize(content, caret.caret);
         let line = preview_edit::line_index(&starts, caret);
         let (start, _) = preview_edit::line_bounds(content, &starts, line);
         let text = preview_edit::line_text(content, &starts, line);
@@ -14893,10 +15828,16 @@ impl Runtime {
     /// Put the selection on the clipboard, through the door the terminal's own
     /// copy already uses.
     fn copy_preview_selection(&mut self) {
+        let Some(surface) = self.preview_keyboard_surface() else {
+            return;
+        };
+        let Some(caret) = self.preview_pane(surface).map(|pane| pane.caret) else {
+            return;
+        };
         let Some(text) = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.as_deref())
-            .map(|content| self.preview_caret.selected(content).to_owned())
+            .map(|content| caret.selected(content).to_owned())
             .filter(|text| !text.is_empty())
         else {
             return;
@@ -14924,27 +15865,43 @@ impl Runtime {
             return Ok(());
         }
         let eol = self
-            .current_preview_buffer()
+            .preview_keyboard_surface()
+            .and_then(|surface| self.preview_buffer_on(surface))
             .and_then(|buffer| buffer.content.as_deref())
             .map_or("\n", preview_edit::eol_of);
         let text = preview_edit::with_eol(&text, eol);
         self.insert_into_preview(&text)
     }
 
-    /// Write the buffer on the seat back to its file (mock-up 6139-6150).
+    /// Write the buffer the keyboard is in back to its file (mock-up 6139-6150).
     ///
     /// Nothing happens to a clean buffer — the mock-up's own guard, and the
     /// reason is the acknowledgement: "Saved" printed over a save that had
     /// nothing to write teaches the word to mean "the key worked" rather than
     /// "the file changed".
     fn save_preview(&mut self) -> Result<()> {
-        let Some(path) = self.preview_buffer.clone() else {
+        let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
-        let Some(buffer) = self.preview_pool.get_mut(&path) else {
+        self.save_preview_on(surface)
+    }
+
+    /// The same, for a **named** surface — what a head's own `Save` button
+    /// presses.
+    ///
+    /// The chord and the button are two doors to one verb, and they name their
+    /// surface differently: `Ctrl+S` means "wherever the keyboard is" (the
+    /// mock-up's "from any focus state", 6139-6150), a button means the window it
+    /// is drawn on. Splitting the naming from the verb is what keeps them one
+    /// verb.
+    fn save_preview_on(&mut self, surface: PreviewSurface) -> Result<()> {
+        if !self.preview_is_editable(surface) {
+            return Ok(());
+        }
+        let Some(buffer) = self.preview_buffer_on_mut(surface) else {
             return Ok(());
         };
-        if !buffer.is_editable() || !buffer.dirty {
+        if !buffer.dirty {
             return Ok(());
         }
         let notice = match buffer.save() {
@@ -14955,20 +15912,20 @@ impl Runtime {
                 format!("Not saved \u{2014} {error}")
             }
         };
-        self.preview_notice = Some((notice, Instant::now()));
+        self.preview_pane_mut(surface).notice = Some((notice, Instant::now()));
         self.repaint_preview()
     }
 
-    /// The sentence the body is owed about the last save, if it is still owed
-    /// one.
+    /// The sentence this surface's body is owed about its last save, if it is
+    /// still owed one.
     ///
     /// "Saved" is an acknowledgement and expires after [`FOOT_REVEAL_FEEDBACK`]
     /// (ruling 6: the mock-up's four durations are one). A refusal does not
     /// expire, because it is not a report of something that happened but of
     /// something that did *not*, and a warning that fades is a warning the user
     /// is entitled to have missed.
-    fn preview_save_notice(&self, now: Instant) -> Option<&str> {
-        let (notice, at) = self.preview_notice.as_ref()?;
+    fn preview_save_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
+        let (notice, at) = self.preview_pane(surface)?.notice.as_ref()?;
         if notice == preview::PREVIEW_SAVED_NOTICE
             && now.saturating_duration_since(*at) >= FOOT_REVEAL_FEEDBACK
         {
@@ -14977,20 +15934,41 @@ impl Runtime {
         Some(notice)
     }
 
-    /// The acknowledgement's one wake-up: the instant it is due to go away.
+    /// The acknowledgement's one wake-up: the **soonest** instant one of them is
+    /// due to go away.
+    ///
+    /// One deadline for every surface, because there is one event loop and it
+    /// wakes for the nearest thing owed: two panes each flashing "Saved" are two
+    /// words that expire independently, and the earlier of the two is what the
+    /// window has to be up for. The sweep at that instant asks all of them again.
     fn preview_notice_deadline(&self) -> Option<Instant> {
-        self.preview_notice
-            .as_ref()
+        self.preview_panes
+            .iter()
+            .filter_map(|(_, pane)| pane.notice.as_ref())
             .filter(|(notice, _)| notice == preview::PREVIEW_SAVED_NOTICE)
             .map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)
+            .min()
     }
 
-    /// Take the expired acknowledgement down.
+    /// Take every expired acknowledgement down.
+    ///
+    /// All of them at once, because the clock the wake-up was set on is the
+    /// window's: it fires for the soonest, and a second pane whose word expired
+    /// in the same instant must not have to wait for a third event to notice.
     fn advance_preview_notice(&mut self, now: Instant) -> Result<()> {
-        if self.preview_notice.is_none() || self.preview_save_notice(now).is_some() {
+        let expired: Vec<PreviewSurface> = self
+            .preview_panes
+            .iter()
+            .filter(|(_, pane)| pane.notice.is_some())
+            .map(|(surface, _)| surface)
+            .filter(|surface| self.preview_save_notice(*surface, now).is_none())
+            .collect();
+        if expired.is_empty() {
             return Ok(());
         }
-        self.preview_notice = None;
+        for surface in expired {
+            self.preview_pane_mut(surface).notice = None;
+        }
         self.repaint_preview()
     }
 
@@ -15000,72 +15978,71 @@ impl Runtime {
     /// Returns whether the press was the surface's.
     fn press_preview_body(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_edit_body(position, scale) else {
+        let Some((surface, body)) = self.preview_edit_body(position) else {
             return Ok(false);
         };
-        let Some(offset) = self.preview_offset_at(body, scale, position) else {
+        let Some(offset) = self.preview_offset_at(surface, body, scale, position) else {
             return Ok(false);
         };
         let Some(content) = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.clone())
         else {
             return Ok(false);
         };
-        let mut caret = self.preview_caret;
+        let mut caret = self.preview_pane_mut(surface).caret;
         // Shift-click extends from wherever the selection already was, which is
         // the one gesture that makes a long selection possible without a drag
         // that outruns the pane.
         caret.place(&content, offset, self.modifiers.shift_key());
-        self.preview_caret = caret;
-        self.preview_edit_focused = true;
-        self.preview_selecting = true;
+        self.preview_pane_mut(surface).caret = caret;
+        self.preview_edit_focus = Some(surface);
+        self.preview_selecting = Some(surface);
         self.repaint_preview()?;
         Ok(true)
     }
 
     /// The pointer travelling with the button down, mid-selection.
     fn drag_preview_selection(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        if !self.preview_selecting {
-            return Ok(false);
-        }
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_content_body_rect(scale) else {
+        // The gesture's own surface, not the one under the pointer: a selection
+        // belongs to the body it began in however far the hand has since gone.
+        let Some(surface) = self.preview_selecting else {
             return Ok(false);
         };
-        let Some(offset) = self.preview_offset_at(body, scale, position) else {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            return Ok(false);
+        };
+        let Some(offset) = self.preview_offset_at(surface, body, scale, position) else {
             return Ok(false);
         };
         let Some(content) = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.clone())
         else {
             return Ok(false);
         };
-        let mut caret = self.preview_caret;
+        let was = self.preview_pane_mut(surface).caret;
+        let mut caret = was;
         caret.place(&content, offset, true);
-        if caret == self.preview_caret {
+        if caret == was {
             return Ok(true);
         }
-        self.preview_caret = caret;
+        self.preview_pane_mut(surface).caret = caret;
         self.repaint_preview()?;
         Ok(true)
     }
 
-    /// The edit surface's rectangle, if the pointer is inside one.
-    fn preview_edit_body(&self, position: PhysicalPosition<f64>, scale: f32) -> Option<[f32; 4]> {
-        if !self
-            .current_preview_buffer()
-            .is_some_and(preview::PreviewBuffer::is_editable)
-        {
-            return None;
-        }
-        let body = self.preview_content_body_rect(scale)?;
-        let (x, y) = (position.x as f32, position.y as f32);
-        (body[0] <= x && x <= body[2] && body[1] <= y && y <= body[3]).then_some(body)
+    /// The edit surface the pointer is inside, and its rectangle.
+    fn preview_edit_body(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(PreviewSurface, [f32; 4])> {
+        let (surface, body) = self.preview_surface_at(position)?;
+        self.preview_is_editable(surface).then_some((surface, body))
     }
 
-    /// Which byte of the body a point names.
+    /// Which byte of this surface's body a point names.
     ///
     /// **The painter's own arithmetic, read backwards.** The row is the line the
     /// point is inside and the column is the *nearest* cell boundary rather than
@@ -15074,20 +16051,22 @@ impl Runtime {
     /// the end of the line.
     fn preview_offset_at(
         &self,
+        surface: PreviewSurface,
         body: [f32; 4],
         scale: f32,
         position: PhysicalPosition<f64>,
     ) -> Option<usize> {
         let content = self
-            .current_preview_buffer()
+            .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.as_deref())?;
+        let pane = self.preview_pane(surface)?;
         let metrics = seats::preview_text_metrics(scale);
-        let advance = self.preview_mono_advance;
+        let advance = pane.mono_advance;
         if advance <= 0.0 {
             return None;
         }
-        let x = position.x as f32 - body[0] - metrics.padding_x + self.preview_scroll[0];
-        let y = position.y as f32 - body[1] - metrics.padding_y + self.preview_scroll[1];
+        let x = position.x as f32 - body[0] - metrics.padding_x + pane.scroll[0];
+        let y = position.y as f32 - body[1] - metrics.padding_y + pane.scroll[1];
         let row = (y / metrics.line_height).floor().max(0.0) as usize;
         let column = (x / advance).round().max(0.0) as usize;
         // **The painter's arithmetic read backwards, through the same wrap.** A
@@ -15095,7 +16074,7 @@ impl Runtime {
         // row starts is exactly what the layout knows, and asking it here is
         // what keeps the caret under the pointer on a reflowed line.
         let (line, from, to) = self
-            .preview_wrap()
+            .preview_wrap(surface)
             .and_then(|wrap| wrap.row_span(row))
             .map_or((row, 0, usize::MAX), |span| span);
         Some(preview_edit::offset_at(
@@ -15105,9 +16084,9 @@ impl Runtime {
         ))
     }
 
-    /// How the text surface is currently wrapped, if it is showing one.
-    fn preview_wrap(&self) -> Option<&preview_edit::WrapLayout> {
-        match &self.preview_doc {
+    /// How this surface's text is currently wrapped, if it is showing text.
+    fn preview_wrap(&self, surface: PreviewSurface) -> Option<&preview_edit::WrapLayout> {
+        match &self.preview_pane(surface)?.doc {
             PreviewDocument::Text { wrap, .. } => Some(wrap),
             _ => None,
         }
@@ -15125,18 +16104,29 @@ impl Runtime {
         self.present_chrome_change()
     }
 
-    /// The only scroll the preview body is allowed to hold.
+    /// The only scroll a preview body is allowed to hold — **every** surface's.
     ///
     /// `heal_files_scroll`'s twin and its whole argument: the painter believes
     /// the stored number, so a buffer that got shorter, a pane that got taller
     /// or a switch to a smaller file has to be answered *here* rather than by
-    /// the layout quietly disagreeing with what it was handed.
+    /// the layout quietly disagreeing with what it was handed. All of them,
+    /// because one solve moves every rectangle at once: healing only the pane the
+    /// gesture touched would leave the others believing a geometry that stopped
+    /// existing in the same frame.
     fn heal_preview_scroll(&mut self) {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_content_body_rect(scale) else {
-            return;
-        };
-        self.preview_scroll = self.clamped_preview_scroll(body, scale, self.preview_scroll);
+        for surface in self.preview_surfaces() {
+            let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+                continue;
+            };
+            let Some(scroll) = self.preview_pane(surface).map(|pane| pane.scroll) else {
+                continue;
+            };
+            let healed = self.clamped_preview_scroll(surface, body, scale, scroll);
+            if healed != scroll {
+                self.preview_pane_mut(surface).scroll = healed;
+            }
+        }
     }
 
     /// Re-derive the parsed body if what it was parsed from has changed.
@@ -15145,11 +16135,15 @@ impl Runtime {
     /// the measuring below hold the renderer: a rebuild happens when a file
     /// lands or a pane changes width, and paying one copy for that is the whole
     /// price of never copying on a wheel notch.
-    fn rebuild_preview_document(&mut self, body: [f32; 4], scale: f32) {
+    fn rebuild_preview_document(&mut self, surface: PreviewSurface, body: [f32; 4], scale: f32) {
+        // The face this surface is showing is part of the key, because the two
+        // faces of one markdown file are two documents — and now that the flip
+        // is the view's, two surfaces on one file can be caching both at once.
+        let md_source = self.preview_md_source(surface);
         let key = self
-            .current_preview_buffer()
-            .map(|buffer| preview_document_key(buffer, body[2] - body[0], scale));
-        if key == self.preview_doc_key {
+            .preview_buffer_on(surface)
+            .map(|buffer| preview_document_key(buffer, md_source, body[2] - body[0], scale));
+        if key == self.preview_pane_mut(surface).doc_key {
             return;
         }
         // **A resize re-flows; it does not re-parse** (user report, 2026-08-13).
@@ -15158,45 +16152,48 @@ impl Runtime {
         // for the one pass that is genuinely per-width — how many lines the
         // wrapping blocks take — instead of re-parsing 64KB and re-shaping every
         // table cell sixty times a second. See [`MarkdownBlockIntrinsic`].
-        let reflow_only = key.as_ref().map(|key| &key.parse)
-            == self.preview_doc_key.as_ref().map(|key| &key.parse);
-        self.preview_doc_key = key;
+        let pane = self.preview_pane_mut(surface);
+        let reflow_only =
+            key.as_ref().map(|key| &key.parse) == pane.doc_key.as_ref().map(|key| &key.parse);
+        pane.doc_key = key;
         if reflow_only
             && let PreviewDocument::Markdown {
                 blocks,
                 intrinsic,
                 layout,
-            } = std::mem::take(&mut self.preview_doc)
+            } = std::mem::take(&mut pane.doc)
         {
             let metrics = seats::preview_markdown_metrics(scale);
             let width = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
             let _ = layout;
             let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics);
-            self.preview_doc = PreviewDocument::Markdown {
+            self.preview_pane_mut(surface).doc = PreviewDocument::Markdown {
                 blocks,
                 intrinsic,
                 layout,
             };
             return;
         }
-        let Some((view, content)) = self
-            .current_preview_buffer()
-            .map(|buffer| (buffer.view(), buffer.content.clone().unwrap_or_default()))
-        else {
-            self.preview_doc = PreviewDocument::Empty;
+        let Some((view, content)) = self.preview_buffer_on(surface).map(|buffer| {
+            (
+                buffer.view(md_source),
+                buffer.content.clone().unwrap_or_default(),
+            )
+        }) else {
+            self.preview_pane_mut(surface).doc = PreviewDocument::Empty;
             return;
         };
         let text_metrics = seats::preview_text_metrics(scale);
-        self.preview_mono_advance = self.renderer.preview_mono_advance(text_metrics.font_size);
-        self.preview_doc = match view {
+        let advance = self.renderer.preview_mono_advance(text_metrics.font_size);
+        self.preview_pane_mut(surface).mono_advance = advance;
+        let doc = match view {
             // The editor's own line model, not [`str::lines`]: a body ending in
             // a break has an empty line after it, the caret can stand on that
             // line, and a document that did not draw it would be a document a
             // caret could leave.
             preview::PreviewView::Text => {
                 let lines = preview_edit::display_lines(&content);
-                let wrap = match preview_wrap_columns(body, text_metrics, self.preview_mono_advance)
-                {
+                let wrap = match preview_wrap_columns(body, text_metrics, advance) {
                     Some(columns) => preview_edit::WrapLayout::wrapped(&lines, columns),
                     None => preview_edit::WrapLayout::unwrapped(&lines),
                 };
@@ -15255,6 +16252,7 @@ impl Runtime {
             }
             preview::PreviewView::Image | preview::PreviewView::None => PreviewDocument::Empty,
         };
+        self.preview_pane_mut(surface).doc = doc;
     }
 
     /// Everything about a document that a pane's width cannot change.
@@ -15475,8 +16473,11 @@ fn measure_markdown_block(
 impl Runtime {
     /// How tall the parsed document is, and how wide, in the units the scroller
     /// is clamped in.
-    fn preview_content_extent(&self, scale: f32) -> (f32, usize) {
-        match &self.preview_doc {
+    fn preview_content_extent(&self, surface: PreviewSurface, scale: f32) -> (f32, usize) {
+        let Some(pane) = self.preview_pane(surface) else {
+            return (0.0, 0);
+        };
+        match &pane.doc {
             PreviewDocument::Empty => (0.0, 0),
             // **A folded body is as tall as its rows**, not as its lines. The
             // width it answers is still the file's own; whether that width is
@@ -15484,55 +16485,82 @@ impl Runtime {
             // `preview_document_max_scroll`.
             PreviewDocument::Text { wrap, .. } => (
                 seats::preview_text_metrics(scale).line_height * wrap.rows() as f32,
-                self.current_preview_buffer()
+                self.preview_buffer_on(surface)
                     .map_or(0, |buffer| buffer.max_columns),
             ),
             PreviewDocument::Diff(rows) => (
                 rows.last().map_or(0.0, |row| {
                     row.top + seats::preview_diff_metrics(scale).line_height
                 }),
-                self.current_preview_buffer()
+                self.preview_buffer_on(surface)
                     .map_or(0, |buffer| buffer.max_columns),
             ),
             PreviewDocument::Table { .. } | PreviewDocument::Markdown { .. } => (0.0, 0),
         }
     }
 
-    /// Hand the renderer the body of whatever the preview seat is showing.
+    /// Hand the renderer the body of every preview **seat** this tab has.
+    ///
+    /// One list rather than one slot, because the content plane is plural: two
+    /// preview panes are two documents at two scroll positions, and a renderer
+    /// holding one body could only ever draw the last one built. The order is
+    /// [`Self::preview_surfaces`]'s, which is stable between frames — a list
+    /// whose order changed would be a diff against the last frame that never
+    /// settles.
+    ///
+    /// **A float's document is deliberately not in this list.** This lane is
+    /// drawn a whole pass *before* the overlays, so a body handed to it would be
+    /// painted behind the very window that contains it; a preview float's
+    /// document rides on its own [`marks::OverlayLayer::body`] instead — see
+    /// [`Self::preview_float_layer`].
+    fn refresh_preview_body(&mut self) {
+        let bodies = self
+            .preview_surfaces()
+            .into_iter()
+            .filter(|surface| matches!(surface, PreviewSurface::Seat(_)))
+            .filter_map(|surface| self.build_preview_body(surface))
+            .collect();
+        self.renderer.set_preview_bodies(bodies);
+    }
+
+    /// The body of whatever **one** surface is showing, or nothing when it is
+    /// showing nothing at all.
     ///
     /// **Only what is visible is built.** A 64KB head is some two thousand lines
     /// and a pane holds perhaps forty; building the rest would put the file's
     /// size into the frame's cost, which is exactly what the head read exists to
     /// keep out of it.
-    fn refresh_preview_body(&mut self) {
+    fn build_preview_body(&mut self, surface: PreviewSurface) -> Option<bt_render::PreviewBody> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = self.preview_content_body_rect(scale) else {
-            self.renderer.set_preview_body(None);
-            return;
-        };
+        let body = self.preview_surface_body_rect(surface, scale)?;
         // A picture's own lane draws the pixels; what is left for this surface
         // is the sentence under them (mock-up 4955).
-        if self.preview_image.is_some() {
-            let meta = self.preview_image_meta(body, scale);
-            self.renderer.set_preview_body(meta);
-            return;
+        if self
+            .preview_pane(surface)
+            .is_some_and(|pane| pane.image.is_some())
+        {
+            return self.preview_image_meta(surface, body, scale);
         }
-        self.rebuild_preview_document(body, scale);
-        if self.current_preview_buffer().is_none() {
-            self.renderer.set_preview_body(None);
-            return;
-        }
+        self.rebuild_preview_document(surface, body, scale);
+        self.preview_buffer_on(surface)?;
         let palette = bt_render::chrome_palette();
-        let scroll = self.preview_scroll;
-        let advance = self.preview_mono_advance;
-        let lit = self.preview_block_lit();
-        let (rows_height, columns) = self.preview_content_extent(scale);
+        let pane = self.preview_pane(surface)?;
+        let scroll = pane.scroll;
+        let advance = pane.mono_advance;
+        let lit = self.preview_block_lit(surface);
+        let (rows_height, columns) = self.preview_content_extent(surface, scale);
         let mut sites = Vec::new();
-        let mut built = match &self.preview_doc {
+        let mut built = match &self.preview_pane(surface)?.doc {
             PreviewDocument::Text { lines, wrap } => {
-                let geometry =
-                    self.preview_doc_text_geometry(body, scale, rows_height, columns, advance);
-                let edit = self.preview_edit_paint(&geometry, wrap, scale);
+                let geometry = self.preview_doc_text_geometry(
+                    surface,
+                    body,
+                    scale,
+                    rows_height,
+                    columns,
+                    advance,
+                );
+                let edit = self.preview_edit_paint(surface, &geometry, wrap, scale);
                 build_preview_text_body(&geometry, lines, wrap, advance, edit.as_ref(), &palette)
             }
             PreviewDocument::Diff(rows) => build_preview_diff_body(
@@ -15565,7 +16593,7 @@ impl Runtime {
                     seats::preview_markdown_metrics(scale),
                     scroll,
                     BlockScrollPaint {
-                        offsets: &self.preview_md_block_scroll,
+                        offsets: &self.preview_pane(surface)?.md_block_scroll,
                         lit,
                         scale,
                     },
@@ -15600,12 +16628,13 @@ impl Runtime {
         //
         // A truncated buffer is read-only and has no save to report, so the first
         // two can never both be owed.
-        if let Some(notice) = self.preview_foot_notice() {
-            let bar =
-                seats::preview_body_rect(&self.seats, &self.seat_layout, scale).unwrap_or(body);
+        if let Some(notice) = self.preview_foot_notice(surface) {
+            let bar = self
+                .preview_surface_pane_rect(surface, scale)
+                .unwrap_or(body);
             built.foot = Some(preview_foot(bar, scale, notice, &palette));
         } else if let Some(notice) = self
-            .preview_save_notice(Instant::now())
+            .preview_save_notice(surface, Instant::now())
             .filter(|notice| *notice != preview::PREVIEW_SAVED_NOTICE)
             .map(str::to_owned)
         {
@@ -15615,9 +16644,10 @@ impl Runtime {
         // paragraph landed and that answer is only true of the body as it now
         // stands. The hover's rule is drawn from the same boxes, so the line
         // under a link cannot be anywhere but under it.
-        self.preview_links = measure_preview_links(&mut self.renderer, &built, &sites);
-        if let Some(hovered) = self.preview_link_hover
-            && self.preview_links.iter().any(|link| link.rect == hovered)
+        let links = measure_preview_links(&mut self.renderer, &built, &sites);
+        if let Some((hovered_surface, hovered)) = self.preview_link_hover
+            && hovered_surface == surface
+            && links.iter().any(|link| link.rect == hovered)
         {
             let thickness = (scale).round().max(1.0);
             built.quads.push(bt_render::PreviewQuad {
@@ -15625,7 +16655,8 @@ impl Runtime {
                 color: palette.accent,
             });
         }
-        self.renderer.set_preview_body(Some(built));
+        self.preview_pane_mut(surface).links = links;
+        Some(built)
     }
 
     /// The caret and the selection, in the columns the painter draws them in.
@@ -15636,14 +16667,15 @@ impl Runtime {
     /// frame's cost.
     fn preview_edit_paint(
         &self,
+        surface: PreviewSurface,
         geometry: &seats::PreviewMonoGeometry,
         wrap: &preview_edit::WrapLayout,
         scale: f32,
     ) -> Option<PreviewEditPaint> {
-        let buffer = self.current_preview_buffer()?;
-        if !buffer.is_editable() {
+        if !self.preview_is_editable(surface) {
             return None;
         }
+        let buffer = self.preview_buffer_on(surface)?;
         let content = buffer.content.as_deref()?;
         let starts = preview_edit::line_starts(content);
         let range = visible_range(
@@ -15652,7 +16684,7 @@ impl Runtime {
             wrap.rows(),
             geometry.viewport,
         );
-        let selection = self.preview_caret.range();
+        let selection = self.preview_pane(surface)?.caret.range();
         // **Cut per visual row, not per line.** A selection is a range of the
         // *line*, and a wrapped line is several rows: a band drawn once for the
         // whole line would start on the first row and run off its right edge
@@ -15661,9 +16693,8 @@ impl Runtime {
         // The caret belongs to the *focus*, not to the buffer: a body you have
         // clicked away from keeps its selection, greyed, the way a text field
         // does, but it has no caret because nothing is going to land there.
-        let caret = self
-            .preview_edit_focus()
-            .then(|| self.preview_caret_position())
+        let caret = (self.preview_edit_focus() == Some(surface))
+            .then(|| self.preview_caret_position(surface))
             .flatten()
             .map(|(line, column)| preview_caret_row(wrap, line, column));
         // The window's one composition, drawn here because this is where the
@@ -15693,6 +16724,7 @@ impl Runtime {
 
     fn preview_doc_text_geometry(
         &self,
+        surface: PreviewSurface,
         body: [f32; 4],
         scale: f32,
         rows_height: f32,
@@ -15705,7 +16737,8 @@ impl Runtime {
             rows_height,
             columns,
             advance,
-            self.preview_scroll,
+            self.preview_pane(surface)
+                .map_or([0.0, 0.0], |pane| pane.scroll),
         )
     }
 
@@ -15715,8 +16748,13 @@ impl Runtime {
     /// know yet is left out rather than printed as a placeholder, so the line
     /// grows as the decoder and the worker answer instead of flickering through
     /// three shapes.
-    fn preview_image_meta(&self, body: [f32; 4], scale: f32) -> Option<bt_render::PreviewBody> {
-        let image = self.preview_image.as_ref()?;
+    fn preview_image_meta(
+        &self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> Option<bt_render::PreviewBody> {
+        let image = self.preview_pane(surface)?.image.as_ref()?;
         let mut fields = Vec::new();
         if let Some((width, height)) = image.native {
             fields.push(format!("{width} \u{00d7} {height}"));
@@ -15773,16 +16811,31 @@ impl Runtime {
         })
     }
 
+    /// The picture on the texture lane right now — [`TabState::preview_raster`]'s
+    /// pane, and only that one.
+    ///
+    /// Every path that talks to the decoder or the sampler asks through here, so
+    /// "which picture is being rasterised" is one question with one answer rather
+    /// than a search that could find a second surface's.
+    fn preview_raster_image(&self) -> Option<&PreviewImageState> {
+        self.preview_pane(self.preview_raster?)?.image.as_ref()
+    }
+
+    /// The same, mutably.
+    fn preview_raster_image_mut(&mut self) -> Option<&mut PreviewImageState> {
+        let surface = self.preview_raster?;
+        self.preview_pane_mut(surface).image.as_mut()
+    }
+
     fn defer_preview_resample(&mut self, observed_at: Instant) {
-        if let Some(preview) = self.preview_image.as_mut() {
+        if let Some(preview) = self.preview_raster_image_mut() {
             preview.defer_resize_scale(observed_at);
         }
     }
 
     fn finish_preview_resize_if_quiet(&mut self, now: Instant) -> Result<()> {
         let due = self
-            .preview_image
-            .as_mut()
+            .preview_raster_image_mut()
             .is_some_and(|preview| preview.finish_resize_scale_if_quiet(now));
         if due {
             self.refresh_preview_for_layout();
@@ -15801,7 +16854,12 @@ impl Runtime {
         // — which is what makes a pane grown taller give its scroll back.
         self.refresh_preview_body();
         self.heal_preview_scroll();
-        let Some(preview_seat) = self.seats.preview() else {
+        // **The lane is a seat's.** `bt_render::PreviewImage` is addressed by
+        // `SeatId`, so a picture torn off into a float keeps its head, its foot
+        // and its meta line and has nowhere to put its pixels — see
+        // [`TabState::preview_raster`] for why that limit lives here rather than
+        // in whichever call site noticed it.
+        let Some(PreviewSurface::Seat(preview_seat)) = self.preview_raster else {
             self.renderer.set_preview_image(None);
             return;
         };
@@ -15824,8 +16882,7 @@ impl Runtime {
         };
         let body = placement.body;
         let Some(path) = self
-            .preview_image
-            .as_ref()
+            .preview_raster_image()
             .map(|preview| preview.path.clone())
         else {
             self.renderer.set_preview_image(None);
@@ -15844,7 +16901,7 @@ impl Runtime {
                 return;
             }
             Some(PeekCacheEntry::Failed) => {
-                if let Some(preview) = self.preview_image.as_mut() {
+                if let Some(preview) = self.preview_raster_image_mut() {
                     preview.failure.get_or_insert_with(|| {
                         "Preview failed: image could not be loaded".to_owned()
                     });
@@ -15855,14 +16912,14 @@ impl Runtime {
             None => None,
         };
         if let (Some(preview), Some((_, _, native_width, native_height))) =
-            (self.preview_image.as_mut(), decoded.as_ref())
+            (self.preview_raster_image_mut(), decoded.as_ref())
         {
             preview.native = Some((*native_width, *native_height));
         }
         let Some((content_key, rgba, native_width, native_height)) = decoded else {
             self.renderer.set_preview_image(None);
             if !self.math_worker_running {
-                if let Some(preview) = self.preview_image.as_mut() {
+                if let Some(preview) = self.preview_raster_image_mut() {
                     preview.failure =
                         Some("Preview failed: image worker is unavailable".to_owned());
                 }
@@ -15878,7 +16935,7 @@ impl Runtime {
                 .is_ok()
             {
                 self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
-            } else if let Some(preview) = self.preview_image.as_mut() {
+            } else if let Some(preview) = self.preview_raster_image_mut() {
                 preview.failure = Some("Preview failed: image worker is unavailable".to_owned());
             }
             return;
@@ -15898,7 +16955,7 @@ impl Runtime {
         let Some((display_width, display_height)) =
             preview_image_extent(fit_width, fit_height, native_width, native_height)
         else {
-            if let Some(preview) = self.preview_image.as_mut() {
+            if let Some(preview) = self.preview_raster_image_mut() {
                 preview.failure = Some("Preview failed: preview seat is too small".to_owned());
             }
             self.renderer.set_preview_image(None);
@@ -15906,13 +16963,11 @@ impl Runtime {
         };
         let target = (content_key.clone(), display_width, display_height);
         let exact_raster = self
-            .preview_image
-            .as_ref()
+            .preview_raster_image()
             .and_then(|preview| preview.raster.as_ref())
             .is_some_and(|raster| raster.matches(&target));
         if let Some(raster) = self
-            .preview_image
-            .as_ref()
+            .preview_raster_image()
             .and_then(|preview| preview.raster.as_ref())
         {
             // During a drag, keep the last texture on screen and let the sampler stretch it to the
@@ -15934,7 +16989,7 @@ impl Runtime {
         if exact_raster {
             return;
         }
-        if self.preview_image.as_ref().is_some_and(|preview| {
+        if self.preview_raster_image().is_some_and(|preview| {
             preview.pending.as_ref() == Some(&target) || preview.resize_scale_deadline.is_some()
         }) || !self.math_worker_running
         {
@@ -15950,11 +17005,11 @@ impl Runtime {
             })
             .is_ok()
         {
-            if let Some(preview) = self.preview_image.as_mut() {
+            if let Some(preview) = self.preview_raster_image_mut() {
                 preview.pending = Some(target);
                 preview.failure = None;
             }
-        } else if let Some(preview) = self.preview_image.as_mut() {
+        } else if let Some(preview) = self.preview_raster_image_mut() {
             preview.failure = Some("Preview failed: image worker is unavailable".to_owned());
         }
     }
@@ -16320,30 +17375,45 @@ impl Runtime {
                             // offset is held to two lines from a body landing.
                             let content = buffer.content.clone();
                             let tab = &mut self.tabs[index];
-                            if tab.preview_buffer.as_deref() == Some(response.path.as_path())
-                                && let Some(content) = content
-                            {
-                                tab.preview_caret.heal(&content);
+                            // **Every surface on this buffer**, and there may be
+                            // several: one file open in two panes is one buffer
+                            // (§7.1.3) with two carets, and a body arriving under
+                            // one of them arrives under both.
+                            let showing: Vec<PreviewSurface> = tab
+                                .preview_panes
+                                .iter()
+                                .filter(|(_, pane)| {
+                                    pane.buffer.as_deref() == Some(response.path.as_path())
+                                })
+                                .map(|(surface, _)| surface)
+                                .collect();
+                            if let Some(content) = content {
+                                for surface in &showing {
+                                    tab.preview_panes.entry(*surface).caret.heal(&content);
+                                }
                             }
-                            changed |= index == self.active_tab
-                                && self.tabs[index].preview_buffer.as_deref()
-                                    == Some(response.path.as_path());
+                            changed |= index == self.active_tab && !showing.is_empty();
                         }
                         // A picture's byte count, for the meta line under it.
                         // Filed against the image state rather than the pool,
                         // because a picture's buffer is not what is on screen —
-                        // the decode lane is.
+                        // the decode lane is. Told to **every** surface showing
+                        // that file: the byte count is a fact about the file, and
+                        // a second copy of the picture owes the same sentence
+                        // even though only one of them holds the texture.
                         preview::PreviewAnswer::Size(bytes) => {
-                            if tab
-                                .preview_image
-                                .as_ref()
-                                .is_some_and(|image| image.path == response.path)
-                            {
-                                if let Some(image) = tab.preview_image.as_mut() {
+                            let mut told = false;
+                            for (_, pane) in tab.preview_panes.iter_mut() {
+                                if let Some(image) = pane
+                                    .image
+                                    .as_mut()
+                                    .filter(|image| image.path == response.path)
+                                {
                                     image.bytes = bytes;
+                                    told = true;
                                 }
-                                changed |= index == self.active_tab;
                             }
+                            changed |= told && index == self.active_tab;
                         }
                     }
                 }
@@ -16556,10 +17626,14 @@ impl Runtime {
                     // the one that asked, so two trees never fill in with each
                     // other's contents.
                     files::FilesHost::Float(epoch) => {
-                        let Some(win) = self.float.live_mut(epoch) else {
+                        let Some(files) = self
+                            .float
+                            .live_mut(epoch)
+                            .and_then(float::FloatWin::files_mut)
+                        else {
                             continue;
                         };
-                        win.cache.accept(&response.key, response.outcome);
+                        files.cache.accept(&response.key, response.outcome);
                         changed = true;
                     }
                 },
@@ -16922,8 +17996,13 @@ impl Runtime {
         }
         match request {
             restore::GateRequest::ClosePane(seat) => {
+                // The pool is the tab's, so emptying it leaves *every* surface
+                // naming a buffer that is gone — the view each of them was on has
+                // to be filed and let go, not only the pane being closed.
                 self.preview_pool.clear();
-                self.clear_preview_view();
+                for surface in self.preview_surfaces() {
+                    self.clear_preview_view(surface);
+                }
                 self.close_pane(seat)
             }
             restore::GateRequest::CloseTab(index) => {
@@ -16984,8 +18063,10 @@ impl Runtime {
     /// one's dirty bit — a list that showed only the clean ones, or only the
     /// recent ones, would be the window deciding which unsaved edits you are
     /// allowed to know about.
-    fn preview_menu_items(&self) -> Vec<profiles::PreviewMenuItem> {
-        let current = self.preview_buffer.as_deref();
+    fn preview_menu_items(&self, seat: SeatId) -> Vec<profiles::PreviewMenuItem> {
+        let current = self
+            .preview_pane(PreviewSurface::Seat(seat))
+            .and_then(|pane| pane.buffer.as_deref());
         self.preview_pool
             .buffers()
             .map(|buffer| profiles::PreviewMenuItem {
@@ -17010,8 +18091,9 @@ impl Runtime {
         let scale = self.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
-        let anchor = seats::preview_head_geometry(&head, scale, self.preview_head_tools()).pill?;
-        let items = self.preview_menu_items();
+        let anchor =
+            seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).pill?;
+        let items = self.preview_menu_items(seat);
         if items.is_empty() {
             return None;
         }
@@ -17065,7 +18147,7 @@ impl Runtime {
     /// nothing else: the buffer keeps its edits, its dirty bit and — through
     /// `open_preview_file`'s own filing — its caret and scroll, which is why
     /// §7.1.3 promises the switch costs "零提示零打断".
-    fn choose_preview_buffer(&mut self, index: usize) -> Result<()> {
+    fn choose_preview_buffer(&mut self, seat: SeatId, index: usize) -> Result<()> {
         self.close_preview_menu()?;
         let Some(path) = self
             .preview_pool
@@ -17075,7 +18157,11 @@ impl Runtime {
         else {
             return Ok(());
         };
-        if self.preview_buffer.as_deref() == Some(path.as_path()) {
+        if self
+            .preview_pane(PreviewSurface::Seat(seat))
+            .and_then(|pane| pane.buffer.as_deref())
+            == Some(path.as_path())
+        {
             return Ok(());
         }
         self.open_preview_file(path)
@@ -17176,13 +18262,13 @@ impl Runtime {
     /// remembering the painted list, on [`Runtime::press_files_row`]'s reasoning.
     fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<RowActivation> {
         if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
-            let win = self.float.live(id)?;
-            let rows = files::tree_view(&win.files, &win.cache).rows;
+            let files = self.float.live(id)?.files()?;
+            let rows = files::tree_view(&files.files, &files.cache).rows;
             let row = rows.get(index)?;
             if !matches!(row.kind, files::RowKind::File) {
                 return None;
             }
-            return Some(files_row_activation(&win.files.root, &row.key));
+            return Some(files_row_activation(&files.files.root, &row.key));
         }
         let Some(seats::ChromeTarget::FilesRow { seat, index }) = self.chrome_target_at(position)
         else {
@@ -17354,21 +18440,35 @@ impl Runtime {
         // against the host we are walking.
         let dock_label = self.float_dock_label_width(scale);
         let now = Instant::now();
-        let motion = self.motion;
         let (x, y) = (position.x as f32, position.y as f32);
-        for win in self.float.hit_order() {
+        // The identities first, then the windows one at a time: the head's tools
+        // are a question about the *content* plane, which is `&self`, and asking
+        // it inside a loop that is already holding the host would be two borrows
+        // of one window.
+        let ids: Vec<float::FloatId> = self.float.hit_order().map(|win| win.epoch).collect();
+        for id in ids {
+            let tools = self.float_head_tools(id);
+            let Some(win) = self.float.drawn().find(|win| win.epoch == id) else {
+                continue;
+            };
             let geometry = float::float_geometry(
-                risen_frame(win.frame, win.fade(now, motion, scale)),
+                risen_frame(win.frame, self.float_fade_of(win, now, scale)),
                 win.mode,
                 scale,
                 dock_label,
+                tools,
             );
-            let rows = files::tree_view(&win.files, &win.cache).rows.len();
-            let tree = seats::files_tree_geometry(geometry.body, rows, win.cache.scroll_px, scale);
+            // Only a tree has rows to be hit; a buffer's own body is asked by the
+            // preview's pointer path, which resolves its surface for itself.
+            let tree = win.files().map(|files| {
+                let rows = files::tree_view(&files.files, &files.cache).rows.len();
+                seats::files_tree_geometry(geometry.body, rows, files.cache.scroll_px, scale)
+            });
             if let Some(part) = float::float_hit(&geometry, x, y, |x, y| {
-                tree.row_at(x + geometry.body[0], y + geometry.body[1])
+                tree.as_ref()?
+                    .row_at(x + geometry.body[0], y + geometry.body[1])
             }) {
-                return Some((win.epoch, part));
+                return Some((id, part));
             }
         }
         None
@@ -17480,6 +18580,9 @@ impl Runtime {
         }
         if self.float.sweep(now, self.motion, scale) {
             self.forget_dead_float_gestures();
+            // A finished exit is where a window stops being drawn, and therefore
+            // where it stops being a preview surface.
+            self.sweep_preview_panes();
             changed = true;
         }
         // `height: auto` while nobody has taken hold of it: the window grows as
@@ -17513,9 +18616,12 @@ impl Runtime {
         let mut asks = Vec::new();
         for win in self.float.live_windows_mut() {
             let epoch = win.epoch;
-            let root = win.files.root.clone();
-            for key in files::tree_view(&win.files, &win.cache).wanted {
-                win.cache.mark_pending(&key);
+            let Some(files) = win.files_mut() else {
+                continue;
+            };
+            let root = files.files.root.clone();
+            for key in files::tree_view(&files.files, &files.cache).wanted {
+                files.cache.mark_pending(&key);
                 asks.push(files::DirRequest {
                     host: files::FilesHost::Float(epoch),
                     path: files::full_path(&root, &key),
@@ -17551,12 +18657,25 @@ impl Runtime {
         if self.float.raise(id) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
+        // Which tenant is in this window, asked once: the three parts below whose
+        // verb differs by tenant all read the same answer, and asking three times
+        // is three chances for them to disagree about one window.
+        let holds_a_buffer = self
+            .float
+            .live(id)
+            .is_some_and(|win| win.preview().is_some());
         match part {
             float::FloatPart::Close => {
                 self.dismiss_float(id)?;
             }
+            float::FloatPart::Dock if holds_a_buffer => self.dock_preview_float(id)?,
             float::FloatPart::Dock => self.dock_float(id)?,
+            // The foot names what the window is showing, so it reveals what the
+            // window is showing: a tree's root folder, a buffer's own file.
+            float::FloatPart::Foot if holds_a_buffer => self.reveal_float_file(id)?,
             float::FloatPart::Foot => self.reveal_float_root(id)?,
+            float::FloatPart::Save => self.save_preview_on(PreviewSurface::Float(id))?,
+            float::FloatPart::Flip => self.flip_preview_source_on(PreviewSurface::Float(id))?,
             float::FloatPart::Row(index) => self.press_float_row(id, index)?,
             float::FloatPart::Head => {
                 let frame = self.float.live(id).map(|win| win.frame).unwrap_or_default();
@@ -17591,6 +18710,12 @@ impl Runtime {
                     });
                 }
             }
+            // A buffer's body is an edit surface: the press puts the caret where
+            // the pointer is and arms the drag that selects, exactly as it does
+            // in a docked pane.
+            float::FloatPart::Body if holds_a_buffer => {
+                self.press_preview_body(position)?;
+            }
             // The body away from any row: a press lands on the window and goes no
             // further, which is what makes a float opaque to the layout beneath.
             float::FloatPart::Body => {}
@@ -17613,7 +18738,11 @@ impl Runtime {
         let Some(win) = self.float.live_mut(id) else {
             return Ok(());
         };
-        let rows = files::tree_view(&win.files, &win.cache).rows;
+        let epoch = win.epoch;
+        let Some(files) = win.files_mut() else {
+            return Ok(());
+        };
+        let rows = files::tree_view(&files.files, &files.cache).rows;
         let Some(row) = rows.get(index) else {
             return Ok(());
         };
@@ -17625,15 +18754,14 @@ impl Runtime {
         // directory means "select the next row" (the keyboard's own semantics),
         // so the Left that followed acted on the *child* and an open folder
         // could never be shut from a float (user-reported 2026-08-12).
-        let opening = press_files_node(&mut win.files, &key, kind);
+        let opening = press_files_node(&mut files.files, &key, kind);
         if matches!(kind, files::RowKind::Directory { .. }) {
-            win.cache.turn_row(&key, opening, Instant::now(), motion);
+            files.cache.turn_row(&key, opening, Instant::now(), motion);
         }
         if opening {
             // Unfolding is this product's refresh gesture (there is no watcher
             // yet), so an opened directory is re-asked exactly as a column's is.
-            let epoch = win.epoch;
-            let root = win.files.root.clone();
+            let root = files.files.root.clone();
             let request = files::DirRequest {
                 host: files::FilesHost::Float(epoch),
                 path: files::full_path(&root, &key),
@@ -17657,7 +18785,12 @@ impl Runtime {
     /// window that was already open somewhere else, and without a word here the
     /// click reads as having done nothing.
     fn reveal_float_root(&mut self, id: float::FloatId) -> Result<()> {
-        let Some(root) = self.float.live(id).map(|win| win.files.root.clone()) else {
+        let Some(root) = self
+            .float
+            .live(id)
+            .and_then(float::FloatWin::files)
+            .map(|files| files.files.root.clone())
+        else {
             return Ok(());
         };
         if root.is_empty() {
@@ -17668,6 +18801,35 @@ impl Runtime {
         // three strips is one verb, and a bridge that only one of the three
         // goes around is a bridge with a hole in it.
         if self.reveal_in_explorer(Path::new(&root)) {
+            self.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Show the **file** a preview float is holding in the OS file manager.
+    ///
+    /// [`Self::reveal_float_root`]'s opposite number, and the same division the
+    /// two feet already make one surface over: a foot prints what its window is
+    /// showing, so a tree's points at a folder and a buffer's points at the file
+    /// itself (the docked preview foot's own ruling, 2026-08-13 — "the directory
+    /// it is in" is not an answer to "where is this file").
+    fn reveal_float_file(&mut self, id: float::FloatId) -> Result<()> {
+        let surface = PreviewSurface::Float(id);
+        let Some(path) = self
+            .preview_buffer_on(surface)
+            .map(|buffer| buffer.path.clone())
+            .or_else(|| {
+                self.preview_pane(surface)
+                    .and_then(|pane| pane.image.as_ref())
+                    .map(|image| image.path.clone())
+            })
+        else {
+            return Ok(());
+        };
+        if self.reveal_in_explorer(&path) {
             self.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
@@ -17770,11 +18932,17 @@ impl Runtime {
             self.float_drag = None;
             return Ok(false);
         };
+        // The grip's floors are the tenant's — a tree is useless below 200×150, a
+        // buffer below 260×200 — and the whole dimension set is asked once, at
+        // the door, exactly as `FloatSizing` was built for.
+        let sizing = float_sizing_of(win);
         win.frame = match drag.kind {
             FloatDragKind::Move { grab } => {
                 float::float_dragged_to(win.frame, pointer, grab, viewport, scale)
             }
-            FloatDragKind::Resize => float::float_resized_to(win.frame, pointer, viewport, scale),
+            FloatDragKind::Resize => {
+                float::float_resized_to(win.frame, pointer, viewport, scale, sizing)
+            }
         };
         // A hand on the window ends `height: auto`: from here the size and the
         // place are the user's answer, and rows arriving later do not get to
@@ -17806,12 +18974,16 @@ impl Runtime {
             .live_windows()
             .filter(|win| win.self_sizing)
             .filter_map(|win| {
-                let rows = files::tree_view(&win.files, &win.cache).rows.len();
+                // `height: auto` is the tree's; a buffer float is sized by its
+                // own opening rule and has no row count to follow.
+                let files = win.files()?;
+                let rows = files::tree_view(&files.files, &files.cache).rows.len();
                 let body = seats::files_tree_content_height(rows, scale);
                 let size = float::float_opening_size(
                     float::float_height_for_body(body, scale),
                     viewport,
                     scale,
+                    float::FloatSizing::files(),
                 );
                 let grown = match win.anchor {
                     Some(anchor) => float::float_placement(anchor, size, viewport, scale),
@@ -17853,9 +19025,13 @@ impl Runtime {
             // including a header press still waiting to become one, which if it
             // outlived its peek would keep whatever opened next.
             self.forget_dead_float_gestures();
+            self.sweep_preview_panes();
         }
         let scale = self.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
+        // Every live window, whoever is inside it: the preview float inherits
+        // P67's translate-home for free because the chassis is shared, and a
+        // second re-clamp of its own would be a second answer to one question.
         for win in self.float.live_windows_mut() {
             win.frame = float::clamp_pinned(win.frame, viewport, scale);
         }
@@ -17919,6 +19095,51 @@ impl Runtime {
         rows
     }
 
+    /// Which of the head's optional controls **this window** is asking for.
+    ///
+    /// A tree asks for none of them and gets the head it always had. A buffer
+    /// asks for the dot's slot unconditionally and for whichever of the two verbs
+    /// its content class earns (P57) — the slot is reserved occupied or not,
+    /// because reserving it is the whole of what makes "the dot appearing shoves
+    /// nothing" true (P16), and a head laid out without room for a button it is
+    /// then drawn with is a button standing on the name (D4).
+    fn float_head_tools(&self, id: float::FloatId) -> float::FloatHeadTools {
+        let is_preview = self
+            .float
+            .drawn()
+            .find(|win| win.epoch == id)
+            .is_some_and(|win| win.preview().is_some());
+        if !is_preview {
+            return float::FloatHeadTools::default();
+        }
+        let surface = PreviewSurface::Float(id);
+        let buffer = self.preview_buffer_on(surface);
+        float::FloatHeadTools {
+            dirty: true,
+            save: self.preview_is_editable(surface),
+            flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
+        }
+    }
+
+    /// How far through its entrance or exit this window is.
+    ///
+    /// **A preview float has neither** (P49 ③). The mock-up gives `flyIn`/
+    /// `flyOut` to `#files-flyout` alone: a tree flies out of the header it was
+    /// summoned from, and a buffer is *carried* out of a pane by hand — a
+    /// gesture that has already shown where the window came from, and one an
+    /// entrance played on top of would only blur. So it is simply there, at full
+    /// strength, from the frame it opens to the frame it is wiped.
+    fn float_fade_of(&self, win: &float::FloatWin, now: Instant, scale: f32) -> float::FloatFade {
+        if win.preview().is_some() {
+            return float::FloatFade {
+                opacity: 1.0,
+                rise: 0.0,
+                moving: false,
+            };
+        }
+        win.fade(now, self.motion, scale)
+    }
+
     /// One float's chassis, laid out where that window stands this frame.
     ///
     /// The rise is [`risen_frame`]'s, shared with the hit test so the window is
@@ -17929,15 +19150,41 @@ impl Runtime {
     ) -> Option<(float::FloatGeometry, float::FloatFade)> {
         let now = Instant::now();
         let scale = self.renderer.metrics().scale_factor as f32;
+        let tools = self.float_head_tools(id);
         let (mode, frame, fade) = {
             let win = self.float.drawn().find(|win| win.epoch == id)?;
-            (win.mode, win.frame, win.fade(now, self.motion, scale))
+            (win.mode, win.frame, self.float_fade_of(win, now, scale))
         };
         let dock_label = self.float_dock_label_width(scale);
         Some((
-            float::float_geometry(risen_frame(frame, fade), mode, scale, dock_label),
+            float::float_geometry(risen_frame(frame, fade), mode, scale, dock_label, tools),
             fade,
         ))
+    }
+
+    /// Just the body of a float, asked **without a font**.
+    ///
+    /// [`Self::float_geometry_of`] has to borrow the renderer, because the head's
+    /// `DOCK` button is sized to a measured caption and only the face knows how
+    /// wide that is. The body is not: it is the frame less its border, its head
+    /// and its foot, and none of those depend on what the head has room for. So
+    /// every `&self` question about where a float's *content* is — which is all
+    /// of the preview's pointer arithmetic — is answered here rather than by
+    /// taking a mutable borrow of the whole window to describe controls it is
+    /// never going to look at.
+    fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
+        let win = self.float.drawn().find(|win| win.epoch == id)?;
+        let fade = self.float_fade_of(win, Instant::now(), scale);
+        Some(
+            float::float_geometry(
+                risen_frame(win.frame, fade),
+                win.mode,
+                scale,
+                0.0,
+                self.float_head_tools(id),
+            )
+            .body,
+        )
     }
 
     /// How wide the `DOCK` caption is — only the font knows, so it is measured
@@ -17973,8 +19220,31 @@ impl Runtime {
             .collect()
     }
 
-    /// One floating window, drawn.
+    /// One floating window, drawn — dispatched on **who is inside it**.
+    ///
+    /// The chassis is shared and the two tenants differ only in what fills the
+    /// three strips, which is P49's difference table made structural: one branch
+    /// per tenant, both handing the same [`float::build`] a [`float::FloatChrome`]
+    /// and a body.
     fn float_window_layer(
+        &mut self,
+        id: float::FloatId,
+        now: Instant,
+    ) -> Option<marks::OverlayLayer> {
+        if self
+            .float
+            .drawn()
+            .find(|win| win.epoch == id)?
+            .preview()
+            .is_some()
+        {
+            return self.preview_float_layer(id, now);
+        }
+        self.files_float_layer(id, now)
+    }
+
+    /// The tree tenant, drawn — the chassis's first and, until slice 5, only one.
+    fn files_float_layer(
         &mut self,
         id: float::FloatId,
         now: Instant,
@@ -17986,25 +19256,26 @@ impl Runtime {
         // below — which wants the renderer — is not fighting the host for `self`.
         let (mode, root, content) = {
             let win = self.float.drawn().find(|win| win.epoch == id)?;
-            let view = files::tree_view(&win.files, &win.cache);
+            let files = win.files()?;
+            let view = files::tree_view(&files.files, &files.cache);
             let turns = view
                 .rows
                 .iter()
                 .filter_map(|row| match row.kind {
                     files::RowKind::Directory { open } => Some((
                         row.key.clone(),
-                        win.cache.row_turn(&row.key, open, now, motion).0,
+                        files.cache.row_turn(&row.key, open, now, motion).0,
                     )),
                     _ => None,
                 })
                 .collect();
             (
                 win.mode,
-                win.files.root.clone(),
+                files.files.root.clone(),
                 seats::FilesTreeContent {
                     rows: view.rows,
-                    scroll_px: win.cache.scroll_px,
-                    selected: win.files.sel.clone(),
+                    scroll_px: files.cache.scroll_px,
+                    selected: files.files.sel.clone(),
                     turns,
                     // Never, for either mode — ruled 2026-08-12. A transient
                     // peek is never keyboard-driven (G90). A pinned float holds
@@ -18099,17 +19370,138 @@ impl Runtime {
         };
         Some(float::build(
             &geometry,
-            mode,
-            &name,
-            &path,
-            FLOAT_DOCK_LABEL,
-            hover,
-            revealed,
+            &float::FloatChrome {
+                mode,
+                // `#i-folder` and a left-hand dock panel: this window holds a
+                // tree, and P54's side-honesty puts the filled half where the
+                // pane will land.
+                mark: marks::ChromeMark::Folder,
+                title: &name,
+                path: &path,
+                dock_label: FLOAT_DOCK_LABEL,
+                dock_mark: marks::ChromeMark::DockLeft,
+                hover,
+                revealed,
+                // A tree has no buffer, so it has neither the dot nor the two
+                // verbs the dot and the flip belong to.
+                dirty: false,
+                flip_to_source: false,
+            },
             body,
             scale,
             &palette,
             fade,
         ))
+    }
+
+    /// The buffer tenant, drawn — P43-P67's window.
+    ///
+    /// **The document does not go through the chassis's channels.** A float's
+    /// quads and labels are the tenant's contribution *inside* the body rect, and
+    /// a scrolled document is not a list of quads — it is a clipped surface with
+    /// its own paragraphs, its own foot and its own caret. So it rides on
+    /// [`marks::OverlayLayer::body`], which is drawn inside this layer and above
+    /// this window's own face; handing it to the seat lane instead would paint it
+    /// a whole pass earlier and therefore *behind* the window containing it.
+    fn preview_float_layer(
+        &mut self,
+        id: float::FloatId,
+        now: Instant,
+    ) -> Option<marks::OverlayLayer> {
+        let (geometry, fade) = self.float_geometry_of(id)?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let surface = PreviewSurface::Float(id);
+        let mode = self.float.drawn().find(|win| win.epoch == id)?.mode;
+        // The head's caption and the foot's path, off whatever this window is
+        // showing — a buffer, or a picture that came down the decode lane.
+        let md_source = self.preview_md_source(surface);
+        let (title, path, dirty, flip_to_source) = match self.preview_buffer_on(surface) {
+            Some(buffer) => (
+                buffer.name.clone(),
+                buffer.path.to_string_lossy().into_owned(),
+                buffer.dirty,
+                // This window's own face, not the file's — a pane behind it may
+                // be reading the same file the other way round.
+                !md_source,
+            ),
+            None => {
+                let image = self
+                    .preview_pane(surface)
+                    .and_then(|pane| pane.image.as_ref());
+                (
+                    image.map(PreviewImageState::title).unwrap_or_default(),
+                    image.map_or_else(String::new, |image| {
+                        image.path.to_string_lossy().into_owned()
+                    }),
+                    false,
+                    false,
+                )
+            }
+        };
+        let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float(id), now);
+        let path = if revealed {
+            FOOT_REVEALED_LABEL.to_owned()
+        } else {
+            path
+        };
+        let head_font = float::FLOAT_HEAD_FONT_LOGICAL_PX * scale;
+        let foot_font = float::FLOAT_FOOT_FONT_LOGICAL_PX * scale;
+        let (title, path) = {
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            (
+                // **Not upper-cased** (P51). The files head shouts its root
+                // because a root is a place; a filename is a name, and a name
+                // shouted is a name you have to read twice.
+                settings::ellipsized(
+                    &title,
+                    geometry.head_title[2] - geometry.head_title[0],
+                    head_font,
+                    &mut measure,
+                ),
+                // Left-truncated, exactly as the docked foot is (P35): the
+                // ellipsis goes at the head so the file name survives.
+                settings::ellipsized_left(
+                    &path,
+                    geometry.foot_path[2] - geometry.foot_path[0],
+                    foot_font,
+                    &mut measure,
+                ),
+            )
+        };
+        let hover = self
+            .float_hover
+            .filter(|(hovered, _)| *hovered == id)
+            .map(|(_, part)| part);
+        let palette = bt_render::chrome_palette();
+        let mut layer = float::build(
+            &geometry,
+            &float::FloatChrome {
+                mode,
+                // `#i-file` and a right-hand dock panel: this window holds a
+                // buffer, and P54's side-honesty puts the filled half where the
+                // pane will land.
+                mark: marks::ChromeMark::File,
+                title: &title,
+                path: &path,
+                dock_label: FLOAT_DOCK_LABEL,
+                dock_mark: marks::ChromeMark::DockRight,
+                hover,
+                revealed,
+                dirty,
+                flip_to_source,
+            },
+            float::FloatBody {
+                quads: Vec::new(),
+                labels: Vec::new(),
+                sprites: Vec::new(),
+            },
+            scale,
+            &palette,
+            fade,
+        );
+        layer.body = self.build_preview_body(surface);
+        Some(layer)
     }
 
     /// The rectangle a float is allowed to occupy, in physical pixels: **the
@@ -18268,6 +19660,19 @@ impl Runtime {
         )
     }
 
+    /// Every origin a live window already stands at — what the cascade steps
+    /// clear of.
+    ///
+    /// The caller's own list rather than the host's, because
+    /// [`float::cascade_origin`] must not assume the newcomer is going into this
+    /// host: a pop-out computes its frame before its window exists.
+    fn taken_float_origins(&self) -> Vec<[f32; 2]> {
+        self.float
+            .live_windows()
+            .map(|win| [win.frame[0], win.frame[1]])
+            .collect()
+    }
+
     /// Put a float on screen, sized to its content and placed against `anchor`.
     ///
     /// The one door every way of opening one goes through — hover, click, a
@@ -18293,8 +19698,12 @@ impl Runtime {
         let viewport = self.float_viewport();
         let rows = files::tree_view(&state, &cache).rows.len();
         let body = seats::files_tree_content_height(rows, scale);
-        let size =
-            float::float_opening_size(float::float_height_for_body(body, scale), viewport, scale);
+        let size = float::float_opening_size(
+            float::float_height_for_body(body, scale),
+            viewport,
+            scale,
+            float::FloatSizing::files(),
+        );
         let placed = match anchor {
             Some(anchor) => float::float_placement(anchor, size, viewport, scale),
             // No anchor is the pop-out case with a head that has already gone;
@@ -18306,13 +19715,20 @@ impl Runtime {
                 [left, top, left + size[0], top + size[1]]
             }
         };
+        // The cascade, between the placement and the clamp: a window landing on
+        // one already standing at that origin steps clear of it, so the thing
+        // that obviously happened is visible. The ruling is about *floats*, not
+        // about previews, which is why it is here in the shared door.
+        let placed = float::cascade_origin(placed, &self.taken_float_origins(), viewport, scale);
         let frame = float::clamp_pinned(placed, viewport, scale);
         self.float.open(
             mode,
             origin,
-            state,
-            cache,
-            width,
+            float::FloatTenant::Files(float::FloatFiles {
+                files: state,
+                cache,
+                width,
+            }),
             frame,
             anchor,
             Instant::now(),
@@ -18321,6 +19737,9 @@ impl Runtime {
         // replaces the old one, and a new pinned window dismisses a live peek —
         // and not a carry of some *other* float that is still perfectly in hand.
         self.forget_dead_float_gestures();
+        // And the content plane of the window this opening replaced, on the same
+        // terms: an opening is a closing for whoever was in the peek slot.
+        self.sweep_preview_panes();
         // A window that opens under a stationary pointer inherits none of the
         // last one's shape.
         self.apply_pointer_cursor();
@@ -18369,6 +19788,12 @@ impl Runtime {
             return Ok(false);
         }
         self.forget_dead_float_gestures();
+        // **The view goes; the buffer stays** (P60). A preview float's pane is
+        // retired the moment the window stops existing, but the buffer it was on
+        // belongs to the *tab*'s pool (§7.1.3) and is untouched: closing a window
+        // you tore off is not a way to lose an edit, and the tab-close gate is
+        // still the thing that asks about one.
+        self.sweep_preview_panes();
         // The window can go while the pointer stands still — Esc closes it from
         // the keyboard — so the hand it was shaping has to be given back here
         // rather than at the next move that may never come.
@@ -18453,16 +19878,23 @@ impl Runtime {
             return Ok(());
         };
         self.forget_dead_float_gestures();
+        // The window is gone, so whatever content plane it carried goes with it.
+        self.sweep_preview_panes();
         // Same reason as dismissal: the window this shape belonged to is gone,
         // and Dock can be reached without the pointer moving afterwards.
         self.apply_pointer_cursor();
+        // Docking a *tree* seats a files column. A buffer float's own DOCK lands
+        // a preview pane instead, and that door is not open yet.
+        let float::FloatTenant::Files(tenant) = win.tenant else {
+            return Ok(());
+        };
         let metrics = self.seat_metrics();
-        let Some(seat) = self.seats.add_files_pane(&metrics, Some(win.width)) else {
+        let Some(seat) = self.seats.add_files_pane(&metrics, Some(tenant.width)) else {
             return Ok(());
         };
         let active = self.active_tab;
-        self.tabs[active].files.insert(seat, win.files);
-        self.tabs[active].file_trees.insert(seat, win.cache);
+        self.tabs[active].files.insert(seat, tenant.files);
+        self.tabs[active].file_trees.insert(seat, tenant.cache);
         // `DOCK` is a button and this is the click on it.
         self.set_files_keyboard(Some(seat), FilesFocusArrival::Pointer);
         // **The hole this used to be** (user report, 2026-08-13). A column
@@ -18474,6 +19906,165 @@ impl Runtime {
         // prompt that reprints itself over its own middle. The keyboard twin
         // never had the bug because it always ran the full ceremony; this one
         // now runs the same one.
+        self.settle_seat_set_change()?;
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// `.pv-popout` — the preview pane is carried out into a window of its own
+    /// (P29/P60).
+    ///
+    /// **It moves the presentation, not the buffer.** The buffer stays exactly
+    /// where §7.1.3 put it, in this tab's pool, so nothing is lost, no dirty gate
+    /// has anything to ask about, and the switcher still lists it. What travels
+    /// is the *view* — the [`PreviewPane`] whole, scroll, caret, notice and all —
+    /// because a pop-out that put you back at the top of the file would be a
+    /// re-open wearing a move's name.
+    ///
+    /// **A pop-out never kills a tab** (P61), and it is the layout layer that
+    /// says so rather than a guard here: [`seats::Seats::close_seat`] refuses to
+    /// empty a tree, so a pane that is the last one standing simply does not
+    /// leave, and the view is put back where it was. That refusal is unreachable
+    /// today for a third reason as well — a tab always holds at least one
+    /// terminal (I106), so a preview leaf is never the only pane — but the
+    /// structural answer is the one that survives that stopping being true.
+    fn pop_out_preview(&mut self, seat: SeatId) -> Result<()> {
+        let surface = PreviewSurface::Seat(seat);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let viewport = self.float_viewport();
+        // The button's own box, read while the head it stands in is still on
+        // screen: the window hangs off the control that summoned it, which is
+        // every other float's rule.
+        let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
+            let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+            seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).popout
+        });
+        // **The size it was, capped** — the move's own argument applied to the
+        // geometry. A document has no natural height to open at the way a tree's
+        // row count is one, so the honest answer is "as tall as the pane you took
+        // it out of", and `float_opening_size` cuts that to min(64vh, 520).
+        let body_height = self
+            .preview_surface_pane_rect(surface, scale)
+            .map_or(0.0, |body| body[3] - body[1]);
+        let size = float::float_opening_size(
+            float::float_height_for_body(body_height, scale),
+            viewport,
+            scale,
+            float::FloatSizing::preview(),
+        );
+        // The menu hanging off this head is pointing at a head that is leaving.
+        if self.preview_menu.seat() == Some(seat) {
+            self.close_preview_menu()?;
+        }
+        let pane = self.preview_panes.remove(surface).unwrap_or_default();
+        let metrics = self.seat_metrics();
+        if !self.seats.close_seat(&metrics, seat) {
+            *self.preview_panes.entry(surface) = pane;
+            return Ok(());
+        }
+        // The texture lane is a seat's ([`TabState::preview_raster`]), so a
+        // picture carried into a window keeps its head, its foot and its meta
+        // line and gives the lane back.
+        if self.preview_raster == Some(surface) {
+            self.preview_raster = None;
+            self.renderer.set_preview_image(None);
+        }
+        let placed = match anchor {
+            Some(anchor) => float::float_placement(anchor, size, viewport, scale),
+            None => {
+                let left = ((viewport[0] + viewport[2]) / 2.0 - size[0] / 2.0).round();
+                let top = ((viewport[1] + viewport[3]) / 2.0 - size[1] / 2.0).round();
+                [left, top, left + size[0], top + size[1]]
+            }
+        };
+        let placed = float::cascade_origin(placed, &self.taken_float_origins(), viewport, scale);
+        let frame = float::clamp_pinned(placed, viewport, scale);
+        let tab = self.id;
+        // Origin `None` and no anchor kept: this window was **torn off**, not
+        // summoned from a header, so there is no trigger to re-click it from and
+        // nothing to re-place it against as content arrives.
+        let id = self.float.open(
+            float::FloatMode::Pinned,
+            None,
+            float::FloatTenant::Preview(float::FloatPreview { tab }),
+            frame,
+            None,
+            Instant::now(),
+        );
+        *self.preview_panes.entry(PreviewSurface::Float(id)) = pane;
+        self.forget_dead_float_gestures();
+        self.apply_pointer_cursor();
+        self.settle_seat_set_change()?;
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// `DOCK`, on a window holding a buffer — the float becomes a preview pane
+    /// again (P62).
+    ///
+    /// **It lands in the tab you are looking at**, which is the files flyout's
+    /// own ruling (§7.1.2, 2026-07-17) and is the same sentence for the same
+    /// reason: a window floats across tab switches precisely so it can serve you
+    /// wherever you are, and sending it home would be the app deciding for you
+    /// where you meant to put it.
+    ///
+    /// So the **buffer** may have to move house, and that is the one case in this
+    /// build where one does. The rule on a path collision is **dirty wins**: an
+    /// incoming buffer with unsaved work replaces the target's copy, and a clean
+    /// incoming one gives way to a dirty copy already there. Nothing is ever
+    /// merged and nothing dirty is ever dropped. The full pool-merge law (P122)
+    /// is slice 7's; this is the two-tab case of it, written where the two tabs
+    /// actually meet.
+    fn dock_preview_float(&mut self, id: float::FloatId) -> Result<()> {
+        let Some(origin) = self
+            .float
+            .live(id)
+            .and_then(float::FloatWin::preview)
+            .map(|preview| preview.tab)
+        else {
+            return Ok(());
+        };
+        let surface = PreviewSurface::Float(id);
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == origin) else {
+            return Ok(());
+        };
+        // Where it lands, resolved **before** the window is taken apart: this may
+        // have to mint a leaf, and a view lifted out of a window that then had
+        // nowhere to put it down would be a view nothing is holding.
+        let Some(landing) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        // The view, out of whichever tab's plane was holding it — a float's pane
+        // lives with the tab that opened the window, not with the one on screen.
+        let Some(pane) = self.tabs[from].preview_panes.remove(surface) else {
+            return Ok(());
+        };
+        let active = self.active_tab;
+        if from != active
+            && let Some(path) = pane.buffer.clone()
+            && let Some(incoming) = self.tabs[from].preview_pool.take(&path)
+        {
+            let stands = self.tabs[active]
+                .preview_pool
+                .get(&path)
+                .is_some_and(|existing| existing.dirty)
+                && !incoming.dirty;
+            if !stands {
+                self.tabs[active].preview_pool.insert(incoming);
+            }
+        }
+        *self.preview_pane_mut(landing) = pane;
+        if let PreviewSurface::Seat(seat) = landing {
+            // `DOCK` is a button and this is the click on it: the pane you just
+            // put down is the one you are looking at.
+            self.seats.set_focus(seat);
+        }
+        // Wiped rather than dismissed — a preview float has no exit to play
+        // (P49 ③), so an animation frame here would be the one place it did.
+        self.float.wipe(id);
+        self.forget_dead_float_gestures();
+        self.sweep_preview_panes();
+        self.apply_pointer_cursor();
         self.settle_seat_set_change()?;
         self.refresh_chrome();
         self.present_chrome_change()
@@ -20264,8 +21855,7 @@ impl Runtime {
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
         let preview_matches = self
-            .preview_image
-            .as_ref()
+            .preview_raster_image()
             .is_some_and(|preview| normalized_local_image_path_key(&preview.path) == cache_key);
         match result {
             Ok(decoded) => {
@@ -20287,7 +21877,7 @@ impl Runtime {
             Err(error) => {
                 self.peek_cache
                     .insert(cache_key.clone(), PeekCacheEntry::Failed);
-                if preview_matches && let Some(preview) = self.preview_image.as_mut() {
+                if preview_matches && let Some(preview) = self.preview_raster_image_mut() {
                     preview.failure = Some(format!("Preview failed: {error}"));
                 }
             }
@@ -20320,7 +21910,7 @@ impl Runtime {
     }
 
     fn complete_preview_scale(&mut self, scaled: bt_term::ScaledInlineImage) -> Result<()> {
-        let Some(preview) = self.preview_image.as_mut() else {
+        let Some(preview) = self.preview_raster_image_mut() else {
             return Ok(());
         };
         if !preview.accept_scaled(scaled) {
@@ -21256,13 +22846,17 @@ impl Runtime {
         // live inside the drag handle too, and three of them are dead zones in it
         // (the mock-up's `.pane-close, .pane-files, .pv-tool` exclusion, 5874).
         .or_else(|| {
-            seats::hit_preview_head(
-                &self.seat_layout,
-                scale,
-                self.preview_head_tools(),
-                position.x,
-                position.y,
-            )
+            // Every preview seat's own tools, so the head the walk is standing on
+            // is laid out to the name *it* is drawn with. One set for all of them
+            // put the second head's buttons wherever the first head's name
+            // happened to end.
+            let tools: Vec<(SeatId, seats::PreviewHeadTools)> = self
+                .seats
+                .preview_seats()
+                .into_iter()
+                .map(|seat| (seat, self.preview_head_tools(seat)))
+                .collect();
+            seats::hit_preview_head(&self.seat_layout, scale, &tools, position.x, position.y)
         })
         .or_else(|| {
             seats::hit_chrome(
@@ -22478,7 +24072,7 @@ impl Runtime {
             // A selection drawn across the edit surface ends wherever the button
             // comes up. The release is consumed because the press was: a gesture
             // belongs to the surface it began on, whatever it is let go over.
-            if std::mem::take(&mut self.preview_selecting) {
+            if self.preview_selecting.take().is_some() {
                 return Ok(true);
             }
             // Ahead of the press: a gesture that has become a drag answers with
@@ -22549,12 +24143,13 @@ impl Runtime {
         // the rename guard above makes, and the same reason: a surface that kept
         // the keyboard after you clicked somewhere else is a surface that eats
         // the next thing you type.
-        if self.preview_edit_focused
-            && self
-                .preview_edit_body(position, self.renderer.metrics().scale_factor as f32)
-                .is_none()
+        // The surface that holds the keyboard keeps it only while the press is
+        // inside *that* surface's body: a press in the preview beside it is a
+        // press somewhere else, exactly as a press on the rail is.
+        if let Some(focused) = self.preview_edit_focus()
+            && self.preview_edit_body(position).map(|(surface, _)| surface) != Some(focused)
         {
-            self.preview_edit_focused = false;
+            self.preview_edit_focus = None;
             self.repaint_preview()?;
         }
         let Some(target) = target else {
@@ -22755,6 +24350,11 @@ impl Runtime {
                 self.tab_clicks.interrupt();
                 self.files_row_clicks.interrupt();
                 self.toggle_preview_pin(seat)?;
+            }
+            seats::ChromeTarget::PreviewPopOut(seat) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.pop_out_preview(seat)?;
             }
             seats::ChromeTarget::PreviewFoot(seat) => {
                 self.tab_clicks.interrupt();
@@ -23057,13 +24657,15 @@ impl Runtime {
         // their press. Its "except the button that opened it" is the name, which
         // toggles for itself (P136) and would otherwise be shut here and
         // re-opened one line later.
-        if let (Some(layout), Some(position)) = (self.preview_menu_layout(), self.pointer_position)
+        if let Some(seat) = self.preview_menu.seat()
+            && let (Some(layout), Some(position)) =
+                (self.preview_menu_layout(), self.pointer_position)
         {
             match profiles::preview_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         match row {
-                            Some(index) => self.choose_preview_buffer(index)?,
+                            Some(index) => self.choose_preview_buffer(seat, index)?,
                             None => {
                                 self.close_preview_menu()?;
                             }
@@ -23673,20 +25275,12 @@ impl Runtime {
         // kind of answer: a pane whose body is a scroller, which the router
         // below has no vocabulary for.
         if let Some(position) = self.pointer_position
+            && let Some((surface, body)) = self.preview_surface_at(position)
             && self
-                .current_preview_buffer()
+                .preview_buffer_on(surface)
                 .is_some_and(|buffer| buffer.content.is_some())
-            && let Some(body) = seats::preview_body_rect(
-                &self.seats,
-                &self.seat_layout,
-                self.renderer.metrics().scale_factor as f32,
-            )
-            && body[0] <= position.x as f32
-            && position.x as f32 <= body[2]
-            && body[1] <= position.y as f32
-            && position.y as f32 <= body[3]
         {
-            return self.scroll_preview_body(body, delta);
+            return self.scroll_preview_body(surface, body, delta);
         }
         // A notch belongs to the pane it is over. With one terminal that is the
         // terminal or nothing, which is what this guard has always said; with a
@@ -24105,7 +25699,7 @@ impl Runtime {
         // here rather than in the branch below it: without it, Ctrl+V typed into
         // a file would go to a shell the user is not looking at, which is the
         // exact failure `InputOwner` exists to prevent.
-        let editing = self.preview_edit_focus();
+        let editing = self.preview_edit_focus().is_some();
         if !editing
             && input::should_copy_selection(
                 &event.logical_key,
@@ -24394,7 +25988,8 @@ impl Runtime {
                 })
             }
             Ime::Disabled => {
-                let drawn_in_the_preview = self.preedit.is_some() && self.preview_edit_focus();
+                let drawn_in_the_preview =
+                    self.preedit.is_some() && self.preview_edit_focus().is_some();
                 self.preedit = None;
                 self.ime_active = false;
                 self.ime_cursor_throttle.reset();
@@ -25289,8 +26884,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
             runtime
-                .preview_image
-                .as_ref()
+                .preview_raster_image()
                 .and_then(|preview| preview.resize_scale_deadline),
             runtime.session_store.deadline(),
         ]);
@@ -38544,8 +40138,8 @@ mod tests {
             truncated: false,
             mtime: None,
         });
-        let wide = preview_document_key(&buffer, 1200.0, 1.0);
-        let narrow = preview_document_key(&buffer, 400.0, 1.0);
+        let wide = preview_document_key(&buffer, false, 1200.0, 1.0);
+        let narrow = preview_document_key(&buffer, false, 400.0, 1.0);
         assert_ne!(wide, narrow, "a width change is still a layout change");
         assert_eq!(
             wide.parse, narrow.parse,
@@ -38557,7 +40151,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, 1200.0, 1.0).parse,
+            preview_document_key(&buffer, false, 1200.0, 1.0).parse,
             wide.parse,
             "an edit re-parses"
         );
@@ -38817,83 +40411,124 @@ mod tests {
         }
     }
 
-    /// PIN (user report, 2026-08-12) — the composition is **drawn where it will
-    /// land**, over an opaque ground, with the IME's caret inside it.
+    /// PIN — a composition **opens a space in the line** rather than being
+    /// painted over it, and the IME's caret stands inside it.
     ///
     /// The terminal's machine writes preedit into grid cells; this surface has
-    /// none, so the form is copied and the mechanism is not — which is exactly
-    /// the thing that has to be pinned, because "the letters are somewhere" and
-    /// "the letters are at the caret, and the document is not showing through
-    /// them" are two different pictures and only one of them is usable.
+    /// none, so the form is copied and the mechanism cannot be. This used to
+    /// copy it by drawing the row whole and laying the letters on top over an
+    /// opaque patch of the *pane's* ground — which real-machine capture
+    /// (2026-08-13) showed fails twice over: the patch hides only the cells the
+    /// composition itself covers, so every character after the caret stays where
+    /// it was and the composition and the rest of the word share cells neither
+    /// can be read in; and on a float, whose body stands on the window's face
+    /// rather than a pane's, the patch is the wrong colour as well. Splitting the
+    /// row cures both, because there is then nothing left to hide.
     ///
-    /// MUTATIONS: drop the ground quad and the first assertion goes red; leave
-    /// the caret at the document's column and the last one does.
+    /// Asserted at **two geometries** — a docked pane's body and a float's, which
+    /// is the surface the colour half of the bug only showed on — because a body
+    /// that is a pure function of its rectangle must not have learned which kind
+    /// of container it is in.
+    ///
+    /// MUTATIONS: draw the row unsplit (one run over `from..to`) and the tail's
+    /// offset assertion goes red; put the ground quad back and the "no pane ink"
+    /// assertion does; leave the caret at the document's column and the last one
+    /// does.
     #[test]
-    fn a_composition_in_the_preview_stands_at_the_caret_over_its_own_ground() {
+    fn a_composition_in_the_preview_opens_a_space_in_the_line_it_lands_in() {
         let palette = bt_render::chrome_palette();
-        let body = [0.0, 0.0, 400.0, 200.0];
         let metrics = seats::preview_text_metrics(1.0);
-        let lines = vec!["one".to_owned(), "two".to_owned()];
+        let lines = vec!["one".to_owned(), "paragraph".to_owned()];
         let advance = 8.0;
-        let geometry = seats::preview_mono_geometry(
-            body,
-            metrics,
-            metrics.line_height * 2.0,
-            5,
-            advance,
-            [0.0, 0.0],
-        );
         let wrap = preview_edit::WrapLayout::unwrapped(&lines);
+        // Mid-word, which is the case that was unreadable: four characters of
+        // "paragraph" stand before the caret and five after it.
         let paint = PreviewEditPaint {
             bands: Vec::new(),
-            caret: Some((1, 2)),
+            caret: Some((1, 4)),
             caret_width: 1.0,
             preedit: Some(PreviewPreedit {
                 row: 1,
-                column: 2,
+                column: 4,
                 text: "ni".to_owned(),
                 columns: 2,
                 caret_columns: 1,
             }),
         };
-        let built =
-            build_preview_text_body(&geometry, &lines, &wrap, advance, Some(&paint), &palette);
-        let row = geometry.line_rect(1);
+        // A pane's body and a float's — the same builder, two containers.
+        for (surface, body) in [
+            ("a docked pane", [0.0, 0.0, 400.0, 200.0]),
+            ("a preview float", [1866.0, 145.0, 2266.0, 345.0]),
+        ] {
+            let geometry = seats::preview_mono_geometry(
+                body,
+                metrics,
+                metrics.line_height * 2.0,
+                12,
+                advance,
+                [0.0, 0.0],
+            );
+            let built =
+                build_preview_text_body(&geometry, &lines, &wrap, advance, Some(&paint), &palette);
+            let row = geometry.line_rect(1);
+            let at = |columns: f32| row[0] + advance * columns;
+            let run_at = |text: &str| {
+                built
+                    .paragraphs
+                    .iter()
+                    .find(|paragraph| paragraph.runs.iter().any(|run| run.text == text))
+                    .unwrap_or_else(|| panic!("{surface}: no run drawing {text:?}"))
+                    .rect[0]
+            };
 
-        let ground = built
-            .quads
-            .iter()
-            .find(|quad| quad.color == palette.seat_body)
-            .expect("the composition lays its own ground — this is not a cell grid");
-        assert_eq!(
-            [ground.rect[0], ground.rect[2]],
-            [row[0] + advance * 2.0, row[0] + advance * 4.0],
-            "spanning its own columns from the caret"
-        );
-        let rule = built
-            .quads
-            .iter()
-            .find(|quad| quad.color == palette.preview_body_text)
-            .expect("underlined, which is the terminal's own form for a preedit");
-        assert_eq!(rule.rect[3], row[3], "along the bottom of its line");
+            // The line is two runs with the composition's own width between them.
+            assert_eq!(run_at("para"), at(0.0), "{surface}: the head stays put");
+            assert_eq!(
+                run_at("graph"),
+                at(6.0),
+                "{surface}: and the tail is pushed right by the whole composition \
+                 — four columns of head plus its own two"
+            );
+            let letters = run_at("ni");
+            assert_eq!(
+                letters,
+                at(4.0),
+                "{surface}: the letters land at the caret, in the space just opened"
+            );
+            assert!(
+                letters + advance * 2.0 <= run_at("graph") + 0.001,
+                "{surface}: and stop before the tail begins — nothing overlaps"
+            );
 
-        let letters = built
-            .paragraphs
-            .iter()
-            .find(|paragraph| paragraph.runs.iter().any(|run| run.text == "ni"))
-            .expect("and the letters themselves, where they will land");
-        assert_eq!(letters.rect[0], row[0] + advance * 2.0);
-
-        let caret = built
-            .quads
-            .iter()
-            .find(|quad| quad.color == palette.preview_caret)
-            .expect("the caret is drawn");
-        assert_eq!(
-            caret.rect[0],
-            row[0] + advance * 3.0,
-            "inside the composition, where the IME says it is — not before it"
-        );
+            // Nothing is masked, so no pane-only ink is painted at all: that is
+            // the half of the bug a float showed and a pane hid.
+            assert!(
+                !built
+                    .quads
+                    .iter()
+                    .any(|quad| quad.color == palette.seat_body),
+                "{surface}: a split line needs no ground under the composition"
+            );
+            let rule = built
+                .quads
+                .iter()
+                .find(|quad| quad.color == palette.preview_body_text)
+                .unwrap_or_else(|| panic!("{surface}: underlined, as a preedit is"));
+            assert_eq!(
+                rule.rect[3], row[3],
+                "{surface}: along the bottom of its line"
+            );
+            let caret = built
+                .quads
+                .iter()
+                .find(|quad| quad.color == palette.preview_caret)
+                .unwrap_or_else(|| panic!("{surface}: the caret is drawn"));
+            assert_eq!(
+                caret.rect[0],
+                at(5.0),
+                "{surface}: inside the composition, where the IME says it is"
+            );
+        }
     }
 
     /// PIN (P123) — **gate ① is about the LAST preview pane and nothing else.**
@@ -39057,7 +40692,7 @@ mod tests {
     /// ③ the body handed to the layout is the pane's body *minus* the bar, so
     ///    the scroll extent ends at the bar's top edge.
     ///
-    /// MUTATION ①: return the full body from `preview_content_body_rect` — the
+    /// MUTATION ①: return the full body from `preview_surface_body_rect` — the
     /// clip assertion goes red, and that is the reported bug exactly: the
     /// document is laid out over the bar again.
     /// MUTATION ②: push the bar's fill into `quads` instead of `foot` and the
@@ -39146,6 +40781,79 @@ mod tests {
         buffer
     }
 
+    /// **The flip is the view's, not the buffer's** (ruling 2026-08-13).
+    ///
+    /// Two surfaces on one markdown file: turning one over leaves the other
+    /// showing what it was showing, and the *buffer* — its body, its dirty bit,
+    /// its revision — stays shared across both, because the ruling moved the
+    /// view mode and nothing else.
+    ///
+    /// Real-machine capture is the reason it exists: `md_source` lived on the
+    /// shared `PreviewBuffer`, so a float torn off to read a rendered page turned
+    /// into raw markdown the moment a pane behind it was flipped to source.
+    ///
+    /// Mutation: read the face off the buffer again — give `PreviewBuffer` back
+    /// its `md_source` and have both panes consult it — and the second assertion
+    /// goes red, which is the reported bleed exactly.
+    #[test]
+    fn two_surfaces_on_one_markdown_buffer_flip_independently() {
+        let mut panes = PreviewPanes::default();
+        let path = PathBuf::from(r"C:\w\notes.md");
+        let pane = PreviewSurface::Seat(SeatId(1));
+        let float = PreviewSurface::Float(7);
+        for surface in [pane, float] {
+            panes.entry(surface).buffer = Some(path.clone());
+        }
+        let mut pool = preview::PreviewPool::default();
+        pool.insert(text_buffer("notes.md", "# Title\n\nbody\n"));
+
+        // Both start on the render, which is what never having been flipped is.
+        assert!(!panes.entry(pane).md_source);
+        assert!(!panes.entry(float).md_source);
+
+        // The pane is turned over. The float is not.
+        panes.entry(pane).md_source = true;
+        assert!(panes.entry(pane).md_source, "the surface that was flipped");
+        assert!(
+            !panes.entry(float).md_source,
+            "and only that one — a float reading the page keeps reading the page"
+        );
+
+        // Which is what every reader downstream of the flag now answers with.
+        let buffer = pool.get(&path).expect("the one buffer");
+        assert_eq!(
+            (
+                buffer.view(panes.entry(pane).md_source),
+                buffer.view(panes.entry(float).md_source)
+            ),
+            (preview::PreviewView::Text, preview::PreviewView::Markdown),
+            "one file, two faces, at the same instant"
+        );
+        assert!(
+            buffer.is_editable(true) && !buffer.is_editable(false),
+            "the source face has a caret and the rendered page has not"
+        );
+        assert_ne!(
+            preview_document_key(buffer, true, 400.0, 1.0),
+            preview_document_key(buffer, false, 400.0, 1.0),
+            "so the two faces cannot share one cached document"
+        );
+
+        // And the buffer itself is still one buffer: the ruling moved the view
+        // mode, not the file.
+        let buffer = pool.get_mut(&path).expect("the one buffer");
+        buffer.edit_content(|content| {
+            content.push_str("more\n");
+            true
+        });
+        assert!(buffer.dirty, "an edit through either face dirties the file");
+        assert_eq!(
+            pool.buffers().count(),
+            1,
+            "and there is still exactly one of it"
+        );
+    }
+
     /// ⑥ A same-length edit rebuilds the document.
     ///
     /// **The named bug.** The cache key's revision counter was the content's
@@ -39162,22 +40870,23 @@ mod tests {
     #[test]
     fn a_same_length_edit_rebuilds_the_cached_document() {
         let mut buffer = text_buffer("a.rs", "let x = 1;\n");
-        let before = preview_document_key(&buffer, 400.0, 2.0);
+        let before = preview_document_key(&buffer, false, 400.0, 2.0);
         buffer.edit_content(|content| {
             content.replace_range(8..9, "2");
             true
         });
         assert_eq!(buffer.content.as_deref(), Some("let x = 2;\n"));
-        let after = preview_document_key(&buffer, 400.0, 2.0);
+        let after = preview_document_key(&buffer, false, 400.0, 2.0);
         assert_ne!(
             before, after,
             "one letter for another is still a different document"
         );
         // And nothing else moved: the same buffer at the same width and scale is
         // the same key, or every wheel notch would re-parse the file.
-        assert_eq!(after, preview_document_key(&buffer, 400.0, 2.0));
-        assert_ne!(after, preview_document_key(&buffer, 401.0, 2.0));
-        assert_ne!(after, preview_document_key(&buffer, 400.0, 1.0));
+        assert_eq!(after, preview_document_key(&buffer, false, 400.0, 2.0));
+        assert_ne!(after, preview_document_key(&buffer, true, 400.0, 2.0));
+        assert_ne!(after, preview_document_key(&buffer, false, 401.0, 2.0));
+        assert_ne!(after, preview_document_key(&buffer, false, 400.0, 1.0));
     }
 
     /// ⑤ A caret, a selection and a scroll survive a switch to another buffer
@@ -41718,5 +43427,116 @@ mod tests {
             None,
             "the rim asked to divide the whole layout, so there is no pane to name"
         );
+    }
+
+    // ── the plural content plane (slice 5) ──────────────────────────────────
+
+    /// PIN (P95 / ruling 8⑧, slice 5) — **two preview surfaces are two views over
+    /// one pool**, and that is the whole of what the pin was waiting for.
+    ///
+    /// Slice 4 could pin a pane and could say which pane a new file would land on
+    /// ([`seats::Seats::landing_preview`]), and then had to open the file over the
+    /// pinned pane anyway, because the buffer on screen, its document, its caret
+    /// and its scroll were one set of fields on the tab. This is those fields made
+    /// plural, asked as a property: pin a pane, open a second file, and the first
+    /// pane still holds its own buffer at its own scroll.
+    ///
+    /// The pool is deliberately not part of the split — a file open in two panes
+    /// is one buffer (§7.1.3, the 2026-07-17 ruling) — so what two surfaces are
+    /// allowed to disagree about is exactly the width of [`PreviewPane`].
+    ///
+    /// MUTATIONS:
+    /// ① make `PreviewPanes::entry` always hand back the first pane (`&mut
+    ///    self.panes[0].1`) — the singleton restored — and the "unchanged" and
+    ///    "own scroll" assertions go red together;
+    /// ② have `open` below land on `seats.preview()` instead of
+    ///    `seats.landing_preview()` — the second surface is the first, and the
+    ///    same two assertions go red.
+    #[test]
+    fn a_pinned_preview_keeps_its_own_buffer_and_scroll_when_the_next_file_opens() {
+        let metrics = seats::seat_metrics(1_000);
+        let mut seats = seats::Seats::lone_terminal();
+        let mut panes = PreviewPanes::default();
+
+        // `open_preview_file`'s landing rule, as a two-line stand-in: the seat
+        // layer says where, and the content plane writes there.
+        let open = |seats: &mut seats::Seats, panes: &mut PreviewPanes, path: &str| {
+            let seat = seats.add_preview(&metrics).expect("a preview lands");
+            let surface = PreviewSurface::Seat(seat);
+            panes.entry(surface).buffer = Some(PathBuf::from(path));
+            surface
+        };
+
+        let first = open(&mut seats, &mut panes, "a.md");
+        panes.entry(first).scroll = [0.0, 120.0];
+        assert_eq!(
+            open(&mut seats, &mut panes, "b.md"),
+            first,
+            "un-pinned, the next file reuses the pane — the singleton still holds"
+        );
+        assert_eq!(
+            panes.get(first).expect("a view").buffer.as_deref(),
+            Some(Path::new("b.md")),
+            "and replaces what it was showing"
+        );
+
+        // Now pin it, and open a third file.
+        let PreviewSurface::Seat(pinned) = first else {
+            unreachable!("the landing surface is a seat");
+        };
+        assert!(seats.toggle_preview_pin(pinned));
+        let second = open(&mut seats, &mut panes, "c.rs");
+        assert_ne!(second, first, "a pinned pane is not the reuse target");
+
+        assert_eq!(
+            panes.get(first).expect("a view").buffer.as_deref(),
+            Some(Path::new("b.md")),
+            "the pinned pane is untouched — that is what the pin buys"
+        );
+        assert_eq!(
+            panes.get(first).expect("a view").scroll,
+            [0.0, 120.0],
+            "including how far down it was"
+        );
+
+        // And the two scroll apart without touching one another.
+        panes.entry(second).scroll = [0.0, 40.0];
+        assert_eq!(panes.get(first).expect("a view").scroll, [0.0, 120.0]);
+        assert_eq!(panes.get(second).expect("a view").scroll, [0.0, 40.0]);
+        assert_eq!(
+            panes.showing(),
+            vec![PathBuf::from("b.md"), PathBuf::from("c.rs")],
+            "both are on screen, in the order they were first shown"
+        );
+
+        // Closing one retires its view and leaves the other's alone.
+        assert!(panes.remove(second).is_some());
+        assert!(panes.get(second).is_none());
+        assert_eq!(
+            panes.get(first).expect("a view").buffer.as_deref(),
+            Some(Path::new("b.md"))
+        );
+    }
+
+    /// PIN — a seat and a float are two surfaces even when their numbers agree.
+    ///
+    /// `SeatId` and `FloatId` are both counters that start at the low integers, so
+    /// a content plane keyed on a bare number would have the first preview pane
+    /// and the first preview float share a view — one scroll, one caret, and a
+    /// document that jumps when you touch the other window.
+    ///
+    /// Mutation: give `PreviewSurface` a `PartialEq` that compares only the
+    /// number inside — `panes.entry(float)` then finds the seat's view and the
+    /// map holds one entry answering for two windows.
+    #[test]
+    fn a_seat_and_a_float_that_share_a_number_are_still_two_surfaces() {
+        let seat = PreviewSurface::Seat(SeatId(1));
+        let float = PreviewSurface::Float(1);
+        assert_ne!(seat, float);
+        let mut panes = PreviewPanes::default();
+        panes.entry(seat).scroll = [0.0, 10.0];
+        panes.entry(float).scroll = [0.0, 20.0];
+        assert_eq!(panes.get(seat).expect("a view").scroll, [0.0, 10.0]);
+        assert_eq!(panes.get(float).expect("a view").scroll, [0.0, 20.0]);
     }
 }

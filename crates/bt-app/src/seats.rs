@@ -388,19 +388,35 @@ impl Seats {
     /// The whole of what a pin does: "this pane keeps its buffers and stops being
     /// the reuse target — the NEXT file opens a fresh preview beside it" (P95).
     ///
-    /// `#[allow(dead_code)]`, on the precedent [`crate::preview::is_diff_name`]
-    /// sets: the *rule* is written and pinned by test now, and the one call site
-    /// that would consume it — `Runtime::open_preview_file` — cannot, because
-    /// this window still has a single preview content plane. Landing a second
-    /// preview leaf today would draw two heads with one file's name in them; the
-    /// note on that function says so, and this is the answer waiting for it.
-    #[allow(dead_code)]
+    /// **Slice 5 consumed it.** This carried an `#[allow(dead_code)]` and a note
+    /// saying the one call site that wanted it — `Runtime::open_preview_file` —
+    /// could not use it, because the window had a single preview content plane
+    /// and landing a second preview leaf would have drawn two heads with one
+    /// file's name in them. The content plane is plural now, so this is the seat
+    /// `open_preview_file` opens into and the seat [`Self::add_preview`] hands
+    /// back when there is one to reuse.
     pub fn landing_preview(&self) -> Option<SeatId> {
         self.tree
             .seats_in_order()
             .into_iter()
             .find(|seat| seat.kind == SeatKind::Preview && !seat.pinned)
             .map(|seat| seat.id)
+    }
+
+    /// **Every** preview seat, in tree order.
+    ///
+    /// [`Self::preview`] answers "which seat is the preview" and was the whole
+    /// truth while a tab could hold one. The pin lets a tab hold several, so the
+    /// paint, the sweep and the pointer all need the list rather than the first
+    /// of it — and tree order is the order they are drawn in, which is what makes
+    /// a frame's list of bodies stable between frames.
+    pub fn preview_seats(&self) -> Vec<SeatId> {
+        self.tree
+            .seats_in_order()
+            .into_iter()
+            .filter(|seat| seat.kind == SeatKind::Preview)
+            .map(|seat| seat.id)
+            .collect()
     }
 
     /// Whether this seat is a pinned preview.
@@ -445,23 +461,40 @@ impl Seats {
     pub fn toggle_preview(&mut self, metrics: &SeatMetrics) -> bool {
         match self.preview() {
             Some(existing) => self.close_seat(metrics, existing),
-            None => {
-                let seat = Seat::new(SeatId(self.next_seat), SeatKind::Preview);
-                let split_id = SplitId(self.next_split);
-                match apply(&self.tree, metrics, &Edit::LandPreview { seat, split_id }) {
-                    Ok(outcome) => {
-                        self.tree = outcome.tree;
-                        self.next_seat += 1;
-                        self.next_split += 1;
-                        // A leaf arrived — the preview is a pane like any other,
-                        // and the terminal beside it narrows to make room (U8).
-                        self.structure_revision += 1;
-                        true
-                    }
-                    Err(_) => false,
-                }
-            }
+            None => self.add_preview(metrics).is_some(),
         }
+    }
+
+    /// **Land a preview leaf, without asking whether one is already there** —
+    /// the second half of P95, and the verb the pin finally makes reachable.
+    ///
+    /// [`Edit::LandPreview`] already does the right thing on its own: it reuses
+    /// an un-pinned preview seat when there is one (so nothing moves) and lands
+    /// a fresh leaf in the far-right root column otherwise. What could not be
+    /// said before slice 5 is the *else* — a pinned preview is not a reuse
+    /// target, so this had to be able to mint a second `SeatKind::Preview` leaf
+    /// beside the first, and [`Self::toggle_preview`] is the wrong door for that
+    /// because a toggle facing an open pane closes it.
+    ///
+    /// Returns the seat a file opened right now would land on: the reused one, or
+    /// the new one. `None` only when the edit itself refused, which is the honest
+    /// answer rather than a half-made pane.
+    pub fn add_preview(&mut self, metrics: &SeatMetrics) -> Option<SeatId> {
+        let landing = self.landing_preview();
+        if let Some(seat) = landing {
+            return Some(seat);
+        }
+        let seat = Seat::new(SeatId(self.next_seat), SeatKind::Preview);
+        let id = seat.id;
+        let split_id = SplitId(self.next_split);
+        let outcome = apply(&self.tree, metrics, &Edit::LandPreview { seat, split_id }).ok()?;
+        self.tree = outcome.tree;
+        self.next_seat += 1;
+        self.next_split += 1;
+        // A leaf arrived — the preview is a pane like any other, and the terminal
+        // beside it narrows to make room (U8).
+        self.structure_revision += 1;
+        Some(id)
     }
 
     /// Seat a files column down the whole left edge of this tab (A8), returning
@@ -1759,6 +1792,13 @@ pub enum ChromeTarget {
     PreviewSave(SeatId),
     /// `.pv-tool.pv-md-flip` — rendered view ⇄ source (P28).
     PreviewFlip(SeatId),
+    /// `.pv-tool.pv-popout` — "pop out to a floating window" (P29/P60).
+    ///
+    /// **It moves the presentation, not the buffer.** The buffer stays in its
+    /// tab's pool, so nothing is lost and no dirty gate fires; what leaves the
+    /// tree is the pane that was showing it. Which is why it is a sibling of the
+    /// pin rather than of the `×`: both are about where a buffer is *shown*.
+    PreviewPopOut(SeatId),
     /// `.pv-tool.pv-pin` — "keep this pane; the next file opens a new preview"
     /// (P30/P95), the one route to a second preview pane.
     PreviewPin(SeatId),
@@ -4252,6 +4292,12 @@ fn all_powershell(seats: &Seats) -> BTreeMap<SeatId, ChromeMark> {
 }
 
 /// Build chrome while supplying the preview seat's content title and optional body placeholder.
+///
+/// **`preview_title` is spread over every preview seat**, which is a fixture
+/// convenience and not the product's rule: the window looks each seat's caption
+/// up on its own ([`ChromeContent::preview_titles`]), so a test about two panes
+/// naming two different files builds that list itself and calls
+/// [`build_chrome_for_tabs`] directly.
 #[cfg(test)]
 pub fn build_chrome_with_preview(
     seats: &Seats,
@@ -4273,6 +4319,15 @@ pub fn build_chrome_with_preview(
         landing: 0.0,
         edit: None,
     }];
+    let preview_titles: Vec<(SeatId, &str)> = preview_title
+        .map(|title| {
+            seats
+                .preview_seats()
+                .into_iter()
+                .map(|seat| (seat, title))
+                .collect()
+        })
+        .unwrap_or_default();
     build_chrome_for_tabs(
         seats,
         layout,
@@ -4289,7 +4344,7 @@ pub fn build_chrome_with_preview(
             // otherwise is written against.
             rail: RailState::default(),
             rail_scroll: 0.0,
-            preview_title,
+            preview_titles: &preview_titles,
             terminal_names: &NO_TERMINAL_NAMES,
             leaf_marks: &all_powershell(seats),
             files_names: &NO_FILES_NAMES,
@@ -4297,8 +4352,8 @@ pub fn build_chrome_with_preview(
             files_root_open: None,
             files_trees: &NO_FILES_TREES,
             preview_message,
-            preview_foot: None,
-            preview_head: None,
+            preview_feet: &[],
+            preview_heads: &[],
             preview_card: None,
             fit_overflow: None,
             profile_menu_open: false,
@@ -4515,7 +4570,16 @@ pub struct ChromeContent<'a> {
     /// opposite number, and its own field because the two are different lists on
     /// different axes with different lengths.
     pub rail_scroll: f32,
-    pub preview_title: Option<&'a str>,
+    /// What each preview seat's caption says — the file it is showing, **by
+    /// seat**.
+    ///
+    /// Beside [`Self::preview_heads`] rather than folded into it, because the two
+    /// are different questions with different owners: this is a *caption* and is
+    /// asked of a collapsed bar as well as of a head, while a head is the run of
+    /// controls only a full pane has. Keyed by seat for the head's own reason —
+    /// two preview panes show two files, and a collapsed bar printing its
+    /// neighbour's name is the same lie in a narrower strip.
+    pub preview_titles: &'a [(SeatId, &'a str)],
     /// Which tabs' floating trees are on screen, for the floats summoned from a
     /// tab's own trigger — `.vtab.shown` (Q173).
     ///
@@ -4603,15 +4667,18 @@ pub struct ChromeContent<'a> {
     /// directory on the event loop.
     pub files_trees: &'a BTreeMap<SeatId, FilesTreeContent>,
     pub preview_message: Option<&'a str>,
-    /// The preview pane's path strip — its foot (P32-P35).
-    pub preview_foot: Option<FootStrip<'a>>,
-    /// The preview head's own furniture, when a preview seat is on screen.
+    /// Each preview pane's path strip — its foot (P32-P35), **by seat**.
+    pub preview_feet: &'a [(SeatId, FootStrip<'a>)],
+    /// Each preview head's own furniture, **by seat**.
     ///
-    /// Beside [`Self::preview_title`] rather than folded into it, because the two
-    /// are different questions with different owners: the title is a *caption*
-    /// and is asked of a collapsed bar and a drag ghost as well as of a head,
-    /// while this is the run of controls that only a full head has.
-    pub preview_head: Option<PreviewHeadContent<'a>>,
+    /// A list keyed by seat rather than one value, and real-machine capture is
+    /// why: with one, every `SeatKind::Preview` placement was painted the same
+    /// head, so two preview panes side by side wore one file's name, one file's
+    /// path and one pin between them while their bodies showed two different
+    /// files. A header that names a file its own body is not showing is worse
+    /// than no header — and the plural content plane means the head has to be
+    /// asked the same question the body already is: *whose*.
+    pub preview_heads: &'a [(SeatId, PreviewHeadContent<'a>)],
     /// The "no preview" card, when the preview seat is showing one.
     ///
     /// Beside [`Self::preview_message`] rather than instead of it, because the
@@ -4807,7 +4874,7 @@ pub fn build_chrome_for_tabs(
         tab_scroll,
         rail,
         rail_scroll,
-        preview_title,
+        preview_titles,
         float_shown,
         terminal_names,
         leaf_marks,
@@ -4816,8 +4883,8 @@ pub fn build_chrome_for_tabs(
         files_root_open,
         files_trees,
         preview_message,
-        preview_foot,
-        preview_head,
+        preview_feet,
+        preview_heads,
         preview_card,
         fit_overflow,
         profile_menu_open,
@@ -4832,6 +4899,28 @@ pub fn build_chrome_for_tabs(
     // answer from `seat_caption` instead of re-reading the source.
     let terminal_name = |id: SeatId| terminal_names.get(&id).map(String::as_str);
     let files_name = |id: SeatId| files_names.get(&id).map(String::as_str);
+    // The same rule, one pane kind over. A preview seat's head, its collapsed
+    // bar and its foot all name the file *it* is showing, and all three read it
+    // here — so a caption that disagreed with the body under it would have to be
+    // three lookups going wrong the same way rather than one list being short.
+    let preview_head = |id: SeatId| {
+        preview_heads
+            .iter()
+            .find(|(seat, _)| *seat == id)
+            .map(|(_, content)| *content)
+    };
+    let preview_foot = |id: SeatId| {
+        preview_feet
+            .iter()
+            .find(|(seat, _)| *seat == id)
+            .map(|(_, strip)| *strip)
+    };
+    let preview_title = |id: SeatId| {
+        preview_titles
+            .iter()
+            .find(|(seat, _)| *seat == id)
+            .map(|(_, title)| *title)
+    };
     let palette = chrome_palette();
     let mut quads = Vec::new();
     let mut labels = Vec::new();
@@ -4956,7 +5045,7 @@ pub fn build_chrome_for_tabs(
                     placement.presentation,
                     seat_short_caption(
                         placement.kind,
-                        preview_title,
+                        preview_title(placement.id),
                         terminal_name(placement.id),
                         files_name(placement.id),
                     ),
@@ -5119,8 +5208,14 @@ pub fn build_chrome_for_tabs(
                 // flex row. Everything to the right of the `×` — the head as a
                 // drag handle, the close, the body below — is untouched, which is
                 // P24's whole point about the head carrying both classes.
+                //
+                // **This placement's own**, looked up by id. Every preview seat
+                // asking one shared value is how two panes came to wear one
+                // file's name (real-machine capture, slice 5): the kind of the
+                // seat says *whether* it has a preview head, and only its
+                // identity says which.
                 let preview_head = (placement.kind == SeatKind::Preview)
-                    .then_some(preview_head)
+                    .then(|| preview_head(placement.id))
                     .flatten();
                 if let Some(content) = preview_head {
                     push_preview_head(
@@ -5138,7 +5233,7 @@ pub fn build_chrome_for_tabs(
                     pane_labels.push(ChromeLabel {
                         text: seat_caption(
                             placement.kind,
-                            preview_title,
+                            preview_title(placement.id),
                             terminal_name(placement.id),
                             files_name(placement.id),
                         )
@@ -5356,10 +5451,10 @@ pub fn build_chrome_for_tabs(
                 // to top: the path, then the truncation notice, then the document.
                 if let Some(geometry) = files_pane {
                     let strip = match placement.kind {
-                        SeatKind::Preview => preview_foot.map(|foot| FootStrip {
-                            path: foot.path,
-                            revealed: foot.revealed,
-                        }),
+                        // This placement's own path, by the head's rule and for
+                        // the head's reason: a foot printing the file a *sibling*
+                        // pane is showing is the same lie one strip lower.
+                        SeatKind::Preview => preview_foot(placement.id),
                         _ => files_tree.map(|tree| FootStrip {
                             path: tree.foot_path.as_str(),
                             revealed: tree.foot_revealed,
@@ -8278,17 +8373,21 @@ pub struct PreviewHeadGeometry {
     pub dirty: [f32; 4],
     pub save: Option<[f32; 4]>,
     pub flip: Option<[f32; 4]>,
+    /// `.pv-tool.pv-popout` (P29) — the slice-5 arrival the note below reserved.
+    pub popout: Option<[f32; 4]>,
     pub pin: Option<[f32; 4]>,
 }
 
 /// Lay one preview head's contents out inside the common head it rides on.
 ///
 /// The trailing run is taken off the right in the mock-up's own DOM order —
-/// `.pv-save`, `.pv-md-flip`, `.pv-pin`, `.pane-close` — so a head that has lost
-/// room drops controls from the *left* of that run, which is the order flexbox
-/// would drop them in and the order that keeps the `×` reachable longest. The
-/// pop-out sits between the flip and the pin in that list and is slice 5's; when
-/// it arrives it takes its box here, before the pin, and nothing else moves.
+/// `.pv-save`, `.pv-md-flip`, `.pv-popout`, `.pv-pin`, `.pane-close` — so a head
+/// that has lost room drops controls from the *left* of that run, which is the
+/// order flexbox would drop them in and the order that keeps the `×` reachable
+/// longest.
+///
+/// The pop-out arrived in slice 5 and took the box this note had reserved for it,
+/// between the flip and the pin, and nothing else moved.
 #[must_use]
 pub fn preview_head_geometry(
     head: &PaneHeadGeometry,
@@ -8319,10 +8418,15 @@ pub fn preview_head_geometry(
     // The pin is always offered: it is the one control that is a *state* as well
     // as an action, and P95 makes it the only route to a second preview pane.
     let pin = take(true);
+    // Offered as unconditionally as the pin, and for the mirror of its reason:
+    // the pin is how a buffer stops being replaceable *in* the tree, and this is
+    // how it leaves the tree altogether. Neither is a property of the content, so
+    // neither can be earned or lost by it.
+    let popout = take(true);
     let flip = take(tools.flip);
     let save = take(tools.save);
 
-    let run_left = [save, flip, pin]
+    let run_left = [save, flip, popout, pin]
         .into_iter()
         .flatten()
         .map(|box_| box_[0])
@@ -8401,6 +8505,7 @@ pub fn preview_head_geometry(
         ],
         save,
         flip,
+        popout,
         pin,
     }
 }
@@ -8849,7 +8954,7 @@ pub fn hit_files_foot(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option
 pub fn hit_preview_head(
     layout: &SeatLayout,
     scale: f32,
-    tools: PreviewHeadTools,
+    tools: &[(SeatId, PreviewHeadTools)],
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -8861,6 +8966,19 @@ pub fn hit_preview_head(
         let Some(rect) = full_pane_rect(layout, placement.id) else {
             continue;
         };
+        // **This placement's own measurements.** The two string widths in
+        // `PreviewHeadTools` are what decide where the switcher's pill ends and
+        // therefore where every button to the right of it begins, so laying a
+        // second head out with the first head's widths would answer for
+        // rectangles nobody can see — the paint's own bug, arriving one frame
+        // later as a press on the wrong control.
+        let Some(tools) = tools
+            .iter()
+            .find(|(seat, _)| *seat == placement.id)
+            .map(|(_, tools)| *tools)
+        else {
+            continue;
+        };
         let head = pane_head_geometry(rect, placement.kind, scale);
         let geometry = preview_head_geometry(&head, scale, tools);
         let hit = |box_: Option<[f32; 4]>| box_.is_some_and(|box_| contains(box_, x, y));
@@ -8869,6 +8987,9 @@ pub fn hit_preview_head(
         }
         if hit(geometry.flip) {
             return Some(ChromeTarget::PreviewFlip(placement.id));
+        }
+        if hit(geometry.popout) {
+            return Some(ChromeTarget::PreviewPopOut(placement.id));
         }
         if hit(geometry.pin) {
             return Some(ChromeTarget::PreviewPin(placement.id));
@@ -9336,6 +9457,15 @@ fn push_preview_head(
         } else {
             ChromeMark::Eye
         },
+        false,
+    );
+    tool(
+        geometry.popout,
+        ChromeTarget::PreviewPopOut(seat),
+        // `#i-float` — a frame with an arrow leaving through its corner, the
+        // standard "opens outside this frame" idiom, and the same glyph the files
+        // head's own pop-out wears. One verb, one drawing.
+        ChromeMark::Float,
         false,
     );
     tool(
@@ -10043,7 +10173,22 @@ pub fn preview_card_geometry(
 /// — a second copy of "the seat less its head" is a second chance for one of
 /// them to be off by the hairline.
 pub fn preview_body_rect(seats: &Seats, layout: &SeatLayout, scale: f32) -> Option<[f32; 4]> {
-    let seat = seats.preview()?;
+    preview_seat_body_rect(seats, layout, seats.preview()?, scale)
+}
+
+/// The same, for a **named** preview seat.
+///
+/// The plural form, and the one every caller uses now that a tab can hold more
+/// than one preview leaf (slice 5): `preview_body_rect` above is this asked
+/// about `seats.preview()`, which is still the right question for the paths that
+/// mean "the preview seat" and the wrong one for anything that means "this one".
+#[must_use]
+pub fn preview_seat_body_rect(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<[f32; 4]> {
     let viewport = preview_body_viewport(seats, layout, seat, scale)?;
     Some([
         viewport.x as f32,
@@ -10247,6 +10392,7 @@ pub(crate) fn build_drag_ghost(
         }],
         sprites: vec![ChromeSprite::new(mark, layout.mark, mark_color)],
         opacity: 1.0,
+        body: None,
     }
 }
 
@@ -11768,6 +11914,9 @@ mod tests {
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let marks = all_powershell(&seats);
         let tabs = [TabContent::default()];
+        let seat = seats.preview().expect("the fixture just opened one");
+        let titles = [(seat, content.name)];
+        let heads = [(seat, content)];
         let chrome = build_chrome_for_tabs(
             &seats,
             &layout,
@@ -11782,7 +11931,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                preview_title: Some(content.name),
+                preview_titles: &titles,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &marks,
                 files_names: &NO_FILES_NAMES,
@@ -11790,8 +11939,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: Some(content),
+                preview_feet: &[],
+                preview_heads: &heads,
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -12076,6 +12225,59 @@ mod tests {
         assert!(!seats.preview_is_pinned(seats.terminal()));
     }
 
+    /// PIN (P95, slice 5) — **the pin's other half: a second preview leaf.**
+    ///
+    /// `landing_preview` said where a file would land and could answer "nowhere"
+    /// from the day the pin existed; what it could not do was make the pane the
+    /// file lands on instead. [`Seats::add_preview`] is that verb, and it is the
+    /// reason the pin is now worth something: pinning a pane and opening another
+    /// file leaves the first pane exactly as it was and puts a second preview
+    /// beside it.
+    ///
+    /// It is deliberately *not* [`Seats::toggle_preview`]: a toggle facing an
+    /// open pane closes it, which is the opposite of what a browsing gesture
+    /// means.
+    ///
+    /// MUTATIONS:
+    /// ① have `add_preview` return `self.preview()` instead of
+    ///    `self.landing_preview()` — the fourth assertion goes red and a pinned
+    ///    pane is clobbered after all;
+    /// ② have it call `toggle_preview` — the third goes red, and opening a file
+    ///    beside a pinned preview *closes* the preview.
+    #[test]
+    fn a_pinned_preview_gets_a_second_leaf_beside_it_rather_than_losing_its_buffer() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        let first = seats.add_preview(&metrics).expect("a preview lands");
+        assert_eq!(seats.preview_seats(), vec![first]);
+        assert_eq!(
+            seats.add_preview(&metrics),
+            Some(first),
+            "un-pinned, the same pane answers again — the content changes, the geometry does not"
+        );
+        assert_eq!(seats.preview_seats(), vec![first], "and nothing was minted");
+
+        assert!(seats.toggle_preview_pin(first));
+        let second = seats
+            .add_preview(&metrics)
+            .expect("a pinned preview does not block the next file");
+        assert_ne!(second, first, "the next file opens beside it, not over it");
+        assert_eq!(
+            seats.preview_seats(),
+            vec![first, second],
+            "two preview leaves, in tree order"
+        );
+        assert!(
+            seats.preview_is_pinned(first) && !seats.preview_is_pinned(second),
+            "the pin belongs to the pane that was pinned and travels to nothing"
+        );
+        assert_eq!(
+            seats.landing_preview(),
+            Some(second),
+            "and the new one is now the reuse target"
+        );
+    }
+
     /// PIN (P32-P35) — **a preview pane wears the files column's own foot**, and
     /// its body is shortened by exactly the strip's height.
     ///
@@ -12155,22 +12357,24 @@ mod tests {
         for (box_, expected) in [
             (geometry.save, ChromeTarget::PreviewSave(seat)),
             (geometry.flip, ChromeTarget::PreviewFlip(seat)),
+            (geometry.popout, ChromeTarget::PreviewPopOut(seat)),
             (geometry.pin, ChromeTarget::PreviewPin(seat)),
             (geometry.pill, ChromeTarget::PreviewName(seat)),
         ] {
             let (x, y) = centre(box_.expect("a head this wide seats every control"));
             assert_eq!(
-                hit_preview_head(&layout, 1.0, tools, x, y),
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
                 Some(expected),
                 "{expected:?} answers for its own rectangle"
             );
         }
-        // The three tools stand in a row, right to left in the mock-up's DOM
+        // The four tools stand in a row, right to left in the mock-up's DOM
         // order, and none of them overlaps the name.
         let save = geometry.save.expect("a save box");
         let flip = geometry.flip.expect("a flip box");
+        let popout = geometry.popout.expect("a pop-out box");
         let pin = geometry.pin.expect("a pin box");
-        assert!(save[2] <= flip[0] && flip[2] <= pin[0]);
+        assert!(save[2] <= flip[0] && flip[2] <= popout[0] && popout[2] <= pin[0]);
         assert!(geometry.pill.expect("a pill")[2] <= save[0]);
     }
 
@@ -13267,7 +13471,7 @@ mod tests {
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
-                    preview_title: None,
+                    preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
@@ -13275,8 +13479,8 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
-                    preview_foot: None,
-                    preview_head: None,
+                    preview_feet: &[],
+                    preview_heads: &[],
                     preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -13479,7 +13683,7 @@ mod tests {
                 tab_scroll,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -13487,8 +13691,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open,
@@ -13574,7 +13778,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -13582,8 +13786,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &trees,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -17229,7 +17433,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -17237,8 +17441,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -17423,7 +17627,7 @@ mod tests {
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
-                    preview_title: None,
+                    preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
@@ -17431,8 +17635,8 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
-                    preview_foot: None,
-                    preview_head: None,
+                    preview_feet: &[],
+                    preview_heads: &[],
                     preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -17526,7 +17730,7 @@ mod tests {
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
-                    preview_title: None,
+                    preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
@@ -17534,8 +17738,8 @@ mod tests {
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
-                    preview_foot: None,
-                    preview_head: None,
+                    preview_feet: &[],
+                    preview_heads: &[],
                     preview_card: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -17734,7 +17938,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &all_powershell(seats),
                 files_names: &NO_FILES_NAMES,
@@ -17742,8 +17946,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -19508,7 +19712,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -19516,8 +19720,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow,
                 profile_menu_open: false,
@@ -19565,7 +19769,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -19573,8 +19777,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -20350,7 +20554,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -20358,8 +20562,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -20591,7 +20795,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -20599,8 +20803,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -20842,7 +21046,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -20850,8 +21054,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -20996,7 +21200,7 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -21004,8 +21208,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -22180,7 +22384,7 @@ mod tests {
                 // state the report was made in.
                 rail: icon_rail(1.0),
                 rail_scroll: 0.0,
-                preview_title: None,
+                preview_titles: &[],
                 terminal_names: &names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -22188,8 +22392,8 @@ mod tests {
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
-                preview_foot: None,
-                preview_head: None,
+                preview_feet: &[],
+                preview_heads: &[],
                 preview_card: None,
                 fit_overflow: None,
                 profile_menu_open: false,

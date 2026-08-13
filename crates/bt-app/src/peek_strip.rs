@@ -820,6 +820,7 @@ pub fn build(
         labels,
         sprites,
         opacity: 1.0,
+        body: None,
     }]
 }
 

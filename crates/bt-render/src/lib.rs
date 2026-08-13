@@ -2068,7 +2068,7 @@ pub struct Renderer {
     cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
     preview_image: Option<PreviewImage>,
-    preview_body: Option<PreviewBody>,
+    preview_bodies: Vec<PreviewBody>,
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
@@ -2411,6 +2411,19 @@ pub struct OverlayLayer {
     /// palette actually uses (.088/.094) the widest gap that opens is under 2.5%
     /// of an already-invisible ink, and it closes as the fade lands.
     pub opacity: f32,
+    /// A scrolled **document** inside this layer (P43's second tenant).
+    ///
+    /// A preview float is a window with a file in it, and a file is not quads
+    /// and captions: it is [`PreviewBody`] — runs in two faces, wrapped or not,
+    /// under a clip, with blocks that scroll inside themselves. Handing it to
+    /// `set_preview_bodies` instead would draw it in the pass *before* the
+    /// overlays, which is the pass this layer's own window fill is drawn after —
+    /// so the document would be behind the window that contains it.
+    ///
+    /// Riding here instead makes the z-order true by construction: a layer's
+    /// three channels are finished before the next layer's are opened, so the
+    /// document sits above its own window and below whatever stands over it.
+    pub body: Option<PreviewBody>,
 }
 
 impl Default for OverlayLayer {
@@ -2427,6 +2440,7 @@ impl Default for OverlayLayer {
             labels: Vec::new(),
             icons: Vec::new(),
             opacity: 1.0,
+            body: None,
         }
     }
 }
@@ -3078,7 +3092,7 @@ impl Renderer {
             cursor_blink_visible: true,
             peek_overlay: None,
             preview_image: None,
-            preview_body: None,
+            preview_bodies: Vec::new(),
             trace_perf,
             perf_frame: 0,
         })
@@ -3213,14 +3227,25 @@ impl Renderer {
         changed
     }
 
-    /// Replace the preview seat's body. Returns whether anything changed.
+    /// Replace **every** preview body this frame. Returns whether anything
+    /// changed.
     ///
     /// The whole body, every frame it differs, rather than a placement door
     /// beside it: a document's rectangles are recomputed from the seat and the
     /// scroll offset by the caller anyway, so there is no cheaper half to move.
-    pub fn set_preview_body(&mut self, body: Option<PreviewBody>) -> bool {
-        let changed = self.preview_body != body;
-        self.preview_body = body;
+    ///
+    /// # A list, since slice 5
+    ///
+    /// This was one `Option`, because the window had one preview seat. A tab can
+    /// now hold a pinned preview pane, the un-pinned one beside it and a torn-off
+    /// float at the same time, and each of those is a document scrolled to its own
+    /// place. Every [`PreviewBody`] already carries its own `clip` in
+    /// whole-surface coordinates, so nothing here has to know which surface a body
+    /// came from — the list is drawn in the order it is given, which is the order
+    /// the caller paints its surfaces in.
+    pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
+        let changed = self.preview_bodies != bodies;
+        self.preview_bodies = bodies;
         changed
     }
 
@@ -3879,70 +3904,17 @@ impl Renderer {
                 &chrome_layouts,
             )
             .is_ok();
+        // One flat list over every body, because they are one draw: each body
+        // already carries its own `clip` in whole-surface coordinates, so two
+        // documents on screen are two sets of cropped rectangles and not two
+        // passes.
         let preview_body_rects: Vec<RectInstance> = self
-            .preview_body
-            .as_ref()
-            .map(|body| {
-                let mut rects: Vec<RectInstance> = body
-                    .quads
-                    .iter()
-                    .filter_map(|quad| {
-                        // Cropped to the body here rather than by a scissor,
-                        // because the pass is in whole-surface coordinates and a
-                        // second scissor would have to be set and unset around
-                        // two draws that are otherwise one.
-                        let rect = crop_to(quad.rect, body.clip)?;
-                        Some(surface_pixel_rect(
-                            rect,
-                            quad.color,
-                            self.config.width,
-                            self.config.height,
-                        ))
-                    })
-                    .collect();
-                // A scrolling block's fills are cropped to the block **and** to
-                // the body: the offset moves them sideways out of their own
-                // rectangle, and the body's clip still ends where the pane head
-                // begins.
-                for block in &body.blocks {
-                    let Some(window) = crop_to(block.clip, body.clip) else {
-                        continue;
-                    };
-                    rects.extend(block.quads.iter().filter_map(|quad| {
-                        let rect = crop_to(quad.rect, window)?;
-                        Some(surface_pixel_rect(
-                            rect,
-                            quad.color,
-                            self.config.width,
-                            self.config.height,
-                        ))
-                    }));
-                }
-                // The foot stands *below* the content's clip and is cropped to
-                // its own bar, which is the whole of why it is a slot rather
-                // than two more entries in `quads`.
-                if let Some(foot) = body.foot.as_ref() {
-                    rects.push(surface_pixel_rect(
-                        foot.bar,
-                        foot.ground,
-                        self.config.width,
-                        self.config.height,
-                    ));
-                    rects.push(surface_pixel_rect(
-                        [
-                            foot.bar[0],
-                            foot.bar[1],
-                            foot.bar[2],
-                            (foot.bar[1] + foot.border_px).min(foot.bar[3]),
-                        ],
-                        foot.border,
-                        self.config.width,
-                        self.config.height,
-                    ));
-                }
-                rects
+            .preview_bodies
+            .iter()
+            .flat_map(|body| {
+                preview_body_rect_instances(body, self.config.width, self.config.height)
             })
-            .unwrap_or_default();
+            .collect();
         let preview_body_rect_buffer = (!preview_body_rects.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3951,11 +3923,10 @@ impl Renderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let preview_text_layouts = self
-            .preview_body
-            .as_ref()
-            .map(|body| shape_preview_body(&mut self.font_system, body))
-            .unwrap_or_default();
+        let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
+        for body in &self.preview_bodies {
+            preview_text_layouts.extend(shape_preview_body(&mut self.font_system, body));
+        }
         let preview_text_prepared = !preview_text_layouts.is_empty()
             && prepare_chrome_text_atlas(
                 &mut self.preview_text_renderer,
@@ -3980,7 +3951,7 @@ impl Renderer {
         let overlay_layers = std::mem::take(&mut self.overlay_layers);
         let mut overlay_draws: Vec<PreparedOverlayLayer> = Vec::with_capacity(overlay_layers.len());
         for (index, layer) in overlay_layers.iter().enumerate() {
-            let rects: Vec<RectInstance> = layer
+            let mut rects: Vec<RectInstance> = layer
                 .faded_quads()
                 .iter()
                 .map(|quad| {
@@ -3993,6 +3964,16 @@ impl Renderer {
                     )
                 })
                 .collect();
+            // The document's fills, over this layer's own face and under its
+            // captions — the same order, and the same croppings, the seat's lane
+            // uses, because it is the same document drawn one layer up.
+            if let Some(body) = layer.body.as_ref() {
+                rects.extend(preview_body_rect_instances(
+                    body,
+                    self.config.width,
+                    self.config.height,
+                ));
+            }
             let rect_buffer = (!rects.is_empty()).then(|| {
                 self.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -4010,12 +3991,15 @@ impl Renderer {
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             });
-            let layouts = shape_chrome_labels(
+            let mut layouts = shape_chrome_labels(
                 &mut self.font_system,
                 &layer.labels,
                 self.chrome_cap_height_ratio,
                 layer.opacity,
             );
+            if let Some(body) = layer.body.as_ref() {
+                layouts.extend(shape_preview_body(&mut self.font_system, body));
+            }
             while self.overlay_text_renderers.len() <= index {
                 self.overlay_text_renderers.push(TextRenderer::new(
                     &mut self.atlas,
@@ -5815,6 +5799,76 @@ fn preview_paragraph_left(paragraph: &PreviewParagraph, buffer: &Buffer) -> f32 
 }
 
 /// Shape a preview body — one buffer per visible paragraph.
+/// Every filled rectangle one preview body draws, already cropped.
+///
+/// A free function because two lanes ask for it now: the seat's, which runs
+/// before the overlays, and an overlay layer's own
+/// ([`OverlayLayer::body`]) — and a second copy of these croppings is a second
+/// chance for a document in a float to be clipped differently from the same
+/// document in a pane.
+fn preview_body_rect_instances(
+    body: &PreviewBody,
+    surface_width: u32,
+    surface_height: u32,
+) -> Vec<RectInstance> {
+    let mut rects: Vec<RectInstance> = body
+        .quads
+        .iter()
+        .filter_map(|quad| {
+            // Cropped to the body here rather than by a scissor, because the pass
+            // is in whole-surface coordinates and a second scissor would have to
+            // be set and unset around two draws that are otherwise one.
+            let rect = crop_to(quad.rect, body.clip)?;
+            Some(surface_pixel_rect(
+                rect,
+                quad.color,
+                surface_width,
+                surface_height,
+            ))
+        })
+        .collect();
+    // A scrolling block's fills are cropped to the block **and** to the body: the
+    // offset moves them sideways out of their own rectangle, and the body's clip
+    // still ends where the pane head begins.
+    for block in &body.blocks {
+        let Some(window) = crop_to(block.clip, body.clip) else {
+            continue;
+        };
+        rects.extend(block.quads.iter().filter_map(|quad| {
+            let rect = crop_to(quad.rect, window)?;
+            Some(surface_pixel_rect(
+                rect,
+                quad.color,
+                surface_width,
+                surface_height,
+            ))
+        }));
+    }
+    // The foot stands *below* the content's clip and is cropped to its own bar,
+    // which is the whole of why it is a slot rather than two more entries in
+    // `quads`.
+    if let Some(foot) = body.foot.as_ref() {
+        rects.push(surface_pixel_rect(
+            foot.bar,
+            foot.ground,
+            surface_width,
+            surface_height,
+        ));
+        rects.push(surface_pixel_rect(
+            [
+                foot.bar[0],
+                foot.bar[1],
+                foot.bar[2],
+                (foot.bar[1] + foot.border_px).min(foot.bar[3]),
+            ],
+            foot.border,
+            surface_width,
+            surface_height,
+        ));
+    }
+    rects
+}
+
 fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<ChromeTextLayout> {
     let content = body
         .paragraphs
@@ -11872,6 +11926,7 @@ mod tests {
                 opacity: 0.5,
             }],
             opacity: 0.25,
+            body: None,
         };
 
         let quads = layer.faded_quads();

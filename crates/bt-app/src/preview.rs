@@ -1019,8 +1019,6 @@ pub struct PreviewBuffer {
     /// somebody else wrote the file while it was open here. `None` for a buffer
     /// that has no body yet — there is nothing to be stale.
     pub disk_mtime: Option<SystemTime>,
-    /// Whether a markdown buffer is showing its source rather than its render.
-    pub md_source: bool,
     pub load: PreviewLoad,
     /// The widest line of [`Self::content`], in drawn columns.
     ///
@@ -1058,7 +1056,6 @@ impl PreviewBuffer {
             dirty: false,
             revision: 0,
             disk_mtime: None,
-            md_source: false,
             load,
             max_columns: 0,
         }
@@ -1073,7 +1070,8 @@ impl PreviewBuffer {
             )
     }
 
-    /// Whether this buffer would be shown on a surface that edits.
+    /// Whether this buffer would be shown on a surface that edits, **as the
+    /// surface asking is showing it**.
     ///
     /// The name's judgement ([`is_editable`]) **and two facts only a body
     /// knows**. A buffer with no body has nothing to put a caret in; a
@@ -1082,11 +1080,17 @@ impl PreviewBuffer {
     /// "超大文件只读降级" is exactly this line — the degradation is read-only,
     /// and read-only has to be enforced where the editing is, not where the
     /// notice is printed.
-    pub fn is_editable(&self) -> bool {
+    ///
+    /// `md_source` is the *view's*, not the buffer's, and that is the 2026-08-13
+    /// ruling: a rendered markdown page has nothing to type into and its source
+    /// has, so whether this file is editable right now is a question about the
+    /// surface looking at it. Two surfaces on one markdown file can answer it
+    /// differently at the same moment, and both are right.
+    pub fn is_editable(&self, md_source: bool) -> bool {
         self.load == PreviewLoad::Ready
             && self.content.is_some()
             && !self.truncated
-            && is_editable(&self.name, self.ftype, self.md_source)
+            && is_editable(&self.name, self.ftype, md_source)
     }
 
     /// Hand the body to an edit, and file everything one implies.
@@ -1150,9 +1154,13 @@ impl PreviewBuffer {
         self.truncated.then_some(PREVIEW_TRUNCATED_NOTICE)
     }
 
-    /// Which body this buffer is drawn as.
-    pub fn view(&self) -> PreviewView {
-        preview_view(&self.name, self.ftype, self.md_source)
+    /// Which body this buffer is drawn as **on the surface asking**.
+    ///
+    /// Parameterised for [`Self::is_editable`]'s reason: the flip is the view's,
+    /// so a markdown file is a rendered page in one pane and a text surface in
+    /// another at the same instant.
+    pub fn view(&self, md_source: bool) -> PreviewView {
+        preview_view(&self.name, self.ftype, md_source)
     }
 
     /// Why there is no body to show, when there is none.
@@ -1250,6 +1258,32 @@ impl PreviewPool {
             .index_of(&path)
             .expect("the buffer just opened is never the one evicted");
         &mut self.buffers[index]
+    }
+
+    /// Lift a buffer **out** of this pool, whole.
+    ///
+    /// The migrating half of the one case where a buffer changes tabs: a preview
+    /// float docked into a tab that is not the one it was born in. It is not
+    /// `open`'s business and must not be — `open` is the only door that ever
+    /// reads a disk, and a buffer that has travelled is a buffer whose edits and
+    /// whose dirty bit have to arrive intact rather than be read again.
+    pub fn take(&mut self, path: &Path) -> Option<PreviewBuffer> {
+        let index = self.index_of(path)?;
+        Some(self.buffers.remove(index))
+    }
+
+    /// Put a buffer **in**, replacing whatever was under that path.
+    ///
+    /// [`Self::take`]'s other half. It does not evict: the cap is `open`'s law
+    /// and is about a pool growing by *browsing*, while this is one buffer moving
+    /// house — and a migration that silently dropped somebody's unsaved edit to
+    /// keep a ceiling would be the ceiling costing exactly what it is not worth
+    /// (see `open`'s own note).
+    pub fn insert(&mut self, buffer: PreviewBuffer) {
+        match self.index_of(&buffer.path) {
+            Some(index) => self.buffers[index] = buffer,
+            None => self.buffers.push(buffer),
+        }
     }
 
     fn index_of(&self, path: &Path) -> Option<usize> {
@@ -2905,11 +2939,14 @@ mod tests {
     #[test]
     fn a_truncated_buffer_is_read_only_however_editable_its_name_is() {
         let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
-        assert!(!buffer.is_editable(), "a buffer with no body has no caret");
+        assert!(
+            !buffer.is_editable(false),
+            "a buffer with no body has no caret"
+        );
         buffer.accept(read("fn main() {}\n", false));
-        assert!(buffer.is_editable());
+        assert!(buffer.is_editable(false));
         buffer.accept(read("fn main() {}\n", true));
-        assert!(!buffer.is_editable());
+        assert!(!buffer.is_editable(false));
     }
 
     /// ② A save writes the body to the disk and cleans the buffer.

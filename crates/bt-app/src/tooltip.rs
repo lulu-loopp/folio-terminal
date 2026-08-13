@@ -562,6 +562,7 @@ pub fn build(
         labels,
         sprites: Vec::new(),
         opacity,
+        body: None,
     }]
 }
 

@@ -168,10 +168,18 @@ pub enum ChromeMark {
     ///
     /// **Side-honest**, and the mock-up says so at line 2233: the filled panel
     /// sits on the side the pane will land on. Files dock left; previews dock
-    /// right, which is why the symbol sheet carries a mirrored twin. Only the
-    /// left one is drawn here — the right one is the preview block's, and
-    /// minting an unused variant now would be guessing at the day it is needed.
+    /// right, which is why the symbol sheet carries a mirrored twin.
     DockLeft,
+    /// `#i-dock-right` — the mirrored twin, and the preview float's own DOCK
+    /// (P53/P54).
+    ///
+    /// The day the note above was waiting for. Same window, same panel, same
+    /// opacity; the filled bar sits at `x = 9.4` instead of `1.6`, because a
+    /// preview docks into the far-right root column and an icon that pointed left
+    /// while the pane appeared on the right was a user-reported mismatch — which
+    /// is why "side-honest" is written into the drawing rather than left to the
+    /// caption beside it.
+    DockRight,
     /// `#i-check` — the tick that confirms a folder was revealed in the OS file
     /// manager (B24).
     ///
@@ -356,6 +364,7 @@ impl ChromeMark {
             Self::Paste => "i-paste",
             Self::Float => "i-float",
             Self::DockLeft => "i-dock-left",
+            Self::DockRight => "i-dock-right",
             Self::ResizeGrip => "fly-resize",
             Self::Check => "i-check",
             Self::Pin { filled: false } => "i-pin",
@@ -569,6 +578,12 @@ pub struct OverlayLayer {
     /// rides through the rasterizer untouched: how faded a layer is has nothing
     /// to do with which marks it names.
     pub opacity: f32,
+    /// A scrolled document inside this layer — see
+    /// [`bt_render::OverlayLayer::body`]. The preview float is the one tenant
+    /// that has one, and it rides here for the z-order's sake: the document has
+    /// to be drawn above its own window's face, which is drawn a whole pass after
+    /// the seat's documents are.
+    pub body: Option<bt_render::PreviewBody>,
 }
 
 impl Default for OverlayLayer {
@@ -580,6 +595,7 @@ impl Default for OverlayLayer {
             labels: Vec::new(),
             sprites: Vec::new(),
             opacity: 1.0,
+            body: None,
         }
     }
 }
@@ -639,6 +655,7 @@ impl ChromeMarkRasters {
                 labels: layer.labels,
                 icons: self.icons_for(&layer.sprites, &mut kept),
                 opacity: layer.opacity,
+                body: layer.body,
             })
             .collect();
         self.rasters = kept;
@@ -1079,6 +1096,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfileCmd => 14,
         ChromeMark::Float => 17,
         ChromeMark::DockLeft => 18,
+        ChromeMark::DockRight => 26,
         ChromeMark::ResizeGrip => 19,
         ChromeMark::Check => 20,
         ChromeMark::Copy => 21,
@@ -1099,7 +1117,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 26] = [
+const SYMBOL_VIEW_BOX: [&str; 27] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1139,11 +1157,13 @@ const SYMBOL_VIEW_BOX: [&str; 26] = [
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
+    // `#i-dock-right`, the mirrored dock, in its twin's box.
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 26] = [
+const SYMBOL_BODY: [&str; 27] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1280,6 +1300,12 @@ const SYMBOL_BODY: [&str; 26] = [
     ),
     // #i-code — mock-up 2170.
     r#"<path d="M5.8 4.4L2.2 8l3.6 3.6M10.2 4.4L13.8 8l-3.6 3.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // #i-dock-right — `#i-dock-left` mirrored about the frame's own centre: the
+    // window is unchanged and the panel moves to x = 9.4, which is 16 − 1.6 − 5.
+    concat!(
+        r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
+        r##"<rect x="9.4" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/>"##,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the

@@ -147,6 +147,13 @@ pub struct FloatGeometry {
     pub head_title: [f32; 4],
     /// The `DOCK` button, or `None` when the head is too narrow to seat it.
     pub dock: Option<[f32; 4]>,
+    /// `.pv-dirty`'s **reserved** slot — occupied or not (P16/P47). `None` for a
+    /// tenant that has no dirty bit to show, which is the files tree.
+    pub dirty: Option<[f32; 4]>,
+    /// `.pvf-save`, when the buffer inside is one that edits (P57).
+    pub save: Option<[f32; 4]>,
+    /// `.pvf-flip`, when the buffer inside is markdown.
+    pub flip: Option<[f32; 4]>,
     /// The `×`.
     pub close: [f32; 4],
     /// What the tenant fills — the tree, for this slice.
@@ -174,6 +181,22 @@ fn snap(rect: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// Which of the head's optional controls this tenant is asking for.
+///
+/// The files tree asks for none of them and gets the head it always had; a
+/// preview asks for the dot it must reserve room for and for whichever of the
+/// two buffer verbs its content class earns (P57's `editable` / `flippable`).
+/// Passed to the *geometry* rather than only to the paint for D4's reason: a head
+/// drawn with a button its layout never reserved is a button standing on the
+/// name.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FloatHeadTools {
+    /// Reserve `.pv-dirty`'s slot, occupied or not.
+    pub dirty: bool,
+    pub save: bool,
+    pub flip: bool,
+}
+
 /// Lay the chassis out inside `frame`.
 ///
 /// `dock_label_px` is the measured width of the button's caption, because only
@@ -185,6 +208,7 @@ pub fn float_geometry(
     mode: FloatMode,
     scale: f32,
     dock_label_px: f32,
+    tools: FloatHeadTools,
 ) -> FloatGeometry {
     let px = |logical: f32| logical * scale;
     let border = px(FLOAT_WINDOW_BORDER_LOGICAL_PX).max(1.0).round();
@@ -270,7 +294,39 @@ pub fn float_geometry(
     let dock = (dock_left > head_mark[2] + gap)
         .then(|| [dock_left, dock_top.round(), dock_right, dock_bottom.round()]);
 
-    let title_right = dock.map_or(close[0], |dock| dock[0]) - gap;
+    // The two buffer verbs, taken off the trailing run in the mock-up's own DOM
+    // order (P57: `.pvf-save`, `.pvf-flip`, `.fly-dock`, `.fly-close`), so a head
+    // that has lost room drops them from the *left* of that run — the order
+    // flexbox would drop them in, and the order that keeps `×` reachable longest.
+    // The same rule `preview_head_geometry` follows one surface over.
+    let button_box = px(FLOAT_DOCK_GLYPH_LOGICAL_PX) + px(FLOAT_DOCK_PADDING_X_LOGICAL_PX) * 2.0;
+    let mut run_left = dock.map_or(close[0], |dock| dock[0]);
+    let mut take = |wanted: bool| -> Option<[f32; 4]> {
+        if !wanted {
+            return None;
+        }
+        let right = (run_left - gap).floor();
+        let left = (right - button_box).floor();
+        (left > head_mark[2] + gap).then(|| {
+            run_left = left;
+            [left, dock_top.round(), right, dock_bottom.round()]
+        })
+    };
+    let flip = take(tools.flip);
+    let save = take(tools.save);
+
+    // `.pv-dirty { width: 12px }` — a *reserved* slot beside the name, so the dot
+    // appearing shoves nothing (P16). It is taken off the same trailing run and
+    // before the name, which is where the DOM puts it.
+    let dirty_slot = px(FLOAT_DIRTY_SLOT_LOGICAL_PX);
+    let dirty = tools.dirty.then(|| {
+        let right = (run_left - gap).floor();
+        let left = (right - dirty_slot).floor();
+        run_left = left;
+        snap([left, head[1], right, head[3]])
+    });
+
+    let title_right = run_left - gap;
     let head_title = snap([
         head_mark[2] + gap,
         head[1],
@@ -305,6 +361,9 @@ pub fn float_geometry(
         head_mark,
         head_title,
         dock,
+        dirty,
+        save,
+        flip,
         close,
         body,
         foot_edge,
@@ -353,6 +412,84 @@ pub const FLOAT_FOOT_FONT_LOGICAL_PX: f32 = 11.0;
 pub const FLOAT_GRIP_GLYPH_LOGICAL_PX: f32 = 8.0;
 /// `right: 3px; bottom: 3px` — how far that chevron sits in from the corner.
 pub const FLOAT_GRIP_GLYPH_INSET_LOGICAL_PX: f32 = 3.0;
+/// `#pv-float .pv-dirty { width: 12px }` (P47) — the dot's reserved slot.
+pub const FLOAT_DIRTY_SLOT_LOGICAL_PX: f32 = 12.0;
+/// `#pv-float .pv-dirty { font-size: 13px }` — the glyph inside that slot, the
+/// same size the docked head sets it at.
+pub const FLOAT_DIRTY_GLYPH_LOGICAL_PX: f32 = crate::seats::PREVIEW_DIRTY_FONT_LOGICAL_PX;
+
+// ── the preview float's own numbers (P45, P49, P65 — N36's "second set") ────
+//
+// The chassis is one skeleton with two sets of dimensions, and every one of these
+// differs from the files flyout's on purpose. P49 lists the differences and says
+// why in one line: **do not assume "shared chassis" means "same numbers"**.
+
+/// `#pv-float { width: 430px }` — against the flyout's 264.
+///
+/// A file is read across, a folder is read down. 264 is a column of names; 430 is
+/// the narrowest thing a line of source can be shown in without becoming a
+/// thumbnail — the same argument `MIN_PREVIEW_W` makes for the docked pane.
+pub const PREVIEW_FLOAT_WIDTH_LOGICAL_PX: f32 = 430.0;
+/// `#pv-float { max-height: min(64vh, 520px) }` — the flat half.
+pub const PREVIEW_FLOAT_MAX_HEIGHT_LOGICAL_PX: f32 = 520.0;
+/// And the proportional half, against the flyout's `.62`.
+pub const PREVIEW_FLOAT_MAX_HEIGHT_VIEWPORT_FRACTION: f32 = 0.64;
+/// The grip's floor: `clamp(clientX - r0.left, 260, …)` (P65), against 200.
+pub const PREVIEW_FLOAT_MIN_WIDTH_LOGICAL_PX: f32 = 260.0;
+/// `clamp(clientY - r0.top, 200, …)`, against 150.
+pub const PREVIEW_FLOAT_MIN_HEIGHT_LOGICAL_PX: f32 = 200.0;
+/// How far a float born on top of another steps down and right (the 2026-08-12
+/// cascade ruling).
+///
+/// One title bar's worth, which is what every stacking window manager since the
+/// Macintosh has used and the smallest step at which the window underneath is
+/// still visibly a *window* rather than a misprint.
+pub const FLOAT_CASCADE_STEP_LOGICAL_PX: f32 = 24.0;
+/// How close two origins have to be before the newcomer counts as landing on
+/// top of the old one.
+pub const FLOAT_CASCADE_TOLERANCE_LOGICAL_PX: f32 = 4.0;
+
+/// The two sets of numbers, chosen by who is moving in.
+///
+/// A struct rather than eight `match`es scattered through the placement, the
+/// grip and the re-clamp: "which tenant is this" is asked once, at the door, and
+/// what comes back is the whole dimension set. Adding a third tenant adds a
+/// constructor here and touches nothing else, which is the same extension seam
+/// `SeatMetrics` gives the layout solver.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FloatSizing {
+    pub width: f32,
+    pub max_height: f32,
+    pub max_height_fraction: f32,
+    pub min_width: f32,
+    pub min_height: f32,
+}
+
+impl FloatSizing {
+    /// The files flyout's set — 264 / min(62vh, 460) / 200×150.
+    #[must_use]
+    pub fn files() -> Self {
+        Self {
+            width: FLOAT_WINDOW_WIDTH_LOGICAL_PX,
+            max_height: FLOAT_WINDOW_MAX_HEIGHT_LOGICAL_PX,
+            max_height_fraction: FLOAT_WINDOW_MAX_HEIGHT_VIEWPORT_FRACTION,
+            min_width: FLOAT_WINDOW_MIN_WIDTH_LOGICAL_PX,
+            min_height: FLOAT_WINDOW_MIN_HEIGHT_LOGICAL_PX,
+        }
+    }
+
+    /// The preview float's — 430 / min(64vh, 520) / 260×200.
+    #[must_use]
+    pub fn preview() -> Self {
+        Self {
+            width: PREVIEW_FLOAT_WIDTH_LOGICAL_PX,
+            max_height: PREVIEW_FLOAT_MAX_HEIGHT_LOGICAL_PX,
+            max_height_fraction: PREVIEW_FLOAT_MAX_HEIGHT_VIEWPORT_FRACTION,
+            min_width: PREVIEW_FLOAT_MIN_WIDTH_LOGICAL_PX,
+            min_height: PREVIEW_FLOAT_MIN_HEIGHT_LOGICAL_PX,
+        }
+    }
+}
 
 /// The size a float opens at, before any hand has touched it.
 ///
@@ -361,15 +498,18 @@ pub const FLOAT_GRIP_GLYPH_INSET_LOGICAL_PX: f32 = 3.0;
 /// [`bt_render::FLOAT_WINDOW_MAX_HEIGHT_LOGICAL_PX`] for why the cap applies to
 /// a fresh pinned window too.
 #[must_use]
-pub fn float_opening_size(content_height: f32, viewport: [f32; 4], scale: f32) -> [f32; 2] {
+pub fn float_opening_size(
+    content_height: f32,
+    viewport: [f32; 4],
+    scale: f32,
+    sizing: FloatSizing,
+) -> [f32; 2] {
     let px = |logical: f32| logical * scale;
     let margin = px(FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX);
     let viewport_height = (viewport[3] - viewport[1] - margin * 2.0).max(0.0);
-    let cap = (viewport_height * FLOAT_WINDOW_MAX_HEIGHT_VIEWPORT_FRACTION)
-        .min(px(FLOAT_WINDOW_MAX_HEIGHT_LOGICAL_PX));
+    let cap = (viewport_height * sizing.max_height_fraction).min(px(sizing.max_height));
     let floor = px(FLOAT_WINDOW_MIN_STRIP_LOGICAL_PX);
-    let width = px(FLOAT_WINDOW_WIDTH_LOGICAL_PX)
-        .min((viewport[2] - viewport[0] - margin * 2.0).max(floor));
+    let width = px(sizing.width).min((viewport[2] - viewport[0] - margin * 2.0).max(floor));
     [
         width.round(),
         content_height.clamp(floor, cap.max(floor)).round(),
@@ -450,6 +590,92 @@ pub fn float_placement(
     ]
 }
 
+/// Step a newborn window down and right until it is not standing exactly on top
+/// of one that is already open (**user ruling, 2026-08-12**).
+///
+/// # Why a cascade and not a de-duplication
+///
+/// The morning of the same day repealed 同根去重: opening a second window on a
+/// root you already have is legal and ordinary, because two windows on one folder
+/// are two viewports rather than two copies. What that repeal left behind was the
+/// symptom the de-duplication had been hiding — click the same trigger twice and
+/// the second window lands on the first *to the pixel*, so the thing that
+/// obviously happened (a window opened) is invisible, and the thing that obviously
+/// did not (nothing) is what you see. Every stacking window manager since the
+/// Macintosh answers this the same way, and the answer is not "refuse".
+///
+/// # The shape
+///
+/// One step of [`FLOAT_CASCADE_STEP_LOGICAL_PX`] per window already standing at
+/// this origin, tried in order, **on whichever axes still have room**, and the
+/// search rolls back to the un-stepped origin only when neither axis has any.
+/// Rolling back rather than clamping: a clamped cascade piles every window after
+/// the fourth against the same edge, which is the collision this exists to
+/// prevent, arrived at from the other side.
+///
+/// **Per axis, and that is the correction of 2026-08-13.** This used to abandon
+/// the whole ladder the moment the *diagonal* left the viewport, which reads as
+/// the same rule until you notice where a preview float is born: popped out of a
+/// pane head at the far right of the tree, so [`float_placement`] clamps it flush
+/// against `viewport[2] - margin` and the sideways half of the very first step
+/// has nowhere to go. The ladder was abandoned at step zero and the function
+/// returned an origin it had just been told was occupied — two windows to the
+/// pixel, the lower one unreachable, which is exactly the collision the ruling is
+/// about. A window with no room to its right can still go *down*; one against the
+/// bottom can still go right; only in the far corner is there genuinely nowhere
+/// left, and that is where the roll-back belongs.
+///
+/// `taken` is every origin already occupied — the caller's own list, because this
+/// module must not assume the newcomer is going into *this* host (a pop-out
+/// computes its frame before the window exists).
+#[must_use]
+pub fn cascade_origin(
+    frame: [f32; 4],
+    taken: &[[f32; 2]],
+    viewport: [f32; 4],
+    scale: f32,
+) -> [f32; 4] {
+    let px = |logical: f32| logical * scale;
+    let step = px(FLOAT_CASCADE_STEP_LOGICAL_PX);
+    let tolerance = px(FLOAT_CASCADE_TOLERANCE_LOGICAL_PX);
+    let margin = px(FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX);
+    let width = frame[2] - frame[0];
+    let height = frame[3] - frame[1];
+    let occupied = |left: f32, top: f32| {
+        taken.iter().any(|origin| {
+            (origin[0] - left).abs() <= tolerance && (origin[1] - top).abs() <= tolerance
+        })
+    };
+    let mut left = frame[0];
+    let mut top = frame[1];
+    // Bounded by the number of windows that can be standing here: each turn of
+    // the loop is one of them, so a list of `n` origins cannot ask for more than
+    // `n` steps, and the roll-back below ends it sooner than that.
+    for _ in 0..=taken.len() {
+        if !occupied(left, top) {
+            break;
+        }
+        let room_right = left + step + width <= viewport[2] - margin;
+        let room_down = top + step + height <= viewport[3] - margin;
+        // The far corner: the ladder has run out of screen on both axes, so it
+        // wraps to where the placement put it and accepts the overlap. Every
+        // stacking window manager wraps eventually; what none of them does is
+        // wrap on the first rung.
+        if !room_right && !room_down {
+            left = frame[0];
+            top = frame[1];
+            break;
+        }
+        if room_right {
+            left += step;
+        }
+        if room_down {
+            top += step;
+        }
+    }
+    snap([left, top, left + width, top + height])
+}
+
 /// Put a pinned float back inside the viewport after the window changed shape
 /// (G93, §7.1.2「主窗口缩小自动重钳位」).
 ///
@@ -516,11 +742,12 @@ pub fn float_resized_to(
     pointer: [f32; 2],
     viewport: [f32; 4],
     scale: f32,
+    sizing: FloatSizing,
 ) -> [f32; 4] {
     let px = |logical: f32| logical * scale;
     let margin = px(FLOAT_WINDOW_DRAG_MARGIN_LOGICAL_PX);
-    let min_width = px(FLOAT_WINDOW_MIN_WIDTH_LOGICAL_PX);
-    let min_height = px(FLOAT_WINDOW_MIN_HEIGHT_LOGICAL_PX);
+    let min_width = px(sizing.min_width);
+    let min_height = px(sizing.min_height);
     let right = pointer[0]
         .min(viewport[2] - margin)
         .max(frame[0] + min_width);
@@ -560,6 +787,10 @@ pub enum FloatPart {
     Head,
     /// The `DOCK` button.
     Dock,
+    /// `.pvf-save` — a preview float's own head control.
+    Save,
+    /// `.pvf-flip` — likewise.
+    Flip,
     /// The `×`.
     Close,
     /// A row of the tree, by visible index.
@@ -596,6 +827,12 @@ pub fn float_hit(
     }
     if geometry.dock.is_some_and(hit) {
         return Some(FloatPart::Dock);
+    }
+    if geometry.flip.is_some_and(hit) {
+        return Some(FloatPart::Flip);
+    }
+    if geometry.save.is_some_and(hit) {
+        return Some(FloatPart::Save);
     }
     if hit(geometry.close) {
         return Some(FloatPart::Close);
@@ -730,12 +967,9 @@ pub struct FloatHost {
     epoch: FloatId,
 }
 
-/// The float itself: what it is showing, where it is, and how it got there.
-#[derive(Debug)]
-pub struct FloatWin {
-    pub mode: FloatMode,
-    /// The header it can be re-clicked from, or `None` once torn off a column.
-    pub origin: FloatOrigin,
+/// A file tree inside a float — the chassis's first tenant.
+#[derive(Debug, Default)]
+pub struct FloatFiles {
     /// Its own throwaway `{root, open, sel}` (G81) — never a leaf's, never
     /// persisted.
     pub files: crate::seats::FilesLeafState,
@@ -745,6 +979,43 @@ pub struct FloatWin {
     pub cache: crate::files::DirCache,
     /// The column width this view carries between float and dock (F75/G97).
     pub width: bt_layout::LogicalPx,
+}
+
+/// A preview buffer inside a float — the chassis's **second** tenant (P43-P67).
+///
+/// Almost empty, and that is the design working. §7.1.3 puts buffer ownership on
+/// the *tab*, so what the window is showing, how far it is scrolled and where its
+/// caret is all live in that tab's content plane under
+/// `PreviewSurface::Float(id)` — exactly where a docked preview pane's do. All
+/// this window has to remember is **whose** pool to read, which is the mock-up's
+/// own `pvFloatState = { wsId, buf }` with the buffer taken out because the pool
+/// already holds it.
+#[derive(Clone, Copy, Debug)]
+pub struct FloatPreview {
+    /// The tab whose pool and content plane this window draws from.
+    pub tab: TabId,
+}
+
+/// What is living inside a float this time.
+///
+/// The module header promised this: "the files tree is the first thing shown
+/// inside it, not the thing it is for". An enum rather than two optional fields,
+/// because a window shows one thing — two `Option`s can both be `Some`, and the
+/// frame that finds them both has no rule to fall back on.
+#[derive(Debug)]
+pub enum FloatTenant {
+    Files(FloatFiles),
+    Preview(FloatPreview),
+}
+
+/// The float itself: what it is showing, where it is, and how it got there.
+#[derive(Debug)]
+pub struct FloatWin {
+    pub mode: FloatMode,
+    /// The header it can be re-clicked from, or `None` once torn off a column.
+    pub origin: FloatOrigin,
+    /// What is inside.
+    pub tenant: FloatTenant,
     /// The window's box in physical pixels.
     pub frame: [f32; 4],
     /// Whether the tree inside holds the keyboard.
@@ -806,6 +1077,32 @@ impl FloatWin {
     #[must_use]
     pub fn is_live(&self) -> bool {
         self.dismissed_at.is_none()
+    }
+
+    /// The tree inside, if that is what is inside.
+    #[must_use]
+    pub fn files(&self) -> Option<&FloatFiles> {
+        match &self.tenant {
+            FloatTenant::Files(files) => Some(files),
+            FloatTenant::Preview(_) => None,
+        }
+    }
+
+    /// The same, mutably.
+    pub fn files_mut(&mut self) -> Option<&mut FloatFiles> {
+        match &mut self.tenant {
+            FloatTenant::Files(files) => Some(files),
+            FloatTenant::Preview(_) => None,
+        }
+    }
+
+    /// The buffer inside, if that is what is inside.
+    #[must_use]
+    pub fn preview(&self) -> Option<FloatPreview> {
+        match &self.tenant {
+            FloatTenant::Files(_) => None,
+            FloatTenant::Preview(preview) => Some(*preview),
+        }
     }
 }
 
@@ -1013,14 +1310,11 @@ impl FloatHost {
     /// the answer to. Leaving it up would strand it — the pointer is on a trigger,
     /// which `drive_float_hover` counts as "still dealing with the peek", so its
     /// grace would never start and the question would sit over the answer.
-    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
         mode: FloatMode,
         origin: FloatOrigin,
-        files: crate::seats::FilesLeafState,
-        cache: crate::files::DirCache,
-        width: bt_layout::LogicalPx,
+        tenant: FloatTenant,
         frame: [f32; 4],
         anchor: Option<[f32; 4]>,
         now: Instant,
@@ -1030,9 +1324,7 @@ impl FloatHost {
         let win = FloatWin {
             mode,
             origin,
-            files,
-            cache,
-            width,
+            tenant,
             frame,
             focused: mode == FloatMode::Pinned,
             epoch: self.epoch,
@@ -1237,31 +1529,66 @@ pub struct FloatBody {
     pub sprites: Vec<ChromeSprite>,
 }
 
-/// Draw the chassis around a body someone else filled in.
+/// Everything about a float that is the **tenant's** answer rather than the
+/// chassis's.
 ///
-/// `root_name` is what the head shouts (the root's last segment, upper-cased by
-/// the caller — `#files-flyout .fly-head { text-transform: uppercase }`, and the
-/// rule is the files head's alone because a *filename* keeps its case); `path` is
-/// what the foot says, in full. That division is the mock-up's own note at line
-/// 731: the header names the leaf, the foot says where you actually are.
-#[allow(clippy::too_many_arguments)]
+/// A struct rather than eleven positional arguments, and the reason is P43's
+/// total: the chassis is shared, so the differences between two tenants have to
+/// be *legible in one place* — this is that place, and every field of it is a
+/// line of P49's difference table.
+#[derive(Clone, Copy)]
+pub struct FloatChrome<'a> {
+    pub mode: FloatMode,
+    /// The head's own icon: `#i-folder` for a tree, `#i-file` for a buffer.
+    pub mark: ChromeMark,
+    /// What the head says. Upper-cased **by the caller** — the files head shouts
+    /// its root in caps and a filename keeps its case (P51), and a
+    /// `text-transform` living in the chassis would apply that rule to both.
+    pub title: &'a str,
+    /// What the foot says, in full. That division is the mock-up's own note at
+    /// line 731: the header names the leaf, the foot says where you are.
+    pub path: &'a str,
+    pub dock_label: &'a str,
+    /// Side-honest (P54): the filled panel sits where the pane will land —
+    /// [`ChromeMark::DockLeft`] for a tree, [`ChromeMark::DockRight`] for a
+    /// preview.
+    pub dock_mark: ChromeMark,
+    pub hover: Option<FloatPart>,
+    /// Whether the foot is confirming a reveal rather than showing the path
+    /// (B24). The caption arrives from the caller, so this module holds no clock
+    /// and no wording.
+    pub revealed: bool,
+    /// Whether the reserved dot is **occupied** (P16/P47). Meaningless without
+    /// [`FloatHeadTools::dirty`], which is what reserved the slot.
+    pub dirty: bool,
+    /// Which way the flip is pointing: the glyph names the *destination*, so
+    /// `#i-code` ("edit source") when the render is showing and `#i-eye` when the
+    /// source is.
+    pub flip_to_source: bool,
+}
+
+/// Draw the chassis around a body someone else filled in.
 #[must_use]
 pub fn build(
     geometry: &FloatGeometry,
-    mode: FloatMode,
-    root_name: &str,
-    path: &str,
-    dock_label: &str,
-    hover: Option<FloatPart>,
-    // `revealed`: whether the foot is confirming a reveal rather than showing the
-    // path (B24). The caption arrives from the caller, so this module holds no
-    // clock and no wording.
-    revealed: bool,
+    chrome: &FloatChrome<'_>,
     body: FloatBody,
     scale: f32,
     palette: &ChromePalette,
     fade: FloatFade,
 ) -> OverlayLayer {
+    let FloatChrome {
+        mode,
+        mark,
+        title: root_name,
+        path,
+        dock_label,
+        dock_mark,
+        hover,
+        revealed,
+        dirty,
+        flip_to_source,
+    } = *chrome;
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
     let mut quads: Vec<OverlayQuad> = Vec::new();
@@ -1327,11 +1654,7 @@ pub fn build(
     }
     let mut sprites = Vec::new();
     let mut labels = Vec::new();
-    sprites.push(ChromeSprite::new(
-        ChromeMark::Folder,
-        geometry.head_mark,
-        palette.accent,
-    ));
+    sprites.push(ChromeSprite::new(mark, geometry.head_mark, palette.accent));
     labels.push(ChromeLabel {
         text: root_name.to_owned(),
         rect: geometry.head_title,
@@ -1363,7 +1686,7 @@ pub fn build(
         let glyph_left = dock[0] + px(FLOAT_DOCK_PADDING_X_LOGICAL_PX);
         let glyph_top = dock[1] + ((dock[3] - dock[1]) - glyph) / 2.0;
         sprites.push(ChromeSprite::new(
-            ChromeMark::DockLeft,
+            dock_mark,
             snap([glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph]),
             if lit {
                 palette.dialog_title_text
@@ -1392,6 +1715,67 @@ pub fn build(
             tabular_numerals: false,
             clip: None,
         });
+    }
+    // The dot, in its reserved slot. Drawn only when it is *on*: the slot is
+    // reserved by the geometry either way, which is what makes it "appearing
+    // shoves nothing" (P16) rather than "appearing is announced by a shove".
+    //
+    // The same glyph, colour and centring the docked head uses (P47 is the pane's
+    // rule read on the other surface): one dot means one thing, and a second
+    // drawing of it is a second thing to keep in step.
+    if let Some(slot) = geometry.dirty
+        && dirty
+    {
+        labels.push(ChromeLabel {
+            text: crate::seats::PREVIEW_DIRTY_DOT.to_owned(),
+            rect: slot,
+            font_size_px: px(FLOAT_DIRTY_GLYPH_LOGICAL_PX),
+            color: palette.accent,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+    for (box_, part, glyph_mark) in [
+        (geometry.save, FloatPart::Save, ChromeMark::Save),
+        (
+            geometry.flip,
+            FloatPart::Flip,
+            if flip_to_source {
+                ChromeMark::Code
+            } else {
+                ChromeMark::Eye
+            },
+        ),
+    ] {
+        let Some(box_) = box_ else {
+            continue;
+        };
+        let lit = hover == Some(part);
+        if lit {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: button_radius,
+                },
+                box_,
+                palette.dialog_hover,
+            ));
+        }
+        let glyph = px(FLOAT_DOCK_GLYPH_LOGICAL_PX);
+        let left = box_[0] + ((box_[2] - box_[0]) - glyph) / 2.0;
+        let top = box_[1] + ((box_[3] - box_[1]) - glyph) / 2.0;
+        sprites.push(ChromeSprite::new(
+            glyph_mark,
+            snap([left, top, left + glyph, top + glyph]),
+            if lit {
+                palette.dialog_title_text
+            } else {
+                palette.dialog_muted_text
+            },
+        ));
     }
     let close_lit = hover == Some(FloatPart::Close);
     if close_lit {
@@ -1477,6 +1861,7 @@ pub fn build(
         labels,
         sprites,
         opacity: fade.opacity.clamp(0.0, 1.0),
+        body: None,
     }
 }
 
@@ -1492,6 +1877,15 @@ mod tests {
         [left, top, left + width, top + height]
     }
 
+    /// A tree tenant on this root, at the column's opening width.
+    fn files_tenant(root: &str) -> FloatTenant {
+        FloatTenant::Files(FloatFiles {
+            files: state(root),
+            cache: crate::files::DirCache::default(),
+            width: bt_layout::LogicalPx::px(240),
+        })
+    }
+
     /// G79: the chassis is the mock-up's, value for value — a 30px head, a 30px
     /// foot, and a body that is whatever is left between them.
     #[test]
@@ -1501,6 +1895,7 @@ mod tests {
             FloatMode::Peek,
             SCALE,
             30.0,
+            FloatHeadTools::default(),
         );
         assert_eq!(
             geometry.head[3] - geometry.head[1],
@@ -1528,14 +1923,26 @@ mod tests {
     fn only_a_pinned_float_wears_the_corner_grip() {
         let box_ = frame(100.0, 100.0, 264.0, 400.0);
         assert!(
-            float_geometry(box_, FloatMode::Peek, SCALE, 30.0)
-                .grip
-                .is_none(),
+            float_geometry(
+                box_,
+                FloatMode::Peek,
+                SCALE,
+                30.0,
+                FloatHeadTools::default()
+            )
+            .grip
+            .is_none(),
             "a transient peek has no grip"
         );
-        let grip = float_geometry(box_, FloatMode::Pinned, SCALE, 30.0)
-            .grip
-            .expect("a pinned float has one");
+        let grip = float_geometry(
+            box_,
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools::default(),
+        )
+        .grip
+        .expect("a pinned float has one");
         assert_eq!(grip[2] - grip[0], 16.0, "16px wide");
         assert_eq!(grip[3] - grip[1], 16.0, "16px tall");
     }
@@ -1549,6 +1956,7 @@ mod tests {
             FloatMode::Peek,
             SCALE,
             30.0,
+            FloatHeadTools::default(),
         );
         let dock = geometry.dock.expect("there is room for it");
         assert!(dock[2] < geometry.close[0], "DOCK stands left of the ×");
@@ -1587,6 +1995,7 @@ mod tests {
                     FloatMode::Pinned,
                     scale,
                     label_px,
+                    FloatHeadTools::default(),
                 );
                 let dock = geometry.dock.expect("a 264px head seats the button");
                 let wanted = (FLOAT_DOCK_PADDING_X_LOGICAL_PX * 2.0
@@ -1621,7 +2030,13 @@ mod tests {
     /// that can undo whatever made the window this narrow.
     #[test]
     fn a_head_with_no_room_drops_the_dock_button_and_keeps_the_close() {
-        let geometry = float_geometry(frame(0.0, 0.0, 60.0, 200.0), FloatMode::Pinned, SCALE, 30.0);
+        let geometry = float_geometry(
+            frame(0.0, 0.0, 60.0, 200.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools::default(),
+        );
         assert!(geometry.dock.is_none(), "DOCK gives up its box");
         assert!(
             geometry.close[2] > geometry.close[0],
@@ -1685,7 +2100,7 @@ mod tests {
         let viewport = [0.0, 51.0, 1920.0, 1080.0];
         let split = [[0.0, 51.0, 1920.0, 565.0], [0.0, 565.0, 1920.0, 1080.0]];
         // Tall enough to want the whole cap — a home folder's worth of rows.
-        let size = float_opening_size(100_000.0, viewport, HIDPI);
+        let size = float_opening_size(100_000.0, viewport, HIDPI, FloatSizing::files());
         let gap = FLOAT_WINDOW_TRIGGER_GAP_LOGICAL_PX * HIDPI;
         for (which, pane) in split.iter().enumerate() {
             let trigger =
@@ -1737,7 +2152,8 @@ mod tests {
     #[test]
     fn the_grip_stops_at_two_hundred_by_one_fifty() {
         let float = frame(100.0, 100.0, 264.0, 400.0);
-        let resized = float_resized_to(float, [110.0, 110.0], VIEWPORT, SCALE);
+        let resized =
+            float_resized_to(float, [110.0, 110.0], VIEWPORT, SCALE, FloatSizing::files());
         assert_eq!(
             resized[2] - resized[0],
             200.0,
@@ -1778,6 +2194,7 @@ mod tests {
             FloatMode::Pinned,
             SCALE,
             30.0,
+            FloatHeadTools::default(),
         );
         let centre = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
         let (x, y) = centre(geometry.close);
@@ -1828,16 +2245,23 @@ mod tests {
             FloatMode::Pinned,
             SCALE,
             30.0,
+            FloatHeadTools::default(),
         );
         let palette = bt_render::chrome_palette();
         let layer = build(
             &geometry,
-            FloatMode::Pinned,
-            "WEIYI",
-            "C:\\Users\\Weiyi",
-            "DOCK",
-            Some(FloatPart::Foot),
-            false,
+            &FloatChrome {
+                mode: FloatMode::Pinned,
+                mark: ChromeMark::Folder,
+                title: "WEIYI",
+                path: "C:\\Users\\Weiyi",
+                dock_label: "DOCK",
+                dock_mark: ChromeMark::DockLeft,
+                hover: Some(FloatPart::Foot),
+                revealed: false,
+                dirty: false,
+                flip_to_source: false,
+            },
             FloatBody {
                 quads: Vec::new(),
                 labels: Vec::new(),
@@ -1886,6 +2310,7 @@ mod tests {
             FloatMode::Peek,
             SCALE,
             30.0,
+            FloatHeadTools::default(),
         );
         let inside = (geometry.body[0] + 10.0, geometry.body[1] + 10.0);
         assert_eq!(
@@ -1924,9 +2349,7 @@ mod tests {
         host.open(
             FloatMode::Peek,
             Some(trigger),
-            state(root),
-            crate::files::DirCache::default(),
-            bt_layout::LogicalPx::px(240),
+            files_tenant(root),
             frame(100.0, 100.0, 264.0, 300.0),
             None,
             now,
@@ -1943,9 +2366,7 @@ mod tests {
         host.open(
             FloatMode::Pinned,
             trigger,
-            state(root),
-            crate::files::DirCache::default(),
-            bt_layout::LogicalPx::px(240),
+            files_tenant(root),
             box_,
             None,
             now,
@@ -1957,7 +2378,8 @@ mod tests {
         host.drawn().map(|win| win.epoch).collect()
     }
 
-    const TAB: FloatTrigger = FloatTrigger::Tab(TabId(1));
+    const TAB_ID: TabId = TabId(1);
+    const TAB: FloatTrigger = FloatTrigger::Tab(TAB_ID);
     const OTHER: FloatTrigger = FloatTrigger::Tab(TabId(2));
     const THIRD: FloatTrigger = FloatTrigger::Tab(TabId(3));
 
@@ -2184,6 +2606,8 @@ mod tests {
         );
         host.live_mut(first)
             .expect("open")
+            .files_mut()
+            .expect("a tree tenant")
             .files
             .open
             .insert("/crates".to_owned());
@@ -2196,12 +2620,19 @@ mod tests {
 
         host.live_mut(second)
             .expect("open")
+            .files_mut()
+            .expect("a tree tenant")
             .files
             .open
             .insert("/docs".to_owned());
 
         let unfolded = |host: &FloatHost, id: FloatId| {
-            let files = &host.live(id).expect("open").files;
+            let files = &host
+                .live(id)
+                .expect("open")
+                .files()
+                .expect("a tree tenant")
+                .files;
             (files.open.contains("/crates"), files.open.contains("/docs"))
         };
         assert_eq!(
@@ -2306,11 +2737,13 @@ mod tests {
             );
         }
         assert_eq!(
-            host.live_mut(first).map(|win| win.files.root.clone()),
+            host.live_mut(first)
+                .and_then(|win| win.files_mut().map(|files| files.files.root.clone())),
             Some("C:/x".to_owned()),
         );
         assert_eq!(
-            host.live_mut(second).map(|win| win.files.root.clone()),
+            host.live_mut(second)
+                .and_then(|win| win.files_mut().map(|files| files.files.root.clone())),
             Some("C:/y".to_owned()),
         );
         // A window that has gone takes its traffic with it — the cancellation,
@@ -2537,9 +2970,11 @@ mod tests {
         let peek = host.open(
             FloatMode::Peek,
             Some(TAB),
-            opened,
-            crate::files::DirCache::default(),
-            bt_layout::LogicalPx::px(240),
+            FloatTenant::Files(FloatFiles {
+                files: opened,
+                cache: crate::files::DirCache::default(),
+                width: bt_layout::LogicalPx::px(240),
+            }),
             frame(180.0, 90.0, 264.0, 300.0),
             None,
             now,
@@ -2548,7 +2983,14 @@ mod tests {
         let win = host.live(peek).expect("still open");
         assert_eq!(win.mode, FloatMode::Pinned);
         assert_eq!(win.frame, frame(180.0, 90.0, 264.0, 300.0), "same box");
-        assert!(win.files.open.contains("/crates"), "same unfolding");
+        assert!(
+            win.files()
+                .expect("a tree tenant")
+                .files
+                .open
+                .contains("/crates"),
+            "same unfolding"
+        );
         assert!(win.focused, "and a click hands it the keyboard");
     }
 
@@ -2720,5 +3162,454 @@ mod tests {
         assert!(host.promote().is_some());
         assert!(!host.peek_is_open(), "a pinned window lets it go");
         assert!(host.is_pinned(peek));
+    }
+
+    // ── the second tenant (P43-P67) and the cascade ─────────────────────────
+
+    /// PIN — P45/P49/P65: **one chassis, two sets of numbers.** Every value the
+    /// mock-up gives `#pv-float` differs from `#files-flyout`'s, and P49's whole
+    /// point is that "shared chassis" must not be read as "same dimensions".
+    ///
+    /// Mutation: return `FloatSizing::files()` from `FloatSizing::preview` and
+    /// every assertion here goes red at once.
+    #[test]
+    fn the_preview_float_is_a_wider_taller_window_than_the_files_flyout() {
+        let files = FloatSizing::files();
+        let preview = FloatSizing::preview();
+        assert_eq!((files.width, preview.width), (264.0, 430.0));
+        assert_eq!((files.max_height, preview.max_height), (460.0, 520.0));
+        assert_eq!(
+            (files.max_height_fraction, preview.max_height_fraction),
+            (0.62, 0.64)
+        );
+        assert_eq!((files.min_width, preview.min_width), (200.0, 260.0));
+        assert_eq!((files.min_height, preview.min_height), (150.0, 200.0));
+
+        // And the numbers are *used*, not merely declared: the opening size and
+        // the grip's floor both read them.
+        let viewport = [0.0, 34.0, 1600.0, 1000.0];
+        assert_eq!(
+            float_opening_size(100_000.0, viewport, SCALE, preview)[0],
+            430.0,
+            "a preview float opens 430 wide"
+        );
+        let squeezed = float_resized_to(
+            frame(100.0, 100.0, 430.0, 400.0),
+            [110.0, 110.0],
+            VIEWPORT,
+            SCALE,
+            preview,
+        );
+        assert_eq!(
+            [squeezed[2] - squeezed[0], squeezed[3] - squeezed[1]],
+            [260.0, 200.0],
+            "and the grip cannot take it below 260×200"
+        );
+    }
+
+    /// PIN — P57: the preview head reserves the dot's slot and the two buffer
+    /// verbs, and it drops them from the left of the trailing run when the head
+    /// runs out of width — with the `×` the last thing standing.
+    ///
+    /// Mutation: reserve the dot *after* the title instead of before it, and the
+    /// third assertion goes red — the name's box runs under the dot.
+    #[test]
+    fn the_preview_heads_own_controls_take_their_room_before_the_name_does() {
+        let box_ = frame(100.0, 100.0, 430.0, 400.0);
+        let bare = float_geometry(
+            box_,
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools::default(),
+        );
+        assert_eq!((bare.dirty, bare.save, bare.flip), (None, None, None));
+
+        let dressed = float_geometry(
+            box_,
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                dirty: true,
+                save: true,
+                flip: true,
+            },
+        );
+        let dirty = dressed.dirty.expect("the dot's slot is reserved");
+        let save = dressed.save.expect("a text buffer wears a save button");
+        let flip = dressed.flip.expect("markdown wears a flip");
+        let dock = dressed.dock.expect("and DOCK is still there");
+        assert!(
+            save[2] <= flip[0] && flip[2] <= dock[0] && dock[2] <= dressed.close[0],
+            "DOM order left to right: save, flip, DOCK, ×"
+        );
+        assert!(
+            dirty[2] <= save[0],
+            "the dot stands between the name and the run"
+        );
+        assert!(
+            dressed.head_title[2] <= dirty[0],
+            "and the name's box stops before the dot rather than under it"
+        );
+        assert!(
+            dressed.head_title[2] < bare.head_title[2],
+            "a dressed head has less room for the name than a bare one"
+        );
+    }
+
+    /// PIN — P57/P54: a preview float's head is hit-tested for its own two
+    /// controls, and they are asked before the head that carries them.
+    ///
+    /// Mutation: move the `Save`/`Flip` arms below the `Head` test in
+    /// [`float_hit`] and pressing a button drags the window instead.
+    #[test]
+    fn the_preview_heads_buttons_answer_before_the_drag_handle_does() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 430.0, 400.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools {
+                dirty: true,
+                save: true,
+                flip: true,
+            },
+        );
+        let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        let (x, y) = middle(geometry.save.expect("a save button"));
+        assert_eq!(
+            float_hit(&geometry, x, y, |_, _| None),
+            Some(FloatPart::Save)
+        );
+        let (x, y) = middle(geometry.flip.expect("a flip button"));
+        assert_eq!(
+            float_hit(&geometry, x, y, |_, _| None),
+            Some(FloatPart::Flip)
+        );
+        let (x, y) = middle(geometry.dirty.expect("a reserved dot"));
+        assert_eq!(
+            float_hit(&geometry, x, y, |_, _| None),
+            Some(FloatPart::Head),
+            "the dot is a state and not a control — the head under it still drags"
+        );
+    }
+
+    /// PIN — the 2026-08-12 cascade ruling: a window born on top of one that is
+    /// already open steps down and right instead of hiding it.
+    ///
+    /// Mutation ①: return `frame` unchanged and the second assertion goes red —
+    /// two windows at one origin. Mutation ②: step both axes unconditionally and
+    /// the third block goes red — a window with no room below is walked off the
+    /// bottom of the screen.
+    ///
+    /// **The edge cases were re-judged on 2026-08-13.** This used to assert that
+    /// a window with no room *below* rolled all the way back to its placement —
+    /// onto the very window it was told about. That is the roll-back firing on
+    /// the first rung, and it is what shipped as two pop-outs at one box; see
+    /// [`cascade_origin`]'s own note. A blocked axis now simply stops stepping
+    /// while the other one carries on, and the roll-back is kept for the corner
+    /// where both are blocked, which is the case it was always arguing about.
+    #[test]
+    fn a_float_born_on_top_of_another_steps_down_and_right() {
+        let viewport = [0.0, 34.0, 1280.0, 800.0];
+        let born = frame(100.0, 100.0, 430.0, 300.0);
+        assert_eq!(
+            cascade_origin(born, &[], viewport, SCALE),
+            born,
+            "an empty screen takes the placement it was given"
+        );
+        let one = cascade_origin(born, &[[100.0, 100.0]], viewport, SCALE);
+        assert_eq!(
+            [one[0], one[1]],
+            [124.0, 124.0],
+            "one step of the title bar's own height"
+        );
+        let two = cascade_origin(born, &[[100.0, 100.0], [124.0, 124.0]], viewport, SCALE);
+        assert_eq!([two[0], two[1]], [148.0, 148.0], "and the ladder continues");
+        assert_eq!(
+            [one[2] - one[0], one[3] - one[1]],
+            [430.0, 300.0],
+            "a step moves the window, it does not resize it"
+        );
+        // A window with no room *below* still has room to its right, so it goes
+        // there: a blocked axis stops that axis and nothing else.
+        let low = frame(100.0, 470.0, 430.0, 300.0);
+        let sideways = cascade_origin(low, &[[100.0, 470.0]], viewport, SCALE);
+        assert_eq!(
+            [sideways[0], sideways[1]],
+            [124.0, 470.0],
+            "no room below: the ladder turns sideways rather than giving up"
+        );
+        // And the mirror of it, which is the case a preview float is always in.
+        let right = frame(834.0, 100.0, 430.0, 300.0);
+        let downward = cascade_origin(right, &[[834.0, 100.0]], viewport, SCALE);
+        assert_eq!(
+            [downward[0], downward[1]],
+            [834.0, 124.0],
+            "flush against the right margin: the ladder goes straight down"
+        );
+        // Only the far corner has nowhere left, and there the ladder wraps to
+        // where the placement put it rather than piling against the edge.
+        let corner = frame(834.0, 470.0, 430.0, 300.0);
+        let rolled = cascade_origin(corner, &[[834.0, 470.0]], viewport, SCALE);
+        assert_eq!(
+            [rolled[0], rolled[1]],
+            [834.0, 470.0],
+            "both axes blocked: back to where the placement put it"
+        );
+    }
+
+    /// PIN — **the cascade as it is actually called**, for a window born against
+    /// the right margin.
+    ///
+    /// The function above was tested in isolation and was right about every case
+    /// it was asked; what shipped broken was the *pipeline* — `float_placement`,
+    /// then `cascade_origin`, then `clamp_pinned` — because a preview pops out of
+    /// a pane head at the far right of the tree, so `float_placement` clamps it
+    /// flush against `viewport[2] - margin` and the diagonal step has nowhere to
+    /// go on its very first try. Real-machine capture, 2026-08-13: two pop-outs
+    /// landed at one box to the pixel and the first window was unreachable.
+    ///
+    /// So this walks the whole pipeline rather than the middle of it, and it uses
+    /// a right-edge trigger because that is the case a preview float always is.
+    ///
+    /// Red gate: roll back to the un-stepped origin whenever the diagonal leaves
+    /// the viewport — the shape this had — and the second window lands on the
+    /// first, which is the assertion below.
+    #[test]
+    fn two_windows_popped_out_at_the_right_margin_do_not_land_on_each_other() {
+        const HIDPI: f32 = 2.0;
+        let viewport = [0.0, 32.0, 2740.0, 1660.0];
+        // The `.pv-popout` button of a preview pane at the far right of the tree.
+        let trigger = frame(2600.0, 60.0, 40.0, 30.0);
+        let size = float_opening_size(100_000.0, viewport, HIDPI, FloatSizing::preview());
+        let place = |taken: &[[f32; 2]]| {
+            let placed = float_placement(trigger, size, viewport, HIDPI);
+            let stepped = cascade_origin(placed, taken, viewport, HIDPI);
+            clamp_pinned(stepped, viewport, HIDPI)
+        };
+        let first = place(&[]);
+        assert!(
+            (first[2] - (viewport[2] - FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX * HIDPI)).abs()
+                <= 4.0,
+            "the fixture is only honest if the first window really is flush right: {first:?}"
+        );
+        let second = place(&[[first[0], first[1]]]);
+        assert_ne!(
+            [second[0], second[1]],
+            [first[0], first[1]],
+            "a second pop-out must be visible as a second window"
+        );
+        // Sideways is what has no room here, so the step is the one axis that
+        // does — and the window is moved, not resized.
+        assert_eq!(
+            [second[2] - second[0], second[3] - second[1]],
+            [first[2] - first[0], first[3] - first[1]],
+            "a step moves the window, it does not resize it"
+        );
+        assert!(
+            second[1] > first[1],
+            "flush against the right margin, the ladder goes down: {second:?}"
+        );
+        assert!(
+            second[3] <= viewport[3],
+            "and stays on the screen it stepped inside of: {second:?}"
+        );
+    }
+
+    /// PIN — **two pop-outs from one address open two windows, one step apart.**
+    ///
+    /// `Runtime::pop_out_preview`'s whole placement decision, driven twice against
+    /// a live host: read the origins already taken, place against the button,
+    /// cascade, clamp, open. The anchor is deliberately the *same* both times,
+    /// which is the case the machine found — the pop-out button is right-aligned
+    /// in a preview head, so a pane that widens when its neighbour leaves offers
+    /// the button at the very same x.
+    ///
+    /// It is written against the host rather than against `cascade_origin` alone
+    /// because what shipped broken was never the arithmetic: the step is only
+    /// worth anything if the newcomer is a *second* window and if the list it is
+    /// stepping over is the one the host actually holds.
+    ///
+    /// Mutation ①: hand `cascade_origin` an empty `taken` — the second window
+    /// lands on the first and the offset assertion goes red. Mutation ②: reuse
+    /// the first window instead of opening a second (`wipe` before `open`) — the
+    /// stack assertion goes red, which is the reuse-versus-pop-out ruling of
+    /// 2026-08-13 stated as a test.
+    #[test]
+    fn two_pop_outs_from_one_button_open_two_windows_one_step_apart() {
+        const HIDPI: f32 = 2.0;
+        let now = Instant::now();
+        let viewport = [0.0, 32.0, 2740.0, 1660.0];
+        // An interior head, so the ladder has room on both axes and the step is
+        // the diagonal the ruling describes. The right-margin case — where a
+        // preview pane's head usually is — is pinned by its own test above.
+        let trigger = frame(1200.0, 120.0, 40.0, 30.0);
+        let size = float_opening_size(100_000.0, viewport, HIDPI, FloatSizing::preview());
+        let mut host = FloatHost::default();
+        // Exactly the six lines `pop_out_preview` runs, in its order.
+        let pop_out = |host: &mut FloatHost| {
+            let taken: Vec<[f32; 2]> = host
+                .live_windows()
+                .map(|win| [win.frame[0], win.frame[1]])
+                .collect();
+            let placed = float_placement(trigger, size, viewport, HIDPI);
+            let stepped = cascade_origin(placed, &taken, viewport, HIDPI);
+            let frame = clamp_pinned(stepped, viewport, HIDPI);
+            host.open(
+                FloatMode::Pinned,
+                None,
+                FloatTenant::Preview(FloatPreview { tab: TAB_ID }),
+                frame,
+                None,
+                now,
+            )
+        };
+        let first = pop_out(&mut host);
+        let second = pop_out(&mut host);
+        assert_ne!(
+            first, second,
+            "a pop-out opens a window; it never reuses the one already torn off"
+        );
+        assert_eq!(
+            stack(&host),
+            vec![first, second],
+            "and both stand — the second did not replace the first"
+        );
+        let one = host.live(first).expect("the first window").frame;
+        let two = host.live(second).expect("the second window").frame;
+        assert_eq!(
+            [two[0] - one[0], two[1] - one[1]],
+            [
+                FLOAT_CASCADE_STEP_LOGICAL_PX * HIDPI,
+                FLOAT_CASCADE_STEP_LOGICAL_PX * HIDPI
+            ],
+            "one step down and right, so the newcomer is visible as a newcomer"
+        );
+        assert_eq!(
+            [two[2] - two[0], two[3] - two[1]],
+            [one[2] - one[0], one[3] - one[1]],
+            "a step moves the window, it does not resize it"
+        );
+        // And a third, so the ladder is a ladder rather than a single nudge.
+        let third = pop_out(&mut host);
+        let three = host.live(third).expect("the third window").frame;
+        assert_eq!(
+            [three[0] - two[0], three[1] - two[1]],
+            [
+                FLOAT_CASCADE_STEP_LOGICAL_PX * HIDPI,
+                FLOAT_CASCADE_STEP_LOGICAL_PX * HIDPI
+            ],
+            "each newcomer steps clear of every window already standing"
+        );
+    }
+
+    /// PIN — a preview float is a tenant of this host like any other: it takes a
+    /// place in the pinned list, answers to its own id, and does not disturb the
+    /// tree that was already floating (P44's "one chassis, many tenants").
+    ///
+    /// Mutation: have `FloatWin::preview()` answer `Some` for a files tenant and
+    /// the last two assertions cross over.
+    #[test]
+    fn a_preview_float_stands_beside_a_files_float_without_disturbing_it() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let tree = open_pinned_at(
+            &mut host,
+            Some(TAB),
+            "C:/x",
+            frame(100.0, 100.0, 264.0, 300.0),
+            now,
+        );
+        let buffer = host.open(
+            FloatMode::Pinned,
+            None,
+            FloatTenant::Preview(FloatPreview { tab: TAB_ID }),
+            frame(300.0, 200.0, 430.0, 400.0),
+            None,
+            now,
+        );
+        assert_eq!(stack(&host), vec![tree, buffer], "both stand, in order");
+        assert_eq!(
+            host.top().map(|win| win.epoch),
+            Some(buffer),
+            "and Esc is aimed at the newer one — P66's ladder read as a z-order"
+        );
+        assert!(host.live(tree).expect("open").files().is_some());
+        assert!(host.live(tree).expect("open").preview().is_none());
+        assert!(host.live(buffer).expect("open").preview().is_some());
+        assert!(host.live(buffer).expect("open").files().is_none());
+
+        // Closing the buffer's window leaves the tree's exactly as it was.
+        host.wipe(buffer);
+        assert_eq!(stack(&host), vec![tree]);
+        assert_eq!(
+            host.live(tree).expect("open").frame,
+            frame(100.0, 100.0, 264.0, 300.0)
+        );
+    }
+
+    /// PIN (P67, ruling 7) — **the preview float is re-clamped by the window's
+    /// resize, and it inherits that rather than being given a second copy of it.**
+    ///
+    /// P67 records a gap in the mock-up: `#files-flyout` has a `resize` listener
+    /// that hauls a pinned window back into the viewport, and `#pv-float` has
+    /// none — so the same bug was waiting to be re-committed on the second window.
+    /// The native chassis closes it by construction: `Runtime::reclamp_float`
+    /// walks [`FloatHost::live_windows_mut`] and puts every frame through
+    /// [`clamp_pinned`], and nothing in either of them asks what is inside.
+    ///
+    /// This pins the two halves of that sentence — the walk reaches a preview
+    /// tenant, and the clamp answers for it — because "inherits it" is exactly the
+    /// kind of claim that is true until somebody adds a tenant filter.
+    ///
+    /// Mutation: filter `live_windows_mut` to files tenants and the last two
+    /// assertions go red — a torn-off buffer stranded off-screen with its only
+    /// handle out of reach.
+    #[test]
+    fn a_shrinking_window_hauls_the_preview_float_back_like_every_other_float() {
+        let now = Instant::now();
+        let mut host = FloatHost::default();
+        let tree = open_pinned_at(
+            &mut host,
+            Some(TAB),
+            "C:/x",
+            frame(100.0, 100.0, 264.0, 300.0),
+            now,
+        );
+        let buffer = host.open(
+            FloatMode::Pinned,
+            None,
+            FloatTenant::Preview(FloatPreview { tab: TAB_ID }),
+            frame(900.0, 500.0, 430.0, 400.0),
+            None,
+            now,
+        );
+        // The window shrinks under both of them — `reclamp_float`'s own loop.
+        let shrunk = [0.0, 34.0, 700.0, 600.0];
+        for win in host.live_windows_mut() {
+            win.frame = clamp_pinned(win.frame, shrunk, SCALE);
+        }
+        let inside = |frame: [f32; 4]| {
+            frame[0] >= shrunk[0]
+                && frame[1] >= shrunk[1]
+                && frame[2] <= shrunk[2]
+                && frame[3] <= shrunk[3]
+        };
+        assert!(inside(host.live(tree).expect("open").frame));
+        let buffer_frame = host.live(buffer).expect("open").frame;
+        assert!(
+            inside(buffer_frame),
+            "the torn-off buffer came back too: {buffer_frame:?}"
+        );
+        assert_eq!(
+            [
+                buffer_frame[2] - buffer_frame[0],
+                buffer_frame[3] - buffer_frame[1]
+            ],
+            [430.0, 400.0],
+            "translated, not shrunk — the ruling is 平移回视口、尺寸不变"
+        );
     }
 }
