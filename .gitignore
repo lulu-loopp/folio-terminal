@@ -7,5 +7,6 @@
 !design/assets/*.png
 !docs/spikes/artifacts/03-visual/comparison.png
 !docs/spikes/artifacts/multiwindow/*.png
+!docs/spikes/artifacts/webview2/*.png
 dist/
 .tmp-repaint-capture/
