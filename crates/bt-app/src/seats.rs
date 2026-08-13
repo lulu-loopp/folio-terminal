@@ -456,14 +456,13 @@ impl Seats {
         self.focus = id;
     }
 
-    /// Open the preview seat at its ruled fixed-right address, or close the one
-    /// that is open. Returns whether the tree changed.
-    pub fn toggle_preview(&mut self, metrics: &SeatMetrics) -> bool {
-        match self.preview() {
-            Some(existing) => self.close_seat(metrics, existing),
-            None => self.add_preview(metrics).is_some(),
-        }
-    }
+    // `toggle_preview` stood here: open the preview seat at its ruled address,
+    // or close the one that is open. It existed for one caller, the dev chord
+    // `Ctrl+Alt+Shift+P`, and it went out with it (N25). Opening is
+    // [`Self::add_preview`], which is what every real door already calls;
+    // closing is [`Self::close_seat`] on the pane's own `×`, like any other
+    // pane. A verb that meant "whichever of those two" was only ever a chord's
+    // convenience.
 
     /// **Land a preview leaf, without asking whether one is already there** —
     /// the second half of P95, and the verb the pin finally makes reachable.
@@ -473,8 +472,8 @@ impl Seats {
     /// a fresh leaf in the far-right root column otherwise. What could not be
     /// said before slice 5 is the *else* — a pinned preview is not a reuse
     /// target, so this had to be able to mint a second `SeatKind::Preview` leaf
-    /// beside the first, and [`Self::toggle_preview`] is the wrong door for that
-    /// because a toggle facing an open pane closes it.
+    /// beside the first. The retired `toggle_preview` (N25) was the wrong door
+    /// for that, because a toggle facing an open pane closes it.
     ///
     /// Returns the seat a file opened right now would land on: the reused one, or
     /// the new one. `None` only when the edit itself refused, which is the honest
@@ -4428,6 +4427,17 @@ pub fn build_chrome_with_preview(
                 .collect()
         })
         .unwrap_or_default();
+    // Spread the same way `preview_title` is, and stated as plainly: a test
+    // about two panes saying two different things builds the list itself.
+    let preview_messages: Vec<(SeatId, &str)> = preview_message
+        .map(|message| {
+            seats
+                .preview_seats()
+                .into_iter()
+                .map(|seat| (seat, message))
+                .collect()
+        })
+        .unwrap_or_default();
     build_chrome_for_tabs(
         seats,
         layout,
@@ -4451,10 +4461,10 @@ pub fn build_chrome_with_preview(
             files_name_widths: &NO_FILES_NAME_WIDTHS,
             files_root_open: None,
             files_trees: &NO_FILES_TREES,
-            preview_message,
+            preview_messages: &preview_messages,
             preview_feet: &[],
             preview_heads: &[],
-            preview_card: None,
+            preview_cards: &[],
             fit_overflow: None,
             profile_menu_open: false,
             chevron_turn: 0.0,
@@ -4766,7 +4776,16 @@ pub struct ChromeContent<'a> {
     /// could read a directory for itself would be a module that reads a
     /// directory on the event loop.
     pub files_trees: &'a BTreeMap<SeatId, FilesTreeContent>,
-    pub preview_message: Option<&'a str>,
+    /// What each preview pane's body says while it has no body yet — "Loading
+    /// …", a decode failure, the invitation an empty pane wears — **by seat**.
+    ///
+    /// A list keyed by seat for the reason [`Self::preview_heads`] gives, and
+    /// real-machine capture caught this one the same way it caught that one: a
+    /// single message was painted into *every* `SeatKind::Preview` placement, so
+    /// two panes restoring two files both said "Loading README.md…" while one of
+    /// them was waiting on `todo.txt`. A body that names a file it is not
+    /// loading is the header bug wearing the body's clothes.
+    pub preview_messages: &'a [(SeatId, &'a str)],
     /// Each preview pane's path strip — its foot (P32-P35), **by seat**.
     pub preview_feet: &'a [(SeatId, FootStrip<'a>)],
     /// Each preview head's own furniture, **by seat**.
@@ -4785,7 +4804,7 @@ pub struct ChromeContent<'a> {
     /// two are different states of the same body: the message is what a preview
     /// says while it is *becoming* something, and the card is what it says when
     /// it never will be. Only one is ever `Some`.
-    pub preview_card: Option<PreviewCardContent<'a>>,
+    pub preview_cards: &'a [(SeatId, PreviewCardContent<'a>)],
     /// What the L4 fit-what-fits strip could not show, when the window is in
     /// that state at all ([`fit_what_fits`]). `None` on every ordinary solve.
     pub fit_overflow: Option<FitOverflow>,
@@ -4982,10 +5001,10 @@ pub fn build_chrome_for_tabs(
         files_name_widths,
         files_root_open,
         files_trees,
-        preview_message,
+        preview_messages,
         preview_feet,
         preview_heads,
-        preview_card,
+        preview_cards,
         fit_overflow,
         profile_menu_open,
         chevron_turn,
@@ -5577,7 +5596,10 @@ pub fn build_chrome_for_tabs(
                 // sentence, and the one way out (mock-up 614-623). Drawn instead
                 // of a body notice, never beside one.
                 if placement.kind == SeatKind::Preview
-                    && let Some(card) = preview_card
+                    && let Some(card) = preview_cards
+                        .iter()
+                        .find(|(seat, _)| *seat == placement.id)
+                        .map(|(_, card)| card)
                 {
                     let body = files_pane.map_or(
                         [head_box[0], head_bottom, head_box[2], head_box[3]],
@@ -5641,8 +5663,19 @@ pub fn build_chrome_for_tabs(
                     });
                 }
                 let body_notice = match placement.kind {
-                    SeatKind::Preview if preview_card.is_some() => None,
-                    SeatKind::Preview => preview_message,
+                    // **Both asked of this seat, never of "the" preview.** A
+                    // card belonging to one pane used to blank the message of
+                    // every other, and a message belonging to one pane used to
+                    // be printed in all of them.
+                    SeatKind::Preview
+                        if preview_cards.iter().any(|(seat, _)| *seat == placement.id) =>
+                    {
+                        None
+                    }
+                    SeatKind::Preview => preview_messages
+                        .iter()
+                        .find(|(seat, _)| *seat == placement.id)
+                        .map(|(_, message)| *message),
                     // T227: the degradation has to be *visible*. A leaf whose
                     // kind this build does not know keeps its place in the tree
                     // rather than taking the tree down with it (§2.1), but a
@@ -11759,7 +11792,7 @@ mod tests {
         let dpi_milli = 1_000;
         let metrics = seat_metrics(dpi_milli);
         let mut seats = Seats::lone_terminal();
-        assert!(seats.toggle_preview(&metrics));
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
         let whole = seat_viewport(&layout, seats.terminal()).unwrap();
         let body = pane_body_viewport(&seats, &layout, seats.terminal(), 1.0).unwrap();
@@ -11825,7 +11858,7 @@ mod tests {
             let scale = dpi_milli as f32 / 1_000.0;
             let metrics = seat_metrics(dpi_milli);
             let mut seats = Seats::lone_terminal();
-            assert!(seats.toggle_preview(&metrics));
+            seats.add_preview(&metrics).expect("the preview seat lands");
             let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
             let (quads, _, _) = build_chrome(&seats, &layout, scale, ChromePointer::default());
 
@@ -11914,7 +11947,7 @@ mod tests {
     fn the_focused_pane_head_is_the_only_caption_at_five_hundred() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        assert!(seats.toggle_preview(&metrics));
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let (_, labels, _) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
         let palette = chrome_palette();
@@ -11951,7 +11984,7 @@ mod tests {
     fn a_preview_state_notice_is_dim_and_centred_in_the_body() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let (_, labels, sprites) = build_chrome_with_preview(
             &seats,
@@ -12010,7 +12043,7 @@ mod tests {
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let marks = all_powershell(&seats);
         let tabs = [TabContent::default()];
@@ -12038,10 +12071,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &heads,
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -12051,6 +12084,109 @@ mod tests {
         );
         let WindowChrome { seats, .. } = chrome;
         (seats.quads, seats.labels, seats.sprites)
+    }
+
+    /// **Two waiting panes say two different things** — and one refused file
+    /// does not silence the pane beside it.
+    ///
+    /// Real-machine capture, slice 7: a session restored with two preview panes
+    /// drew "Loading README.md…" in both while the second was waiting on
+    /// `todo.txt`, because the body notice was one value spread over every
+    /// `SeatKind::Preview` placement. The card had the same shape and a worse
+    /// consequence: the paint draws a notice only where there is no card, so a
+    /// single refused file blanked every other preview pane's sentence.
+    ///
+    /// MUTATION ①: paint `preview_messages[0]` into every preview placement and
+    /// the second assertion goes red;
+    /// MUTATION ②: gate the notice on `!preview_cards.is_empty()` rather than on
+    /// this seat having one, and the third goes red.
+    #[test]
+    fn each_preview_pane_says_its_own_sentence_and_only_its_own() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        let pinned = seats
+            .add_preview(&metrics)
+            .expect("the first preview lands");
+        assert!(seats.toggle_preview_pin(pinned));
+        let second = seats
+            .add_preview(&metrics)
+            .expect("a pinned pane is not a reuse target");
+        let layout = solved(&seats, viewport_of(1920, 1080, 1_000), &metrics);
+        let marks = all_powershell(&seats);
+        let tabs = [TabContent::default()];
+        let notices = |messages: &[(SeatId, &str)], cards: &[(SeatId, PreviewCardContent<'_>)]| {
+            let chrome = build_chrome_for_tabs(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                ChromeContent {
+                    tabs: &tabs,
+                    active_tab: 0,
+                    grabbed: None,
+                    strip_preview: None,
+                    float_shown: &[],
+                    tab_scroll: 0.0,
+                    rail: RailState::default(),
+                    rail_scroll: 0.0,
+                    preview_titles: &[],
+                    terminal_names: &NO_TERMINAL_NAMES,
+                    leaf_marks: &marks,
+                    files_names: &NO_FILES_NAMES,
+                    files_name_widths: &NO_FILES_NAME_WIDTHS,
+                    files_root_open: None,
+                    files_trees: &NO_FILES_TREES,
+                    preview_messages: messages,
+                    preview_feet: &[],
+                    preview_heads: &[],
+                    preview_cards: cards,
+                    fit_overflow: None,
+                    profile_menu_open: false,
+                    chevron_turn: 0.0,
+                    pane_motion: PaneMotionFrame::default(),
+                    resizing_cards: None,
+                },
+            );
+            chrome
+                .seats
+                .labels
+                .into_iter()
+                .map(|label| label.text)
+                .filter(|text| text.starts_with("Loading ") || text == PLACEHOLDER_SEAT_NOTICE)
+                .collect::<Vec<_>>()
+        };
+
+        let both = notices(
+            &[
+                (pinned, "Loading README.md\u{2026}"),
+                (second, "Loading todo.txt\u{2026}"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            both,
+            vec![
+                "Loading README.md\u{2026}".to_owned(),
+                "Loading todo.txt\u{2026}".to_owned()
+            ],
+            "each pane's own sentence, in tree order"
+        );
+
+        // Only one pane is waiting: the other has nothing to say and says
+        // nothing, rather than repeating its neighbour's file name.
+        let one = notices(&[(second, "Loading todo.txt\u{2026}")], &[]);
+        assert_eq!(one, vec!["Loading todo.txt\u{2026}".to_owned()]);
+
+        // And a card on the *first* pane leaves the second pane's sentence
+        // standing — the card replaces a body, and only its own.
+        let card = PreviewCardContent {
+            notice: "No preview for this file type",
+            button: "Open in default app",
+            button_text_px: 120.0,
+            button_hovered: false,
+        };
+        let mixed = notices(&[(second, "Loading todo.txt\u{2026}")], &[(pinned, card)]);
+        assert_eq!(mixed, vec!["Loading todo.txt\u{2026}".to_owned()]);
     }
 
     /// A head with one buffer, nothing dirty and nothing editable.
@@ -12086,7 +12222,7 @@ mod tests {
     fn preview_head_box() -> [f32; 4] {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
@@ -12139,7 +12275,7 @@ mod tests {
         let seat = {
             let metrics = seat_metrics(1_000);
             let mut seats = Seats::lone_terminal();
-            seats.toggle_preview(&metrics);
+            seats.add_preview(&metrics).expect("the preview seat lands");
             seats.preview().expect("the preview seat")
         };
         let hovered = ChromePointer {
@@ -12292,7 +12428,7 @@ mod tests {
     fn a_pinned_preview_stops_being_the_seat_a_new_file_would_replace() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let seat = seats.preview().expect("the preview seat");
         assert_eq!(
             seats.landing_preview(),
@@ -12334,16 +12470,17 @@ mod tests {
     /// file leaves the first pane exactly as it was and puts a second preview
     /// beside it.
     ///
-    /// It is deliberately *not* [`Seats::toggle_preview`]: a toggle facing an
-    /// open pane closes it, which is the opposite of what a browsing gesture
-    /// means.
+    /// It is deliberately not a toggle: the retired `toggle_preview` (N25)
+    /// closed the pane it found open, which is the opposite of what a browsing
+    /// gesture means.
     ///
     /// MUTATIONS:
     /// ① have `add_preview` return `self.preview()` instead of
     ///    `self.landing_preview()` — the fourth assertion goes red and a pinned
     ///    pane is clobbered after all;
-    /// ② have it call `toggle_preview` — the third goes red, and opening a file
-    ///    beside a pinned preview *closes* the preview.
+    /// ② have it close the seat it finds instead of returning it — the third
+    ///    goes red, and opening a file beside a pinned preview *closes* the
+    ///    preview.
     #[test]
     fn a_pinned_preview_gets_a_second_leaf_beside_it_rather_than_losing_its_buffer() {
         let metrics = seat_metrics(1_000);
@@ -12391,7 +12528,7 @@ mod tests {
     fn a_preview_pane_reserves_its_path_strip_out_of_its_body() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let whole = pane_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
@@ -12435,7 +12572,7 @@ mod tests {
     fn the_preview_tools_answer_before_the_drag_handle_they_sit_in() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let seat = seats.preview().expect("the preview seat");
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
@@ -12492,7 +12629,7 @@ mod tests {
             .device_rect
             .unwrap();
 
-        assert!(seats.toggle_preview(&metrics), "the preview must open");
+        seats.add_preview(&metrics).expect("the preview must open");
         assert!(seats.preview().is_some());
         let narrowed = solved(&seats, viewport, &metrics)
             .get(seats.terminal())
@@ -12509,7 +12646,11 @@ mod tests {
             "a row split takes no height"
         );
 
-        assert!(seats.toggle_preview(&metrics), "the preview must close");
+        let preview = seats.preview().expect("the preview seat is open");
+        assert!(
+            seats.close_seat(&metrics, preview),
+            "the preview must close"
+        );
         assert!(seats.is_lone_terminal());
         let after = solved(&seats, viewport, &metrics)
             .get(seats.terminal())
@@ -12527,7 +12668,7 @@ mod tests {
         let metrics = seat_metrics(1_000);
         let viewport = viewport_of(800, 600, 1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
 
         let (requested, usable) = requested_ratio(slot, 1_000_000, -400.0).unwrap();
@@ -12624,7 +12765,7 @@ mod tests {
     fn a_divider_drag_in_a_window_too_small_for_both_seats_still_follows_the_hand() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let viewport = viewport_of(1600, 900, 1_000);
         let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
         let cramped = LogicalPx::px(499);
@@ -12905,7 +13046,7 @@ mod tests {
         let metrics = seat_metrics(dpi_milli);
         let viewport = viewport_of(1600, 900, dpi_milli);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         // Drag to a ratio that is nobody's default, so a round trip cannot pass
         // by landing back on a constant.
         let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
@@ -12937,6 +13078,7 @@ mod tests {
                 ),
                 pinned: false,
                 focused_leaf: "leaf-0".to_owned(),
+                preview: None,
             }],
             ..SessionV1::default()
         };
@@ -13000,7 +13142,7 @@ mod tests {
             let (width, height) = (1920u32, 1200u32);
 
             let mut seats = Seats::lone_terminal();
-            assert!(seats.toggle_preview(&metrics), "the preview must open");
+            seats.add_preview(&metrics).expect("the preview must open");
             let opened = seat_viewport(
                 &solved(&seats, viewport_of(width, height, dpi_milli), &metrics),
                 seats.terminal(),
@@ -13038,7 +13180,11 @@ mod tests {
             );
 
             // Closing hands every pixel back, so the sequence is symmetric.
-            assert!(seats.toggle_preview(&metrics), "the preview must close");
+            let preview = seats.preview().expect("the preview seat is open");
+            assert!(
+                seats.close_seat(&metrics, preview),
+                "the preview must close"
+            );
             let closed = seat_viewport(
                 &solved(&seats, viewport_of(width, height, dpi_milli), &metrics),
                 seats.terminal(),
@@ -13057,7 +13203,7 @@ mod tests {
     fn a_squeezed_seat_becomes_a_clickable_bar_that_keeps_its_place() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         // 260 + 1 + 360 needs 621; 500 does not have it, so the non-focus seat
         // collapses and the focus seat is the last to fall.
         let viewport = viewport_of(500, 600, 1_000);
@@ -13120,7 +13266,7 @@ mod tests {
     fn a_modal_swallows_the_divider_the_seat_and_the_terminal_under_it() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         // Tall enough that all three probe points land *outside* the dialog,
         // which is the case this pins: a press the panel itself catches already
         // lands nowhere (`SettingsTarget::Panel => {}`), so it would prove the
@@ -13224,7 +13370,7 @@ mod tests {
     fn chrome_at(dpi_milli: u32) -> (Vec<ChromeLabel>, Vec<ChromeSprite>) {
         let metrics = seat_metrics(dpi_milli);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
         let (_, labels, sprites) = build_chrome_with_preview(
             &seats,
@@ -13578,10 +13724,10 @@ mod tests {
                     files_name_widths: &NO_FILES_NAME_WIDTHS,
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
-                    preview_message: None,
+                    preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
-                    preview_card: None,
+                    preview_cards: &[],
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -13790,10 +13936,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open,
                 chevron_turn,
@@ -13885,10 +14031,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &trees,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -17540,10 +17686,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -17734,10 +17880,10 @@ mod tests {
                     files_name_widths: &NO_FILES_NAME_WIDTHS,
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
-                    preview_message: None,
+                    preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
-                    preview_card: None,
+                    preview_cards: &[],
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -17837,10 +17983,10 @@ mod tests {
                     files_name_widths: &NO_FILES_NAME_WIDTHS,
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
-                    preview_message: None,
+                    preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
-                    preview_card: None,
+                    preview_cards: &[],
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -18045,10 +18191,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -19819,10 +19965,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -19876,10 +20022,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -20138,7 +20284,7 @@ mod tests {
     fn a_collapsed_bar_wears_the_pane_heads_own_mark() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let viewport = viewport_of(500, 600, 1_000);
         let layout = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
@@ -20345,7 +20491,9 @@ mod tests {
         // other length (C28).
         let metrics = seat_metrics(1_000);
         let mut with_head = Seats::lone_terminal();
-        with_head.toggle_preview(&metrics);
+        with_head
+            .add_preview(&metrics)
+            .expect("the preview seat lands");
         let full = solved(&with_head, viewport_of(1600, 900, 1_000), &metrics);
         let head = chrome_of(&with_head, &full, Some(cwd));
         assert!(
@@ -20661,10 +20809,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -20902,10 +21050,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -21153,10 +21301,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -21307,10 +21455,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -21958,7 +22106,7 @@ mod tests {
     fn an_idempotent_rebuild_publishes_no_layout_events() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         for (width, height) in [(1600u32, 900u32), (500, 600), (300, 240)] {
             let viewport = viewport_of(width, height, 1_000);
             let first = solved(&seats, viewport, &metrics);
@@ -21984,7 +22132,7 @@ mod tests {
         let viewport = viewport_of(1600, 900, 1_000);
         let mut seats = Seats::lone_terminal();
         let before = solved(&seats, viewport, &metrics);
-        assert!(seats.toggle_preview(&metrics));
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let opened = solved(&seats, viewport, &metrics);
         let preview = seats.preview().unwrap();
         assert_eq!(
@@ -21995,7 +22143,7 @@ mod tests {
             ],
             "in tree order, and the terminal really did give up width"
         );
-        assert!(seats.toggle_preview(&metrics));
+        assert!(seats.close_seat(&metrics, preview));
         let closed = solved(&seats, viewport, &metrics);
         assert_eq!(
             layout_events(&opened, &closed),
@@ -22019,7 +22167,7 @@ mod tests {
         let metrics = seat_metrics(1_000);
         let viewport = viewport_of(1600, 900, 1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let before = solved(&seats, viewport, &metrics);
         let slot = seats.split_slots(&before)[0];
         let usable = slot.slot.extent(slot.dir) - bt_layout::DIVIDER;
@@ -22053,7 +22201,7 @@ mod tests {
     fn crossing_the_collapse_boundary_publishes_a_presentation_change() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        seats.toggle_preview(&metrics);
+        seats.add_preview(&metrics).expect("the preview seat lands");
         let preview = seats.preview().unwrap();
         let roomy = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let cramped = solved(&seats, viewport_of(500, 900, 1_000), &metrics);
@@ -22491,10 +22639,10 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
-                preview_message: None,
+                preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
-                preview_card: None,
+                preview_cards: &[],
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -24957,7 +25105,9 @@ mod drop_plan_tests {
     #[test]
     fn a_preview_dragged_off_its_ruled_address_stays_where_it_was_put() {
         let mut seats = Seats::lone_terminal();
-        assert!(seats.toggle_preview(&metrics()));
+        seats
+            .add_preview(&metrics())
+            .expect("the preview seat lands");
         let preview = seats.preview().expect("the seat just opened");
         let planned = plan(
             &seats,

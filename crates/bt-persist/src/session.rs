@@ -179,6 +179,75 @@ pub struct TabV1 {
     pub pinned: bool,
     /// Stable leaf ID of the focused pane within `root`.
     pub focused_leaf: String,
+    /// What this tab's preview panes were showing, and which buffers it had
+    /// open — the tab's **content section**.
+    ///
+    /// It is here rather than on the preview leaf because of red line L1: the
+    /// layout tree is the solver's input and carries *geometry*, and the pin is
+    /// the only thing about a preview pane that is geometry (see
+    /// [`crate::layout::LeafNodeV1::Preview`]). Which file a pane was showing is
+    /// content, and the pool it came out of belongs to the *tab* by the
+    /// 2026-07-17 ruling (`docs/DESIGN.md` §7.1.3: one buffer per file per tab,
+    /// so a file open in two panes cannot fork). Both facts therefore have to
+    /// sit beside the tree rather than inside it, and this is that place.
+    ///
+    /// Additive, and absent when there is nothing to say: every document
+    /// written before this field still reads, and every tab without a preview
+    /// pane still writes exactly the bytes it used to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<TabPreviewV1>,
+}
+
+/// `tab.preview` — see [`TabV1::preview`].
+///
+/// **Paths and names only. No content, and no dirty bit.** That is the same
+/// honesty `session.json` already practises about scrollback ("不存输出历史"):
+/// a restored pane must not pretend nothing happened, so unsaved edits die with
+/// the process and the pane comes back showing the file as it is on disk. A
+/// dirty buffer is not lost quietly on the way — the three dirty gates
+/// (`docs/DESIGN.md` §7.1.3) name every one of them before the app shuts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabPreviewV1 {
+    /// One entry per preview leaf of `root`, in tree order.
+    pub panes: Vec<PreviewPaneV1>,
+    /// The tab's shared buffer pool, oldest first — the *history* the filename
+    /// switcher lists. A superset of what the panes are showing: a buffer the
+    /// user browsed away from is still in the pool, and dropping it here would
+    /// make the switcher shorter after every restart.
+    pub pool: Vec<PreviewPoolEntryV1>,
+}
+
+/// One preview pane and the file it was showing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewPaneV1 {
+    /// Which leaf of `root` this is, as the positional `leaf-N` token
+    /// [`TabV1::focused_leaf`] already uses — the in-order index of the leaf in
+    /// the saved tree.
+    ///
+    /// A token rather than a bare position in this list, because this list is
+    /// *outside* the tree: a term or files leaf is paired with its seat by where
+    /// it sits in the tree the file carries, and a section standing beside the
+    /// tree has no such position to be read from. Nothing on disk names a
+    /// runtime seat id (§3.2) and nothing should; the in-order index is a
+    /// function of the same tree shape the file already carries, so it cannot
+    /// point outside it.
+    pub leaf: String,
+    /// The file this pane was showing, or `null` for a pane that was showing
+    /// nothing. Written rather than omitted: an empty preview pane is a pane,
+    /// and a reader that inferred it from a missing row could not tell it from
+    /// a pane the writer forgot.
+    pub cur: Option<String>,
+}
+
+/// One buffer in a tab's shared preview pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewPoolEntryV1 {
+    pub path: String,
+    /// The display name the pane's head and the switcher print. Stored rather
+    /// than re-derived, for the same reason `files` leaves store their root:
+    /// this crate does not own a path grammar, and a name split off a path by a
+    /// rule that drifts is a switcher row labelled differently after a restart.
+    pub name: String,
 }
 
 /// One `recent` entry — docs/M2-persistence-schema-v1.md §3.5, deduped by
@@ -194,6 +263,22 @@ pub struct RecentEntryV1 {
     /// no reason to parse it — only the age-based Recent eviction policy,
     /// which is a call-site concern per §7#6, would need to).
     pub timestamp: String,
+    /// The files this tab's preview panes were showing when it was closed, in
+    /// tree order — 裁决 10 (2026-08-12).
+    ///
+    /// **The bug this closes is a named one.** `docs/DESIGN.md` §7.1.4 already
+    /// records what happens when a leaf kind is left out of the vault: a
+    /// files-only tab came back through the shutdown prompt and could not be
+    /// reached by Ctrl+Shift+T — two doors onto one store with one of them
+    /// broken. Now that the session file brings a preview pane back
+    /// ([`TabV1::preview`]), an entry that did not carry it would be that same
+    /// asymmetry a second time, in the same store, for the same reason.
+    ///
+    /// A list of paths and nothing else. Recent is a *launcher*: it restores
+    /// the places you were, not a layout — the pool regrows on demand and the
+    /// pins are not promises anyone made about a closed tab.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previews: Vec<String>,
 }
 
 /// `docs/DESIGN.md` §7.1.4: "Recent 条目 = 终端 seed **或** files 场所" — the
@@ -244,6 +329,7 @@ mod tests {
             })),
             pinned: false,
             focused_leaf: "leaf-0".to_string(),
+            preview: None,
         });
         let report = session.degrade_in_place();
         assert!(report.is_clean());

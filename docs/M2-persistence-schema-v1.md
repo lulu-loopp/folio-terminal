@@ -128,8 +128,17 @@ schema 版本化(见 §1.3)足以低成本地拆出第三个文件。
 
 ```
 split { "dir": "row" | "col", "ratio": number, "children": [node, node] }
-leaf  { "kind": "term" | "files", ...见 §3.3/§3.4 }
+leaf  { "kind": "term" | "files" | "preview", ...见 §3.3/§3.4/§3.4b }
 ```
+
+> **【批注 2026-08-13 · 已落地,补上 `preview` 叶】**
+>
+> 本节原文只列 `term` 与 `files`,因为它写在布局求解器的座位家族被裁决之前。
+> `docs/M2-layout-solver-spec.md` §5 随后把「preview 座的 `pinned` 标志」直接写进了持久列,
+> 而**一条写不下去的字段就是一条守不住的裁决**;本节自己也说 `session.json` 载的是「求解器的
+> 输入」,那么它的叶种就是求解器的叶种。`crates/bt-persist/src/layout.rs` 的
+> `LeafNodeV1::Preview` 早已按这个方向补上,本节现在与代码对齐。**additive**:写在它之前的
+> 每一份 v1 文档照读不误,不 bump `schema_version`。
 
 `id` 字段(`DESIGN.md` §7.1.4:"split{dir,ratio}（id 复活时重铸）")**不持久化**——它是运行时
 句柄,恢复时按树形状重新铸造,序列化只需要形状与 `ratio`。`ratio` 的取值范围、序列化精度、
@@ -206,6 +215,24 @@ files {
 直接引用该节点标识符的当前取值序列化,读回时用同一套"尽力恢复,失败则降级"逻辑,失败不是
 本文的错误路径,是既有裁决本就承诺的正常路径。
 
+### 3.4b preview 叶
+
+```
+preview {
+  "kind": "preview",
+  "pinned": bool
+}
+```
+
+**只有一个字段,而且它是几何。** `pinned` 决定的是「下一个被打开的文件复用这个座,还是在它
+旁边开一列」(`DESIGN.md` §7.1.3:「pane 增殖只经显式图钉」),这是求解器输入的一部分,所以它
+在树里。
+
+**没有内容字段,这是红线 L1 而非遗漏。** 「这个 pane 正在看哪个文件」是内容,不是几何;它与
+tab 的共享缓冲池一起,存在 §3.5 的 `tab.preview` content 段里。理由见 `DESIGN.md` §7.1.3
+的 2026-07-17 裁决:缓冲属于**文件**,池属于 **tab**,一个文件在两个 pane 打开必须是同一份
+缓冲——一个挂在叶上的内容字段会让「同一文件两份缓冲」在盘上就成立。
+
 ### 3.5 顶层会话结构
 
 ```
@@ -216,15 +243,57 @@ files {
     {
       "root": <split 或 leaf, 见 §3.2>,
       "pinned": bool,
-      "focused_leaf": "<叶稳定 ID>"
+      "focused_leaf": "<叶稳定 ID>",
+      "preview": {                          // 可选,见下方批注
+        "panes": [ { "leaf": "leaf-N", "cur": "<路径>?" }, ... ],
+        "pool":  [ { "path": "<路径>", "name": "<显示名>" }, ... ]
+      }
     }
   ],
   "active_tab": number,
   "recent": [
-    { "key": "<profile_id+cwd+manual_name>", "seed": {...}, "timestamp": "<ISO-8601>" }
+    {
+      "key": "<profile_id+cwd+manual_name>",
+      "seed": {...},
+      "timestamp": "<ISO-8601>",
+      "previews": ["<路径>", ...]           // 可选,见下方批注
+    }
   ]
 }
 ```
+
+> **【批注 2026-08-13 · 已落地,补上 tab 级 content 段与 Recent 的 previews】**
+>
+> **`tab.preview` —— preview 的内容身份住在 tab 层,不进布局树(裁决 11,2026-08-12)。**
+> 红线 L1 把内容挡在布局树之外,而「这个 preview pane 正在看哪个文件」正是内容;`DESIGN.md`
+> §7.1.3 又把缓冲池的归属定在 **tab** 上(一个 tab 一个池,一个文件恰好一份缓冲)。两条合起来
+> 只剩一个位置:树旁边的 tab 层。
+>
+> - `panes` —— 每片 preview 叶一行,树序。`leaf` 用与 `focused_leaf` **同一套 `leaf-N` 位置
+>   令牌**指回树里:`term`/`files` 叶坐在树里,位置本身就是地址;content 段站在树外,没有位置
+>   可读,只能指名道姓——而磁盘上不该出现运行时座位 id(§3.2),树的中序下标是唯一既指得准
+>   又完全由文件自身形状决定的地址。`cur` 为 `null` 表示这个 pane 什么都没显示,**写出来而
+>   不是省略**:空 pane 是一种状态,靠"少一行"表达的话读者分不清它与写漏了。
+> - `pool` —— tab 的共享缓冲池,最旧在前,即文件名切换器列出的那份**历史**。它是 `panes` 的
+>   超集:浏览过又切走的缓冲仍在池里,丢掉它会让切换器每次重启后变短。
+> - **只存路径与名,不存正文、不存脏位。** 与本 schema「不存输出历史」同一条诚实:恢复出来的
+>   pane 显示磁盘现状,不假装什么都没发生过。未保存的编辑不会无声消失——§7.1.3 的三道脏门
+>   (关最后一个 preview pane / 关 tab / 关应用)在此之前按名点过。`name` 存而不是从 `path`
+>   现算:本 crate 不拥有路径文法,一条会漂移的切分规则会让同一行在重启后换个名字。
+> - **恢复顺序**:池先复活(全新、无正文、无脏),各叶再按 `cur` 指进池里,`cur` 在池里找不到
+>   就现造一份补进去;令牌指到别的叶种(手改过的文件、或新版本写的树)只让那一行落空,pane 照常
+>   回来,这就是 §5.4 的逐叶降级。
+> - **浮窗不落盘。** 浮窗是一个手势的产物而不是一个场所:它的 pane 在树里、它的缓冲在池里,
+>   唯一没带回来的是「曾经撕下来过」。
+> - 字段可选,**additive**:整段缺席即"没有 preview",写在它之前的每一份文档照读不误,
+>   `schema_version` 不因它 bump;无 preview 的 tab 一个字节都不多写。
+>
+> **`recent[].previews` —— 关掉的 tab 把它的页面一起带进库(裁决 10,2026-08-12)。**
+> `DESIGN.md` §7.1.4 记着同一个坑的第一次:files 叶被 `recordRecent` 静默跳过,于是纯 files
+> tab 经 shut→restore 能回来、经 Ctrl+Shift+T 却回不来——**同一个库两扇门,坏了一扇**。
+> `tab.preview` 一落地,不带 previews 的 Recent 条目就是这个坑第二次。只存路径:不存池(按需
+> 从磁盘重生)、不存图钉(没人向一个已关闭的 tab 许诺过它的排布)——**Recent 恢复的是你去过的
+> 地方,不是一套布局**。同样可选、additive、空则不写。
 
 - `active tab`/`focusIndex` 直接对应 `DESIGN.md` §7.1.4 列出的序列化面,字段名取
   `active_tab`/`focused_leaf` 以避免与运行时 `InputOwner`(§7.1.5)的命名混淆——两者是

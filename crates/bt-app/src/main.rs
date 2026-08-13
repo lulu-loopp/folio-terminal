@@ -3980,6 +3980,82 @@ impl TabState {
             manual_name: leaf.manual_name,
         }
     }
+
+    /// **What one preview seat is showing**, whichever door it came through.
+    ///
+    /// A picture and a document arrive on a pane by two different lanes and are
+    /// mutually exclusive on it ([`PreviewPane::image`]), so "which file is this
+    /// pane on" has to ask both — a reader that only knew about the pool would
+    /// write a pinned pane full of picture back to disk as an empty one.
+    fn preview_showing(&self, seat: SeatId) -> Option<&Path> {
+        let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
+        pane.buffer
+            .as_deref()
+            .or_else(|| pane.image.as_ref().map(|image| image.path.as_path()))
+    }
+
+    /// **The tab's content section** — `bt_persist::TabV1::preview`.
+    ///
+    /// Which file each preview pane was showing, and the whole of the tab's
+    /// shared pool. Both are content and neither may enter the layout tree (red
+    /// line L1), so this is what stands beside the tree instead; `pinned` is
+    /// geometry and is already in the tree, and the two do not overlap.
+    ///
+    /// **Floats are not here, and that is the ruling rather than an omission.** A
+    /// preview float is a window somebody tore off by hand for as long as they
+    /// wanted it; the pane it came from is in the tree and the buffer it holds is
+    /// in this pool, so nothing is lost — what does not come back is the *torn
+    /// off* arrangement, which is a gesture and not a place.
+    ///
+    /// `None` when there is nothing to say, so a tab that has never opened a
+    /// preview writes exactly the bytes it wrote before this field existed.
+    fn preview_content(&self) -> Option<bt_persist::TabPreviewV1> {
+        let panes: Vec<bt_persist::PreviewPaneV1> = self
+            .seats
+            .tree()
+            .seats_in_order()
+            .iter()
+            .enumerate()
+            .filter(|(_, seat)| seat.kind == bt_layout::SeatKind::Preview)
+            .map(|(index, seat)| bt_persist::PreviewPaneV1 {
+                // The same positional token `focused_leaf` uses, and minted by
+                // the same walk: a section standing outside the tree has to name
+                // the leaf it is about, and an id would be a runtime handle the
+                // file has no business asserting (§3.2).
+                leaf: format!("leaf-{index}"),
+                cur: self
+                    .preview_showing(seat.id)
+                    .map(|path| path.to_string_lossy().into_owned()),
+            })
+            .collect();
+        // **No content and no dirty bit** (P151): the pool serializes as the list
+        // of files it held, so a restored pane shows what is on disk rather than
+        // pretending an unsaved edit was never lost. The three dirty gates are
+        // what stop that loss being silent.
+        let pool: Vec<bt_persist::PreviewPoolEntryV1> = self
+            .preview_pool
+            .buffers()
+            .map(|buffer| bt_persist::PreviewPoolEntryV1 {
+                path: buffer.path.to_string_lossy().into_owned(),
+                name: buffer.name.clone(),
+            })
+            .collect();
+        (!panes.is_empty() || !pool.is_empty()).then_some(bt_persist::TabPreviewV1 { panes, pool })
+    }
+
+    /// The files this tab's preview panes are showing, in tree order — what a
+    /// close puts in the vault (裁决 10).
+    ///
+    /// The pool is deliberately *not* here: Recent restores the places you were,
+    /// and a browsing history regrown from disk is not one of them.
+    fn preview_pages(&self) -> Vec<String> {
+        self.seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| self.preview_showing(seat))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
 }
 
 impl Deref for Runtime {
@@ -9806,6 +9882,7 @@ fn revive_plan(
     TabSeed,
     BTreeMap<SeatId, LeafSeed>,
     BTreeMap<SeatId, seats::FilesLeafState>,
+    PreviewRestore,
 ) {
     let mut seats =
         seats::Seats::from_persisted(&tab.root).unwrap_or_else(seats::Seats::lone_terminal);
@@ -9879,7 +9956,83 @@ fn revive_plan(
             )
         })
         .collect();
-    (seats, seed, leaves, files)
+    let preview = PreviewRestore::from_persisted(&seats, tab.preview.as_ref());
+    (seats, seed, leaves, files, preview)
+}
+
+/// **A saved tab's content section, paired back to the seats the tree minted** —
+/// `bt_persist::TabV1::preview` on the way in.
+///
+/// The pairing rule is the third one in this file, and it is deliberately *not*
+/// the `zip` the other two use. A term leaf and a files leaf sit inside the
+/// saved tree, so their position in it is an address; the content section stands
+/// beside the tree and has no position to be read from, which is why each of its
+/// rows carries the `leaf-N` token `focused_leaf` already spells its own address
+/// in. Resolving it here — against the tree that was actually revived — is what
+/// makes a hand-edited or truncated section cost the pane's *file* and never the
+/// pane.
+#[derive(Clone, Debug, Default)]
+struct PreviewRestore {
+    /// The file each preview seat comes back showing.
+    cur: BTreeMap<SeatId, PathBuf>,
+    /// The tab's pool, oldest first — path and the name it was listed under.
+    pool: Vec<(PathBuf, String)>,
+}
+
+impl PreviewRestore {
+    fn from_persisted(seats: &seats::Seats, saved: Option<&bt_persist::TabPreviewV1>) -> Self {
+        let Some(saved) = saved else {
+            // A document written before the content section existed. An empty
+            // pool and no `cur` is the honest reading of it — not a preview pane
+            // guessing at a file it was never told about.
+            return Self::default();
+        };
+        let order = seats.tree().seats_in_order();
+        let cur = saved
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let index = pane.leaf.strip_prefix("leaf-")?.parse::<usize>().ok()?;
+                let seat = order.get(index)?;
+                // A token that names a leaf of some other kind is a section that
+                // has come adrift from its tree — a hand edit, or a tree this
+                // build read differently. The pane still arrives; it arrives
+                // empty, which is a state, and it is the same degradation §5.4
+                // asks for everywhere else.
+                (seat.kind == bt_layout::SeatKind::Preview)
+                    .then(|| Some((seat.id, PathBuf::from(pane.cur.as_ref()?))))?
+            })
+            .collect();
+        let pool = saved
+            .pool
+            .iter()
+            .map(|entry| (PathBuf::from(&entry.path), entry.name.clone()))
+            .collect();
+        Self { cur, pool }
+    }
+
+    /// The one thing a Recent entry can rebuild: the files, with the pool left
+    /// to regrow (裁决 10).
+    fn from_pages(cur: BTreeMap<SeatId, PathBuf>) -> Self {
+        Self {
+            cur,
+            pool: Vec::new(),
+        }
+    }
+}
+
+/// The files a *saved* tab's preview panes were showing, read straight off the
+/// document — what the restore prompt puts in the vault when you decline it.
+///
+/// Declining is not discarding (see [`Runtime::answer_restore`]), so the entry
+/// it writes has to carry everything the tab would have come back with. This is
+/// [`TabState::preview_pages`]'s opposite number for a tab that was never built.
+fn persisted_preview_pages(tab: &TabV1) -> Vec<String> {
+    tab.preview
+        .iter()
+        .flat_map(|content| content.panes.iter())
+        .filter_map(|pane| pane.cur.clone())
+        .collect()
 }
 
 /// Every Term leaf of a persisted tree, in the order the tree is drawn.
@@ -10293,6 +10446,11 @@ fn create_tab_state(
     // no entry is a column with no root yet, exactly as a Terminal seat with no
     // entry is a shell in a fresh folder.
     files: &BTreeMap<SeatId, seats::FilesLeafState>,
+    // What each Preview leaf of this tree is showing, and the pool those buffers
+    // come out of. The third content table, carried the same way as the other
+    // two and for the same reason — a preview seat with no entry is a pane with
+    // nothing on it yet, which is a state and not a gap.
+    preview: &PreviewRestore,
     seed: TabSeed,
     programs: &profiles::ProfilePrograms,
     // What a Terminal seat with no entry in `leaves` is started as — the
@@ -10364,11 +10522,43 @@ fn create_tab_state(
         .into_iter()
         .map(|seat| (seat, files.get(&seat).cloned().unwrap_or_default()))
         .collect();
+    // **The pool first, then the panes** — P153's order, and it is the order
+    // that makes "a `cur` nobody saved a pool entry for" a buffer minted once
+    // rather than a pane pointing at nothing. Every buffer arrives empty and
+    // clean: `PreviewBuffer::new` answers everything that can be answered
+    // without a disk, and the bytes are the worker's to fetch when the pane is
+    // actually looked at.
+    let mut preview_pool = preview::PreviewPool::default();
+    for (path, name) in &preview.pool {
+        preview_pool.insert(preview::PreviewBuffer::new(path.clone(), name.clone()));
+    }
+    let mut preview_panes = PreviewPanes::default();
+    for seat in seats.preview_seats() {
+        let Some(path) = preview.cur.get(&seat) else {
+            continue;
+        };
+        if path_is_previewable_image(path) {
+            // A picture is not a pool buffer — it comes back down the decode
+            // lane, exactly as a click on a `.png` row sends it.
+            preview_panes.entry(PreviewSurface::Seat(seat)).image =
+                Some(PreviewImageState::new(path.clone()));
+            continue;
+        }
+        if preview_pool.get(path).is_none() {
+            preview_pool.insert(preview::PreviewBuffer::new(
+                path.clone(),
+                files_row_display_name(path),
+            ));
+        }
+        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(path.clone());
+    }
     Ok((
         assemble_tab_state(
             id,
             sessions,
             files,
+            preview_pool,
+            preview_panes,
             terminal_seat_id,
             seed,
             seats,
@@ -10406,6 +10596,8 @@ fn assemble_tab_state(
     id: TabId,
     sessions: BTreeMap<SeatId, LeafSession>,
     files: BTreeMap<SeatId, seats::FilesLeafState>,
+    preview_pool: preview::PreviewPool,
+    preview_panes: PreviewPanes,
     focused_leaf: SeatId,
     seed: TabSeed,
     seats: seats::Seats,
@@ -10449,9 +10641,9 @@ fn assemble_tab_state(
         seats,
         seat_layout,
         seat_overflow,
-        preview_panes: PreviewPanes::default(),
+        preview_panes,
         preview_raster: None,
-        preview_pool: preview::PreviewPool::default(),
+        preview_pool,
         preview_edit_focus: None,
         preview_views: PreviewViewStore::default(),
         preview_selecting: None,
@@ -10546,6 +10738,13 @@ fn pane_into_new_tab(
         // files column reaching the strip is I124, and the day it does the seat
         // arriving here brings its state with it exactly as this session does.
         BTreeMap::new(),
+        // Same argument on the preview side, and it holds for the same reason:
+        // `pane_can_become_a_tab` lets only a Terminal seat through, so the new
+        // tab has no preview leaf to show anything on and no pool to show it
+        // from. The day a preview pane may be torn out to the strip, the buffer
+        // migration §7.1.3 §168 describes arrives here beside this session.
+        preview::PreviewPool::default(),
+        PreviewPanes::default(),
         key,
         TabSeed {
             // The profile is not stated here any more, and its absence is the
@@ -11048,13 +11247,15 @@ impl Runtime {
                 TabSeed::default(),
                 BTreeMap::new(),
                 BTreeMap::new(),
+                PreviewRestore::default(),
             )]
         } else {
             plan.open.iter().map(revive_plan).collect()
         };
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
-        for (index, (seats, seed, leaves, files)) in restored_roots.into_iter().enumerate() {
+        for (index, (seats, seed, leaves, files, preview)) in restored_roots.into_iter().enumerate()
+        {
             let (tab, conpty_source) = create_tab_state(
                 TabId(index as u64 + 1),
                 seats,
@@ -11073,6 +11274,9 @@ impl Runtime {
                 // And every files column comes back rooted where it was left,
                 // which before this slice was nowhere at all.
                 &files,
+                // And every preview pane comes back on the file it was showing,
+                // out of a pool that comes back as the list of names it was.
+                &preview,
                 seed,
                 &profile_programs,
                 default_profile,
@@ -11270,6 +11474,17 @@ impl Runtime {
             lawful_client_size: None,
         };
         runtime.refresh_work_area();
+        // **The pinned tabs' preview panes ask for their files here**, and this
+        // is the earliest they can: the worker is a field of the runtime, so
+        // there is nothing to ask until the struct above exists. Every other
+        // revive door (`answer_restore`, `reopen_recent`) asks the moment it
+        // pushes its tab; this is the launch door doing the same, and without it
+        // a restored pane sits on "Loading …" forever — measured on the real
+        // machine, which is also why it is a loop over every tab rather than
+        // over the active one.
+        for index in 0..runtime.tabs.len() {
+            runtime.request_revived_previews(index);
+        }
         runtime.apply_window_min_inner_size()?;
         runtime.window.set_title(&runtime.display_title());
         runtime.refresh_chrome();
@@ -11386,8 +11601,9 @@ impl Runtime {
             None,
             &leaves,
             // A new tab is one terminal and nothing else — no files leaf to
-            // root, so nothing to say about one.
+            // root, so nothing to say about one, and no preview pane either.
             &BTreeMap::new(),
+            &PreviewRestore::default(),
             TabSeed::default(),
             &self.profile_programs,
             self.default_profile(),
@@ -11500,14 +11716,15 @@ impl Runtime {
     /// Index 0 is "the one I just closed", which is the whole of what undo-close
     /// is: not a separate store, just the front of this one.
     fn reopen_recent(&mut self, index: usize) -> Result<()> {
-        let Some(seed) = self.recent.take(index) else {
+        let Some(entry) = self.recent.take(index) else {
             return Ok(());
         };
+        let pages = entry.previews;
         let seed::Seed::Term {
             profile_id,
             cwd,
             manual_name,
-        } = seed
+        } = entry.seed
         else {
             // A files place has no shell to start; the pane that would host it
             // is T5's, and until then such an entry cannot be written either.
@@ -11520,7 +11737,35 @@ impl Runtime {
         });
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
-        let seats = seats::Seats::lone_terminal();
+        let mut seats = seats::Seats::lone_terminal();
+        // **The pages come back beside the shell** (裁决 10). Each one lands
+        // through the same `add_preview` an open goes through, so the address
+        // rule (§7.1.3's far-right seat) is the rule and not a second copy of it
+        // — and each pane but the last is pinned on the way past, because a
+        // pinned pane is what stops the next file reusing the seat instead of
+        // opening beside it (P95). The tab therefore comes back with as many
+        // preview panes as it was closed with, and with exactly one of them
+        // still the reuse target, which is the arrangement §7.1.3 requires of
+        // any tab at rest.
+        //
+        // Pins are not read back from the entry because they were never written
+        // there: Recent restores the places you were, not a layout.
+        let metrics = self.seat_metrics();
+        let mut preview_cur: BTreeMap<SeatId, PathBuf> = BTreeMap::new();
+        for (page, is_last) in pages
+            .iter()
+            .enumerate()
+            .map(|(i, page)| (page, i + 1 == pages.len()))
+        {
+            let Some(seat) = seats.add_preview(&metrics) else {
+                break;
+            };
+            preview_cur.insert(seat, PathBuf::from(page));
+            if !is_last {
+                seats.toggle_preview_pin(seat);
+            }
+        }
+        let preview = PreviewRestore::from_pages(preview_cur);
         // The seed's own profile, never the default one — H66's contract read
         // for a Recent row: the shell you are asking back is the shell you had,
         // and "whatever the default is today" is a different tab wearing this
@@ -11545,6 +11790,7 @@ impl Runtime {
             // as a files *tab* is M174, and it waits on I124 with everything
             // else that needs a tab with no shell in it.
             &BTreeMap::new(),
+            &preview,
             TabSeed {
                 manual_name,
                 // A reopened tab is not pinned: it is coming back because you
@@ -11561,8 +11807,55 @@ impl Runtime {
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
         self.tabs.push(tab);
+        self.request_revived_previews(self.tabs.len() - 1);
         self.apply_window_min_inner_size()?;
         self.activate_tab(self.tabs.len() - 1, true)
+    }
+
+    /// **Ask the worker for everything a revived tab's preview panes are
+    /// showing.**
+    ///
+    /// A restored pool is a list of *names*: P151's "dirty edits do not survive"
+    /// means every buffer comes back with no body at all, so the ones a pane is
+    /// actually on have to be read before there is anything to draw. The rest
+    /// stay empty until the switcher lands on one, and `open_preview_file_on`
+    /// asks then — the same door, and the same lazy rule browsing already uses,
+    /// so a tab restored with eight buffers does not read eight files to show
+    /// one.
+    ///
+    /// By index rather than on the active tab, because a restore builds every
+    /// tab before it activates any of them, and the response carries the
+    /// [`TabId`] it was asked for.
+    fn request_revived_previews(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let id = tab.id;
+        let wants: Vec<(PathBuf, preview::PreviewWant)> = tab
+            .preview_panes
+            .iter()
+            .filter_map(|(_, pane)| {
+                if let Some(image) = pane.image.as_ref() {
+                    // The one field of the meta line no decoder can answer.
+                    return Some((image.path.clone(), preview::PreviewWant::Size));
+                }
+                let path = pane.buffer.as_ref()?;
+                tab.preview_pool
+                    .get(path)
+                    .filter(|buffer| buffer.wants_head_read())
+                    .map(|_| (path.clone(), preview::PreviewWant::Head))
+            })
+            .collect();
+        for (path, want) in wants {
+            if !self.preview_worker.request(preview::PreviewRequest {
+                tab: id,
+                path,
+                want,
+            }) {
+                self.disable_preview_worker();
+                return;
+            }
+        }
     }
 
     /// Answer the restore prompt.
@@ -11591,6 +11884,10 @@ impl Runtime {
                             cwd: leaf.cwd.clone(),
                             manual_name: leaf.manual_name.clone(),
                         },
+                        // Declining is not discarding, so the entry has to carry
+                        // everything taking the tab back would have brought —
+                        // including the page it was showing (裁决 10).
+                        persisted_preview_pages(tab),
                         now,
                     );
                 }
@@ -11605,7 +11902,7 @@ impl Runtime {
         let placeholder = self.placeholder_tab.take();
         let first_revived = self.tabs.len();
         for tab in &pending {
-            let (seats, seed, leaves, files) = revive_plan(tab);
+            let (seats, seed, leaves, files, preview) = revive_plan(tab);
             let proxy = self.event_proxy.clone();
             let wake: OutputWake = Arc::new(move || {
                 let _ = proxy.send_event(AppEvent::PtyOutput);
@@ -11621,6 +11918,7 @@ impl Runtime {
                 None,
                 &leaves,
                 &files,
+                &preview,
                 seed,
                 &self.profile_programs,
                 self.default_profile(),
@@ -11629,6 +11927,7 @@ impl Runtime {
                 FormulaSwitches::from_settings(self.settings_store.loaded()),
             )?;
             self.tabs.push(revived);
+            self.request_revived_previews(self.tabs.len() - 1);
         }
         if let Some(placeholder) = placeholder
             && self.tabs.len() > 1
@@ -11703,8 +12002,9 @@ impl Runtime {
                 // The one regular write path into the vault: closing is what
                 // fills Recent (mock-up 3929). It happens before the tab is
                 // taken apart, because the seed is read off the live session.
+                let pages = self.tabs[index].preview_pages();
                 self.recent
-                    .record(self.tabs[index].seed(), SystemTime::now());
+                    .record(self.tabs[index].seed(), pages, SystemTime::now());
                 let mut removed = self.tabs.remove(index);
                 // Every leaf's shell, not the focused one's. Reaching for
                 // `removed.pty` went through the deref and closed exactly one of
@@ -12060,27 +12360,59 @@ impl Runtime {
         // And the strip along the bottom of each of them, whose caption is cut to
         // the room it has — which only something holding a font can decide.
         self.dress_files_feet(scale, now, &mut files_trees);
-        let preview_message = match (self.current_preview_image(), self.current_preview_buffer()) {
-            (Some(preview), _) => preview.message(),
-            // A document on its way: the same sentence a picture uses, because
-            // it is the same wait.
-            (None, Some(buffer)) => (buffer.load == preview::PreviewLoad::Pending)
-                .then(|| format!("Loading {}\u{2026}", buffer.name)),
-            // An open pane with nothing chosen invites rather than sits mute.
-            (None, None) => self
-                .seats
-                .preview()
-                .is_some()
-                .then(|| "Click a dotted path to preview it here".to_owned()),
-        };
-        // The "no preview" card, when the buffer on the seat has said it will
+        // **One sentence per preview pane, and each about its own body.**
+        //
+        // This was one message spread over every `SeatKind::Preview` placement
+        // until slice 7's restore put two waiting panes on screen at once and
+        // both of them said "Loading README.md…" while one was waiting on
+        // `todo.txt` — the same bug the head and the foot were cured of one
+        // slice earlier, in the one piece of the pane that had been left
+        // singular.
+        let preview_messages_owned: Vec<(SeatId, String)> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| {
+                let surface = PreviewSurface::Seat(seat);
+                let message = match (
+                    self.preview_pane(surface)
+                        .and_then(|pane| pane.image.as_ref()),
+                    self.preview_buffer_on(surface),
+                ) {
+                    (Some(preview), _) => preview.message(),
+                    // A document on its way: the same sentence a picture uses,
+                    // because it is the same wait.
+                    (None, Some(buffer)) => (buffer.load == preview::PreviewLoad::Pending)
+                        .then(|| format!("Loading {}\u{2026}", buffer.name)),
+                    // An open pane with nothing chosen invites rather than sits
+                    // mute.
+                    (None, None) => Some("Click a dotted path to preview it here".to_owned()),
+                }?;
+                Some((seat, message))
+            })
+            .collect();
+        // The "no preview" card, when the buffer on a seat has said it will
         // never have a body. Measured here beside the files names, and for the
         // same reason: only something holding a font can size a button, and the
         // hit test reads the number this frame stored.
-        let preview_card_notice = self
-            .current_preview_buffer()
-            .and_then(preview::PreviewBuffer::refusal)
-            .map(preview::PreviewRefusal::notice);
+        //
+        // Per seat for the reason above, and here it cost more than a wrong
+        // word: the paint draws a body notice only where there is no card, so
+        // one refused file used to blank the "Loading …" of every other preview
+        // pane on screen.
+        let preview_card_notices: Vec<(SeatId, &'static str)> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| {
+                Some((
+                    seat,
+                    self.preview_buffer_on(PreviewSurface::Seat(seat))?
+                        .refusal()?
+                        .notice(),
+                ))
+            })
+            .collect();
         let preview_open_label = self.preview_open_button_label(now);
         // The head's own run and the strip along the bottom, both measured here
         // beside the card and for the card's reason: only something holding a
@@ -12111,15 +12443,24 @@ impl Runtime {
             preview_open_label,
             seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
         );
-        let preview_card = preview_card_notice.map(|notice| seats::PreviewCardContent {
-            notice,
-            button: preview_open_label,
-            button_text_px: self.preview_button_width,
-            button_hovered: matches!(
-                self.seat_pointer.hover,
-                Some(seats::ChromeTarget::PreviewOpenButton(_))
-            ),
-        });
+        let preview_cards: Vec<(SeatId, seats::PreviewCardContent<'_>)> = preview_card_notices
+            .into_iter()
+            .map(|(seat, notice)| {
+                (
+                    seat,
+                    seats::PreviewCardContent {
+                        notice,
+                        button: preview_open_label,
+                        button_text_px: self.preview_button_width,
+                        // The hover already named a seat; now the card it lights
+                        // is that seat's, so two "Open in default app" buttons
+                        // side by side no longer light together.
+                        button_hovered: self.seat_pointer.hover
+                            == Some(seats::ChromeTarget::PreviewOpenButton(seat)),
+                    },
+                )
+            })
+            .collect();
         // U8 — sampled here, on the same `now` every other animated value in
         // this build reads, and handed over as numbers. `seats` has an explicit
         // invariant that nothing in it knows what time it is, and a `PaneMotion`
@@ -12136,6 +12477,13 @@ impl Runtime {
         // "the button you can press is the button you can see" true by
         // construction rather than by two functions agreeing.
         self.files_name_widths = self.measure_files_names(&files_names);
+        // Borrowed off the owned frames above, the same two-step the heads take:
+        // the paint looks a placement up in this list rather than being handed
+        // one answer for every preview seat.
+        let preview_messages: Vec<(SeatId, &str)> = preview_messages_owned
+            .iter()
+            .map(|(seat, message)| (*seat, message.as_str()))
+            .collect();
         // The two lists the paint looks its placement up in, borrowed off the
         // owned frames above — the same two-step the head's `name` and `count`
         // have always taken, once per seat instead of once.
@@ -12199,10 +12547,10 @@ impl Runtime {
                 files_name_widths: &self.files_name_widths,
                 files_root_open: self.root_menu.seat(),
                 files_trees: &files_trees,
-                preview_message: preview_message.as_deref(),
+                preview_messages: &preview_messages,
                 preview_feet: &preview_feet,
                 preview_heads: &preview_heads,
-                preview_card,
+                preview_cards: &preview_cards,
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
                 chevron_turn: self.chevron_turn.sample(now, self.motion).0,
@@ -13922,6 +14270,9 @@ impl Runtime {
                 // Positional rather than a stable id: the in-order index is a function of the
                 // same tree shape the file carries, so it cannot point outside that tree.
                 focused_leaf: format!("leaf-{}", focus_leaf_index(&tab.seats)),
+                // And what each preview pane was showing, out of a pool that
+                // records its files and never their bodies (P151).
+                preview: tab.preview_content(),
             })
             .collect();
         session.active_tab = self.active_tab as u32;
@@ -14137,25 +14488,6 @@ impl Runtime {
         self.sweep_preview_panes();
         self.apply_window_min_inner_size()?;
         self.commit_seat_geometry()
-    }
-
-    /// The dev-only preview toggle, and everything one costs: the tree changes,
-    /// so the window minimum, the terminal's columns, the ConPTY coalescer and
-    /// the session file all follow it, in that order.
-    fn toggle_preview_seat(&mut self) -> Result<()> {
-        let metrics = self.seat_metrics();
-        // Read before the toggle, because a toggle facing an open pane closes it
-        // and the surface it closed is what has to be emptied.
-        let was_open = self.seats.preview();
-        if !self.seats.toggle_preview(&metrics) {
-            return Ok(());
-        }
-        if let Some(seat) = was_open {
-            let surface = PreviewSurface::Seat(seat);
-            self.clear_preview_image(surface);
-            self.clear_preview_view(surface);
-        }
-        self.settle_seat_set_change()
     }
 
     /// **`addFilesPane` and its undo, as one verb** — the `˅` menu's `Files pane`
@@ -15384,16 +15716,11 @@ impl Runtime {
         self.preview_buffer_on(PreviewSurface::Seat(self.seats.preview()?))
     }
 
-    /// The picture **the** preview seat is showing, if it is showing one.
-    ///
-    /// [`Self::current_preview_buffer`]'s other door, singular for the same
-    /// callers and the same reason: the two fill one caption (P36), so a tab's
-    /// name and a schematic's ask them as a pair.
-    fn current_preview_image(&self) -> Option<&PreviewImageState> {
-        self.preview_pane(PreviewSurface::Seat(self.seats.preview()?))?
-            .image
-            .as_ref()
-    }
+    // `current_preview_image` stood here — the picture "the" preview seat was
+    // showing. Its last caller was the singular body message, and that went
+    // plural in slice 7 (see `preview_messages_owned`), so the question it
+    // answered no longer has anybody asking it: every remaining reader of a
+    // picture already knows which surface it means.
 
     /// A wheel notch over a preview's text body.
     ///
@@ -18860,8 +19187,19 @@ impl Runtime {
                 self.close_tab(index)
             }
             restore::GateRequest::Shut => {
+                // **Only the dirty ones.** A shut is the one answer whose pool
+                // has somewhere to go afterwards: every tab is about to be
+                // written to `session.json`, and its pool goes with it as the
+                // list of files the switcher will list next launch
+                // (`TabState::preview_content`). Emptying it here would answer
+                // "discard my unsaved changes" by also throwing away a browsing
+                // history nobody was asked about — measured on the real machine,
+                // where one dirty buffer wrote `"pool": []` and a three-file
+                // history came back empty. The gate raises itself off
+                // `dirty_names`, so dropping the dirty buffers is all it takes
+                // for the re-requested shut not to ask again.
                 for tab in &mut self.tabs {
-                    tab.preview_pool.clear();
+                    tab.preview_pool.discard_dirty();
                 }
                 // The shut is the one verb this does not own: it is the event
                 // loop's, and it is re-requested rather than performed here so
@@ -23662,6 +24000,29 @@ impl Runtime {
             }
         };
         if moved {
+            // **The second door into sovereignty** (最小值主权, 2026-08-08: "a
+            // minimum is law to the program and advice to the user").
+            //
+            // `Edit::DragDivider` already writes the ratio the hand asked for
+            // without consulting a minimum — that half was done the day the
+            // ruling landed. What was missing is that the *solve* which turns
+            // that ratio into rectangles still ran under `Lawful`, so the
+            // concession chain put the layout straight back: measured on a
+            // restored 960-logical window holding two preview panes and a
+            // terminal, dragging the root divider from 1/3 to 1/2 moved nothing
+            // at all — the terminal stayed collapsed at 24px and both previews
+            // stayed on their 360 floor. Under `Sovereign` the same ratio gives
+            // the terminal 254px and lets the two previews fall to 352 together,
+            // which is the ruling's own words: past the floors, the floors give
+            // way *in proportion*.
+            //
+            // Taken here rather than only for the frame the button is down,
+            // because "sovereignty, once taken, is returned only by another
+            // claim" (`size_authority_for_rectangle`): a layout that snapped
+            // back the instant the hand let go would be the refusal arriving one
+            // frame late. `claim_lawful_layout` is what hands the minima back
+            // their force, and it is the program's own door.
+            self.size_policy = SizePolicy::Sovereign;
             self.commit_seat_geometry()?;
         }
         Ok(true)
@@ -26783,18 +27144,15 @@ impl Runtime {
             }
             return Ok(());
         }
-        // Dev-only: open or close the preview seat at its ruled fixed-right
-        // address, so the layout can be felt before the verbs that will really
-        // open it exist. Ctrl+Alt+Shift+P is a placeholder binding and is
-        // documented as such — it wears Alt to leave Ctrl+Shift+P to the command
-        // palette the mock-up promises. It is checked here, above the PTY
-        // encoder, so the chord never reaches the child.
-        if is_preview_toggle_shortcut(&event.logical_key, self.modifiers) {
-            if !event.repeat {
-                self.toggle_preview_seat()?;
-            }
-            return Ok(());
-        }
+        // The scaffold that used to stand here — `Ctrl+Alt+Shift+P`, a dev chord
+        // that opened and closed the preview seat so its ruled address could be
+        // felt before anything could really open one — is gone (N25). Every real
+        // verb exists now: Enter and double-click on a file row, the row's
+        // context menu, a drag to a pane's edge or centre, a click on an inline
+        // image, and the pane's own `×` to close it. A chord that duplicated
+        // them would be a second way to reach a state, and it wore Alt at that,
+        // which is the AltGr ground the shortcut audit rules out of bounds.
+        //
         // The shortcut registry (P2-7), above the PTY encoder because that is what
         // "we claim this chord" means: the table is consulted before any key is
         // encoded, and a chord that is in it never reaches the child. Only chords
@@ -29142,24 +29500,6 @@ fn pty_frame_is_unchanged(
         .is_some_and(|previous| presentation_equivalent(previous, next))
 }
 
-/// The dev-only preview toggle: `Ctrl+Alt+Shift+P`.
-///
-/// Matched on the *character* the layout produced rather than on a physical key
-/// so it behaves the same on every keyboard layout, and required to carry the
-/// whole chord and nothing else — a bare `Ctrl+P` is a real terminal control
-/// byte (DLE) and must keep reaching the child.
-///
-/// Alt is in the chord because `Ctrl+Shift+P` is spoken for: the mock-up gives
-/// it to the command palette (`design/ui-mockup.html` line 5988), and that
-/// binding tests `!e.altKey`, so adding Alt is precisely how a placeholder gets
-/// out of the way of the verb that is coming. This toggle is scaffolding for
-/// feeling the preview seat's ruled address before the real verbs exist; the
-/// palette is product, and product wins the shorter chord.
-fn is_preview_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    modifiers == ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT
-        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("p"))
-}
-
 /// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**
 ///
 /// Every route into the rail goes through here — today the settings dialog's two
@@ -30295,6 +30635,7 @@ mod tests {
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
+            preview: None,
         }
     }
 
@@ -30417,7 +30758,7 @@ mod tests {
     #[test]
     fn a_seed_naming_a_profile_we_do_not_have_still_comes_back() {
         let tab = saved_tab("wsl-ubuntu", "C:\\a", Some("notes"), true);
-        let (seats, seed, leaves, _files) = revive_plan(&tab);
+        let (seats, seed, leaves, _files, _preview) = revive_plan(&tab);
         assert_eq!(
             leaves.get(&seats.terminal()).map(|leaf| leaf.profile),
             Some(profiles::FALLBACK_PROFILE),
@@ -30450,7 +30791,7 @@ mod tests {
             })))
         };
         let here = std::env::current_dir().expect("a test runs somewhere");
-        let (seats, _, leaves, _files) = revive_plan(&TabV1 {
+        let (seats, _, leaves, _files, _preview) = revive_plan(&TabV1 {
             root: LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
                 dir: bt_persist::SplitDirV1::Row,
                 ratio: 500_000,
@@ -30458,6 +30799,7 @@ mod tests {
             }),
             pinned: false,
             focused_leaf: "leaf-0".to_owned(),
+            preview: None,
         });
         let [left, right] = seats.terminals()[..] else {
             panic!("a row of two terminals holds two terminal seats");
@@ -30501,6 +30843,7 @@ mod tests {
             }),
             pinned: false,
             focused_leaf: "leaf-0".to_owned(),
+            preview: None,
         }
     }
 
@@ -30571,10 +30914,11 @@ mod tests {
         );
 
         // ── the read half ──
-        let (revived, _, folders, _files) = revive_plan(&TabV1 {
+        let (revived, _, folders, _files, _preview) = revive_plan(&TabV1 {
             root: saved,
             pinned: false,
             focused_leaf: "leaf-0".to_owned(),
+            preview: None,
         });
         let [revived_left, revived_right] = revived.terminals()[..] else {
             panic!("the tree came back with its two terminals");
@@ -30618,6 +30962,7 @@ mod tests {
             }),
             pinned: false,
             focused_leaf: "leaf-1".to_owned(),
+            preview: None,
         }
     }
 
@@ -30659,7 +31004,7 @@ mod tests {
             // be indistinguishable from one that survived properly.
             width: 197,
         };
-        let (seats, _, _, files) = revive_plan(&saved_files_and_terminal(saved.clone()));
+        let (seats, _, _, files, _preview) = revive_plan(&saved_files_and_terminal(saved.clone()));
 
         // ── the read half: the three facts landed on the seat that owns them ──
         let [column] = seats.files()[..] else {
@@ -30713,7 +31058,7 @@ mod tests {
     /// column, and the difference is that now it is a fact rather than a default.
     #[test]
     fn a_files_column_with_no_root_writes_an_honest_empty_leaf() {
-        let (seats, _, _, files) =
+        let (seats, _, _, files, _preview) =
             revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
                 root: String::new(),
                 open: Vec::new(),
@@ -30765,7 +31110,7 @@ mod tests {
                 },
             )))
         };
-        let (seats, _, _, states) = revive_plan(&TabV1 {
+        let (seats, _, _, states, _preview) = revive_plan(&TabV1 {
             root: LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
                 dir: bt_persist::SplitDirV1::Row,
                 ratio: 500_000,
@@ -30787,6 +31132,7 @@ mod tests {
             }),
             pinned: false,
             focused_leaf: "leaf-1".to_owned(),
+            preview: None,
         });
         let [left, right] = seats.files()[..] else {
             panic!("two files leaves in, two files seats out");
@@ -30804,6 +31150,346 @@ mod tests {
         );
     }
 
+    /// **A tab with two preview panes, out to disk and back** — N44, the whole
+    /// of slice 7's ruling in one pass.
+    ///
+    /// The pin rides in the tree, the file and the pool ride in the content
+    /// section beside it, and the section names each pane by the same
+    /// positional token `focused_leaf` uses. What this gate is really for is the
+    /// *pairing*: a section that paired by position in its own list would put
+    /// the pinned pane's file on the unpinned pane the moment the two lists
+    /// disagree, which looks like a working preview showing the wrong document.
+    ///
+    /// MUTATION ①: have `PreviewRestore::from_persisted` zip `saved.panes`
+    /// against `seats.preview_seats()` instead of resolving the token — the
+    /// second assertion goes red, because the fixture deliberately writes the
+    /// two panes in the other order.
+    /// MUTATION ②: drop the `SeatKind::Preview` check in `from_persisted` — the
+    /// terminal row lands a file on the shell's seat and the last assertion
+    /// goes red.
+    #[test]
+    fn two_preview_panes_come_back_on_the_files_the_section_named() {
+        let metrics = cross_metrics();
+        let mut seats = seats::Seats::lone_terminal();
+        let pinned = seats
+            .add_preview(&metrics)
+            .expect("the first preview lands");
+        assert!(seats.toggle_preview_pin(pinned));
+        let landing = seats
+            .add_preview(&metrics)
+            .expect("a pinned pane is not a reuse target, so a second lands beside it");
+        assert_ne!(pinned, landing, "the pin bought a second pane");
+
+        let token = |seat: SeatId| {
+            let index = seats
+                .tree()
+                .seats_in_order()
+                .iter()
+                .position(|found| found.id == seat)
+                .expect("the seat is in the tree it came from");
+            format!("leaf-{index}")
+        };
+        let readme = PathBuf::from(r"C:\repo\README.md");
+        let saved = bt_persist::TabPreviewV1 {
+            // Deliberately in the *other* order from `preview_seats()`, so a
+            // positional pairing cannot pass by accident.
+            panes: vec![
+                bt_persist::PreviewPaneV1 {
+                    leaf: token(landing),
+                    cur: None,
+                },
+                bt_persist::PreviewPaneV1 {
+                    leaf: token(pinned),
+                    cur: Some(readme.to_string_lossy().into_owned()),
+                },
+                // A row naming the terminal: a hand edit, or a tree a newer
+                // build shaped differently. It costs that row and nothing else.
+                bt_persist::PreviewPaneV1 {
+                    leaf: token(seats.terminal()),
+                    cur: Some(r"C:\repo\stray.md".to_owned()),
+                },
+            ],
+            pool: vec![
+                bt_persist::PreviewPoolEntryV1 {
+                    path: readme.to_string_lossy().into_owned(),
+                    name: "README.md".to_owned(),
+                },
+                bt_persist::PreviewPoolEntryV1 {
+                    path: r"C:\repo\notes.md".to_owned(),
+                    name: "notes.md".to_owned(),
+                },
+            ],
+        };
+
+        let restored = PreviewRestore::from_persisted(&seats, Some(&saved));
+        assert_eq!(
+            restored.cur.get(&pinned),
+            Some(&readme),
+            "the file lands on the leaf the section named"
+        );
+        assert_eq!(
+            restored.cur.get(&landing),
+            None,
+            "a pane that was showing nothing comes back showing nothing"
+        );
+        assert!(
+            !restored.cur.contains_key(&seats.terminal()),
+            "a row naming a leaf of another kind is dropped, not obeyed"
+        );
+        assert_eq!(
+            restored.pool.len(),
+            2,
+            "the pool is a history, not a screen"
+        );
+
+        // And the write side agrees with the read side, which is the only way
+        // the round trip can be a round trip. Assembled the way every other tab
+        // is, so nothing here is a second opinion about what a tab is.
+        let sessions = BTreeMap::from([(seats.terminal(), leaf_saying("SHELL"))]);
+        let focused = seats.terminal();
+        let mut pool = preview::PreviewPool::default();
+        for (path, name) in &restored.pool {
+            pool.insert(preview::PreviewBuffer::new(path.clone(), name.clone()));
+        }
+        let mut panes = PreviewPanes::default();
+        panes.entry(PreviewSurface::Seat(pinned)).buffer = Some(readme.clone());
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(1),
+            sessions,
+            BTreeMap::new(),
+            pool,
+            panes,
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+
+        let written = tab.preview_content().expect("this tab has previews");
+        assert_eq!(
+            written.panes.len(),
+            2,
+            "one row per preview leaf, in tree order"
+        );
+        let round_tripped = PreviewRestore::from_persisted(&tab.seats, Some(&written));
+        assert_eq!(
+            round_tripped.cur, restored.cur,
+            "what was written is what comes back on the same seats"
+        );
+        assert_eq!(
+            tab.preview_pages(),
+            vec![readme.to_string_lossy().into_owned()],
+            "and the vault takes the files, skipping the pane that had none (裁决 10)"
+        );
+    }
+
+    /// The shape slice 7's restore actually produces on a narrow window: a
+    /// terminal and two preview panes, which by the metrics table wants
+    /// 260 + 360 + 360 and cannot have it.
+    fn restored_two_previews_and_a_terminal() -> (seats::Seats, SeatMetrics, LogicalRect) {
+        let dpi_milli = 2_000_u32;
+        let metrics = seats::seat_metrics(dpi_milli);
+        // 1920x1200 physical at 2x — the very window the real-machine capture
+        // was taken in, which is 960x560 of usable logical room.
+        let viewport = seats::logical_viewport(1920, 1200, seats::scale_ppm(dpi_milli), 0);
+        let mut seats = seats::Seats::lone_terminal();
+        let pinned = seats
+            .add_preview(&metrics)
+            .expect("the first preview lands");
+        assert!(seats.toggle_preview_pin(pinned));
+        let second = seats
+            .add_preview(&metrics)
+            .expect("a pinned pane is not a reuse target");
+        // The focused leaf a restore writes: the pane the user was last on.
+        assert!(seats.set_focus(second));
+        (seats, metrics, viewport)
+    }
+
+    fn logical_width(layout: &SeatLayout, seat: SeatId) -> i64 {
+        layout
+            .rects
+            .iter()
+            .find(|placement| placement.id == seat)
+            .and_then(|placement| placement.rect)
+            .expect("the seat was placed")
+            .extent(bt_layout::Axis::Row)
+            .floor_px()
+    }
+
+    fn presentation_of(layout: &SeatLayout, seat: SeatId) -> bt_layout::Presentation {
+        layout
+            .rects
+            .iter()
+            .find(|placement| placement.id == seat)
+            .expect("the seat was placed")
+            .presentation
+    }
+
+    /// **A window too narrow for its restored tree degrades explicitly, and the
+    /// terminal is not quietly crushed.**
+    ///
+    /// Two preview panes and a terminal want 980 logical pixels of floor plus two
+    /// dividers, and a restored 960-wide window has not got it. What the user
+    /// sees is a terminal reduced to a strip — and this pins *what that strip
+    /// is*: `Presentation::Collapsed`, the ruled §2.6.3 degradation (a clickable
+    /// title bar, still in the tree, still focusable), reached by the collapse
+    /// order's own rule that the focus seat falls last. It is not a seat handed
+    /// some arbitrary width below its minimum.
+    ///
+    /// Red gate: give a seat a width between `COLLAPSED_EXTENT` and its own
+    /// minimum and the `Collapsed` assertion fails — which is the difference
+    /// between an honest fold and a crush.
+    #[test]
+    fn a_restore_too_narrow_for_its_tree_folds_a_pane_rather_than_crushing_it() {
+        let (seats, metrics, viewport) = restored_two_previews_and_a_terminal();
+        let terminal = seats.terminal();
+        let layout = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("the concession chain has an answer for this window");
+        assert_eq!(
+            presentation_of(&layout, terminal),
+            bt_layout::Presentation::Collapsed(bt_layout::AxisSet::ROW),
+            "the farthest non-focus seat folds; it is not given a sliver"
+        );
+        assert_eq!(
+            logical_width(&layout, terminal),
+            bt_layout::COLLAPSED_EXTENT.floor_px(),
+            "and a fold is exactly the ruled extent, not whatever was left over"
+        );
+        for seat in seats.preview_seats() {
+            assert_eq!(
+                presentation_of(&layout, seat),
+                bt_layout::Presentation::Full,
+                "what the fold bought is two whole preview panes"
+            );
+            assert!(
+                logical_width(&layout, seat) >= bt_layout::MIN_PREVIEW_W.floor_px(),
+                "each of them at or above its own floor — that is what law means"
+            );
+        }
+    }
+
+    /// **A hand on the divider outranks a preview's floor** (最小值主权,
+    /// 2026-08-08: "a minimum is law to the program and advice to the user").
+    ///
+    /// Real machine, slice 7: with the layout above on screen, dragging the root
+    /// divider to give the terminal half the window did *nothing*. The edit was
+    /// never the problem — `Edit::DragDivider` writes the ratio the hand asked
+    /// for and consults no minimum — but the solve that turns that ratio into
+    /// rectangles ran under `Lawful`, so the concession chain put every seat
+    /// straight back on its floor and folded the terminal again. The divider
+    /// went dead under the hand.
+    ///
+    /// MUTATION: solve the dragged tree under `Lawful` (which is what
+    /// `drive_divider_drag` did before this slice) and every assertion below the
+    /// first goes red — the terminal comes back 24 pixels wide.
+    #[test]
+    fn a_divider_drag_takes_the_room_a_preview_floor_was_holding() {
+        let (mut seats, metrics, viewport) = restored_two_previews_and_a_terminal();
+        let terminal = seats.terminal();
+        let root = seats
+            .split_slots(
+                &seats
+                    .solve(viewport, &metrics, SizePolicy::Lawful)
+                    .expect("the folded layout solves"),
+            )
+            .first()
+            .expect("the tree has a root split")
+            .id;
+
+        assert_eq!(
+            seats.drag_divider(
+                &metrics,
+                root,
+                bt_layout::Ratio::clamped_from_ppm(500_000),
+                bt_layout::LogicalPx::px(950),
+            ),
+            Ok(true),
+            "the edit has always honoured the hand — it writes the ratio asked for"
+        );
+
+        // What the window used to do with that ratio, and why the drag looked
+        // dead: under law the floors take it all back.
+        let lawful = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("still solvable");
+        assert_eq!(
+            logical_width(&lawful, terminal),
+            bt_layout::COLLAPSED_EXTENT.floor_px(),
+            "the ratio the hand wrote buys nothing while the minima are law"
+        );
+
+        // And what it does now: past the floors, the floors give way together.
+        let sovereign = seats
+            .solve(viewport, &metrics, SizePolicy::Sovereign)
+            .expect("sovereign cannot refuse");
+        assert_eq!(
+            presentation_of(&sovereign, terminal),
+            bt_layout::Presentation::Full,
+            "the terminal is a pane again, not a strip"
+        );
+        assert!(
+            logical_width(&sovereign, terminal) > 200,
+            "and it is wide enough to be one: {}",
+            logical_width(&sovereign, terminal)
+        );
+        let previews: Vec<i64> = seats
+            .preview_seats()
+            .into_iter()
+            .map(|seat| logical_width(&sovereign, seat))
+            .collect();
+        assert!(
+            previews
+                .iter()
+                .all(|width| *width < bt_layout::MIN_PREVIEW_W.floor_px()),
+            "the 360 floor gave way, which is the whole of the ruling: {previews:?}"
+        );
+        assert!(
+            previews
+                .windows(2)
+                .all(|pair| (pair[0] - pair[1]).abs() <= 1),
+            "and it gave way *in proportion*, not by one pane paying for the other: {previews:?}"
+        );
+    }
+
+    /// Sovereignty taken by a divider drag is not handed back by a rectangle
+    /// that happens to match the program's last claim — the same asymmetry the
+    /// window drag already relies on, and the reason the layout does not snap
+    /// back one frame after the button comes up.
+    #[test]
+    fn a_layout_the_hand_chose_stays_the_hands_until_the_program_claims_again() {
+        let claimed = PhysicalSize::new(1920, 1200);
+        let (policy, held) =
+            size_authority_for_rectangle(SizePolicy::Sovereign, Some(claimed), claimed);
+        assert_eq!(policy, SizePolicy::Sovereign);
+        assert_eq!(held, Some(claimed));
+    }
+
+    /// A tab that has never opened a preview writes no content section at all,
+    /// so its bytes are the bytes it wrote before the field existed.
+    #[test]
+    fn a_tab_with_no_preview_pane_writes_no_content_section() {
+        let seats = cross_seats(1);
+        let focused = seats.terminal();
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(1),
+            BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            preview::PreviewPool::default(),
+            PreviewPanes::default(),
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+        assert!(tab.preview_content().is_none());
+        assert!(tab.preview_pages().is_empty());
+    }
+
     /// A shell that never reported a folder starts where a fresh one would, and
     /// says so by contributing no entry at all.
     ///
@@ -30814,7 +31500,7 @@ mod tests {
     /// to read and not two.
     #[test]
     fn a_saved_pane_that_named_no_folder_contributes_no_entry() {
-        let (seats, _, none, _files) = revive_plan(&saved_row_of_two("", ""));
+        let (seats, _, none, _files, _preview) = revive_plan(&saved_row_of_two("", ""));
         assert!(
             none.values().all(|leaf| leaf.cwd.is_none()),
             "two silent shells, two absences"
@@ -30827,7 +31513,7 @@ mod tests {
         );
 
         let here = std::env::current_dir().expect("a test runs somewhere");
-        let (seats, _, one, _files) = revive_plan(&saved_row_of_two(
+        let (seats, _, one, _files, _preview) = revive_plan(&saved_row_of_two(
             &here.to_string_lossy(),
             "C:\\definitely\\not\\here",
         ));
@@ -35275,36 +35961,45 @@ mod tests {
         );
     }
 
-    /// PIN — N144: `Ctrl+Shift+P` is the command palette's
-    /// (`design/ui-mockup.html` line 5988), so the dev-only preview toggle
-    /// stands aside to `Ctrl+Alt+Shift+P`. The mock-up's own palette binding
-    /// tests `!e.altKey`, so the chord it leaves free is exactly this one and
-    /// the two can never collide.
+    /// N25 — **the scaffold is retired and its chord belongs to nobody.**
     ///
-    /// Red gate: the toggle used to answer to `Ctrl+Shift+P`, which would have
-    /// eaten the palette's chord before it was ever built.
+    /// `Ctrl+Alt+Shift+P` opened and closed the preview seat while the block had
+    /// no verbs that could. Every one of them exists now, so a chord that
+    /// duplicated them would be a second way into the same state — and it wore
+    /// Alt, which the shortcut audit rules off limits precisely because AltGr
+    /// produces `Ctrl+Alt` on the layouts a European user types on.
+    ///
+    /// Red gate: put the matcher back and `p` under that chord stops reaching
+    /// the shell. Asserted through the registry rather than against a deleted
+    /// function, because "no code claims it" is the property, and the registry
+    /// is the only thing left that could.
     #[test]
-    fn the_dev_preview_toggle_leaves_ctrl_shift_p_to_the_command_palette() {
-        let lower = Key::Character("p".into());
-        let upper = Key::Character("P".into());
-        let ctrl_alt_shift = ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT;
-        assert!(
-            !is_preview_toggle_shortcut(&lower, ModifiersState::CONTROL | ModifiersState::SHIFT),
-            "Ctrl+Shift+P belongs to the command palette"
+    fn the_retired_preview_chord_reaches_the_shell_like_any_other_key() {
+        let key = Key::Character("p".into());
+        let claimed = |modifiers| {
+            shortcuts::lookup_action(&key, &key, modifiers, shortcuts::Focus { preview: false })
+        };
+        let in_preview = |modifiers| {
+            shortcuts::lookup_action(&key, &key, modifiers, shortcuts::Focus { preview: true })
+        };
+        for modifiers in [
+            ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
+            // A bare Ctrl+P is DLE and must keep reaching the child.
+            ModifiersState::CONTROL,
+            ModifiersState::CONTROL | ModifiersState::ALT,
+        ] {
+            assert!(
+                claimed(modifiers).is_none() && in_preview(modifiers).is_none(),
+                "{modifiers:?}+P is claimed by nothing, in either focus"
+            );
+        }
+        // And the chord the scaffold deliberately stood aside from is still the
+        // command palette's, which is why the scaffold wore Alt in the first
+        // place — the reason it had to go is that Alt was never free either.
+        assert_eq!(
+            claimed(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            Some(shortcuts::Action::CommandPalette)
         );
-        assert!(is_preview_toggle_shortcut(&lower, ctrl_alt_shift));
-        assert!(
-            is_preview_toggle_shortcut(&upper, ctrl_alt_shift),
-            "the chord is matched on the character, whatever case the layout produced"
-        );
-        // A bare Ctrl+P is DLE and must keep reaching the child; so must every
-        // near-miss that is not the whole chord.
-        assert!(!is_preview_toggle_shortcut(&lower, ModifiersState::CONTROL));
-        assert!(!is_preview_toggle_shortcut(
-            &lower,
-            ModifiersState::CONTROL | ModifiersState::ALT
-        ));
-        assert!(!is_preview_toggle_shortcut(&lower, ModifiersState::empty()));
     }
 
     /// Every rail state the settings dialog can ask for arrives with both of the
@@ -35813,7 +36508,9 @@ mod tests {
         let mut seats = seats::Seats::lone_terminal();
         let lone = solved_terminal_seat(&seats, dpi_milli, physical);
 
-        assert!(seats.toggle_preview(&metrics));
+        let preview = seats
+            .add_preview(&metrics)
+            .expect("a 1600x900 tab seats the ruled preview");
         let split = solved_terminal_seat(&seats, dpi_milli, physical);
         assert_eq!(lone.y, 40);
         assert_eq!(lone.height, 860, "lone terminal body is the whole seat");
@@ -35854,7 +36551,7 @@ mod tests {
             split_grid
         );
 
-        assert!(seats.toggle_preview(&metrics));
+        assert!(seats.close_seat(&metrics, preview));
         let closed = solved_terminal_seat(&seats, dpi_milli, physical);
         assert_eq!(closed, lone);
         let close_at = start + Duration::from_secs(1);
@@ -36106,10 +36803,10 @@ mod tests {
     ///    other reading is a reading of the *caller's* intent — and intent is
     ///    exactly what the two verbs that skipped the ceremony had plenty of.
     ///
-    /// MUTATION ①: drop the `structure_revision += 1` from `Seats::toggle_preview`
+    /// MUTATION ①: drop the `structure_revision += 1` from `Seats::add_preview`
     /// and the revision assertion goes red — which is the tripwire going blind,
     /// the same blindness that let `dock_float` re-solve and stop.
-    /// MUTATION ②: solve the *pre-toggle* tree for `after` and the width
+    /// MUTATION ②: solve the *pre-landing* tree for `after` and the width
     /// assertion goes red, which is the pre-fix `dock_float` in one line: the
     /// tree grew a pane and the rectangle handed to the shell did not.
     #[test]
@@ -36131,10 +36828,9 @@ mod tests {
             .expect("the solver placed the lone terminal");
         let settled = seats.structure_revision();
 
-        assert!(
-            seats.toggle_preview(&metrics),
-            "a 1600x900 lone-terminal tab has room for the ruled preview seat"
-        );
+        seats
+            .add_preview(&metrics)
+            .expect("a 1600x900 lone-terminal tab has room for the ruled preview seat");
         let after_layout = solve(&seats);
         let after = seats::pane_body_viewport(&seats, &after_layout, terminal, scale)
             .expect("the solver placed the terminal beside the preview");
@@ -38837,7 +39533,7 @@ mod tests {
         let second = seats
             .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
             .expect("a 1600x900 window divides");
-        assert!(seats.toggle_preview(&metrics), "the preview lands");
+        seats.add_preview(&metrics).expect("the preview lands");
         let preview = seats.preview().expect("and it is in the tree");
         let before = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
@@ -39900,7 +40596,7 @@ mod tests {
 
     /// A tab holding one files column and one terminal, with the column rooted.
     fn tab_with_a_files_column(id: u64, root: &str) -> TabState {
-        let (seats, _, _, files) =
+        let (seats, _, _, files, _preview) =
             revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
                 root: root.to_owned(),
                 open: Vec::new(),
@@ -39918,6 +40614,8 @@ mod tests {
             TabId(id),
             sessions,
             files,
+            preview::PreviewPool::default(),
+            PreviewPanes::default(),
             focused,
             TabSeed::default(),
             seats,
@@ -42780,7 +43478,7 @@ mod tests {
         assert_eq!(leaf.open, vec!["/src".to_owned()]);
         assert_eq!(leaf.sel.as_deref(), Some("/src/main.rs"));
 
-        let (seats, _, _, files) = revive_plan(&saved_files_and_terminal(leaf));
+        let (seats, _, _, files, _preview) = revive_plan(&saved_files_and_terminal(leaf));
         let revived = seats.files()[0];
         assert_eq!(
             files[&revived].open.iter().cloned().collect::<Vec<_>>(),
@@ -42798,7 +43496,7 @@ mod tests {
     /// which is what turns "I left it open here" into rows again.
     #[test]
     fn a_restored_expansion_comes_back_as_questions_and_not_as_rows() {
-        let (seats, _, _, files) =
+        let (seats, _, _, files, _preview) =
             revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
                 root: "D:\\work".to_owned(),
                 open: vec!["/src".to_owned()],
@@ -42816,6 +43514,8 @@ mod tests {
             TabId(1),
             sessions,
             files,
+            preview::PreviewPool::default(),
+            PreviewPanes::default(),
             focused,
             TabSeed::default(),
             seats,
@@ -43232,6 +43932,8 @@ mod tests {
             sessions,
             // `cross_seats` builds a row of terminals and nothing else.
             BTreeMap::new(),
+            preview::PreviewPool::default(),
+            PreviewPanes::default(),
             focused,
             TabSeed::default(),
             seats,
@@ -43428,7 +44130,9 @@ mod tests {
         // behind it — a preview body — is still the seat's press and not the
         // grid's, and so is the surface that is no seat at all.
         let mut with_preview = cross_seats(2);
-        with_preview.toggle_preview(&cross_metrics());
+        with_preview
+            .add_preview(&cross_metrics())
+            .expect("the preview seat lands");
         let (preview_layout, _) = cross_solve(&with_preview);
         let preview = with_preview.preview().expect("the preview seat is open");
         let shells: std::collections::BTreeSet<SeatId> =

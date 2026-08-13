@@ -543,9 +543,17 @@
 
   /* ── file preview pane (P3-6 step 3) ──
      A third leaf kind. Quick-look + quick-edit, NOT an IDE (DESIGN §7.1.3):
-     text edits in place with an explicit save; editing promotes the pane out of
-     the preview-singleton (VS Code semantics), so the next Enter opens a fresh
-     preview instead of clobbering your dirty buffer. */
+     text edits in place with an explicit save.
+     EDITING DOES NOT PROMOTE (裁决 1, 2026-08-12 — 落地 2026-08-13). This block
+     used to end "editing promotes the pane out of the preview-singleton (VS Code
+     semantics)", which is the ruling DESIGN §7.1.3 overturned on 2026-07-17 when
+     it moved buffer ownership from the pane up to the tab: 「pane 增殖只经显式图钉
+     (编辑不改变 pane 生命周期)」. A dirty buffer cannot be clobbered by the next
+     Enter because the buffer belongs to the tab's pool and survives the switch —
+     which is what makes the promotion unnecessary rather than merely unwanted.
+     The pin in the header is the one and only way a tab grows a second preview
+     pane; see the note above `mkPreviewLeaf` for the same correction on the JS
+     side, and 7858-7873 for the implementation that was already right. */
   .preview-pane .pane-inner { background: var(--termbg); display: flex; flex-direction: column; }
   /* same 30px header as every other pane — the .panehead height rules it; only
      the horizontal padding is ours (user report 2026-07-17: it ran taller) */
@@ -3086,9 +3094,19 @@
   const mkFilesLeaf = (root) => ({ type: "leaf", id: leafSeq++, kind: "files",
                                    files: { root: root || HOME, open: new Set(["/crates", "/docs", "/src"]), sel: null, width: FILES_W } });
   /* ── preview leaf (third leaf kind; DESIGN §7.1.3) ──
-     Quick-look + quick-edit. `transient` is the singleton flag: the one
-     transient preview per tab gets REUSED by the next Enter; the first edit
-     clears it (the pane is "promoted", VS Code-style) and marks dirty. */
+     Quick-look + quick-edit. THE SINGLETON FLAG IS `pvPinned`, AND IT READS THE
+     OTHER WAY (裁决 1, 2026-08-12 — 落地 2026-08-13). This note used to describe
+     a `transient` field: "the one transient preview per tab gets REUSED by the
+     next Enter; the first edit clears it (the pane is 'promoted', VS Code-style)
+     and marks dirty". Two things were wrong with it. There is no `transient`
+     field and there never was — the leaf carries `pvPinned` (below), whose
+     polarity is inverted: an UN-pinned preview is the reuse target, and pinning
+     is what takes a pane out of the rotation. And editing does not promote:
+     DESIGN §7.1.3 overturned that on 2026-07-17 in the same ruling that moved
+     the buffer pool from the pane to the tab, so `pane 增殖只经显式图钉`. The
+     input handler at 7858-7873 has always said so ("dirty marks the BUFFER,
+     nothing else changes hands"); this comment was the last place the old
+     reading survived. */
   const isPreviewLeaf = (l) => !!(l && l.kind === "preview");
   const previewFtype = (name) => {
     const dot = name.lastIndexOf(".");

@@ -128,10 +128,26 @@ impl From<&RecentSeedV1> for Seed {
     }
 }
 
-/// One entry in the vault: a seed and when it was put there.
+/// One entry in the vault: a seed, whatever it was looking at, and when it was
+/// put there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecentEntry {
     pub seed: Seed,
+    /// The files this tab's preview panes were showing, in tree order — 裁决 10
+    /// (2026-08-12).
+    ///
+    /// **The same bug, caught the second time by name.** This module's own
+    /// header records what happened when a leaf kind was left out of the vault:
+    /// a files-only tab came back through the shutdown prompt and could not be
+    /// reached by Ctrl+Shift+T, which is two doors onto one store with one of
+    /// them broken. The session file now brings a preview pane back
+    /// (`bt_persist::TabV1::preview`), so an entry that dropped it would be that
+    /// asymmetry again, in this store, for this reason.
+    ///
+    /// Paths only, and no pins: Recent is a *launcher*, not a layout. It
+    /// restores the places you were — the pool regrows from disk on demand, and
+    /// nobody ever promised a closed tab's pane arrangement back.
+    pub previews: Vec<String>,
     /// Absolute, not relative — "3 分钟前" is computed at the moment it is drawn,
     /// so a vault read back from disk a day later says "a day ago" rather than
     /// repeating whatever it said when it was written.
@@ -146,15 +162,21 @@ pub struct SeedVault {
 }
 
 impl SeedVault {
-    /// Put a seed in, newest first.
+    /// Put a seed in, newest first, with whatever its tab was previewing.
     ///
     /// Re-recording a place you already have **moves it to the front and keeps
     /// one copy** rather than growing a second: the vault is a list of places,
     /// and a place is somewhere you can be more than once (mock-up 4053-4054).
-    pub fn record(&mut self, seed: Seed, at: SystemTime) {
+    /// The newest recording's previews win outright, for the same reason the
+    /// newest timestamp does — the entry describes the last time you were there.
+    ///
+    /// `previews` is a parameter and not an `Option` with a default, so every
+    /// door into the vault has to answer the question. A writer that could stay
+    /// silent about a leaf kind is precisely how the files leaf went missing.
+    pub fn record(&mut self, seed: Seed, previews: Vec<String>, at: SystemTime) {
         let key = seed.recent_key();
         self.entries.retain(|entry| entry.seed.recent_key() != key);
-        self.entries.insert(0, RecentEntry { seed, at });
+        self.entries.insert(0, RecentEntry { seed, previews, at });
         self.entries.truncate(RECENT_CAPACITY);
     }
 
@@ -175,13 +197,18 @@ impl SeedVault {
         self.entries.is_empty()
     }
 
-    /// Draw a seed back out, removing it — mock-up 7366, `state.recent.splice(i, 1)`.
+    /// Draw an entry back out, removing it — mock-up 7366,
+    /// `state.recent.splice(i, 1)`.
     ///
     /// Taking it out is what makes Recent a *launcher* rather than a history: the
     /// entry has become a tab, and leaving a copy behind would offer to open a
     /// place that is already open.
-    pub fn take(&mut self, index: usize) -> Option<Seed> {
-        (index < self.entries.len()).then(|| self.entries.remove(index).seed)
+    ///
+    /// The whole entry rather than its seed: the tab being rebuilt is the seed
+    /// **and** what it was looking at, and a door that handed back only the seed
+    /// is a door that reopens the shell without the page beside it.
+    pub fn take(&mut self, index: usize) -> Option<RecentEntry> {
+        (index < self.entries.len()).then(|| self.entries.remove(index))
     }
 
     /// Rebuild from what was on disk, newest-first order preserved. Entries whose
@@ -195,6 +222,7 @@ impl SeedVault {
                 .filter_map(|entry| {
                     Some(RecentEntry {
                         seed: Seed::from(&entry.seed),
+                        previews: entry.previews.clone(),
                         at: parse_iso8601_utc(&entry.timestamp)?,
                     })
                 })
@@ -211,6 +239,7 @@ impl SeedVault {
                 key: entry.seed.recent_key(),
                 seed: RecentSeedV1::from(&entry.seed),
                 timestamp: format_iso8601_utc(entry.at),
+                previews: entry.previews.clone(),
             })
             .collect()
     }
@@ -454,11 +483,11 @@ mod tests {
     #[test]
     fn two_agents_in_one_folder_under_different_names_stay_two_entries() {
         let mut vault = SeedVault::default();
-        vault.record(term("C:\\repo", Some("claude")), at(0));
-        vault.record(term("C:\\repo", Some("codex")), at(60));
+        vault.record(term("C:\\repo", Some("claude")), Vec::new(), at(0));
+        vault.record(term("C:\\repo", Some("codex")), Vec::new(), at(60));
         assert_eq!(vault.len(), 2, "the name is part of the identity");
 
-        vault.record(term("C:\\repo", Some("claude")), at(120));
+        vault.record(term("C:\\repo", Some("claude")), Vec::new(), at(120));
         assert_eq!(vault.len(), 2, "the same agent is still one entry");
         assert_eq!(vault.entries()[0].seed, term("C:\\repo", Some("claude")));
         assert_eq!(vault.entries()[0].at, at(120), "re-recording restamps it");
@@ -468,7 +497,7 @@ mod tests {
     fn the_vault_holds_eight_and_forgets_from_the_bottom() {
         let mut vault = SeedVault::default();
         for i in 0..12 {
-            vault.record(term(&format!("C:\\p{i}"), None), at(i * 60));
+            vault.record(term(&format!("C:\\p{i}"), None), Vec::new(), at(i * 60));
         }
         assert_eq!(vault.len(), RECENT_CAPACITY);
         assert_eq!(
@@ -488,12 +517,16 @@ mod tests {
     #[test]
     fn drawing_a_seed_out_of_the_vault_removes_it() {
         let mut vault = SeedVault::default();
-        vault.record(term("C:\\a", None), at(0));
-        vault.record(term("C:\\b", None), at(60));
+        vault.record(term("C:\\a", None), Vec::new(), at(0));
+        vault.record(term("C:\\b", None), Vec::new(), at(60));
 
-        assert_eq!(vault.take(0), Some(term("C:\\b", None)), "undo-close = 0");
+        assert_eq!(
+            vault.take(0).map(|entry| entry.seed),
+            Some(term("C:\\b", None)),
+            "undo-close = 0"
+        );
         assert_eq!(vault.len(), 1);
-        assert_eq!(vault.take(5), None, "out of range is not a panic");
+        assert!(vault.take(5).is_none(), "out of range is not a panic");
     }
 
     /// Mock-up 7280-7285.
@@ -513,13 +546,69 @@ mod tests {
         assert_eq!(ago_label(at(200_000), now), "just now", "a backwards clock");
     }
 
+    /// 裁决 10 (2026-08-12) — **a closed tab's preview travels in the vault with
+    /// it**, so undo-close and the restore prompt bring the same tab back.
+    ///
+    /// The red gate is the asymmetry itself: drop `previews` anywhere on the
+    /// path — the recorder, the wire form, the read back — and the page the tab
+    /// was showing survives a shutdown but not a Ctrl+Shift+T, which is exactly
+    /// the shape of the files-leaf bug this module's header records.
+    #[test]
+    fn a_closed_tabs_preview_comes_back_out_of_the_vault_with_it() {
+        let mut vault = SeedVault::default();
+        let pages = vec![
+            r"C:\repo\README.md".to_owned(),
+            r"C:\repo\src\main.rs".to_owned(),
+        ];
+        vault.record(term(r"C:\repo", None), pages.clone(), at(0));
+
+        // Through the wire and back: the paths are on the entry, not on the seed,
+        // and a `to_persisted` that forgot them would still round-trip the seed.
+        let persisted = vault.to_persisted();
+        assert_eq!(persisted[0].previews, pages);
+        let reloaded = SeedVault::from_persisted(&persisted);
+        assert_eq!(reloaded, vault, "a full round trip through the wire form");
+
+        let drawn = reloaded.entries()[0].clone();
+        assert_eq!(drawn.previews, pages, "in tree order, both of them");
+
+        // A tab that was previewing nothing says so, rather than inheriting the
+        // last tab's pages: the field is per entry.
+        vault.record(term(r"C:\other", None), Vec::new(), at(60));
+        assert!(vault.entries()[0].previews.is_empty());
+        assert_eq!(vault.entries()[1].previews, pages);
+    }
+
+    /// Re-recording a place you already have replaces its pages too. The entry
+    /// describes *the last time you were there*, and half-updating it would
+    /// offer to bring back a page you had already closed.
+    #[test]
+    fn the_newest_recording_of_a_place_brings_its_own_pages() {
+        let mut vault = SeedVault::default();
+        vault.record(
+            term(r"C:\repo", None),
+            vec![r"C:\repo\a.md".to_owned()],
+            at(0),
+        );
+        vault.record(
+            term(r"C:\repo", None),
+            vec![r"C:\repo\b.md".to_owned()],
+            at(60),
+        );
+        assert_eq!(vault.len(), 1, "still one place");
+        assert_eq!(
+            vault.entries()[0].previews,
+            vec![r"C:\repo\b.md".to_owned()]
+        );
+    }
+
     /// The absolute stamp is what makes the label honest across a restart: a
     /// vault written yesterday must say "20h ago" today, not "just now".
     #[test]
     fn the_stamp_survives_the_disk_and_the_label_is_computed_fresh() {
         let mut vault = SeedVault::default();
         let written = at(1_780_000_000);
-        vault.record(term("C:\\notes", Some("build")), written);
+        vault.record(term("C:\\notes", Some("build")), Vec::new(), written);
 
         let persisted = vault.to_persisted();
         assert_eq!(persisted.len(), 1);
@@ -556,6 +645,7 @@ mod tests {
                 manual_name: None,
             },
             timestamp: timestamp.to_owned(),
+            previews: Vec::new(),
         };
         let vault = SeedVault::from_persisted(&[
             entry("C:\\a", "not a time"),

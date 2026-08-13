@@ -15,10 +15,11 @@
 use std::path::PathBuf;
 
 use bt_persist::{
-    DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION,
-    SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
-    SessionThemeV1, SessionV1, SettingsV1, TabV1, TermLeafV1, ThemeModeV1, read_session,
-    read_settings, write_session_atomic, write_settings_atomic,
+    DegradationReport, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1,
+    ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
+    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
+    SettingsV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings,
+    write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -134,6 +135,194 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
         String::from_utf8(canonical_bytes()).unwrap(),
         "re-serialized session must match the canonical fixture byte-for-byte"
     );
+}
+
+/// N43 — **the preview leaf and the tab's content section, on the wire.**
+///
+/// The block's red line L1 splits one pane's state across two places on purpose:
+/// `pinned` is *geometry* and rides in the layout tree, while *which file the
+/// pane was showing* and *which buffers the tab had open* are content and ride
+/// in `tab.preview`. A fixture that carried only one of the two would let the
+/// other be dropped silently, which is exactly the failure the split invites —
+/// so both are here, in one document, with a pool entry that no pane is showing
+/// so "the pool is a history, not a list of what is on screen" cannot collapse
+/// into "the pool is the panes" without this failing.
+///
+/// Every field is non-default (`CONVENTIONS.md` §三): light theme, block cursor,
+/// a vertical strip, an icon rail — a preview fixture written in defaults would
+/// pass while the reader dropped four fields on the way past.
+#[test]
+fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section() {
+    let (session, report, degradation) = read_session(&fixture_path("session_v6_preview.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(degradation, DegradationReport::default());
+    assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
+    assert_eq!(session.theme, SessionThemeV1::Light);
+    assert_eq!(session.cursor_style, SessionCursorStyleV1::Block);
+    assert_eq!(session.tab_layout, SessionTabLayoutV1::Vertical);
+    assert_eq!(session.sidebar_mode, SessionSidebarModeV1::Icons);
+
+    let LayoutNodeV1::Split(root) = &session.tabs[0].root else {
+        panic!("tab 0's root is the split the fixture writes");
+    };
+    let LayoutNodeV1::Split(column) = root.children[1].as_ref() else {
+        panic!("the tab's right-hand child is the column of two previews");
+    };
+    // Two preview leaves in one tab is the state the pin exists to create, and
+    // it is the state a "there is one preview per tab" reader would flatten.
+    let pins: Vec<bool> = column
+        .children
+        .iter()
+        .map(|child| match child.as_ref() {
+            LayoutNodeV1::Leaf(LeafNodeV1::Preview(preview)) => preview.pinned,
+            other => panic!("expected a preview leaf, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        pins,
+        vec![true, false],
+        "the pin is per leaf, and it is geometry"
+    );
+
+    let content = session.tabs[0]
+        .preview
+        .as_ref()
+        .expect("the fixture's first tab carries a content section");
+    assert_eq!(
+        content.panes,
+        vec![
+            PreviewPaneV1 {
+                leaf: "leaf-1".to_owned(),
+                cur: Some(r"C:\Users\dev\project\README.md".to_owned()),
+            },
+            PreviewPaneV1 {
+                leaf: "leaf-2".to_owned(),
+                cur: None,
+            },
+        ],
+        "each preview leaf is named by the same positional token `focused_leaf` uses, \
+         and a pane showing nothing says so rather than being left out"
+    );
+    assert_eq!(
+        content.pool,
+        vec![
+            PreviewPoolEntryV1 {
+                path: r"C:\Users\dev\project\README.md".to_owned(),
+                name: "README.md".to_owned(),
+            },
+            PreviewPoolEntryV1 {
+                path: r"C:\Users\dev\project\src\main.rs".to_owned(),
+                name: "main.rs".to_owned(),
+            },
+        ],
+        "the pool is the tab's history: it holds a buffer no pane is showing"
+    );
+    assert_eq!(
+        session.recent[0].previews,
+        vec![r"C:\Users\dev\notes\todo.md".to_owned()],
+        "裁决 10 — a closed tab's preview goes into Recent with it, so undo-close \
+         and the restore prompt are not two doors with one of them broken"
+    );
+
+    // The same fixed-point gate the canonical fixture gets: reading and writing
+    // this document must reproduce it byte for byte.
+    let reserialized = serde_json::to_vec_pretty(&session).expect("SessionV1 always serializes");
+    let expected = std::fs::read(fixture_path("session_v6_preview.json")).unwrap();
+    assert_eq!(
+        String::from_utf8(reserialized).unwrap(),
+        String::from_utf8(expected).unwrap().trim_end().to_owned(),
+        "the preview fixture must be a fixed point of parse-then-serialize"
+    );
+}
+
+/// The other half of "additive": a document written before the content section
+/// existed must read as *no previews*, not as a parse failure and not as an
+/// invented empty pane list.
+#[test]
+fn a_document_written_before_the_content_section_reads_as_no_preview_at_all() {
+    let (session, report, degradation) =
+        read_session(&fixture_path("session_v1_nondefault_canonical.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert!(degradation.is_clean());
+    assert!(
+        session.tabs.iter().all(|tab| tab.preview.is_none()),
+        "no content section on disk is no content section in memory"
+    );
+    assert!(
+        session.recent.iter().all(|entry| entry.previews.is_empty()),
+        "and a Recent entry from before 裁决 10 brings back a tab with no preview"
+    );
+}
+
+/// And the field must not appear on the way back out for a tab that has no
+/// preview: the canonical fixture is a fixed point, and an `Option` that
+/// serialized as `null` would have rewritten every session file on disk.
+#[test]
+fn a_tab_with_no_preview_writes_no_content_section() {
+    let dir =
+        std::env::temp_dir().join(format!("bt-persist-preview-absent-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
+    let session = SessionV1 {
+        tabs: vec![TabV1 {
+            root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: "pwsh".to_owned(),
+                cwd: r"C:\work".to_owned(),
+                manual_name: None,
+            })),
+            pinned: false,
+            focused_leaf: "leaf-0".to_owned(),
+            preview: None,
+        }],
+        ..SessionV1::default()
+    };
+    write_session_atomic(&path, &session).unwrap();
+    let on_disk = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        !on_disk.contains("preview"),
+        "a tab with nothing to say about previews says nothing"
+    );
+    let (loaded, report, _) = read_session(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(loaded, session);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The content section survives the public write/read API, not only the fixture
+/// — including the pane that is showing nothing, which is the one a
+/// `filter_map` over `cur` would quietly drop.
+#[test]
+fn the_content_section_round_trips_through_the_public_session_api() {
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-preview-roundtrip-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
+    let session = SessionV1 {
+        tabs: vec![TabV1 {
+            root: LayoutNodeV1::Leaf(LeafNodeV1::Preview(PreviewLeafV1 { pinned: true })),
+            pinned: false,
+            focused_leaf: "leaf-0".to_owned(),
+            preview: Some(TabPreviewV1 {
+                panes: vec![PreviewPaneV1 {
+                    leaf: "leaf-0".to_owned(),
+                    cur: None,
+                }],
+                pool: vec![PreviewPoolEntryV1 {
+                    path: r"C:\work\notes.md".to_owned(),
+                    name: "notes.md".to_owned(),
+                }],
+            }),
+        }],
+        ..SessionV1::default()
+    };
+    write_session_atomic(&path, &session).unwrap();
+    let (loaded, report, degradation) = read_session(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert!(degradation.is_clean());
+    assert_eq!(loaded, session);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -278,6 +467,7 @@ fn multi_tab_trees_and_active_index_round_trip_together() {
             })),
             pinned: index == 0,
             focused_leaf: "leaf-0".to_owned(),
+            preview: None,
         })
         .collect();
     let session = SessionV1 {

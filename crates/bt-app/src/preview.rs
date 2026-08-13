@@ -1332,10 +1332,28 @@ impl PreviewPool {
             .map(|buffer| buffer.name.as_str())
     }
 
-    /// Forget everything. The gates call it once the user has said the edits may
-    /// go (P123).
+    /// Forget everything. The two gates that take a pool's *home* away call it
+    /// once the user has said the edits may go (P123/P124): closing the last
+    /// preview pane strands the pool, and closing the tab is the pool's owner
+    /// going away.
     pub fn clear(&mut self) {
         self.buffers.clear();
+    }
+
+    /// Forget only what the user just agreed to lose.
+    ///
+    /// **The shut gate's half of [`Self::clear`], and the difference is that a
+    /// shut does not take the pool's home away** — the tab is about to be
+    /// written to `session.json`, and its pool goes with it as the list of files
+    /// the switcher will list on the next launch. Emptying it outright would
+    /// answer "discard my unsaved changes" by also discarding the browsing
+    /// history, which is a second thing the user was never asked about.
+    ///
+    /// It still satisfies what the gate needs of it: the gate raises itself off
+    /// [`Self::dirty_names`], so a pool with no dirty buffer left in it cannot
+    /// ask the question a second time.
+    pub fn discard_dirty(&mut self) {
+        self.buffers.retain(|buffer| !buffer.dirty);
     }
 }
 
@@ -2123,6 +2141,39 @@ mod tests {
         assert_eq!(pool.dirty_names(None).count(), 0);
         pool.clear();
         assert_eq!(pool.len(), 0);
+    }
+
+    /// **A shut discards the edits, not the history** (slice 7).
+    ///
+    /// The shut gate is the one gate whose pool has somewhere to go afterwards:
+    /// the tab is about to be written to `session.json`, and its pool is the
+    /// list of files next launch's switcher will show. `clear()` there answered
+    /// one question by silently deciding a second — measured on the real
+    /// machine, where a shut with one dirty buffer wrote `"pool": []` and a
+    /// three-file history came back empty.
+    ///
+    /// MUTATION: put `clear()` back in `discard_dirty` and the survivors
+    /// assertion goes red; drop the `retain` predicate's `!` and the gate can
+    /// ask its question forever.
+    #[test]
+    fn a_discarded_edit_takes_its_own_buffer_and_leaves_the_history() {
+        let mut pool = PreviewPool::default();
+        for name in ["a.txt", "b.md", "c.rs"] {
+            let path = PathBuf::from(format!(r"C:\w\{name}"));
+            pool.open(path.clone(), name.to_owned(), &[]);
+            pool.get_mut(&path).unwrap().dirty = name == "b.md";
+        }
+        pool.discard_dirty();
+        assert_eq!(
+            pool.buffers().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["a.txt", "c.rs"],
+            "the clean history survives, in its own order"
+        );
+        assert_eq!(
+            pool.dirty_names(None).count(),
+            0,
+            "and the gate has nothing left to ask about, so it cannot re-raise"
+        );
     }
 
     /// ③ The extension table, class by class.

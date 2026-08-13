@@ -3393,6 +3393,7 @@ mod tests {
                 cwd: cwd.to_owned(),
                 manual_name: manual_name.map(str::to_owned),
             },
+            previews: Vec::new(),
             at: at(100_000 - secs_ago),
         }
     }
@@ -3402,6 +3403,7 @@ mod tests {
             seed: Seed::Files {
                 root: root.to_owned(),
             },
+            previews: Vec::new(),
             at: at(100_000 - secs_ago),
         }
     }
@@ -4633,6 +4635,7 @@ mod tests {
                     cwd: "C:\\repo".to_owned(),
                     manual_name: None,
                 },
+                previews: Vec::new(),
                 at: at(100_000),
             },
             term("C:\\work", None, 60),
