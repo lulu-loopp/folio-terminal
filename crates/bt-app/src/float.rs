@@ -1881,7 +1881,7 @@ pub fn build(
         labels,
         sprites,
         opacity: fade.opacity.clamp(0.0, 1.0),
-        body: None,
+        ..OverlayLayer::default()
     }
 }
 

@@ -28,7 +28,7 @@ use bt_persist::ThemeModeV1;
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
-    WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette, rounded_overlay_fill, rounded_overlay_halo,
+    WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette, rounded_overlay_fill, rounded_overlay_shadow,
 };
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
@@ -1710,14 +1710,21 @@ pub(crate) fn push_float_window(
     hairline: [u8; 3],
     hairline_alpha: f32,
 ) {
-    // The wider, fainter ring first, so the two compose into a falloff rather
-    // than a band.
-    for (extent, alpha) in [
-        (spread, shadow_outer_alpha),
-        (spread / 2.0, shadow_inner_alpha),
-    ] {
-        quads.extend(rounded_overlay_halo(frame, radius, extent, shadow, alpha));
-    }
+    // **One soft falloff, not two rings** (user report, 2026-08-13). The two
+    // rings this used to draw — the whole spread at the fainter alpha, half of it
+    // at the darker — are two plateaus of constant alpha, each half the spread
+    // wide, and at a card's 28px that is a pair of concentric squares around the
+    // box rather than a shadow. `rounded_overlay_shadow` samples the curve
+    // instead, in bands a pixel or two wide, anchored on what the old pair
+    // composited to right against the box so nothing got lighter where it was
+    // darkest. Every surface that floats through this door is the same shape now.
+    quads.extend(rounded_overlay_shadow(
+        frame,
+        radius,
+        spread,
+        shadow,
+        bt_render::overlay_shadow_alpha(shadow_inner_alpha, shadow_outer_alpha),
+    ));
     quads.extend(rounded_overlay_fill(
         frame,
         radius,

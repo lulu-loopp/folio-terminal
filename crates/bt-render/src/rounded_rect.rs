@@ -167,6 +167,101 @@ pub(crate) fn rounded_rect_halo_coverage(
     out
 }
 
+/// How many rings a soft shadow is cut into at most.
+///
+/// A cap rather than a fixed count, because the ring thickness that matters is
+/// the *physical* one: at 28px of reach this gives rings a pixel or two thick,
+/// and at twice the DPI — where the reach is 56 physical pixels — it gives rings
+/// two or three physical pixels thick, which is the same fraction of a
+/// millimetre. What it must never do is grow without bound: the corner of a ring
+/// is per-pixel work, so the count is what this shape costs.
+///
+/// Thirty-two rather than the twenty-four that would also stop the banding: at a
+/// float card's 28 pixels of reach, twenty-four bands means eight of them are two
+/// pixels wide, and a two-pixel band steps twice as far down the curve as its
+/// one-pixel neighbours — a stutter in the falloff at the very end where it is
+/// steepest. Above the reach the cap costs nothing, because a ring can never be
+/// thinner than the pixel it is drawn on.
+pub const SHADOW_RINGS: usize = 32;
+
+/// A **soft** drop shadow: the same ring [`rounded_rect_halo_coverage`] draws,
+/// cut into [`SHADOW_RINGS`] concentric bands whose strength falls off with
+/// distance, with each entry's `coverage` already carrying its band's share.
+///
+/// # Why this exists (user report, 2026-08-13: "three concentric squares")
+///
+/// A `box-shadow`'s blur is a gradient, and this pipeline can only draw quads.
+/// The first reading of that was two rings — the whole reach at the fainter
+/// alpha, half the reach at the darker one — on the theory that two steps
+/// compose into a falloff. At a tooltip's 14px of reach they nearly do. At a
+/// floating card's 28 they do not: the two steps are 14 physical pixels wide
+/// each, and a 14px plateau of constant alpha beside another 14px plateau is not
+/// a falloff, it is two rings around a box, which is exactly what was reported.
+///
+/// So the falloff is sampled instead of guessed. Each ring is a pixel or two
+/// wide, and a step that is one pixel wide cannot read as a band however large it
+/// is — banding is a fact about the *width* of a constant region, not about the
+/// size of the step between two of them.
+///
+/// # The curve
+///
+/// `(1 - t)³` over `t = d / extent`, sampled at each ring's own middle. Two
+/// properties earn it, and they are the two a blurred step edge has: it is
+/// steepest right against the box, where a shadow is darkest and changes
+/// fastest, and it meets zero with zero slope at the reach, so the shadow ends
+/// by running out rather than by stopping. A Gaussian's tail has both as well and
+/// costs an `erfc` this crate would have to carry; the cubic is the same shape to
+/// within a few 255ths and is three multiplies.
+pub(crate) fn rounded_rect_shadow_coverage(
+    rect: [f32; 4],
+    radius: f32,
+    extent: f32,
+) -> Vec<CoverageRect> {
+    let extent = extent.round();
+    if extent < 1.0 {
+        return Vec::new();
+    }
+    // Never more rings than there are pixels to give them: a ring thinner than a
+    // pixel is a ring the coverage pass rounds away to nothing.
+    let rings = (extent as usize).clamp(1, SHADOW_RINGS);
+    let mut out = Vec::new();
+    let mut inner = 0.0_f32;
+    for ring in 1..=rings {
+        let outer = (ring as f32 * extent / rings as f32).round();
+        let thickness = outer - inner;
+        if thickness < 1.0 {
+            continue;
+        }
+        // **Sampled at the band's inner edge**, which is what makes the first
+        // band carry the caller's own alpha undiminished. That matters more than
+        // the half-pixel of accuracy a midpoint would buy, because the reach here
+        // is not always a blur: `FLOAT_WINDOW_SHADOW_LOGICAL_PX` is *three*
+        // pixels, a lift rather than a shadow, and a lift whose darkest pixel had
+        // been sampled a sixth of the way down the curve would be a lift that
+        // faded when this function replaced its ring. What the far end pays is a
+        // last band drawn at `(1/rings)³` instead of at nothing — six parts in a
+        // hundred thousand at full ring count, which no 8-bit blend can express.
+        let t = (inner / extent).clamp(0.0, 1.0);
+        let falloff = (1.0 - t).powi(3);
+        let grown = [
+            rect[0] - inner,
+            rect[1] - inner,
+            rect[2] + inner,
+            rect[3] + inner,
+        ];
+        out.extend(
+            rounded_rect_halo_coverage(grown, radius + inner, thickness)
+                .into_iter()
+                .map(|entry| CoverageRect {
+                    rect: entry.rect,
+                    coverage: entry.coverage * falloff,
+                }),
+        );
+        inner = outer;
+    }
+    out
+}
+
 /// One row, `[from, to)` pixel columns: consecutive fully covered pixels merge
 /// into a single rectangle, partial ones stand alone, and empty ones are dropped.
 fn push_row(

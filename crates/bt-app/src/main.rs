@@ -719,6 +719,29 @@ enum PreviewSurface {
     Seat(SeatId),
     /// A preview float — the second tenant of the `.float-win` chassis.
     Float(float::FloatId),
+    /// **The glance card over a file row** ([`file_peek`]) — a third surface,
+    /// and the one the user's 2026-08-13 ruling created: "what the preview on the
+    /// right looks like is what the hover preview looks like, only read-only".
+    ///
+    /// It is a `PreviewSurface` so that sentence is true by construction rather
+    /// than by two renderers agreeing. Everything the card's body is — the ftype
+    /// judgement, the parse, the markdown layout, the table's columns, the diff's
+    /// three inks — is this pipeline's, asked with `Peek` where a pane would ask
+    /// with `Seat`.
+    ///
+    /// Three things make it unlike the other two, and each is a branch you will
+    /// find named below:
+    ///
+    /// * **It is the window's, not a tab's.** There is one pointer, so there is
+    ///   one glance; its view lives on [`Runtime::peek_pane`] beside the card's
+    ///   own state rather than in a tab's `preview_panes` map.
+    /// * **Its buffer may not be in the pool.** A glance at a file nobody opened
+    ///   reads [`Runtime::peek_buffer`], deliberately off the pool so that running
+    ///   the pointer down a list cannot evict the eight buffers you chose (P145).
+    /// * **It is not in [`Runtime::preview_surfaces`].** It cannot be focused,
+    ///   hit, swept, scrolled or typed into — P143's "non-interactive by
+    ///   construction" is that absence, and not a set of `if`s.
+    Peek,
 }
 
 /// Everything **one** preview surface is showing, and how it is being looked at.
@@ -2325,6 +2348,50 @@ fn preview_document_max_scroll(
     }
 }
 
+/// **How tall a parsed document actually is**, in physical pixels, its own
+/// padding included.
+///
+/// [`preview_document_max_scroll`] answers in the units a *pane* wants: a pane is
+/// a fixed box, and the only question it has is how far down it may go. A box
+/// that sizes itself to its content asks the other question — how tall would this
+/// be if nothing cut it — and the glance card is the first thing in this window
+/// to ask it (user ruling, 2026-08-13). Each arm asks the same geometry the
+/// painter lays that body out with, for the one number it has already computed;
+/// nothing here re-measures anything.
+fn preview_document_height(
+    document: &PreviewDocument,
+    body: [f32; 4],
+    scale: f32,
+    advance: f32,
+    rows_height: f32,
+    columns: usize,
+) -> f32 {
+    let mono = |metrics| {
+        seats::preview_mono_geometry(body, metrics, rows_height, columns, advance, [0.0, 0.0])
+            .content_height
+    };
+    match document {
+        PreviewDocument::Empty => 0.0,
+        PreviewDocument::Text { .. } => mono(seats::preview_text_metrics(scale)),
+        PreviewDocument::Diff(_) => mono(seats::preview_diff_metrics(scale)),
+        PreviewDocument::Table { rows, column_cells } => seats::preview_table_geometry(
+            body,
+            column_cells,
+            rows.len(),
+            advance,
+            scale,
+            [0.0, 0.0],
+        )
+        .document_height(),
+        // The same sum `preview_document_max_scroll` takes: the page's two
+        // paddings around the bottom of its last block.
+        PreviewDocument::Markdown { layout, .. } => {
+            seats::preview_markdown_metrics(scale).padding_y * 2.0
+                + layout.last().map_or(0.0, |last| last.top + last.height)
+        }
+    }
+}
+
 /// The read-only degradation, pinned to the foot of the body.
 ///
 /// Pinned rather than appended, because a notice that scrolled with the content
@@ -3500,6 +3567,31 @@ struct Runtime {
     /// tab's POOL buffer when the file is already open, so the glance never lies
     /// about unsaved edits".
     peek_buffer: Option<preview::PreviewBuffer>,
+    /// The glance card's own view of whatever it is reading —
+    /// [`PreviewSurface::Peek`]'s pane.
+    ///
+    /// Beside the buffer rather than in a tab's `preview_panes` for the reason
+    /// the buffer is: there is one pointer, so there is one glance. What it holds
+    /// is a parsed document and the key it was parsed at, which is the whole
+    /// reason the card can be the preview pane's own render without re-parsing a
+    /// markdown file on every frame of a hover.
+    ///
+    /// Nothing that belongs to a *seat* is ever read out of it: the card has no
+    /// scroll (a glance shows the head of a file — see
+    /// [`file_peek::PeekBody::Document`]), no caret and no focus.
+    peek_pane: PreviewPane,
+    /// The glance card's picture, resampled to the box the card draws it in, and
+    /// the question in flight for it.
+    ///
+    /// A second slot beside [`TabState::peek_thumbnail`] rather than a share of
+    /// it: the terminal's inline-image flyout and the file tree's glance are two
+    /// hovers over two different pictures at two different sizes, and one slot
+    /// would have each of them evicting the other's on the way past. They do
+    /// share everything underneath — the path-keyed native decode in
+    /// [`TabState::peek_cache`] and the one resample lane — because that is where
+    /// the expense is.
+    peek_picture: Option<PeekThumbnail>,
+    peek_card_pending: Option<PeekThumbnailTarget>,
     /// The gesture in flight, whatever it is carrying (J111).
     ///
     /// Separate from the presses rather than a further promise state, because
@@ -9387,6 +9479,23 @@ struct FilePeek {
     due: Option<Instant>,
 }
 
+/// What a matured glance is looking at, read off the buffer it found.
+///
+/// The half of the card that costs nothing: a name, a type, a dirty bit and the
+/// row to stand beside. The other half — the document — costs a parse and a
+/// layout, which is why it is asked for separately and only once the shape of the
+/// card has been decided. See [`Runtime::file_peek_layer`].
+struct FilePeekSubject {
+    path: PathBuf,
+    name: String,
+    ftype: preview::PreviewFtype,
+    /// Whether the buffer has refused to be read at all — a network path, a
+    /// binary, a file too large.
+    refused: bool,
+    dirty: bool,
+    row: [f32; 4],
+}
+
 impl TabState {
     /// **K121, re-ruled: letting go of a reorder settles, and settles only.**
     ///
@@ -11468,6 +11577,9 @@ impl Runtime {
             row_press: None,
             file_peek: None,
             peek_buffer: None,
+            peek_pane: PreviewPane::default(),
+            peek_picture: None,
+            peek_card_pending: None,
             drag: None,
             drop_preview: None,
             last_drawn_dock_reveal: None,
@@ -13609,7 +13721,7 @@ impl Runtime {
             labels: rail.labels.clone(),
             sprites: rail.sprites.clone(),
             opacity: opacity.clamp(0.0, 1.0),
-            body: None,
+            ..marks::OverlayLayer::default()
         }]
     }
 
@@ -14945,11 +15057,19 @@ impl Runtime {
 
     /// What this surface is showing, or nothing if it has never shown anything.
     fn preview_pane(&self, surface: PreviewSurface) -> Option<&PreviewPane> {
+        if surface == PreviewSurface::Peek {
+            // The glance is the window's — one pointer, one card — so its view is
+            // not in any tab's map. See [`PreviewSurface::Peek`].
+            return Some(&self.peek_pane);
+        }
         self.preview_tab(surface)?.preview_panes.get(surface)
     }
 
     /// The same, mutably and vivifying — a surface that exists has a view.
     fn preview_pane_mut(&mut self, surface: PreviewSurface) -> &mut PreviewPane {
+        if surface == PreviewSurface::Peek {
+            return &mut self.peek_pane;
+        }
         let index = self.preview_tab_index(surface);
         self.tabs[index].preview_panes.entry(surface)
     }
@@ -14974,7 +15094,19 @@ impl Runtime {
     }
 
     /// The buffer this surface is on, looked up in **its own** tab's one pool.
+    ///
+    /// The glance falls back past the pool: P145 gives it the tab's buffer
+    /// whenever there is one — "so the glance never lies about unsaved edits" —
+    /// and its own off-pool slot when there is not.
     fn preview_buffer_on(&self, surface: PreviewSurface) -> Option<&preview::PreviewBuffer> {
+        if surface == PreviewSurface::Peek {
+            let path = self.peek_pane.buffer.as_deref()?;
+            return self.preview_pool.get(path).or_else(|| {
+                self.peek_buffer
+                    .as_ref()
+                    .filter(|buffer| buffer.path == path)
+            });
+        }
         let tab = self.preview_tab(surface)?;
         tab.preview_pool
             .get(tab.preview_panes.get(surface)?.buffer.as_deref()?)
@@ -15017,7 +15149,9 @@ impl Runtime {
     /// still there, still yours, and showing nothing.
     fn preview_tab(&self, surface: PreviewSurface) -> Option<&TabState> {
         match surface {
-            PreviewSurface::Seat(_) => Some(self),
+            // The glance reads the tab on screen, which is the tab whose rows the
+            // pointer is over — there is nowhere else a file row can be.
+            PreviewSurface::Seat(_) | PreviewSurface::Peek => Some(self),
             PreviewSurface::Float(id) => {
                 let tab = self.float.live(id)?.preview()?.tab;
                 self.tabs.iter().find(|state| state.id == tab)
@@ -15101,6 +15235,11 @@ impl Runtime {
                 // own tab's tree can say whether it is gone.
                 PreviewSurface::Seat(_) => *index == active && !alive.contains(surface),
                 PreviewSurface::Float(_) => !alive.contains(surface),
+                // Unreachable, and that is the point: the glance's view lives on
+                // the window ([`Runtime::peek_pane`]), so no tab's map can be
+                // holding one for the sweep to find. It is retired by the card
+                // coming down, in `hide_file_peek`.
+                PreviewSurface::Peek => false,
             })
             .collect();
         for (index, surface) in dropped {
@@ -15193,6 +15332,11 @@ impl Runtime {
                 seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
             }
             PreviewSurface::Float(id) => self.float_body_rect(id, scale),
+            // The card has no *pane* to be asked about: it is not in the tree and
+            // not in the float host, it is a drawing placed beside a row. The one
+            // caller that needs its box already has it and hands it in — see
+            // [`Self::build_preview_body_in`].
+            PreviewSurface::Peek => None,
         }
     }
 
@@ -17307,6 +17451,21 @@ impl Runtime {
         }
     }
 
+    /// [`preview_document_height`] for the document **this surface** is holding.
+    fn preview_surface_document_height(
+        &self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> f32 {
+        let Some(pane) = self.preview_pane(surface) else {
+            return 0.0;
+        };
+        let advance = pane.mono_advance;
+        let (rows_height, columns) = self.preview_content_extent(surface, scale);
+        preview_document_height(&pane.doc, body, scale, advance, rows_height, columns)
+    }
+
     /// Hand the renderer the body of every preview **seat** this tab has.
     ///
     /// One list rather than one slot, because the content plane is plural: two
@@ -17341,6 +17500,22 @@ impl Runtime {
     fn build_preview_body(&mut self, surface: PreviewSurface) -> Option<bt_render::PreviewBody> {
         let scale = self.renderer.metrics().scale_factor as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
+        self.build_preview_body_in(surface, body)
+    }
+
+    /// The same, in a rectangle the caller already knows.
+    ///
+    /// The split is what the glance card needed. A seat and a float are asked
+    /// where their body is; the card's body is a box the card's own layout
+    /// computed, from a height that depends on how tall this very document turns
+    /// out to be. Handing the rectangle in is what breaks that circle without
+    /// giving the card a second renderer.
+    fn build_preview_body_in(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+    ) -> Option<bt_render::PreviewBody> {
+        let scale = self.renderer.metrics().scale_factor as f32;
         // A picture's own lane draws the pixels; what is left for this surface
         // is the sentence under them (mock-up 4955).
         if self
@@ -17436,7 +17611,17 @@ impl Runtime {
         //
         // A truncated buffer is read-only and has no save to report, so the first
         // two can never both be owed.
-        if let Some(notice) = self.preview_foot_notice(surface) {
+        //
+        // **The glance card is owed none of them.** Its foot is one fixed
+        // sentence — "Enter / double-click opens the preview pane" (P147) — and
+        // that sentence is the card's only exit; a notice that took the strip
+        // would have replaced the way out with a warning about a file you are
+        // merely looking at. The card cannot be saved into either, so only the
+        // truncation bar could ever have been owed, and the truncation is a fact
+        // the pane it opens will state.
+        if surface == PreviewSurface::Peek {
+            // Fall through to the links below with no strip taken.
+        } else if let Some(notice) = self.preview_foot_notice(surface) {
             let bar = self
                 .preview_surface_pane_rect(surface, scale)
                 .unwrap_or(body);
@@ -18806,6 +18991,15 @@ impl Runtime {
         if let Some(peek) = self.file_peek.as_mut() {
             peek.due = None;
         }
+        // The card's surface is pointed at the file here, once, rather than on
+        // every frame that draws it: [`PreviewSurface::Peek`]'s pane is what
+        // holds the parsed document, and re-aiming it per frame would be a
+        // document key that changed per frame and a markdown file re-parsed at
+        // sixty hertz.
+        self.peek_pane = PreviewPane {
+            buffer: Some(path.clone()),
+            ..PreviewPane::default()
+        };
         if self.preview_pool.get(&path).is_some() {
             self.peek_buffer = None;
             return true;
@@ -18842,17 +19036,22 @@ impl Runtime {
             .is_some_and(|peek| peek.due.is_none());
         self.file_peek = None;
         self.peek_buffer = None;
+        // And the parsed document with it: a card that is down is holding a
+        // markdown layout for a file nobody is looking at.
+        self.peek_pane = PreviewPane::default();
+        self.peek_picture = None;
         showing
     }
 
-    /// What the card is saying, or `None` while the intent is still running.
+    /// **What the card is about**, or `None` while the intent is still running —
+    /// everything that can be read off the buffer without laying anything out.
     ///
-    /// The body is derived here, on the frame that draws it, rather than stored
-    /// when the peek was armed: a head read that lands two frames later has to
-    /// reach a card that is already on screen, and a buffer being edited in a
-    /// pane behind the card has to reach it too. Both are the same fact — the
-    /// glance is a *view* of a buffer, never a copy of one.
-    fn file_peek_content(&self) -> Option<(file_peek::PeekContent, [f32; 4])> {
+    /// It is derived on the frame that draws it, rather than stored when the peek
+    /// was armed: a head read that lands two frames later has to reach a card that
+    /// is already on screen, and a buffer being edited in a pane behind the card
+    /// has to reach it too. Both are the same fact — the glance is a *view* of a
+    /// buffer, never a copy of one.
+    fn file_peek_subject(&self) -> Option<FilePeekSubject> {
         let peek = self.file_peek.as_ref()?;
         if peek.due.is_some() {
             return None;
@@ -18863,41 +19062,102 @@ impl Runtime {
             .preview_pool
             .get(&peek.path)
             .or(self.peek_buffer.as_ref())?;
-        let ftype = preview::preview_ftype(&peek.name);
-        let body = match ftype {
-            preview::PreviewFtype::Image => file_peek::PeekBody::Image,
-            preview::PreviewFtype::Unknown => file_peek::PeekBody::Refused,
-            _ => match buffer.refusal() {
-                // A network path or a type this window will not read says so in
-                // the card's own one line, exactly as the preview pane's unknown
-                // card does — the refusal is the preview's judgement, borrowed.
-                Some(_) => file_peek::PeekBody::Refused,
-                None => {
-                    let content = buffer.content.as_deref().unwrap_or_default();
-                    let mut lines: Vec<String> = content
-                        .lines()
-                        .take(file_peek::PEEK_BODY_LINES)
-                        .map(preview::expand_tabs)
-                        .collect();
-                    // "…" when there was more, which is the mock-up's own tail
-                    // (6410) and the only thing the card says about the rest of
-                    // the file.
-                    if content.lines().nth(file_peek::PEEK_BODY_LINES).is_some() {
-                        lines.push("…".to_owned());
-                    }
-                    file_peek::PeekBody::Lines(lines)
-                }
-            },
+        Some(FilePeekSubject {
+            path: peek.path.clone(),
+            name: peek.name.clone(),
+            ftype: preview::preview_ftype(&peek.name),
+            // A network path or a type this window will not read says so in the
+            // card's own one line, exactly as the preview pane's unknown card
+            // does — the refusal is the preview's judgement, borrowed.
+            refused: buffer.refusal().is_some(),
+            dirty: buffer.dirty,
+            row: peek.rect,
+        })
+    }
+
+    /// **The card's picture**: what shape to reserve for it, and the pixels if
+    /// they have arrived.
+    ///
+    /// It rides the machinery the terminal's own image hover already owns — the
+    /// path-keyed native decode in [`TabState::peek_cache`] and the one resample
+    /// lane behind it — because a picture the pointer paused over is the same
+    /// question whichever surface it was paused on, and a second decoder would be
+    /// a second answer to it. What is the card's own is the box: the fit is
+    /// against [`file_peek::PEEK_IMAGE_W_LOGICAL_PX`]'s frame, not against a
+    /// pane's 86%.
+    ///
+    /// Asking is the *frame's* job here rather than the hover's, and that is not
+    /// laziness: the card is rebuilt whenever the chrome is, the cache answers in
+    /// one lookup once it is warm, and the two `pending` guards below mean a
+    /// question already in flight is never asked twice.
+    fn file_peek_picture(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
+        let empty = file_peek::PeekBody::Image {
+            width: 0.0,
+            height: 0.0,
         };
-        Some((
-            file_peek::PeekContent {
-                name: peek.name.clone(),
-                ftype: ftype.label().to_owned(),
-                dirty: buffer.dirty,
-                body,
-            },
-            peek.rect,
-        ))
+        let key = normalized_local_image_path_key(path);
+        let (content_key, rgba, native_width, native_height) = match self.peek_cache.get(&key) {
+            Some(PeekCacheEntry::Ready {
+                key,
+                rgba,
+                width_px,
+                height_px,
+            }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
+            // A decode in flight, or one that failed: the card shows the ground
+            // and no picture. There is no "loading" word here for the same reason
+            // there is none in the document — see [`file_peek::PeekBody`].
+            Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed) => return empty,
+            None => {
+                if self.math_worker_running
+                    && self
+                        .math_worker
+                        .tasks
+                        .send(MathWorkerRequest::PeekImage {
+                            leaf: self.focused_leaf_id(),
+                            path: path.to_owned(),
+                        })
+                        .is_ok()
+                {
+                    self.peek_cache.insert(key, PeekCacheEntry::Pending);
+                }
+                return empty;
+            }
+        };
+        // The frame the mock-up gives the picture, in whole physical pixels.
+        let fit_width = ((file_peek::PEEK_IMAGE_W_LOGICAL_PX * scale).round() as u32).max(1);
+        let fit_height = ((file_peek::PEEK_IMAGE_H_LOGICAL_PX * scale).round() as u32).max(1);
+        let Some((display_width, display_height)) =
+            bt_render::preview_image_extent(fit_width, fit_height, native_width, native_height)
+        else {
+            return empty;
+        };
+        let fitted = file_peek::PeekBody::Image {
+            width: display_width as f32,
+            height: display_height as f32,
+        };
+        let target: PeekThumbnailTarget = (content_key, display_width, display_height);
+        if self
+            .peek_picture
+            .as_ref()
+            .is_some_and(|picture| picture.matches(&target))
+        {
+            return fitted;
+        }
+        if self.peek_card_pending.as_ref() == Some(&target) || !self.math_worker_running {
+            return empty;
+        }
+        if self
+            .math_worker
+            .scale_tasks
+            .send(ScaleWorkerRequest::Peek {
+                leaf: self.focused_leaf_id(),
+                task: peek_scale_task(&target, rgba, native_width, native_height),
+            })
+            .is_ok()
+        {
+            self.peek_card_pending = Some(target);
+        }
+        empty
     }
 
     /// The 350ms is up — put the card on screen (P145).
@@ -18912,11 +19172,47 @@ impl Runtime {
     }
 
     /// The card's layer, or nothing when no glance is up.
+    ///
+    /// # The order, and why it is this one
+    ///
+    /// The card shrink-wraps its body and the body is a document, so *how tall
+    /// the card is* depends on *how tall the document came out* — and how tall a
+    /// document comes out depends on how wide it was laid out, which is the one
+    /// thing about the card that is fixed. So: lay the document out at the card's
+    /// width in a box as tall as the card could ever be, ask what height it
+    /// wanted, size the card, place it, and only then build the body into the box
+    /// the placement produced. The second build re-uses the first's parse — the
+    /// document's key is its content and its *width*, and the width never changed
+    /// — so the two passes cost one.
     fn file_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
-        let Some((content, row)) = self.file_peek_content() else {
+        let Some(subject) = self.file_peek_subject() else {
             return Vec::new();
         };
         let scale = self.renderer.metrics().scale_factor as f32;
+        let body_kind = match subject.ftype {
+            preview::PreviewFtype::Image => self.file_peek_picture(&subject.path, scale),
+            preview::PreviewFtype::Unknown => file_peek::PeekBody::Refused,
+            _ if subject.refused => file_peek::PeekBody::Refused,
+            _ => {
+                let probe = [
+                    0.0,
+                    0.0,
+                    file_peek::body_width(scale),
+                    file_peek::body_max_height(scale),
+                ];
+                self.rebuild_preview_document(PreviewSurface::Peek, probe, scale);
+                file_peek::PeekBody::Document(
+                    self.preview_surface_document_height(PreviewSurface::Peek, probe, scale)
+                        .min(probe[3]),
+                )
+            }
+        };
+        let content = file_peek::PeekContent {
+            name: subject.name,
+            ftype: subject.ftype.label().to_owned(),
+            dirty: subject.dirty,
+            body: body_kind,
+        };
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the tip's and the ghost's do.
@@ -18928,18 +19224,35 @@ impl Runtime {
             .measure_chrome_text(&content.ftype, file_peek::PEEK_TYPE_FONT_LOGICAL_PX * scale);
         let layout = file_peek::layout(
             &content,
-            row,
+            subject.row,
             (width as f32, height as f32),
             name_width,
             ftype_width,
             scale,
         );
-        vec![file_peek::build(
+        let picture = self
+            .peek_picture
+            .as_ref()
+            .map(|picture| file_peek::PeekPicture {
+                key: &picture.key,
+                rgba: &picture.rgba,
+                width_px: picture.width_px,
+                height_px: picture.height_px,
+            });
+        let mut layer = file_peek::build(
             &layout,
             &content,
+            picture,
             &bt_render::chrome_palette(),
             scale,
-        )]
+        );
+        if matches!(content.body, file_peek::PeekBody::Document(_)) {
+            // The same channel a preview float's document rides, for the same
+            // reason: the body has to be drawn *above* the card's own face, and
+            // the seats' document lane is a whole pass below the overlays.
+            layer.body = self.build_preview_body_in(PreviewSurface::Peek, layout.body);
+        }
+        vec![layer]
     }
 
     /// How wide each files head's name is drawn (B15).
@@ -23184,6 +23497,18 @@ impl Runtime {
             self.refresh_chrome();
             self.present_chrome_change()?;
         }
+        // A glance card standing over this very file has been drawing an empty
+        // ground while the decode was out. Nothing else will move the pointer to
+        // rebuild the chrome, so the frame is owed here — and the rebuild is what
+        // asks for the resample, which is the next step of the same errand.
+        if self
+            .file_peek
+            .as_ref()
+            .is_some_and(|peek| normalized_local_image_path_key(&peek.path) == cache_key)
+            && self.refresh_overlay()
+        {
+            self.present_chrome_change()?;
+        }
         Ok(())
     }
 
@@ -23196,6 +23521,25 @@ impl Runtime {
             scaled.width_px,
             scaled.height_px,
         );
+        // **Two hovers ask down this one lane.** The terminal's inline-image
+        // flyout is one; the file tree's glance card is the other, and it asks
+        // here rather than through a fourth worker verb because the question is
+        // identical — one content key at one display size — and the answer is the
+        // same pixels. Which of them asked is the target tuple, which each of
+        // them recorded before sending. The card is checked first and returns:
+        // on the day both want the same picture at the same size the flyout will
+        // simply find its slot cold and ask again, which costs one resample of an
+        // image already decoded.
+        if self.peek_card_pending.as_ref() == Some(&delivered) {
+            self.peek_card_pending = None;
+            self.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
+            // The card is chrome, and a picture that lands while it is up owes
+            // the frame that shows it.
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         if self.peek_thumbnail_pending.as_ref() == Some(&delivered) {
             self.peek_thumbnail_pending = None;
         }
@@ -41072,6 +41416,161 @@ mod tests {
     /// as prose would be a paragraph the width of a table. Both are refuted here
     /// by construction, and stay refuted if someone edits the document.
     ///
+    /// PIN — **the glance card's document is the preview pane's document**, kind
+    /// for kind and shape for shape (user ruling, 2026-08-13).
+    ///
+    /// The card asks [`preview::preview_view`] which body a file is, exactly as a
+    /// pane does, and then goes down the same builders. So the claim to pin is
+    /// that those two steps, run at the card's own width, produce the pane's own
+    /// shapes: a csv is a *table* — cells with a heading band and a grid — and a
+    /// patch is three inks with bands under two of them. Neither is a list of
+    /// lines, which is what the card drew before the ruling and what a regression
+    /// would silently go back to.
+    ///
+    /// The height each one comes out at is asserted beside it, because that is
+    /// the number the card is sized by: a two-row table must be a shorter card
+    /// than a twenty-row one, or "the card shrink-wraps its body" has stopped
+    /// being true the moment the body stopped being lines.
+    ///
+    /// MUTATION: give the card a `PreviewView::Text` document for every file (the
+    /// plain-text body this replaced) — the table assertions lose their grid and
+    /// their heading band, and the diff's two tints collapse to none.
+    #[test]
+    fn the_glance_cards_document_is_the_panes_own_table_and_its_own_three_inks() {
+        let scale = 1.0_f32;
+        let palette = bt_render::chrome_palette();
+        let advance = 7.0_f32;
+        let body = [
+            0.0,
+            0.0,
+            file_peek::body_width(scale),
+            file_peek::body_max_height(scale),
+        ];
+
+        // ① A csv is a table on both surfaces, because one predicate answers for
+        //    both.
+        assert_eq!(
+            preview::preview_view("rows.csv", preview::preview_ftype("rows.csv"), false),
+            preview::PreviewView::Table
+        );
+        let csv = "name,size\nalpha,10\nbeta,20\n";
+        let rows = preview::csv_rows(csv);
+        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let column_cells: Vec<usize> = (0..columns)
+            .map(|column| {
+                rows.iter()
+                    .filter_map(|row| row.get(column))
+                    .map(|cell| bt_unicode::text_width(cell))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let table = PreviewDocument::Table {
+            rows: rows.clone(),
+            column_cells: column_cells.clone(),
+        };
+        let geometry = seats::preview_table_geometry(
+            body,
+            &column_cells,
+            rows.len(),
+            advance,
+            scale,
+            [0.0, 0.0],
+        );
+        let drawn = build_preview_table_body(&geometry, &rows, &palette);
+        assert_eq!(
+            drawn.paragraphs.len(),
+            rows.len() * columns,
+            "one paragraph per cell — a table, not three lines of commas"
+        );
+        assert!(
+            drawn
+                .paragraphs
+                .iter()
+                .any(|cell| cell.runs.iter().any(|run| run.text == "alpha")),
+            "and the cells hold the file's own words"
+        );
+        assert!(
+            drawn.quads.len() > rows.len(),
+            "with a grid under them, not one band per row"
+        );
+
+        // ② A patch is three inks, and two of them stand on bands.
+        assert_eq!(
+            preview::preview_view("fix.diff", preview::preview_ftype("fix.diff"), false),
+            preview::PreviewView::Diff
+        );
+        let patch = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n context\n-gone\n+here\n";
+        let metrics = seats::preview_diff_metrics(scale);
+        let margin = (seats::PREVIEW_DIFF_HUNK_MARGIN_LOGICAL_PX * scale).round();
+        let mut top = 0.0_f32;
+        let diff_rows: Vec<DiffRow> = patch
+            .lines()
+            .map(|line| {
+                let kind = preview::diff_line_kind(line);
+                if kind == preview::DiffLineKind::Hunk {
+                    top += margin;
+                }
+                let row = DiffRow {
+                    text: preview::expand_tabs(line),
+                    kind,
+                    top,
+                };
+                top += metrics.line_height;
+                row
+            })
+            .collect();
+        let diff = PreviewDocument::Diff(diff_rows.clone());
+        let rows_height = diff_rows
+            .last()
+            .map_or(0.0, |row| row.top + metrics.line_height);
+        let drawn = build_preview_diff_body(
+            &seats::preview_mono_geometry(body, metrics, rows_height, 40, advance, [0.0, 0.0]),
+            &diff_rows,
+            &palette,
+        );
+        let inks: std::collections::BTreeSet<[u8; 3]> = drawn
+            .paragraphs
+            .iter()
+            .flat_map(|line| line.runs.iter().map(|run| run.color))
+            .collect();
+        assert!(
+            inks.len() >= 3,
+            "an added line, a removed one and the context around them are three \
+             different inks, saw {inks:?}"
+        );
+        assert_eq!(
+            drawn.quads.len(),
+            2,
+            "and exactly the added and the removed lines stand on a band"
+        );
+
+        // ③ Both are sized by the same question the card asks, and the answer
+        //    grows with the file.
+        let height = |document: &PreviewDocument, rows_height| {
+            preview_document_height(document, body, scale, advance, rows_height, 40)
+        };
+        let table_height = height(&table, 0.0);
+        let diff_height = height(&diff, rows_height);
+        assert!(
+            table_height > 0.0 && diff_height > 0.0,
+            "a document with content is a body with height"
+        );
+        let taller = PreviewDocument::Table {
+            rows: rows.iter().cycle().take(rows.len() * 4).cloned().collect(),
+            column_cells,
+        };
+        assert!(
+            height(&taller, 0.0) > table_height,
+            "and a longer table is a taller card"
+        );
+        assert_eq!(
+            preview_document_height(&PreviewDocument::Empty, body, scale, advance, 0.0, 0),
+            0.0,
+            "a file whose head has not landed yet asks for no room at all"
+        );
+    }
+
     /// MUTATION: make the fence scanner require a *bare* ```` ``` ```` to close
     /// (`lines[index] == "```"`) and the largest-block assertion goes red, which
     /// is the swallowing hypothesis in its real form.

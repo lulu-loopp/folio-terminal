@@ -557,6 +557,24 @@ pub struct ChromePalette {
     pub float_pinned_shadow_inner_alpha: u8,
     /// Half the inner one, same falloff rule as every other floating surface's.
     pub float_pinned_shadow_outer_alpha: u8,
+    /// The file glance card's own lift (`.file-peek { box-shadow: 0 10px 28px
+    /// rgba(0,0,0,.18) }`, mock-up 1785; `.5` on dark, line 1788).
+    ///
+    /// A seventh pair, and it is the card's own declaration rather than the
+    /// tooltip's, which is what the card borrowed until 2026-08-13. The two are
+    /// nearly two-to-one apart on light (.18 against .1): a tooltip is a strip of
+    /// words that barely leaves the surface, and the glance is a 300px document
+    /// standing over a file tree. Borrowing the tip's numbers left it lying flat
+    /// against the rows it was supposed to be hovering above.
+    ///
+    /// The dark declaration's 32px of reach is not carried — the card asks for 28
+    /// on both themes. The curve meets zero with zero slope at the reach, so four
+    /// more pixels of a tail that is already under one 255th changes nothing that
+    /// can be drawn; the alpha is the whole of the difference and the alpha is
+    /// here.
+    pub peek_card_shadow_inner_alpha: u8,
+    /// Half the inner one, same falloff rule as every other floating surface's.
+    pub peek_card_shadow_outer_alpha: u8,
     /// A modal dialog's face — `--win`. Three surfaces have to be told apart here
     /// and the mock-up names all three: `--termbg` is what a terminal shows,
     /// `--menu` is what floats over it, and `--win` is the window's own plane,
@@ -888,6 +906,9 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     float_shadow_outer_alpha: 64,
     float_pinned_shadow_inner_alpha: 148,
     float_pinned_shadow_outer_alpha: 74,
+    // `.5` black — the glance card's dark override at mock-up 1788.
+    peek_card_shadow_inner_alpha: 128,
+    peek_card_shadow_outer_alpha: 64,
     dialog_surface: [0x20, 0x20, 0x20],
     dialog_title_text: [0xe2, 0xe2, 0xe2],
     dialog_secondary_text: [0x9b, 0x9b, 0x9b],
@@ -1064,6 +1085,9 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     float_shadow_outer_alpha: 26,
     float_pinned_shadow_inner_alpha: 61,
     float_pinned_shadow_outer_alpha: 31,
+    // `.18` black — the glance card's base declaration at mock-up 1785.
+    peek_card_shadow_inner_alpha: 46,
+    peek_card_shadow_outer_alpha: 23,
     dialog_surface: [0xff, 0xff, 0xff],
     dialog_title_text: [0x37, 0x35, 0x2f],
     dialog_secondary_text: [0x7d, 0x7c, 0x78],

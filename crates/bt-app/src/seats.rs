@@ -9986,6 +9986,18 @@ pub struct PreviewTableGeometry {
 }
 
 impl PreviewTableGeometry {
+    /// How tall the whole table is, **its outer padding included** — the number
+    /// the scroller is clamped against, and the one a box that sizes itself to
+    /// its content asks for.
+    ///
+    /// `content_height` is the rows alone, because that is what the cell
+    /// arithmetic produces; the padding is recovered from where the first row was
+    /// put, which is the only place it is recorded.
+    #[must_use]
+    pub fn document_height(&self) -> f32 {
+        self.content_height + (self.top - self.viewport[1]) * 2.0
+    }
+
     /// The outer box of one cell, borders included.
     pub fn cell_rect(&self, row: usize, column: usize) -> [f32; 4] {
         let x: f32 =
@@ -10524,8 +10536,7 @@ pub(crate) fn build_drag_ghost(
             clip: None,
         }],
         sprites: vec![ChromeSprite::new(mark, layout.mark, mark_color)],
-        opacity: 1.0,
-        body: None,
+        ..crate::marks::OverlayLayer::default()
     }
 }
 
@@ -19707,9 +19718,16 @@ mod tests {
             .filter(|quad| quad.color == palette.menu_shadow)
             .map(|quad| quad.alpha)
             .fold(0.0_f32, f32::max);
+        // The darkest pixel of the lift is the pair composited — what the two
+        // rings this used to be drawn as put right against the box, and what
+        // `rounded_overlay_shadow`'s first band still puts there.
+        let own = bt_render::overlay_shadow_alpha(
+            f32::from(palette.drag_ghost_shadow_inner_alpha) / 255.0,
+            f32::from(palette.drag_ghost_shadow_outer_alpha) / 255.0,
+        );
         assert!(
-            (strongest - f32::from(palette.drag_ghost_shadow_inner_alpha) / 255.0).abs() < 0.002,
-            "the ghost casts its own lift, got {strongest}"
+            (strongest - own).abs() < 0.002,
+            "the ghost casts its own lift, got {strongest} against {own}"
         );
         // And the pair itself is `.25` on both themes — the assertion above pins
         // only that `build_drag_ghost` reaches for the right field, which stays

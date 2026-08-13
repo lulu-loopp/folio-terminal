@@ -34,7 +34,9 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
-use rounded_rect::{rounded_rect_coverage, rounded_rect_halo_coverage};
+use rounded_rect::{
+    rounded_rect_coverage, rounded_rect_halo_coverage, rounded_rect_shadow_coverage,
+};
 pub use theme::{
     CURSOR_BAR_WIDTH_LOGICAL_PX, ChromePalette, CursorStyle, DARK_CHROME, DEFAULT_BACKGROUND_RGB,
     DOCK_DASH_RATIO, DOCK_PREVIEW_BORDER_LOGICAL_PX, DOCK_PREVIEW_FILL_ALPHA,
@@ -1247,23 +1249,20 @@ fn peek_box_fills(layout: &PeekBoxLayout, palette: ChromePalette, scale: f32) ->
             alpha: entry.coverage * alpha,
         })
     };
-    // The lift: two concentric rings around the box — never under it, because an
-    // outer shadow is clipped out of the border box it lifts — the wider and
-    // fainter one first, so the two compose into a falloff rather than a band.
+    // The lift: one soft falloff around the box — never under it, because an
+    // outer shadow is clipped out of the border box it lifts. It was two rings
+    // until 2026-08-13; see `rounded_rect_shadow_coverage` for why two steps
+    // 14 pixels wide read as two rings rather than as a shadow.
     let spread = FLOAT_WINDOW_SHADOW_LOGICAL_PX * scale;
-    let mut fills: Vec<PeekBoxFill> = [
-        (spread, palette.menu_shadow_outer_alpha),
-        (spread / 2.0, palette.menu_shadow_inner_alpha),
-    ]
-    .into_iter()
-    .flat_map(|(extent, shadow_alpha)| {
-        paint(
-            PeekBoxLayer::Lift,
-            rounded_rect_halo_coverage(layout.frame, radius, extent),
-            palette.menu_shadow,
-            alpha(shadow_alpha),
-        )
-    })
+    let mut fills: Vec<PeekBoxFill> = paint(
+        PeekBoxLayer::Lift,
+        rounded_rect_shadow_coverage(layout.frame, radius, spread),
+        palette.menu_shadow,
+        overlay_shadow_alpha(
+            alpha(palette.menu_shadow_inner_alpha),
+            alpha(palette.menu_shadow_outer_alpha),
+        ),
+    )
     .collect();
     fills.extend(paint(
         PeekBoxLayer::Hairline,
@@ -2528,6 +2527,52 @@ pub fn rounded_overlay_halo(
             alpha: entry.coverage * alpha,
         })
         .collect()
+}
+
+/// How many bands [`rounded_overlay_shadow`] cuts its falloff into, at most —
+/// see [`rounded_rect::SHADOW_RINGS`].
+pub const OVERLAY_SHADOW_RINGS: usize = rounded_rect::SHADOW_RINGS;
+
+/// **A floating surface's lift**: the same ring as [`rounded_overlay_halo`], cut
+/// into concentric bands a pixel or two wide whose strength falls off with
+/// distance — one soft shadow rather than a set of rings around a box.
+///
+/// `alpha` is the strength immediately against the box; the curve takes it to
+/// zero at `extent_px`. See [`rounded_rect::rounded_rect_shadow_coverage`] for
+/// the falloff and for the report that asked for it.
+///
+/// [`rounded_overlay_halo`] is deliberately left as the exact, uniform ring it
+/// is: its other caller strokes an outline with it, and an outline that faded
+/// towards its outer edge would be a bug rather than a softness.
+#[must_use]
+pub fn rounded_overlay_shadow(
+    rect: [f32; 4],
+    radius_px: f32,
+    extent_px: f32,
+    color: [u8; 3],
+    alpha: f32,
+) -> Vec<OverlayQuad> {
+    rounded_rect_shadow_coverage(rect, radius_px, extent_px)
+        .into_iter()
+        .map(|entry| OverlayQuad {
+            rect: entry.rect,
+            color,
+            alpha: entry.coverage * alpha,
+        })
+        .collect()
+}
+
+/// What two rings at the palette's inner and outer alphas composited to
+/// immediately against the box — the one number the soft falloff is anchored on.
+///
+/// The palette carries a *pair* per floating surface because that is the shape
+/// the lift used to be drawn in. The pair is kept, and this is the sentence that
+/// reads it: whatever the old two rings put right up against the box, the new
+/// curve starts at, so no surface's shadow got lighter where it is darkest. Every
+/// other distance is the curve's own answer.
+#[must_use]
+pub fn overlay_shadow_alpha(inner: f32, outer: f32) -> f32 {
+    inner + outer - inner * outer
 }
 
 /// Identity is `key` plus placement. The bytes are a function of the key (that is
@@ -11892,6 +11937,100 @@ mod tests {
         assert!(halo.iter().any(|quad| quad.rect[1] >= frame[3]), "below");
         assert!(halo.iter().any(|quad| quad.rect[2] <= frame[0]), "left");
         assert!(halo.iter().any(|quad| quad.rect[0] >= frame[2]), "right");
+    }
+
+    /// PIN — **a floating surface's lift is one soft shadow, not a set of rings**
+    /// (user report + screenshot, 2026-08-13: three concentric squares around the
+    /// glance card).
+    ///
+    /// The report is about a *shape*, and this is that shape stated as numbers.
+    /// Walk one pixel at a time away from the box and read the alpha:
+    ///
+    /// * it never goes back up — a shadow that brightened outward would be a ring;
+    /// * no two neighbouring pixels differ by more than [`MAX_STEP`], so nothing
+    ///   in the falloff is a cliff;
+    /// * **no run of one alpha is wider than one band**, which is the assertion
+    ///   the report actually asked for: a visible ring *is* a plateau, and at 28px
+    ///   of reach the old two-ring lift had two of them fourteen pixels wide;
+    /// * it starts at the caller's own alpha and has run out by the reach.
+    ///
+    /// Mutation: put the two rings back —
+    /// `halo(rect, radius, extent, .., a) ++ halo(rect, radius, extent / 2, .., a)`
+    /// — and the plateau assertion fails at the first sample (a run 14 pixels
+    /// wide against a band of 2), with the step assertion failing beside it where
+    /// the outer ring stops.
+    #[test]
+    fn a_floating_surfaces_lift_falls_off_instead_of_standing_in_rings() {
+        /// The largest alpha two neighbouring pixels of the falloff may differ by.
+        /// A shadow is steepest right against the box — that is what a blurred
+        /// step edge does — so this is not tight; it is the bound that separates
+        /// "steep" from "a ring ending".
+        const MAX_STEP: f32 = 0.08;
+        let frame = [200.0, 100.0, 500.0, 364.0];
+        let (radius, extent, alpha) = (8.0_f32, 28.0_f32, 0.5_f32);
+        let shadow = rounded_overlay_shadow(frame, radius, extent, [0, 0, 0], alpha);
+        assert!(!shadow.is_empty());
+        for quad in &shadow {
+            let overlaps = quad.rect[0] < frame[2] - radius
+                && quad.rect[2] > frame[0] + radius
+                && quad.rect[1] < frame[3] - radius
+                && quad.rect[3] > frame[1] + radius;
+            assert!(
+                !overlaps,
+                "the lift is still not drawn under its box: {quad:?}"
+            );
+        }
+
+        // A scanline through the box's own middle, walking left out of it: the
+        // straight flank of every band, one sample per physical pixel.
+        let middle = (frame[1] + frame[3]) / 2.0;
+        let at = |x: f32| -> f32 {
+            shadow
+                .iter()
+                .filter(|quad| {
+                    quad.rect[0] <= x
+                        && x < quad.rect[2]
+                        && quad.rect[1] <= middle
+                        && middle < quad.rect[3]
+                })
+                .map(|quad| quad.alpha)
+                .sum()
+        };
+        let samples: Vec<f32> = (0..extent as i32)
+            .map(|step| at(frame[0] - 1.0 - step as f32))
+            .collect();
+
+        assert!(
+            (samples[0] - alpha).abs() <= f32::EPSILON,
+            "the shadow starts at exactly the strength the caller asked for: {}",
+            samples[0]
+        );
+        let band = (extent / OVERLAY_SHADOW_RINGS as f32).ceil() as usize;
+        let mut run = 1_usize;
+        for pair in samples.windows(2) {
+            let (near, far) = (pair[0], pair[1]);
+            assert!(
+                far <= near + f32::EPSILON,
+                "the falloff never brightens outward: {samples:?}"
+            );
+            assert!(
+                near - far <= MAX_STEP,
+                "no cliff in the falloff: {near} → {far} in {samples:?}"
+            );
+            if (near - far).abs() <= f32::EPSILON {
+                run += 1;
+                assert!(
+                    run <= band,
+                    "no plateau wider than one band ({band}px): {samples:?}"
+                );
+            } else {
+                run = 1;
+            }
+        }
+        assert!(
+            *samples.last().expect("the reach is sampled") <= MAX_STEP,
+            "and it has run out by the reach: {samples:?}"
+        );
     }
 
     /// M136: `.tip { opacity: 0; transition: opacity .09s ease }` fades a *popup*,

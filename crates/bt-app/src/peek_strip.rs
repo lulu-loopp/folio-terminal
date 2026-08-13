@@ -819,8 +819,7 @@ pub fn build(
         quads,
         labels,
         sprites,
-        opacity: 1.0,
-        body: None,
+        ..OverlayLayer::default()
     }]
 }
 

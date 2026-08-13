@@ -584,6 +584,18 @@ pub struct OverlayLayer {
     /// to be drawn above its own window's face, which is drawn a whole pass after
     /// the seat's documents are.
     pub body: Option<bt_render::PreviewBody>,
+    /// Rasters this layer draws that are **not** marks: pixels that arrived from
+    /// somewhere else already sized, with nothing to name and nothing to
+    /// rasterize.
+    ///
+    /// A mark is an identity — "the file glyph, 15px, in the accent" — and
+    /// [`ChromeMarkRasters`] exists to turn a fixed set of those into textures and
+    /// keep them. A picture is not one of those: the glance card's thumbnail is
+    /// one file's pixels resampled to one box, cached by whoever owns the file,
+    /// and pushed through here at full size. So it skips the rasterizer and joins
+    /// the same draw list on the other side, after the layer's marks — a picture
+    /// is content, and the marks around it are chrome.
+    pub images: Vec<bt_render::ChromeIcon>,
 }
 
 impl Default for OverlayLayer {
@@ -596,6 +608,7 @@ impl Default for OverlayLayer {
             sprites: Vec::new(),
             opacity: 1.0,
             body: None,
+            images: Vec::new(),
         }
     }
 }
@@ -607,7 +620,10 @@ impl OverlayLayer {
     /// empty by the same argument.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        (self.quads.is_empty() && self.labels.is_empty() && self.sprites.is_empty())
+        (self.quads.is_empty()
+            && self.labels.is_empty()
+            && self.sprites.is_empty()
+            && self.images.is_empty())
             || self.opacity <= 0.0
     }
 }
@@ -653,7 +669,14 @@ impl ChromeMarkRasters {
             .map(|layer| bt_render::OverlayLayer {
                 quads: layer.quads,
                 labels: layer.labels,
-                icons: self.icons_for(&layer.sprites, &mut kept),
+                icons: {
+                    // The layer's own marks first, then whatever pixels it
+                    // brought with it: the icon channel paints in order, and a
+                    // picture belongs over the ground its card drew for it.
+                    let mut icons = self.icons_for(&layer.sprites, &mut kept);
+                    icons.extend(layer.images);
+                    icons
+                },
                 opacity: layer.opacity,
                 body: layer.body,
             })

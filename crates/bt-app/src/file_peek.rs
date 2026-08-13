@@ -24,6 +24,17 @@
 //!   are the preview pane's ([`crate::preview::preview_ftype`]), asked here
 //!   rather than copied — "reuses the preview pane's judgement — same ftype
 //!   rules, same refusal for unknown types" (6368-6370).
+//! * **The document itself** (user ruling, 2026-08-13: *"what the preview on the
+//!   right looks like is what the hover preview looks like, only read-only"*).
+//!   The mock-up's card prints fourteen lines of plain text whatever the file is,
+//!   and P147 copied that; the ruling overturns it on the same ground the
+//!   markdown renderer was grown on — a glance that renders a table as raw commas
+//!   is a glance that lies about what opening the file will show. So the card's
+//!   middle is a [`bt_render::PreviewBody`] built by
+//!   [`crate::PreviewSurface::Peek`] going down the *pane's* pipeline: markdown
+//!   renders, csv is a table, a diff has its three inks, text folds. What is left
+//!   of "read-only" is real and is the whole of the difference — see
+//!   [`PeekBody::Document`].
 //! * **The buffer.** When the file is already open, the glance shows *the tab's
 //!   pool buffer*, dirty dot and all, "so the glance never lies about unsaved
 //!   edits" (6370-6372).
@@ -79,15 +90,14 @@ pub const PEEK_TYPE_PADDING_X_LOGICAL_PX: f32 = 5.0;
 pub const PEEK_TYPE_RADIUS_LOGICAL_PX: f32 = 4.0;
 
 /// `.fpeek-body { padding: 2px 10px 8px }`.
+///
+/// **A picture's frame only**, since the 2026-08-13 ruling. A document brings the
+/// preview pane's own padding with it (`.pv-md`'s 12/16, a mono body's own), and
+/// laying the card's 2/10/8 around *that* would be one inset stated twice — the
+/// card would read as a document in a box inside a box.
 pub const PEEK_BODY_PADDING_TOP_LOGICAL_PX: f32 = 2.0;
 pub const PEEK_BODY_PADDING_X_LOGICAL_PX: f32 = 10.0;
 pub const PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX: f32 = 8.0;
-/// `.fpeek-body { font: 11px/1.55 "Cascadia Mono" … }` — the size.
-pub const PEEK_BODY_FONT_LOGICAL_PX: f32 = 11.0;
-/// …and the line height it is set solid against.
-pub const PEEK_BODY_LINE_HEIGHT: f32 = 1.55;
-/// How many lines of a text body the card shows before it says `…` (6410).
-pub const PEEK_BODY_LINES: usize = 14;
 
 /// `.fpeek-none { padding: 14px 10px 12px }`.
 pub const PEEK_NONE_PADDING_TOP_LOGICAL_PX: f32 = 14.0;
@@ -96,11 +106,16 @@ pub const PEEK_NONE_PADDING_BOTTOM_LOGICAL_PX: f32 = 12.0;
 /// `.fpeek-none { font-size: 11px }`.
 pub const PEEK_NONE_FONT_LOGICAL_PX: f32 = 11.0;
 
-/// The picture placeholder's box: `<svg viewBox="0 0 280 120" width="280"
-/// height="120">` (6402).
+/// The box a picture is fitted into: `<svg viewBox="0 0 280 120" width="280"
+/// height="120">` (6402), which was the placeholder's size and is now the real
+/// thumbnail's bound.
+///
+/// Fitted rather than filled — the picture keeps its own proportions and is
+/// centred in whatever is left over, so a tall image and a wide one are both
+/// themselves rather than both this rectangle.
 pub const PEEK_IMAGE_W_LOGICAL_PX: f32 = 280.0;
 pub const PEEK_IMAGE_H_LOGICAL_PX: f32 = 120.0;
-/// `<rect rx="6">` — the placeholder's own corner.
+/// `<rect rx="6">` — the corner of the ground the picture stands on.
 pub const PEEK_IMAGE_RADIUS_LOGICAL_PX: f32 = 6.0;
 
 /// `.fpeek-foot { padding: 5px 10px }`.
@@ -132,18 +147,38 @@ pub const PEEK_UNKNOWN_TEXT: &str = "No preview — binary or unrecognized type.
 
 /// What the card's middle is showing.
 ///
-/// Three shapes, and they are the three the preview pane already has: a picture,
-/// a refusal, or lines of text. There is deliberately no "loading" variant — a
-/// glance whose body has not arrived draws no lines, which is the same picture
+/// Three shapes, and they are the three the preview pane already has: a document,
+/// a picture, or a refusal. There is deliberately no "loading" variant — a glance
+/// whose body has not arrived draws an empty document, which is the same picture
 /// as an empty file and is over in a few milliseconds either way. A word that
 /// appears for two frames and is replaced is worse than the space it occupied.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PeekBody {
-    /// The head of the file, already cut to [`PEEK_BODY_LINES`] and with the
-    /// `…` appended if it was cut.
-    Lines(Vec<String>),
-    /// A picture: the placeholder, at its own size.
-    Image,
+    /// **The preview pane's own body**, carrying how tall it came out in physical
+    /// pixels.
+    ///
+    /// The document itself is not in here: it is a [`bt_render::PreviewBody`]
+    /// built by the pane's pipeline and handed to the renderer on the card's
+    /// [`crate::marks::OverlayLayer::body`] channel, the same door a preview
+    /// float's document goes through. What this variant carries is the one thing
+    /// the *card's* geometry needs from it — its height — so that a two-line file
+    /// still gets a two-line card.
+    ///
+    /// **It does not scroll, and that is a decision rather than an omission.**
+    /// The card is rendered from the head of the document and cut off at the
+    /// card's own height. A glance is for *placing* a file — is this the README I
+    /// meant, is this csv the one with the headers — and the head answers that;
+    /// the foot's fixed sentence is the way to the rest of it. A scrollable card
+    /// would also need to be a card the pointer can enter, and P143 says it can
+    /// never be one.
+    Document(f32),
+    /// A picture, already fitted: its physical size inside
+    /// [`PEEK_IMAGE_W_LOGICAL_PX`] × [`PEEK_IMAGE_H_LOGICAL_PX`], proportions
+    /// intact.
+    ///
+    /// Zero-sized while the decode and the resample are in flight, which draws
+    /// the ground and no picture — see [`crate::Runtime::file_peek_layer`].
+    Image { width: f32, height: f32 },
     /// A file this window will not read.
     Refused,
 }
@@ -153,13 +188,16 @@ impl PeekBody {
     fn height(&self, scale: f32) -> f32 {
         let px = |logical: f32| logical * scale;
         match self {
-            Self::Lines(lines) => {
-                let line = (px(PEEK_BODY_FONT_LOGICAL_PX) * PEEK_BODY_LINE_HEIGHT).round();
-                px(PEEK_BODY_PADDING_TOP_LOGICAL_PX)
-                    + line * lines.len() as f32
-                    + px(PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX)
-            }
-            Self::Image => {
+            // A document brings its own padding: see
+            // `PEEK_BODY_PADDING_TOP_LOGICAL_PX`.
+            Self::Document(height) => *height,
+            // **The whole fit box, whatever the picture turned out to be.** The
+            // card comes up at 350ms and the decode lands whenever it lands; a
+            // body sized to the picture would be a card that changed height under
+            // the pointer the instant the pixels arrived. So the box is reserved
+            // and the picture is centred in it, which is what `object-fit:
+            // contain` in a fixed frame does anyway.
+            Self::Image { .. } => {
                 px(PEEK_BODY_PADDING_TOP_LOGICAL_PX)
                     + px(PEEK_IMAGE_H_LOGICAL_PX)
                     + px(PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX)
@@ -174,8 +212,101 @@ impl PeekBody {
     }
 }
 
+/// How wide the card's body box is, in physical pixels — the card less its two
+/// hairlines.
+///
+/// Public because the document that goes in it has to be *laid out* at this
+/// width before the card can be laid out at all: how tall a wrapped markdown page
+/// is depends on how wide it is, and how tall the card is depends on the page.
+/// The circle is broken here, at the one number that does not depend on either.
+#[must_use]
+pub fn body_width(scale: f32) -> f32 {
+    let border = (PEEK_BORDER_LOGICAL_PX * scale).max(1.0).round();
+    (PEEK_WIDTH_LOGICAL_PX * scale).round() - border * 2.0
+}
+
+/// The tallest the card's body can be: the cap, less the two hairlines and the
+/// head and the foot that are never what gets cut (P147).
+#[must_use]
+pub fn body_max_height(scale: f32) -> f32 {
+    let border = (PEEK_BORDER_LOGICAL_PX * scale).max(1.0).round();
+    ((PEEK_MAX_HEIGHT_LOGICAL_PX * scale).round()
+        - border * 2.0
+        - head_height(scale)
+        - foot_height(scale))
+    .max(0.0)
+}
+
+/// `.fpeek-head`'s own height — its padding around the taller of its line and its
+/// file mark.
+fn head_height(scale: f32) -> f32 {
+    let px = |logical: f32| logical * scale;
+    (px(PEEK_HEAD_PADDING_TOP_LOGICAL_PX)
+        + (px(PEEK_HEAD_FONT_LOGICAL_PX) * 1.4).max(px(PEEK_MARK_LOGICAL_PX))
+        + px(PEEK_HEAD_PADDING_BOTTOM_LOGICAL_PX))
+    .round()
+}
+
+/// `.fpeek-foot`'s own height.
+fn foot_height(scale: f32) -> f32 {
+    let px = |logical: f32| logical * scale;
+    (px(PEEK_FOOT_PADDING_Y_LOGICAL_PX) * 2.0 + px(PEEK_FOOT_FONT_LOGICAL_PX) * 1.4).round()
+}
+
+/// The pixels behind a [`PeekBody::Image`], already resampled to the size the
+/// card is going to draw them at.
+///
+/// Borrowed rather than owned because the card is rebuilt whenever the chrome is
+/// and the raster is megabytes: the one `Arc` in the window's cache is cloned
+/// once, into the draw list, and never for a layout.
+pub struct PeekPicture<'a> {
+    /// The display-sized texture identity — see
+    /// [`bt_render::ChromeIcon::key`].
+    pub key: &'a str,
+    pub rgba: &'a std::sync::Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+/// The ground a picture stands on: the mock-up's own 280×120 frame, centred in
+/// the card's body and cut by it if the card is short.
+#[must_use]
+fn picture_ground(body: [f32; 4], scale: f32) -> [f32; 4] {
+    let px = |logical: f32| logical * scale;
+    let width = px(PEEK_IMAGE_W_LOGICAL_PX)
+        .min(body[2] - body[0] - px(PEEK_BODY_PADDING_X_LOGICAL_PX) * 2.0);
+    let left = ((body[0] + body[2] - width) / 2.0).round();
+    let top = body[1] + px(PEEK_BODY_PADDING_TOP_LOGICAL_PX);
+    let bottom = (top + px(PEEK_IMAGE_H_LOGICAL_PX)).min(body[3]);
+    [left, top.round(), left + width, bottom.round()]
+}
+
+/// Where the picture itself goes: its own size, centred on its ground.
+///
+/// `None` while there is nothing to draw — the decode and the resample are on
+/// workers, and until they answer the card shows the ground and no picture. That
+/// gap is short and silent by the same rule the document's is: a word for two
+/// frames is worse than the space it occupied.
+#[must_use]
+pub fn picture_rect(layout: &PeekLayout, scale: f32) -> Option<[f32; 4]> {
+    let PeekBody::Image { width, height } = layout.body_kind else {
+        return None;
+    };
+    if !(width >= 1.0 && height >= 1.0) {
+        return None;
+    }
+    let ground = picture_ground(layout.body, scale);
+    let (width, height) = (
+        width.min(ground[2] - ground[0]),
+        height.min(ground[3] - ground[1]),
+    );
+    let left = ((ground[0] + ground[2] - width) / 2.0).round();
+    let top = ((ground[1] + ground[3] - height) / 2.0).round();
+    Some([left, top, left + width, top + height])
+}
+
 /// Everything the card says, before it is placed.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PeekContent {
     pub name: String,
     /// The ftype string, printed as it stands — the mock-up prints the word
@@ -229,12 +360,8 @@ pub fn layout(
     let width = px(PEEK_WIDTH_LOGICAL_PX).round();
 
     let head_line = px(PEEK_HEAD_FONT_LOGICAL_PX) * 1.4;
-    let head_height = (px(PEEK_HEAD_PADDING_TOP_LOGICAL_PX)
-        + head_line.max(px(PEEK_MARK_LOGICAL_PX))
-        + px(PEEK_HEAD_PADDING_BOTTOM_LOGICAL_PX))
-    .round();
-    let foot_height =
-        (px(PEEK_FOOT_PADDING_Y_LOGICAL_PX) * 2.0 + px(PEEK_FOOT_FONT_LOGICAL_PX) * 1.4).round();
+    let head_height = head_height(scale);
+    let foot_height = foot_height(scale);
     let body_height = content.body.height(scale).round();
     // `max-height: 264px; overflow: hidden` — the card shrink-wraps and then
     // stops. The body is what gives way, because the head names the file and the
@@ -315,7 +442,7 @@ pub fn layout(
         dirty,
         ftype,
         body,
-        body_kind: content.body.clone(),
+        body_kind: content.body,
         foot,
     }
 }
@@ -326,12 +453,14 @@ pub fn layout(
 pub fn build(
     layout: &PeekLayout,
     content: &PeekContent,
+    picture: Option<PeekPicture<'_>>,
     palette: &ChromePalette,
     scale: f32,
 ) -> OverlayLayer {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
     let mut quads: Vec<OverlayQuad> = Vec::new();
+    let mut images: Vec<bt_render::ChromeIcon> = Vec::new();
 
     push_float_window(
         &mut quads,
@@ -341,8 +470,11 @@ pub fn build(
         px(PEEK_SHADOW_LOGICAL_PX),
         palette.menu_surface,
         palette.menu_shadow,
-        alpha(palette.tip_shadow_inner_alpha),
-        alpha(palette.tip_shadow_outer_alpha),
+        // The card's own `box-shadow`, not the tooltip's — see
+        // `ChromePalette::peek_card_shadow_inner_alpha` for the day it stopped
+        // borrowing.
+        alpha(palette.peek_card_shadow_inner_alpha),
+        alpha(palette.peek_card_shadow_outer_alpha),
         palette.menu_border,
         alpha(palette.menu_border_alpha),
     );
@@ -412,45 +544,30 @@ pub fn build(
     });
 
     match &layout.body_kind {
-        PeekBody::Lines(lines) => {
-            let line_height = (px(PEEK_BODY_FONT_LOGICAL_PX) * PEEK_BODY_LINE_HEIGHT).round();
-            let left = layout.body[0] + px(PEEK_BODY_PADDING_X_LOGICAL_PX);
-            let right = layout.body[2] - px(PEEK_BODY_PADDING_X_LOGICAL_PX);
-            let top = layout.body[1] + px(PEEK_BODY_PADDING_TOP_LOGICAL_PX);
-            for (index, text) in lines.iter().enumerate() {
-                let row_top = top + line_height * index as f32;
-                // `overflow: hidden` — a card that was cut by its max-height
-                // stops drawing where the box stops rather than spilling onto
-                // the foot.
-                if row_top + line_height > layout.body[3] {
-                    break;
-                }
-                labels.push(ChromeLabel {
-                    // `white-space: pre` — no wrapping, and a long line runs out
-                    // of the card rather than reflowing it.
-                    clip: Some(layout.body),
-                    ..label(
-                        text,
-                        [left, row_top, right, row_top + line_height],
-                        px(PEEK_BODY_FONT_LOGICAL_PX),
-                        palette.menu_item_text,
-                    )
-                });
-            }
-        }
-        PeekBody::Image => {
-            let width = px(PEEK_IMAGE_W_LOGICAL_PX).min(layout.body[2] - layout.body[0]);
-            let left = (layout.body[0] + layout.body[2] - width) / 2.0;
-            let top = layout.body[1] + px(PEEK_BODY_PADDING_TOP_LOGICAL_PX);
-            let bottom = (top + px(PEEK_IMAGE_H_LOGICAL_PX)).min(layout.body[3]);
+        // Nothing to draw here: the document is a `PreviewBody` on the layer's
+        // own channel, clipped to this very box by the builder that made it.
+        // Painting it as labels would be the second renderer the 2026-08-13
+        // ruling exists to prevent.
+        PeekBody::Document(_) => {}
+        PeekBody::Image { .. } => {
             quads.extend(bt_render::rounded_overlay_fill(
-                [left, top, left + width, bottom],
+                picture_ground(layout.body, scale),
                 px(PEEK_IMAGE_RADIUS_LOGICAL_PX),
-                // `fill: var(--termbg)` — the placeholder is a window onto the
-                // picture's own ground, which is the terminal's.
+                // `fill: var(--termbg)` — the ground under the picture is a
+                // window onto the picture's own, which is the terminal's.
                 bt_render::background_rgb(),
                 1.0,
             ));
+            if let Some((rect, picture)) = picture_rect(layout, scale).zip(picture) {
+                images.push(bt_render::ChromeIcon {
+                    key: picture.key.to_owned(),
+                    rect,
+                    rgba: std::sync::Arc::clone(picture.rgba),
+                    width_px: picture.width_px,
+                    height_px: picture.height_px,
+                    opacity: 1.0,
+                });
+            }
         }
         PeekBody::Refused => {
             let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
@@ -492,6 +609,7 @@ pub fn build(
         quads,
         labels,
         sprites: std::mem::take(&mut sprites),
+        images,
         ..OverlayLayer::default()
     }
 }
@@ -511,9 +629,13 @@ mod tests {
         }
     }
 
+    /// A document `count` lines tall, in the mono body's own line height — the
+    /// stand-in for whatever the preview pipeline hands the card.
     fn lines(count: usize) -> PeekBody {
-        PeekBody::Lines((0..count).map(|index| format!("line {index}")).collect())
+        PeekBody::Document(LINE_HEIGHT * count as f32)
     }
+
+    const LINE_HEIGHT: f32 = 18.0;
 
     /// PIN — **P148: the card stands to the right of its row, and flips to the
     /// left rather than running off the screen.**
@@ -600,12 +722,12 @@ mod tests {
     /// nothing to say what it was or what to do about it.
     ///
     /// Mutation: let the body take its natural height without the `min` — a
-    /// fourteen-line card comes back over the cap and the assertion fails.
+    /// forty-line card comes back over the cap and the assertion fails.
     #[test]
     fn a_long_body_is_cut_and_the_sentence_around_it_is_not() {
         let window = (1200.0, 900.0);
         let long = layout(
-            &content(lines(PEEK_BODY_LINES)),
+            &content(lines(40)),
             [40.0, 300.0, 240.0, 320.0],
             window,
             60.0,
@@ -671,5 +793,179 @@ mod tests {
             "and the dot stands after the name, not on it"
         );
         assert!(dot[2] <= dirty.ftype[0], "and before the type chip");
+    }
+
+    /// PIN — **the card paints nothing in its own middle** (user ruling,
+    /// 2026-08-13: "what the preview on the right looks like is what the hover
+    /// preview looks like").
+    ///
+    /// The ruling is about *who renders*, and this is that stated as a shape: the
+    /// card's own layer draws its head, its chip, its rule and its foot, and the
+    /// box between them is left empty for the document that arrives on the body
+    /// channel. Every word inside that box would be a word the card wrote itself
+    /// — a second renderer, disagreeing with the pane about what a table is —
+    /// which is exactly the plain-text body this replaced.
+    ///
+    /// Mutation: put the old body back (`PeekBody::Lines`, fourteen labels laid
+    /// down the body box) and the first assertion goes red with fourteen
+    /// trespassers; drop the `layer.body` hand-off in `file_peek_layer` and the
+    /// card comes up empty on screen, which is the same fact seen from the other
+    /// side.
+    #[test]
+    fn the_cards_middle_is_left_to_the_document_and_written_by_nobody_else() {
+        let window = (1200.0, 900.0);
+        let card = content(lines(6));
+        let layout = layout(
+            &card,
+            [40.0, 300.0, 240.0, 320.0],
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        assert!(
+            matches!(layout.body_kind, PeekBody::Document(_)),
+            "a text file is a document, not a list of lines"
+        );
+        let layer = build(&layout, &card, None, &bt_render::chrome_palette(), SCALE);
+
+        let inside =
+            |rect: [f32; 4]| rect[1] >= layout.body[1] - 0.5 && rect[3] <= layout.body[3] + 0.5;
+        let trespassers: Vec<&str> = layer
+            .labels
+            .iter()
+            .filter(|label| inside(label.rect))
+            .map(|label| label.text.as_str())
+            .collect();
+        assert!(
+            trespassers.is_empty(),
+            "the card wrote its own body: {trespassers:?}"
+        );
+        assert!(
+            layer.images.is_empty(),
+            "and put no picture in a document's box"
+        );
+        // The head and the foot are still the card's own, or it would have
+        // stopped being a card.
+        assert!(
+            layer.labels.iter().any(|label| label.text == "main.rs"),
+            "the head still names the file"
+        );
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == PEEK_FOOT_TEXT),
+            "and the foot still says how to open it"
+        );
+
+        // The body box is the document's own height, which is what makes a short
+        // file a short card — the shrink-wrap the ruling did not change.
+        assert!(
+            (layout.body[3] - layout.body[1] - LINE_HEIGHT * 6.0).abs() <= 1.0,
+            "the body box is as tall as the document said: {:?}",
+            layout.body
+        );
+    }
+
+    /// PIN — **a picture is a picture, fitted and centred, not a placeholder.**
+    ///
+    /// The mock-up's `<svg viewBox="0 0 280 120">` was a grey rectangle standing
+    /// in for a thumbnail. The frame survives — it is what the card reserves, so
+    /// the card does not change height when the decode lands — and what goes in
+    /// it now is the file, at its own proportions, in the middle.
+    ///
+    /// Mutation: keep drawing only the ground (`images` never pushed, or
+    /// `picture_rect` answering `None` unconditionally) and the raster
+    /// assertions go red; fill the frame instead of fitting into it and the
+    /// aspect assertion does.
+    #[test]
+    fn a_picture_card_draws_the_file_at_its_own_proportions() {
+        let window = (1200.0, 900.0);
+        // A 4:1 panorama: nothing that fills a 280×120 frame is ever this shape.
+        let (native_w, native_h) = (1200_u32, 300_u32);
+        let (fit_w, fit_h) = bt_render::preview_image_extent(
+            PEEK_IMAGE_W_LOGICAL_PX as u32,
+            PEEK_IMAGE_H_LOGICAL_PX as u32,
+            native_w,
+            native_h,
+        )
+        .expect("a picture with pixels fits somewhere");
+        let mut card = content(PeekBody::Image {
+            width: fit_w as f32,
+            height: fit_h as f32,
+        });
+        card.name = "wide.png".to_owned();
+        card.ftype = "image".to_owned();
+        let layout = layout(
+            &card,
+            [40.0, 300.0, 240.0, 320.0],
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+
+        let rect = picture_rect(&layout, SCALE).expect("a decoded picture has a place to stand");
+        let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
+        assert!(
+            (width / height - native_w as f32 / native_h as f32).abs() < 0.05,
+            "the picture keeps its own proportions: {width}×{height}"
+        );
+        assert!(
+            rect[1] >= layout.body[1] && rect[3] <= layout.body[3],
+            "and stands inside the card's body: {rect:?} in {:?}",
+            layout.body
+        );
+        let ground = picture_ground(layout.body, SCALE);
+        assert!(
+            ((rect[0] - ground[0]) - (ground[2] - rect[2])).abs() <= 1.0
+                && ((rect[1] - ground[1]) - (ground[3] - rect[3])).abs() <= 1.0,
+            "centred on its ground: {rect:?} in {ground:?}"
+        );
+
+        let rgba: std::sync::Arc<[u8]> = vec![0_u8; (fit_w * fit_h * 4) as usize].into();
+        let layer = build(
+            &layout,
+            &card,
+            Some(PeekPicture {
+                key: "peek:wide.png@280x70",
+                rgba: &rgba,
+                width_px: fit_w,
+                height_px: fit_h,
+            }),
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+        let icon = layer
+            .images
+            .first()
+            .expect("the decoded pixels reach the draw list");
+        assert_eq!(icon.rect, rect, "drawn where the fit put it");
+        assert_eq!((icon.width_px, icon.height_px), (fit_w, fit_h));
+
+        // And with nothing decoded yet, the frame is still reserved: the card
+        // must not change height when the picture lands.
+        let waiting = content(PeekBody::Image {
+            width: 0.0,
+            height: 0.0,
+        });
+        let empty = self::layout(
+            &waiting,
+            [40.0, 300.0, 240.0, 320.0],
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        assert_eq!(
+            empty.body[3] - empty.body[1],
+            layout.body[3] - layout.body[1],
+            "the frame is reserved before the pixels arrive"
+        );
+        assert!(
+            picture_rect(&empty, SCALE).is_none(),
+            "and nothing is drawn in it yet"
+        );
     }
 }

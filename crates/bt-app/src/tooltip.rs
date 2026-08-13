@@ -560,9 +560,8 @@ pub fn build(
     vec![OverlayLayer {
         quads,
         labels,
-        sprites: Vec::new(),
         opacity,
-        body: None,
+        ..OverlayLayer::default()
     }]
 }
 
