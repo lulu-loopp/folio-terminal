@@ -1774,9 +1774,36 @@
   }
   .layout-peek.show { display: block; }
   /* ── file hover peek (§7.1.3 附则, user ruling 2026-07-17) ──
-     A read-only glance card over a FILE row. Non-interactive by construction
-     (pointer-events:none): it can neither trap the pointer nor flicker; wanting
-     to interact IS the signal to Enter/double-click into the real preview pane.
+     A read-only glance card over a FILE row.
+
+     ⚠ OVERTURNED 2026-08-14 (user ruling, P143). This block used to read:
+     "Non-interactive by construction (pointer-events:none): it can neither trap
+     the pointer nor flicker; wanting to interact IS the signal to
+     Enter/double-click into the real preview pane." The native build shipped
+     exactly that, and real use refused it: once the card showed the document
+     (ruling 2026-08-13) a long file arrived cut off with no way to read on, and
+     moving toward the card to try was the very gesture that dismissed it.
+
+     The card is now one the pointer may enter — a hover card of the kind an
+     editor's symbol popup is. It takes three gestures and no more: the wheel
+     scrolls it, a draggable thumb rides its right edge when the document is
+     taller than the card, and a click opens the real preview pane. It is still
+     read-only in the sense that survives: no caret, no selection, no focus, no
+     typing.
+
+     The anti-flicker guarantee the old sentence bought is kept by geometry
+     instead of by abstinence: the row, the gap and the card are one corridor for
+     the purpose of staying alive, and leaving it starts the same 220ms grace
+     every other transient surface in this window closes on. That corridor
+     outranks the rows underneath it: while a card is up and the pointer is
+     inside, another row neither swaps the card nor restarts the 350ms intent —
+     the card hangs below its own row, so the reach toward it crosses the tree,
+     and rows that could still claim it would pull it down under the reaching
+     hand. See `crates/bt-app/src/file_peek.rs` — `corridor`.
+
+     `pointer-events: none` below is therefore no longer the native build's rule;
+     it is left as written because this file is the DOM mock-up and the CSS is
+     what produced the picture, not what governs the port.
      z-index above the pinned flyout (60) — flyout rows peek too. */
   .file-peek {
     position: fixed; z-index: 70; pointer-events: none;

@@ -738,9 +738,21 @@ enum PreviewSurface {
     /// * **Its buffer may not be in the pool.** A glance at a file nobody opened
     ///   reads [`Runtime::peek_buffer`], deliberately off the pool so that running
     ///   the pointer down a list cannot evict the eight buffers you chose (P145).
-    /// * **It is not in [`Runtime::preview_surfaces`].** It cannot be focused,
-    ///   hit, swept, scrolled or typed into — P143's "non-interactive by
-    ///   construction" is that absence, and not a set of `if`s.
+    /// * **It is not in [`Runtime::preview_surfaces`],** and what that absence
+    ///   buys is now smaller than it was. It was written here as "it cannot be
+    ///   focused, hit, swept, scrolled or typed into — P143's 'non-interactive
+    ///   by construction' is that absence, and not a set of `if`s". The
+    ///   2026-08-14 ruling took two of those five away: the card **is** hit (by
+    ///   its own door, [`Runtime::file_peek_holds`], asked before the tree and
+    ///   before the floats) and it **does** scroll (a wheel and a thumb, through
+    ///   the pane's own [`Runtime::scroll_preview_body`]).
+    ///
+    ///   The three that remain are the three that matter for "read-only", and
+    ///   they are still absences rather than `if`s: no focus, so no keystroke can
+    ///   name it; no sweep, because a window-level view is not a tab's to retire;
+    ///   and nothing to type into, because the two doors that make a caret —
+    ///   `press_preview_body` and `preview_edit_focus` — are reached through
+    ///   [`Runtime::preview_surface_at`], which this is still not in.
     Peek,
 }
 
@@ -1988,7 +2000,7 @@ fn measure_preview_links(
 /// because a proportional bar riding a track under a scrolling region is the
 /// picture of a scrollbar in every application on the desk. Something that
 /// looks like a control and is not is worse than no control, so it became one:
-/// the geometry moved to [`preview::block_scroll_bar`], where the hit test and
+/// the geometry moved to [`preview::scroll_bar`], where the hit test and
 /// the drag read the same rectangle this paints.
 ///
 /// The three inks are the divider's three, which is this app's only existing
@@ -2002,7 +2014,13 @@ fn push_block_scroll_indicator(
     scale: f32,
     palette: &bt_render::ChromePalette,
 ) {
-    let Some(bar) = preview::block_scroll_bar(block.clip, offset, content, scale) else {
+    let Some(bar) = preview::scroll_bar(
+        block.clip,
+        preview::ScrollAxis::Horizontal,
+        offset,
+        content,
+        scale,
+    ) else {
         return;
     };
     // Drawn in the block's *own* coordinates rather than the scrolled ones, so
@@ -2066,10 +2084,16 @@ fn preview_block_bar_at(
     document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
     scale: f32,
     at: [f32; 2],
-) -> Option<(usize, preview::BlockScrollBar)> {
+) -> Option<(usize, preview::ScrollBar)> {
     preview_wide_blocks(body, metrics, scroll, document).find_map(|(index, clip, content)| {
         let offset = block_scroll.get(index).copied().unwrap_or(0.0);
-        let bar = preview::block_scroll_bar(clip, offset, content, scale)?;
+        let bar = preview::scroll_bar(
+            clip,
+            preview::ScrollAxis::Horizontal,
+            offset,
+            content,
+            scale,
+        )?;
         (at[0] >= bar.grab[0]
             && at[0] <= bar.grab[2]
             && at[1] >= bar.grab[1]
@@ -9477,6 +9501,36 @@ struct FilePeek {
     rect: [f32; 4],
     /// When the 350ms is up; `None` once the card is on screen.
     due: Option<Instant>,
+    /// **Where the card came to rest, as last drawn** — the rectangle the
+    /// pointer may enter and the far end of [`file_peek::corridor`].
+    ///
+    /// Written by [`Runtime::file_peek_layer`] rather than computed here,
+    /// because it is the *placement's* answer: the flip to the left, the
+    /// viewport clamp and the document's own height all move it, and a second
+    /// derivation of it is a card that is hit-tested where it is not drawn —
+    /// the defect the block's scroll bar already had once and the reason its
+    /// geometry became one function.
+    ///
+    /// `None` until the card has been drawn once, which is exactly as long as
+    /// there is nothing on screen to touch.
+    frame: Option<[f32; 4]>,
+    /// The document's box inside that frame — where a wheel notch lands and what
+    /// the scroll is clamped against. Written beside [`Self::frame`].
+    body: Option<[f32; 4]>,
+    /// How tall the document turned out, so the scroll bar and the clamp agree
+    /// with what was drawn.
+    content: f32,
+    /// When the grace runs out, once the pointer has left the corridor
+    /// (`float::FLY_CLOSE`, the constant every other transient surface in this
+    /// window closes on — a card that took its own number would be a fourth
+    /// answer to "how long does a hand get").
+    ///
+    /// `None` whenever the pointer is somewhere the card is alive.
+    closing_at: Option<Instant>,
+    /// The hand on the scroll thumb, and how far into the thumb it took hold —
+    /// [`PreviewBlockDrag::grab`]'s twin, and kept here rather than beside it
+    /// because a card that comes down takes its drag with it.
+    thumb_grab: Option<f32>,
 }
 
 /// What a matured glance is looking at, read off the buffer it found.
@@ -16039,7 +16093,7 @@ impl Runtime {
     fn preview_block_bar_under(
         &self,
         position: PhysicalPosition<f64>,
-    ) -> Option<(PreviewSurface, usize, preview::BlockScrollBar)> {
+    ) -> Option<(PreviewSurface, usize, preview::ScrollBar)> {
         let scale = self.renderer.metrics().scale_factor as f32;
         let (surface, body) = self.preview_surface_at(position)?;
         let pane = self.preview_pane(surface)?;
@@ -16197,14 +16251,23 @@ impl Runtime {
             (blocks, layout),
         )
         .find(|(index, _, _)| *index == drag.index)
-        .and_then(|(_, clip, content)| preview::block_scroll_bar(clip, offset, content, scale));
+        .and_then(|(_, clip, content)| {
+            preview::scroll_bar(
+                clip,
+                preview::ScrollAxis::Horizontal,
+                offset,
+                content,
+                scale,
+            )
+        });
         // The block stopped being wide — the pane grew, the document changed.
         // The gesture still owns the pointer until the button comes up; there is
         // simply nothing left for it to move.
         let Some(bar) = found else {
             return Ok(true);
         };
-        let wanted = preview::block_scroll_dragged_to(&bar, position.x as f32, drag.grab);
+        let along = bar.along([position.x as f32, position.y as f32]);
+        let wanted = preview::scroll_dragged_to(&bar, along, drag.grab);
         self.set_preview_block_scroll(drag.surface, drag.index, wanted)?;
         Ok(true)
     }
@@ -18932,24 +18995,63 @@ impl Runtime {
     /// 350ms — and that asymmetry is the whole of what this returns: the paint
     /// debt is for the card, not for the timer.
     fn observe_file_peek(&mut self, host: Option<(RowHost, usize)>, now: Instant) -> bool {
+        let at = self
+            .pointer_position
+            .map(|point| [point.x as f32, point.y as f32]);
+        // **A card on screen answers before the rows do** (user ruling,
+        // 2026-08-14), and it answers for the whole of its corridor rather than
+        // for its own rectangle.
+        //
+        // The rectangle alone would not do, and the reason is the gesture this
+        // ruling exists to permit. The card is hung eight pixels above the row
+        // and stands off its right edge, so a hand reaching for the *middle* of
+        // a 264px card travels right and **down** — across a dozen rows of the
+        // very tree it came from. If each of those rows took the card as it
+        // passed, the card would be pulled down and re-armed under the hand that
+        // was reaching for it, and the reach would never land: exactly the
+        // failure the corridor was drawn to make impossible, wearing a different
+        // hat. So while the card is alive and the pointer is inside its
+        // corridor, **another row neither takes the card nor restarts the
+        // intent** — the ruling's own words, and the only reading of them that
+        // leaves the reach possible.
+        //
+        // It costs the rows the corridor covers: a file listed just under the
+        // one being glanced cannot be glanced until this card is down. That is
+        // the same handful of pixels the corridor already spends, and the way
+        // out is the way in — leave the corridor (a move of a few pixels up, or
+        // out of the tree) and the next row arms normally, at once.
+        match self.file_peek_life(at) {
+            Some(file_peek::Life::Held | file_peek::Life::Kept) => return self.keep_file_peek(),
+            // A hand that has started carrying something takes the card down
+            // now, with no grace: a grace is a courtesy to a hand still reaching
+            // for the card, and this one is busy.
+            Some(file_peek::Life::Gone) => return self.hide_file_peek(),
+            // Outside the corridor. Whatever is under the pointer down there is
+            // free to arm its own card, and if nothing is, the grace starts.
+            Some(file_peek::Life::Released) | None => {}
+        }
         let Some((host, index)) = host.filter(|_| self.drag.is_none()) else {
-            return self.hide_file_peek();
+            return self.release_file_peek(now);
         };
         let Some((root, rows)) = self.host_rows(host) else {
-            return self.hide_file_peek();
+            return self.release_file_peek(now);
         };
         let Some(row) = rows
             .get(index)
             .filter(|row| matches!(row.kind, files::RowKind::File))
         else {
-            return self.hide_file_peek();
+            return self.release_file_peek(now);
         };
         if self
             .file_peek
             .as_ref()
             .is_some_and(|peek| peek.host == host && peek.key == row.key)
         {
-            return false;
+            // The card's own row, reached from outside its corridor — which is
+            // only possible while the intent is still counting down, since a
+            // card that exists contains its row. Nothing to do but let the
+            // clock run: an intent that restarted here would never mature.
+            return self.keep_file_peek();
         }
         let taken = self.hide_file_peek();
         if root.is_empty() {
@@ -18966,8 +19068,91 @@ impl Runtime {
             name,
             rect,
             due: Some(now + Duration::from_millis(file_peek::PEEK_INTENT_MS)),
+            frame: None,
+            body: None,
+            content: 0.0,
+            closing_at: None,
+            thumb_grab: None,
         });
         taken
+    }
+
+    /// Whether a card is **on screen and holding the pointer** — the card's own
+    /// hit test, and the first question every pointer path asks about it.
+    ///
+    /// An intent that has not matured holds nothing: there is no card yet, and
+    /// the rectangle a previous one left behind is not a place to stand.
+    fn file_peek_holds(&self, at: [f32; 2]) -> bool {
+        self.file_peek.as_ref().is_some_and(|peek| {
+            peek.due.is_none()
+                && peek
+                    .frame
+                    .is_some_and(|frame| file_peek::contains(frame, at))
+        })
+    }
+
+    /// The card is being touched or stood in: cancel any grace and keep it.
+    ///
+    /// Returns whether a frame is owed, which is only true when a grace was
+    /// actually running — the card is drawn identically either way, so a card
+    /// that was never dying costs nothing to save.
+    fn keep_file_peek(&mut self) -> bool {
+        self.file_peek
+            .as_mut()
+            .is_some_and(|peek| peek.closing_at.take().is_some())
+    }
+
+    /// [`file_peek::life`] for the card that is **on screen**, or `None` when
+    /// there is not one.
+    ///
+    /// The decision itself is over there, as a value, so that the corridor's rule
+    /// can be read and tested without a window; this side owns only the question.
+    ///
+    /// An intent that has not matured answers `None` rather than any of the four:
+    /// there is nothing drawn to be gentle with, the rectangle a previous card
+    /// left behind is not a place to stand, and a grace held over an unborn card
+    /// would fire it over a row the pointer left long ago.
+    fn file_peek_life(&self, at: Option<[f32; 2]>) -> Option<file_peek::Life> {
+        let peek = self.file_peek.as_ref()?;
+        let frame = peek.frame.filter(|_| peek.due.is_none())?;
+        Some(file_peek::life(peek.rect, frame, at, self.drag.is_some()))
+    }
+
+    /// The pointer is outside a living card's corridor and there is nothing under
+    /// it to arm a new one: start the grace, or drop an intent that never
+    /// matured.
+    ///
+    /// Returns whether a frame is owed. Starting a grace owes none — the card is
+    /// drawn identically while it runs — and that is the same asymmetry
+    /// [`Self::observe_file_peek`] reports for arming an intent.
+    fn release_file_peek(&mut self, now: Instant) -> bool {
+        let Some(peek) = self.file_peek.as_ref() else {
+            return false;
+        };
+        if peek.due.is_some() || peek.frame.is_none() {
+            return self.hide_file_peek();
+        }
+        let peek = self.file_peek.as_mut().expect("just borrowed");
+        if peek.closing_at.is_none() {
+            peek.closing_at = Some(now + float::FLY_CLOSE);
+        }
+        false
+    }
+
+    /// The grace has run out — take the card down.
+    ///
+    /// Returns whether anything changed, so the tick that calls it knows whether
+    /// it owes a frame.
+    fn expire_file_peek(&mut self, now: Instant) -> bool {
+        if self
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.closing_at)
+            .is_none_or(|due| due > now)
+        {
+            return false;
+        }
+        self.hide_file_peek()
     }
 
     /// The intent has matured: read what the card will show (P147).
@@ -19162,7 +19347,11 @@ impl Runtime {
 
     /// The 350ms is up — put the card on screen (P145).
     fn advance_file_peek(&mut self, now: Instant) -> Result<()> {
-        if !self.mature_file_peek(now) {
+        // The card's two clocks, in the order they can fire: the 350ms that puts
+        // it up and the grace that takes it down. Both through one tick, because
+        // a card that matured and expired between two wakes owes exactly one
+        // frame and not two.
+        if !(self.mature_file_peek(now) | self.expire_file_peek(now)) {
             return Ok(());
         }
         if self.refresh_overlay() {
@@ -19189,6 +19378,10 @@ impl Runtime {
             return Vec::new();
         };
         let scale = self.renderer.metrics().scale_factor as f32;
+        // How tall the document really is, kept whole: the card's body is the
+        // *capped* height, and the scroll bar's arithmetic needs the uncapped one
+        // to know what share of it is showing.
+        let mut document = 0.0_f32;
         let body_kind = match subject.ftype {
             preview::PreviewFtype::Image => self.file_peek_picture(&subject.path, scale),
             preview::PreviewFtype::Unknown => file_peek::PeekBody::Refused,
@@ -19201,10 +19394,8 @@ impl Runtime {
                     file_peek::body_max_height(scale),
                 ];
                 self.rebuild_preview_document(PreviewSurface::Peek, probe, scale);
-                file_peek::PeekBody::Document(
-                    self.preview_surface_document_height(PreviewSurface::Peek, probe, scale)
-                        .min(probe[3]),
-                )
+                document = self.preview_surface_document_height(PreviewSurface::Peek, probe, scale);
+                file_peek::PeekBody::Document(document.min(probe[3]))
             }
         };
         let content = file_peek::PeekContent {
@@ -19239,20 +19430,188 @@ impl Runtime {
                 width_px: picture.width_px,
                 height_px: picture.height_px,
             });
-        let mut layer = file_peek::build(
-            &layout,
-            &content,
-            picture,
-            &bt_render::chrome_palette(),
-            scale,
-        );
-        if matches!(content.body, file_peek::PeekBody::Document(_)) {
-            // The same channel a preview float's document rides, for the same
-            // reason: the body has to be drawn *above* the card's own face, and
-            // the seats' document lane is a whole pass below the overlays.
-            layer.body = self.build_preview_body_in(PreviewSurface::Peek, layout.body);
+        let palette = bt_render::chrome_palette();
+        let mut layer = file_peek::build(&layout, &content, picture, &palette, scale);
+        // **Where the card came to rest, filed before anything is drawn into
+        // it** — every pointer question about the card reads these three, so a
+        // frame that painted a card without recording it would be a card on
+        // screen that nothing could touch.
+        if let Some(peek) = self.file_peek.as_mut() {
+            peek.frame = Some(layout.frame);
+            peek.body = Some(layout.body);
+            peek.content = document;
         }
-        vec![layer]
+        if !matches!(content.body, file_peek::PeekBody::Document(_)) {
+            return vec![layer];
+        }
+        // The scroll, clamped **on the way in** rather than on the way out (R2's
+        // ruling, second reading): a document that shrank under a card already
+        // scrolled — a head read landing, a theme changing the type — leaves an
+        // offset past its own end, and clamping here is the one place that sees
+        // both the old offset and the new extent. Nothing downstream has to
+        // wonder whether what it was handed is reachable.
+        let scroll = self.clamped_preview_scroll(
+            PreviewSurface::Peek,
+            layout.body,
+            scale,
+            self.peek_pane.scroll,
+        );
+        self.peek_pane.scroll = scroll;
+        // The same channel a preview float's document rides, for the same
+        // reason: the body has to be drawn *above* the card's own face, and
+        // the seats' document lane is a whole pass below the overlays.
+        layer.body = self.build_preview_body_in(PreviewSurface::Peek, layout.body);
+        let Some(bar) = file_peek::scroll_bar(&layout, scroll[1], document, scale) else {
+            return vec![layer];
+        };
+        let state = if self
+            .file_peek
+            .as_ref()
+            .is_some_and(|p| p.thumb_grab.is_some())
+        {
+            file_peek::ThumbState::Held
+        } else if self
+            .pointer_position
+            .is_some_and(|at| file_peek::contains(bar.grab, [at.x as f32, at.y as f32]))
+        {
+            file_peek::ThumbState::Hovered
+        } else {
+            file_peek::ThumbState::Rest
+        };
+        vec![layer, file_peek::build_scroll_bar(&bar, state, &palette)]
+    }
+
+    /// **A press inside the card**, and what it means (user ruling, 2026-08-14).
+    ///
+    /// Two answers and no third, which is what keeps "read-only" true of a card
+    /// the pointer can now reach:
+    ///
+    /// * on the **scroll thumb**, take hold of it — asked first for the reason
+    ///   [`Self::press_preview_block_thumb`] is asked before the body it rides
+    ///   over: a bar drawn inside a region is still a bar, and a press there
+    ///   means the bar, exactly as it does in every text editor on the desk;
+    /// * **anywhere else in the card, open the real preview pane** — the same
+    ///   door Enter and the double-click take, so the foot's promise ("Enter /
+    ///   double-click opens the preview pane") and the click agree about where
+    ///   they land — and take the card down, because what it was standing in for
+    ///   is now on screen.
+    ///
+    /// There is deliberately no caret and no selection: a press in a document is
+    /// a place to type in a *pane*, and the card has nothing to type into. That
+    /// is now the whole of what "read-only" names.
+    ///
+    /// Only the left button; a right press falls through to be whatever it
+    /// already was, and the generic dismissal below takes the card down with it.
+    fn press_file_peek(&mut self, button: MouseButton) -> Result<bool> {
+        if button != MouseButton::Left {
+            return Ok(false);
+        }
+        let Some(position) = self.pointer_position else {
+            return Ok(false);
+        };
+        let at = [position.x as f32, position.y as f32];
+        if !self.file_peek_holds(at) {
+            return Ok(false);
+        }
+        let frame = self
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.frame)
+            .unwrap_or_default();
+        match file_peek::press_at(frame, self.file_peek_bar().as_ref(), at) {
+            file_peek::Press::Elsewhere => Ok(false),
+            file_peek::Press::Thumb(grab) => {
+                if let Some(peek) = self.file_peek.as_mut() {
+                    peek.thumb_grab = Some(grab);
+                }
+                // The thumb's ink changes the moment it is taken, so this owes a
+                // frame even though nothing has moved yet.
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+                Ok(true)
+            }
+            file_peek::Press::Open => {
+                let Some(path) = self.file_peek.as_ref().map(|peek| peek.path.clone()) else {
+                    return Ok(false);
+                };
+                // Down before the pane opens rather than after: opening re-solves
+                // the layout, and a card left standing would be placed against a
+                // row that has just moved under it.
+                self.hide_file_peek();
+                self.open_preview(path)?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// The pointer travelling with the card's thumb in hand.
+    ///
+    /// The bar is re-read every move rather than remembered, which is
+    /// [`Self::drag_preview_block_thumb`]'s rule and every scrollbar's: a drag
+    /// that trusted a stored rectangle would be dragging where the thumb *was*.
+    /// Answers whether the pointer was the thumb's, so the caller stops.
+    fn drag_file_peek_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(grab) = self.file_peek.as_ref().and_then(|peek| peek.thumb_grab) else {
+            return Ok(false);
+        };
+        let Some(bar) = self.file_peek_bar() else {
+            return Ok(true);
+        };
+        // `bar.along` rather than `position.y`: the axis is the bar's own fact,
+        // and a caller that reached for a component itself would be the second
+        // place that has to be right about which way this one runs.
+        let along = bar.along([position.x as f32, position.y as f32]);
+        let wanted = preview::scroll_dragged_to(&bar, along, grab);
+        if (wanted - self.peek_pane.scroll[1]).abs() < f32::EPSILON {
+            return Ok(true);
+        }
+        self.peek_pane.scroll[1] = wanted;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Letting go of the thumb.
+    ///
+    /// It **pays for a frame and consumes nothing**, which is the pair of
+    /// answers a release owes here. The frame is owed because the thumb wears
+    /// the divider's held ink while it is held and the resting one after — the
+    /// same debt [`Self::press_file_peek`] settles on the way down, and left
+    /// unpaid it leaves a blue thumb under a hand that has already let go, until
+    /// some unrelated event happens to redraw (real-machine capture,
+    /// 2026-08-14). Consuming nothing is because a release is never *only* the
+    /// thumb's: the same button coming up still has to reach whatever else was
+    /// waiting for it.
+    fn release_file_peek_thumb(&mut self) -> Result<()> {
+        let released = self
+            .file_peek
+            .as_mut()
+            .is_some_and(|peek| peek.thumb_grab.take().is_some());
+        if released && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The card's scroll bar as it stands **right now**, for a hand rather than
+    /// for the painter.
+    ///
+    /// Re-derived from the card's own filed geometry instead of stored, which is
+    /// the block bar's own hard-won rule: a rectangle remembered from the frame
+    /// it was drawn on is a rectangle the pointer is tested against after the
+    /// thing moved.
+    fn file_peek_bar(&self) -> Option<crate::preview::ScrollBar> {
+        let peek = self.file_peek.as_ref()?;
+        let body = peek.body.filter(|_| peek.due.is_none())?;
+        crate::preview::scroll_bar(
+            body,
+            crate::preview::ScrollAxis::Vertical,
+            self.peek_pane.scroll[1],
+            peek.content,
+            self.renderer.metrics().scale_factor as f32,
+        )
     }
 
     /// How wide each files head's name is drawn (B15).
@@ -24001,6 +24360,14 @@ impl Runtime {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.pointer_position = Some(position);
+        // The glance card's thumb, ahead of everything: it is the topmost thing
+        // on the glass, and a gesture in flight is not a hover. It owns the
+        // pointer outside the card too — a drag that let go the moment it left
+        // a 300px card would make the last line a matter of aim, and the card
+        // would dismiss itself out from under the hand that was using it.
+        if self.drag_file_peek_thumb(position)? {
+            return Ok(());
+        }
         // A selection being drawn across the edit surface owns the pointer, and
         // it owns it *outside* its own body too: a drag that stopped extending
         // the moment it left the pane would make selecting the last line a matter
@@ -26315,6 +26682,17 @@ impl Runtime {
                 }
             }
         }
+        // **The glance card takes its own presses** (user ruling, 2026-08-14),
+        // above the float and below the menus — the order it is drawn in.
+        //
+        // A release is handed on rather than claimed: letting go of a thumb ends
+        // the drag, and the same release still has to reach whatever else was
+        // waiting for one.
+        if state == ElementState::Released {
+            self.release_file_peek_thumb()?;
+        } else if self.press_file_peek(button)? {
+            return Ok(());
+        }
         // The right press that raises it (K143/K146). Both hosts, float first
         // because the float is drawn over the columns.
         if state == ElementState::Pressed
@@ -27030,6 +27408,22 @@ impl Runtime {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // **A notch over the card is the card's** (user ruling, 2026-08-14), and
+        // it is asked before the dismissal below for the obvious reason: the card
+        // is the topmost thing on the glass, and a scroller under the pointer
+        // scrolls — the same sentence the strip, the rail, the tree and the
+        // preview pane are each answering further down.
+        //
+        // It goes down `scroll_preview_body`, the pane's own door, so the notch
+        // travel, the axis and the clamp are one implementation and not two: a
+        // card that scrolled by a different number of pixels per notch than the
+        // pane it mirrors would be lying about being the same document.
+        if let Some(position) = self.pointer_position
+            && self.file_peek_holds([position.x as f32, position.y as f32])
+            && let Some(body) = self.file_peek.as_ref().and_then(|peek| peek.body)
+        {
+            return self.scroll_preview_body(PreviewSurface::Peek, body, delta);
+        }
         // **P149's `document scroll`, capture: true** — "including the tree's
         // own scrolling". Said once, above every branch below, because that is
         // what a capturing listener on the document *is*: whatever this notch
@@ -27353,6 +27747,19 @@ impl Runtime {
         // drag rather than below it: J122 rules the two mutually exclusive — one
         // gesture owns the pointer at a time — so the order between them is a
         // formality and only one of the two calls can ever answer `true`.
+        // The glance card falls on Esc like every transient — but as a
+        // *bystander*, not a rung of the ladder: the press is never consumed
+        // here, so the same Esc still unwinds whatever the layers below owe it
+        // and, with nothing above the shell open, still reaches the PTY
+        // (ruling 2026-08-14: now that the card can hold the pointer, it needs
+        // the retreat every hover surface has).
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.hide_file_peek()
+        {
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        }
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
             && !event.repeat
             && (self.cancel_drag()? || self.cancel_divider_drag()?)
@@ -28689,10 +29096,14 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
             runtime.layout_peek.deadline(),
-            // The glance's 350ms while one is settling, and nothing afterwards:
-            // like the schematic it has no fade, so a card on screen is finished
-            // and asks for no frames at all.
+            // The glance's 350ms while one is settling, and — since it became a
+            // card a hand can walk into (2026-08-14) — the grace that takes it
+            // down again once the pointer has left its corridor. A card standing
+            // still under a pointer that is inside it has neither clock running
+            // and asks for no wake-ups at all, which is the same silence it kept
+            // when it could not be touched.
             runtime.file_peek.as_ref().and_then(|peek| peek.due),
+            runtime.file_peek.as_ref().and_then(|peek| peek.closing_at),
             // The intent's 180ms, the grace's 220/420, and the entrance's own
             // frames until it lands. A window with no float and no hovered
             // trigger reports nothing and costs no wake-ups at all.
@@ -41571,6 +41982,156 @@ mod tests {
         );
     }
 
+    /// PIN — **the card's bar promises exactly as far as the card's clamp
+    /// allows** (user ruling, 2026-08-14: the glance scrolls).
+    ///
+    /// The wheel over the card goes down `scroll_preview_body`, so the offset it
+    /// writes is clamped by `preview_document_max_scroll` — the one authority
+    /// every write of a preview offset already goes through. The *bar* is drawn
+    /// from `preview_document_height` instead, because a box that sizes itself
+    /// to its content asks the other question. Two numbers, two geometries, and
+    /// they have to be the same last pixel: a bar that promised further than the
+    /// clamp allows is a thumb that stops short of its own track, and one that
+    /// promised less is a document with a tail nothing can reach.
+    ///
+    /// Asked of the three documents whose two answers are computed apart — the
+    /// mono body, the patch and the table, each out of its own geometry.
+    /// Markdown's pair is the same expression written twice in
+    /// `preview_document_height` and `preview_document_max_scroll`, which is
+    /// this same guarantee said in a way that cannot drift.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① drop the outer padding from `PreviewTableGeometry::document_height`
+    ///    (`self.content_height` alone) — the csv's bar is two paddings short of
+    ///    its clamp;
+    /// ② drop the `padding_y * 2.0` from `preview_mono_geometry`'s
+    ///    `content_height` — text and diff both lose their air;
+    /// ③ have `file_peek::scroll_bar` measure the overflow against the card's
+    ///    *frame* rather than its body — every case goes red by the head and the
+    ///    foot together.
+    #[test]
+    fn the_glance_cards_bar_promises_exactly_as_far_as_its_clamp_allows() {
+        let scale = 1.0_f32;
+        let advance = 7.0_f32;
+        let row = [40.0, 300.0, 240.0, 320.0];
+        let window = (1200.0, 800.0);
+        let probe = [
+            0.0,
+            0.0,
+            file_peek::body_width(scale),
+            file_peek::body_max_height(scale),
+        ];
+
+        let agree = |what: &str, document: &PreviewDocument, rows_height: f32, columns: usize| {
+            let height =
+                preview_document_height(document, probe, scale, advance, rows_height, columns);
+            let card = file_peek::PeekContent {
+                name: "sample".to_owned(),
+                ftype: "text".to_owned(),
+                dirty: false,
+                body: file_peek::PeekBody::Document(height),
+            };
+            let layout = file_peek::layout(&card, row, window, 60.0, 24.0, scale);
+            let clamp = preview_document_max_scroll(
+                document,
+                layout.body,
+                scale,
+                advance,
+                rows_height,
+                columns,
+            )[1];
+            match file_peek::scroll_bar(&layout, 0.0, height, scale) {
+                Some(bar) => {
+                    assert!(
+                        clamp > 0.0,
+                        "{what}: a bar was drawn over a document with nowhere to go"
+                    );
+                    assert!(
+                        (bar.overflow - clamp).abs() < 0.5,
+                        "{what}: the bar offers {} and the clamp allows {clamp}",
+                        bar.overflow
+                    );
+                }
+                None => assert_eq!(
+                    clamp, 0.0,
+                    "{what}: no bar drawn, so there had better be nowhere to go"
+                ),
+            }
+        };
+
+        // ① Plain text — the mono body, forty lines in a card that holds a dozen.
+        let lines: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+        let text_metrics = seats::preview_text_metrics(scale);
+        agree(
+            "text",
+            &PreviewDocument::Text {
+                wrap: preview_edit::WrapLayout::unwrapped(&lines),
+                lines: lines.clone(),
+            },
+            text_metrics.line_height * 40.0,
+            0,
+        );
+
+        // ② A patch — the same mono geometry with the hunk margins in it.
+        let patch = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n context\n-gone\n+here\n".repeat(8);
+        let diff_metrics = seats::preview_diff_metrics(scale);
+        let margin = (seats::PREVIEW_DIFF_HUNK_MARGIN_LOGICAL_PX * scale).round();
+        let mut top = 0.0_f32;
+        let diff_rows: Vec<DiffRow> = patch
+            .lines()
+            .map(|line| {
+                let kind = preview::diff_line_kind(line);
+                if kind == preview::DiffLineKind::Hunk {
+                    top += margin;
+                }
+                let row = DiffRow {
+                    text: preview::expand_tabs(line),
+                    kind,
+                    top,
+                };
+                top += diff_metrics.line_height;
+                row
+            })
+            .collect();
+        let diff_height = diff_rows
+            .last()
+            .map_or(0.0, |row| row.top + diff_metrics.line_height);
+        agree("diff", &PreviewDocument::Diff(diff_rows), diff_height, 40);
+
+        // ③ A csv — the table geometry, whose padding lives somewhere else
+        //    entirely and is the one this most easily drifts on.
+        let csv = "name,size\n".to_owned() + &"alpha,10\n".repeat(40);
+        let rows = preview::csv_rows(&csv);
+        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let column_cells: Vec<usize> = (0..columns)
+            .map(|column| {
+                rows.iter()
+                    .filter_map(|row| row.get(column))
+                    .map(|cell| bt_unicode::text_width(cell))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        agree(
+            "table",
+            &PreviewDocument::Table { rows, column_cells },
+            0.0,
+            0,
+        );
+
+        // ④ And a short file, which wears no bar and has nowhere to go — the
+        //    other half of the same agreement.
+        agree(
+            "short text",
+            &PreviewDocument::Text {
+                wrap: preview_edit::WrapLayout::unwrapped(&lines[..2]),
+                lines: lines[..2].to_vec(),
+            },
+            text_metrics.line_height * 2.0,
+            0,
+        );
+    }
+
     /// MUTATION: make the fence scanner require a *bare* ```` ``` ```` to close
     /// (`lines[index] == "```"`) and the largest-block assertion goes red, which
     /// is the swallowing hypothesis in its real form.
@@ -41935,11 +42496,11 @@ mod tests {
     /// other than where it was drawn is the same defect wearing a fix.
     ///
     /// MUTATIONS that must turn it red:
-    /// ① have `block_scroll_dragged_to` return the offset it was given instead
+    /// ① have `scroll_dragged_to` return the offset it was given instead
     ///    of reading the pointer — the drag writes nothing, which is the bug;
-    /// ② drop the `grab` widening in `block_scroll_bar` — the second question
+    /// ② drop the `grab` widening in `scroll_bar` — the second question
     ///    goes red and two drawn pixels are the whole target again;
-    /// ③ paint the thumb from any arithmetic other than `block_scroll_bar` —
+    /// ③ paint the thumb from any arithmetic other than `scroll_bar` —
     ///    the first assertion goes red.
     #[test]
     fn the_bar_under_a_wide_block_is_a_thumb_a_hand_can_take_and_drag() {
@@ -42007,7 +42568,7 @@ mod tests {
         // ③ Dragging maps the track onto the overflow, linearly, and stops
         //    where the wheel stops.
         let grab = on_thumb[0] - bar.thumb[0];
-        let dragged_to = |x: f32| preview::block_scroll_dragged_to(&bar, x, grab);
+        let dragged_to = |x: f32| preview::scroll_dragged_to(&bar, x, grab);
         assert_eq!(dragged_to(on_thumb[0]), 0.0, "at rest it has not moved");
         assert!(
             (dragged_to(on_thumb[0] + bar.travel / 2.0) - overflow / 2.0).abs() < 0.5,

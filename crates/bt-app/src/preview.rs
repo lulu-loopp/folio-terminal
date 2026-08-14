@@ -1993,7 +1993,7 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
 }
 
-/// How thick the bar under a too-wide block is *drawn*.
+/// How thick a scrolling region's bar is *drawn*.
 pub const BLOCK_SCROLL_THICKNESS_LOGICAL_PX: f32 = 2.0;
 /// How thick it is to a **hand** — the divider's `SEAT_DIVIDER_HIT_LOGICAL_PX`
 /// and for its reason: one drawn pixel is not a target.
@@ -2004,53 +2004,131 @@ pub const BLOCK_SCROLL_THICKNESS_LOGICAL_PX: f32 = 2.0;
 /// grown around the drawn rule on every side, so the tolerance is the same
 /// whether the approach is from inside the block or from the gap below it.
 pub const BLOCK_SCROLL_HIT_LOGICAL_PX: f32 = 7.0;
+/// The shortest a thumb may be *drawn* (ruling 2026-08-14, both axes): the
+/// honest proportional share of a long document collapses toward one pixel,
+/// and a thumb that cannot be seen cannot be taken. Every desktop scrollbar
+/// floors its thumb for the same reason.
+pub const BLOCK_SCROLL_MIN_THUMB_LOGICAL_PX: f32 = 24.0;
 
-/// The scroll bar a block that is wider than its page wears along its bottom.
+/// Which way a scrolling region runs beneath its bar.
+///
+/// The axis is carried on the bar rather than known by its callers because the
+/// *drag* has to read it back: "how far along the track did the hand get" is a
+/// question about x for one of these and about y for the other, and a drag that
+/// guessed would move the content sideways when the thumb went down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollAxis {
+    /// A markdown block too wide for its page: a rule along the bottom edge, the
+    /// thumb travelling left to right.
+    Horizontal,
+    /// A glance card whose document is taller than the card: a rule down the
+    /// right edge, the thumb travelling top to bottom.
+    Vertical,
+}
+
+/// The scroll bar a region wears along the edge it overflows past.
 ///
 /// One answer for the painter, the hit test and the drag alike: a thumb drawn
 /// somewhere the pointer is not tested is a thumb that looks draggable and
 /// is not, which is the whole of the bug this replaced.
+///
+/// **Grown to two axes on 2026-08-14**, when the glance card became a surface a
+/// hand could scroll. The card's bar is this one stood on its end: the same
+/// proportion, the same thickness, the same grab tolerance, the same linear map
+/// from thumb to offset. Copying it into a second function is how two scrollbars
+/// that are the same scrollbar drift apart — the block's bar has already been
+/// through one round of "the picture and the hit test disagreed", and that is
+/// the bug a copy re-opens.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BlockScrollBar {
-    /// The full-width rule the thumb runs along.
+pub struct ScrollBar {
+    pub axis: ScrollAxis,
+    /// The full-length rule the thumb runs along.
     pub track: [f32; 4],
     /// The visible share of the content, drawn in proportion.
     pub thumb: [f32; 4],
     /// The thumb widened to something a hand can land on.
     pub grab: [f32; 4],
-    /// How far the thumb's left edge may travel along the track.
+    /// How far the thumb's leading edge may travel along the track.
     pub travel: f32,
-    /// How far the content may travel under the block's own rectangle.
+    /// How far the content may travel under the region's own rectangle.
     pub overflow: f32,
 }
 
-/// The bar for a block of `content` pixels shown through `clip`, scrolled by
-/// `offset` — or `None` when the whole block fits and there is nothing to say.
+impl ScrollBar {
+    /// Where the track begins, on the bar's own axis — the origin every
+    /// travelled distance is measured from.
+    #[must_use]
+    pub fn track_start(&self) -> f32 {
+        match self.axis {
+            ScrollAxis::Horizontal => self.track[0],
+            ScrollAxis::Vertical => self.track[1],
+        }
+    }
+
+    /// Where a pointer at `at` stands on the bar's own axis.
+    #[must_use]
+    pub fn along(&self, at: [f32; 2]) -> f32 {
+        match self.axis {
+            ScrollAxis::Horizontal => at[0],
+            ScrollAxis::Vertical => at[1],
+        }
+    }
+}
+
+/// The bar for a region of `content` pixels shown through `clip` along `axis`,
+/// scrolled by `offset` — or `None` when the whole of it fits and there is
+/// nothing to say.
+///
+/// The two axes are the same six lines of arithmetic read against different
+/// components of the rectangle, which is why they are one function: the page is
+/// the clip's extent along the axis, the rule lies against the clip's far edge
+/// across it, and the thumb is the visible share of the content placed in
+/// proportion. Nothing about "wide block" or "tall card" survives into the
+/// numbers.
 #[must_use]
-pub fn block_scroll_bar(
+pub fn scroll_bar(
     clip: [f32; 4],
+    axis: ScrollAxis,
     offset: f32,
     content: f32,
     scale: f32,
-) -> Option<BlockScrollBar> {
-    let [left, _, right, bottom] = clip;
-    let page = (right - left).max(1.0);
+) -> Option<ScrollBar> {
+    // `near`/`far` bound the page along the axis; `edge` is the side the rule
+    // lies against — the bottom of a horizontal region, the right of a vertical
+    // one, which is where every scrollbar on the desk puts it.
+    let (near, far, edge) = match axis {
+        ScrollAxis::Horizontal => (clip[0], clip[2], clip[3]),
+        ScrollAxis::Vertical => (clip[1], clip[3], clip[2]),
+    };
+    let page = (far - near).max(1.0);
     let overflow = content - page;
     if overflow <= 0.0 {
         return None;
     }
     let thickness = (BLOCK_SCROLL_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
-    let top = bottom - thickness;
-    let width = (page * (page / content)).max(1.0);
-    let travel = (page - width).max(0.0);
-    let start = left + travel * (offset.clamp(0.0, overflow) / overflow);
-    let thumb = [start, top, start + width, bottom];
+    let rule = edge - thickness;
+    // The proportional length, floored at a graspable minimum (ruling
+    // 2026-08-14): a document long enough shrinks the honest share to a
+    // one-pixel sliver, and a thumb that cannot be seen cannot be taken. The
+    // floor is capped by the page itself; the travel mapping below stays linear
+    // over whatever travel remains.
+    let length = (page * (page / content))
+        .max(BLOCK_SCROLL_MIN_THUMB_LOGICAL_PX * scale)
+        .min(page)
+        .max(1.0);
+    let travel = (page - length).max(0.0);
+    let start = near + travel * (offset.clamp(0.0, overflow) / overflow);
+    let (track, thumb) = match axis {
+        ScrollAxis::Horizontal => ([near, rule, far, edge], [start, rule, start + length, edge]),
+        ScrollAxis::Vertical => ([rule, near, edge, far], [rule, start, edge, start + length]),
+    };
     // Grown on every side by the same amount, the way `seats::hit_band` grows a
     // divider: the tolerance is a property of the hand, not of the direction it
     // comes from.
     let grow = ((BLOCK_SCROLL_HIT_LOGICAL_PX * scale - thickness) / 2.0).max(0.0);
-    Some(BlockScrollBar {
-        track: [left, top, right, bottom],
+    Some(ScrollBar {
+        axis,
+        track,
         thumb,
         grab: [
             thumb[0] - grow,
@@ -2063,26 +2141,58 @@ pub fn block_scroll_bar(
     })
 }
 
-/// Where a thumb dragged to `x` — held `grab` pixels from its own left edge —
-/// leaves the block's offset.
+/// Where a thumb dragged to `along` — the pointer's coordinate on the bar's own
+/// axis, held `grab` pixels from the thumb's own leading edge — leaves the
+/// region's offset.
 ///
 /// **Linear in the track, clamped at both ends by the same numbers the wheel
 /// clamps by**: a thumb is a picture of the offset, so dragging it is reading
 /// that picture backwards and nothing else. A track with no travel (a thumb as
-/// wide as its track, which cannot happen while `overflow > 0`) answers zero
+/// long as its track, which cannot happen while `overflow > 0`) answers zero
 /// rather than dividing by it.
 #[must_use]
-pub fn block_scroll_dragged_to(bar: &BlockScrollBar, x: f32, grab: f32) -> f32 {
+pub fn scroll_dragged_to(bar: &ScrollBar, along: f32, grab: f32) -> f32 {
     if bar.travel <= 0.0 {
         return 0.0;
     }
-    let along = (x - grab - bar.track[0]) / bar.travel;
-    (along * bar.overflow).clamp(0.0, bar.overflow)
+    let travelled = (along - grab - bar.track_start()) / bar.travel;
+    (travelled * bar.overflow).clamp(0.0, bar.overflow)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ruling 2026-08-14, both axes: however long the document, the thumb is
+    /// never drawn shorter than a hand can see and take — and the floor costs
+    /// the mapping nothing, because the drag still reads linearly over the
+    /// travel that remains and reaches both ends of the clamp.
+    #[test]
+    fn a_thumb_is_never_thinner_than_a_hand_and_still_reaches_both_ends() {
+        let scale = 2.0;
+        for axis in [ScrollAxis::Vertical, ScrollAxis::Horizontal] {
+            let bar = scroll_bar([0.0, 0.0, 300.0, 264.0], axis, 0.0, 50_000.0, scale)
+                .expect("fifty thousand pixels overflow any card");
+            let length = match axis {
+                ScrollAxis::Horizontal => bar.thumb[2] - bar.thumb[0],
+                ScrollAxis::Vertical => bar.thumb[3] - bar.thumb[1],
+            };
+            assert!(
+                length >= BLOCK_SCROLL_MIN_THUMB_LOGICAL_PX * scale,
+                "{axis:?}: a {length}px thumb is a sliver, not a handle"
+            );
+            assert_eq!(
+                scroll_dragged_to(&bar, bar.track_start(), 0.0),
+                0.0,
+                "{axis:?}: the near end of the track is still offset zero"
+            );
+            assert_eq!(
+                scroll_dragged_to(&bar, bar.track_start() + bar.travel, 0.0),
+                bar.overflow,
+                "{axis:?}: the far end of the travel is still the full overflow"
+            );
+        }
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("bt-preview-{tag}-{}", std::process::id()));
