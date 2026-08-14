@@ -45,10 +45,10 @@ use crate::{
 /// halves of one agreement about what `OSC 133;D` means, and a build that could
 /// load an older or newer half would be a build whose markers mean whatever
 /// happens to be on disk. `include_str!` makes the two halves ship as one thing.
-const SCRIPT: &str = include_str!("../../../scripts/shell-integration/betterterminal.bash");
+const SCRIPT: &str = include_str!("../../../scripts/shell-integration/folio.bash");
 
-/// The name it is written under, in `%APPDATA%\BetterTerminal\`.
-const SCRIPT_FILE: &str = "betterterminal.bash";
+/// The name it is written under, in `%APPDATA%\Folio\`.
+const SCRIPT_FILE: &str = "folio.bash";
 
 /// The variable that tells the script it is being used as an init file, and is
 /// therefore responsible for the startup chain `--init-file` displaced.
@@ -260,7 +260,7 @@ fn shell_command_for(
 /// this terminal is not on and will not be for years. It renders `OSC 8`. So
 /// the answer is yes, and the terminal is the only party that knows it.
 ///
-/// It used to be `betterterminal.ps1` line 16 that said so, which made a
+/// It used to be `folio.ps1` line 16 that said so, which made a
 /// capability of the *terminal* a property of one profile's *opt-in script*:
 /// hyperlinks worked in PowerShell if you had installed the script, and nowhere
 /// else, for no reason a user could have discovered. It is stated here instead,
@@ -301,7 +301,7 @@ fn hyperlink_declaration(
 fn cmd_prompt(existing: Option<OsString>) -> OsString {
     let existing = existing.filter(|prompt| !prompt.is_empty());
     // Already ours. A `cmd` pane exports `PROMPT` to everything it starts, so a
-    // BetterTerminal launched from one — or a `cmd` started inside a `cmd` —
+    // Folio launched from one — or a `cmd` started inside a `cmd` —
     // inherits a string that already carries the report, and prefixing again
     // would print the directory twice per prompt and go on doubling.
     if existing
@@ -354,7 +354,7 @@ pub(crate) const fn script_source() -> &'static str {
 /// than a copy of them.
 #[cfg(test)]
 pub(crate) const fn script_source_ps1() -> &'static str {
-    include_str!("../../../scripts/shell-integration/betterterminal.ps1")
+    include_str!("../../../scripts/shell-integration/folio.ps1")
 }
 
 #[cfg(test)]
@@ -415,7 +415,7 @@ mod tests {
     fn the_bash_script_ships_with_unix_line_endings() {
         assert!(
             !script_source().contains('\r'),
-            "betterterminal.bash must be checked out with LF endings — see .gitattributes"
+            "folio.bash must be checked out with LF endings — see .gitattributes"
         );
         // And it is the script, not an empty file that would inject nothing.
         for marker in ["133;A", "133;B", "133;C", "133;D", "]7;", "file://"] {
@@ -424,6 +424,42 @@ mod tests {
                 "the script must emit {marker}"
             );
         }
+    }
+
+    /// PIN — the name this terminal announces itself under and the name the
+    /// PowerShell script recognises are one string.
+    ///
+    /// `PtyCommand` puts `TERM_PROGRAM=<name>` in every child's environment;
+    /// `folio.ps1` turns `FORCE_HYPERLINK` on for exactly the sessions whose
+    /// `TERM_PROGRAM` it recognises as ours. Neither half can tell that the other
+    /// has moved: a script comparing against a name nobody declares simply never
+    /// takes the branch, and the only symptom is that `OSC 8` links in
+    /// hyperlink-gated CLIs stop being links. There is no error, no warning, and
+    /// nothing in the pane that says why.
+    ///
+    /// It reads the bytes that ship rather than a copy of them, for the reason
+    /// `profiles::tests::the_integration_script_names_the_profiles_own_titles`
+    /// gives: a constant restated here would agree with this file forever and
+    /// with the script never.
+    ///
+    /// Red gate: rename [`bt_pty::TERM_PROGRAM`] without the script's literal, or
+    /// the script's literal without the constant, and this fails.
+    #[test]
+    fn the_integration_script_knows_the_name_this_terminal_announces() {
+        let declared = bt_pty::TERM_PROGRAM;
+        let comparison = format!("$env:TERM_PROGRAM -eq '{declared}'");
+        assert!(
+            script_source_ps1().contains(&comparison),
+            "the terminal declares TERM_PROGRAM={declared:?}, so the script must \
+             test for it verbatim; folio.ps1 does not contain {comparison:?}"
+        );
+        // And it is the *only* spelling the script compares against, so a rename
+        // cannot pass by leaving the old literal in a second branch beside it.
+        assert_eq!(
+            script_source_ps1().matches("$env:TERM_PROGRAM -eq").count(),
+            1,
+            "the script recognises this terminal in one place, not two"
+        );
     }
 
     /// PIN — Git Bash is handed the init file *instead of* `--login`.
@@ -435,9 +471,7 @@ mod tests {
     /// and no marker ever arrives.
     #[test]
     fn git_bash_trades_its_login_flag_for_the_init_file() {
-        let script = Path::new(
-            r"C:\Users\dev\AppData\Roaming\BetterTerminal\shell-integration\betterterminal.bash",
-        );
+        let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
         let command = shell_command(
             index_of_id("gitbash"),
             &[],
@@ -449,7 +483,7 @@ mod tests {
             args(&command),
             [
                 "--init-file",
-                r"C:\Users\dev\AppData\Roaming\BetterTerminal\shell-integration\betterterminal.bash",
+                r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash",
                 "-i"
             ]
         );
@@ -486,9 +520,7 @@ mod tests {
     /// markers. That is strictly worse than not injecting.
     #[test]
     fn wsl_is_told_the_place_before_the_shell_and_the_script_in_its_own_spelling() {
-        let script = Path::new(
-            r"C:\Users\dev\AppData\Roaming\BetterTerminal\shell-integration\betterterminal.bash",
-        );
+        let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
         let command = shell_command(
             index_of_id("wsl"),
@@ -505,7 +537,7 @@ mod tests {
                 "--",
                 "/bin/bash",
                 "--init-file",
-                "/mnt/c/Users/dev/AppData/Roaming/BetterTerminal/shell-integration/betterterminal.bash",
+                "/mnt/c/Users/dev/AppData/Roaming/Folio/shell-integration/folio.bash",
                 "-i"
             ],
             "`--cd` is the launcher's and must precede the `--` that ends its arguments"
@@ -537,7 +569,7 @@ mod tests {
     #[test]
     fn powershell_is_not_injected_into() {
         // **Both of them.** They are two profiles and one script: 5.1 and 7 read
-        // the same `$PROFILE` mechanism, `betterterminal.ps1` is written for
+        // the same `$PROFILE` mechanism, `folio.ps1` is written for
         // both, and neither is written into by this product.
         for id in ["pwsh", "winps"] {
             let profile = index_of_id(id);
@@ -608,7 +640,7 @@ mod tests {
     ///
     /// This is R-d settled (`docs/M2-persistence-schema-v1.md` §296-299), and
     /// the red gate is the *coverage*: with the declaration back inside
-    /// `betterterminal.ps1` where it used to live, `OSC 8` links worked in a
+    /// `folio.ps1` where it used to live, `OSC 8` links worked in a
     /// PowerShell whose owner had installed the opt-in script and in no other
     /// pane in the window — a capability of the terminal reachable only through
     /// one profile's optional file.
@@ -668,7 +700,7 @@ mod tests {
     /// Red gate on the first half: assigning `PROMPT` instead of prefixing it
     /// passes every other test here and silently deletes a prompt somebody set
     /// with `setx`. Red gate on the second: a `cmd` pane exports `PROMPT` to
-    /// its children, so without the idempotence check a BetterTerminal started
+    /// its children, so without the idempotence check a Folio started
     /// from a `cmd` pane prints the directory twice, and one started from
     /// *that* prints it three times.
     #[test]

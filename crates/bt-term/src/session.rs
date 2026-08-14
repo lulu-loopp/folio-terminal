@@ -19957,7 +19957,7 @@ mod tests {
         (root, image, work)
     }
 
-    /// The exact bytes `scripts/shell-integration/betterterminal.ps1` puts on the wire for one
+    /// The exact bytes `scripts/shell-integration/folio.ps1` puts on the wire for one
     /// directory: an empty authority and a minimally percent-encoded path. The script's own
     /// emission is pinned end to end in `tests/shell_integration_script.rs`; this is the same
     /// shape, written where a unit test can reach it.

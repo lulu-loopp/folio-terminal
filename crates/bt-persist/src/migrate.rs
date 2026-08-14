@@ -248,7 +248,7 @@ fn migrate_profile_id_in_leaf(leaf: &mut Value) {
 /// forever; a degradation is for as long as the build lacks the profile.
 ///
 /// This table is a **historical mapping and not a registry**. It names the executables that
-/// BetterTerminal actually wrote into v1–v5 documents, plus the slugs those become; the live list
+/// Folio actually wrote into v1–v5 documents, plus the slugs those become; the live list
 /// of profiles is the application's, and this crate deliberately still has no opinion about which
 /// profiles exist (see [`crate::layout::TermLeafV1`]).
 fn profile_slug(current: &str) -> &str {
@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(migrated["theme"], json!("system"));
     }
 
-    /// PIN — the mapping table itself: every spelling BetterTerminal ever wrote, the slugs it
+    /// PIN — the mapping table itself: every spelling Folio ever wrote, the slugs it
     /// already wrote, and the one case that must **not** be rewritten.
     ///
     /// Red gate for the last of those. Folding an unrecognized value into the default profile

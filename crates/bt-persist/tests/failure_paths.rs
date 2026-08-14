@@ -116,7 +116,7 @@ fn illegal_ratio_and_unknown_leaf_kind_degrade_without_losing_the_rest_of_the_tr
     let path = dir.join("session.json");
     // A split with a ratio far outside the valid fraction range, next to a
     // leaf kind this build has never heard of (as if written by a future
-    // BetterTerminal) — §5.4 case 3: neither should take down the whole tab.
+    // Folio) — §5.4 case 3: neither should take down the whole tab.
     std::fs::write(
         &path,
         r#"{

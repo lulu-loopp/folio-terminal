@@ -1,6 +1,6 @@
 # OSC 133 + OSC 7 shell integration
 
-BetterTerminal treats FinalTerm Command Status (FTCS) `OSC 133` markers as the authoritative
+Folio treats FinalTerm Command Status (FTCS) `OSC 133` markers as the authoritative
 prompt/input/output boundary for each terminal screen that emits them:
 
 - `133;A`: prompt starts.
@@ -14,7 +14,7 @@ migrates through staging into the frozen transcript. Rows between C and D are ou
 normal decoration pipeline. Registered candidates and asynchronous worker completions both recheck
 the same region ownership, so a decoration cannot survive by racing a marker.
 
-Region endpoints use BetterTerminal content anchors. Normal scrolling migrates them atomically from
+Region endpoints use Folio content anchors. Normal scrolling migrates them atomically from
 live grid to staging to transcript. Before a resize, a live region also captures its exact displayed
 command text; after vendor reflow, that content witness re-seats its endpoints on the new physical
 rows. Resize therefore changes only projection, not input/output ownership.
@@ -27,14 +27,14 @@ The same script also emits `OSC 7` once per prompt, immediately before `133;A`:
 ESC ] 7 ; file:///<percent-encoded $PWD> BEL
 ```
 
-This is the standard Windows Terminal / iTerm convention and it is the **only** way BetterTerminal
+This is the standard Windows Terminal / iTerm convention and it is the **only** way Folio
 learns where a session's output is being printed from. It exists to resolve relative image path
 text (`./shot.png`, `../a/b.svg`, and bare references carrying a separator such as
 `local-images/sunset.svg`) — see `docs/M2-preview-matrix-and-verbs.md` §6.3. A session that
 never receives OSC 7 leaves relative paths undetected rather than guessing a directory, exactly as
 a screen that never emits OSC 133 keeps the cursor/WRAPLINE heuristics.
 
-The authority is empty (the file-URI spelling of "this host"); BetterTerminal also accepts
+The authority is empty (the file-URI spelling of "this host"); Folio also accepts
 `localhost` and this machine's own name, and rejects every other authority as a remote share. The
 path is percent-encoded minimally: UTF-8 byte by byte, keeping RFC 3986 unreserved characters,
 sub-delims, `:`, `@` and `/`. The directory is stored per session and survives primary/alternate
@@ -118,11 +118,11 @@ and the asymmetry is the shells':
 
 So a Git Bash profile is started as `bash --init-file <script> -i` and a WSL profile as
 `wsl.exe [--cd <dir>] -- <login shell> --init-file <script> -i`, with `BT_SHELL_INTEGRATION=1` in
-the environment. The script is written out to `%APPDATA%\BetterTerminal\shell-integration\` from a
+the environment. The script is written out to `%APPDATA%\Folio\shell-integration\` from a
 copy compiled into the binary, so the two halves of the OSC 133 agreement always ship together.
 
 **What `--init-file` costs, and how it is paid back.** It replaces `~/.bashrc`, and because bash
-consults it only for a shell that is *not* a login shell, BetterTerminal also drops the `--login`
+consults it only for a shell that is *not* a login shell, Folio also drops the `--login`
 that Git Bash's own shortcut passes. The script therefore runs the startup chain itself, in bash's
 documented order — `/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`,
 `~/.profile` — before installing anything of its own. This is not cosmetic on Git for Windows:
@@ -150,7 +150,7 @@ the fallback path below rather than a broken shell. When more than one distribut
 the profile is titled `WSL · <default>` so the row says which one it starts; a machine with one
 needs no qualifier and keeps the bare `WSL`.
 
-**Command Prompt has no script and no hook — its whole integration is `PROMPT`.** BetterTerminal
+**Command Prompt has no script and no hook — its whole integration is `PROMPT`.** Folio
 reads whatever `PROMPT` this process inherited, puts the `OSC 7` report in front of it, and hands
 the result to `cmd.exe`. Prefixed and never replaced: a `PROMPT` in the environment is a prompt
 somebody wrote with `setx`, and a terminal that overwrote it would have taken their prompt away in
@@ -189,8 +189,8 @@ with a hole in the bottom.
 They share the one PowerShell mark. The mock-up draws a single PowerShell symbol and inventing a
 second would assert a visual distinction the family does not have; identity here is the mark *and*
 the title (`docs/UI-UX.md` §126-137), and the titles already differ. What the script emits as its
-`OSC 0` now differs too, and has to: BetterTerminal drops a title that only repeats the profile's
-own name — a shell agreeing with its launcher has announced nothing — so `betterterminal.ps1` names
+`OSC 0` now differs too, and has to: Folio drops a title that only repeats the profile's
+own name — a shell agreeing with its launcher has announced nothing — so `folio.ps1` names
 the edition (`$PSVersionTable.PSEdition`), and a 5.1 session that still called itself `PowerShell`
 would prefix every pane head in its tab with its own family name.
 
@@ -237,7 +237,7 @@ vocabulary. `title Build` in that same pane is kept.
 `supports-hyperlinks` convention that half the Rust CLI ecosystem asks before it will emit `OSC 8`,
 and its default answer is a guess made from `TERM` and a list of known terminal names this one is
 not on. It renders `OSC 8`, so the answer is yes. Until now the only thing that said so was line 16
-of `betterterminal.ps1`, which made a capability of the terminal a property of one profile's
+of `folio.ps1`, which made a capability of the terminal a property of one profile's
 *opt-in* script: links worked in a PowerShell whose owner had installed the script, and in no other
 pane in the window. It is now declared by the profile system — which is exactly the "per-profile
 environment override mechanism" the ruling at `docs/M2-persistence-schema-v1.md` §296-299 deferred
@@ -258,8 +258,8 @@ the UI does not promise either.
 
 Ruling (2026-08-04, evidence-backed): PowerShell 5.1 ships PSReadLine 2.0.0 (2020), whose stale
 render anchor corrupts an unsubmitted wrapped input line whenever the pane narrows — reproduced in
-BetterTerminal itself and in Windows Terminal, while PowerShell 7's PSReadLine 2.4.5 is clean in
-both. Modern terminals already default to `pwsh` when it is present, so BetterTerminal does too.
+Folio itself and in Windows Terminal, while PowerShell 7's PSReadLine 2.4.5 is clean in
+both. Modern terminals already default to `pwsh` when it is present, so Folio does too.
 
 `PtySession::spawn_default` picks the shell to launch in this order:
 
@@ -277,9 +277,9 @@ both. Modern terminals already default to `pwsh` when it is present, so BetterTe
    ruling.
 
 Whichever program is picked is launched the same way `spawn_default` always has: `-NoLogo` plus
-BetterTerminal's usual `TERM_PROGRAM`/`COLORTERM`/`TERM` declarations. If the resolved shell fails
+Folio's usual `TERM_PROGRAM`/`COLORTERM`/`TERM` declarations. If the resolved shell fails
 to start — a bad `BT_SHELL` override, a `pwsh.exe` resolved from a stale `PATH` entry that no longer
-exists, or a profile whose program has been uninstalled — BetterTerminal falls back to
+exists, or a profile whose program has been uninstalled — Folio falls back to
 `powershell.exe` once and **writes a one-line banner into the pane's own first line** instead of
 failing the session outright, naming the program that would not start and the reason. The pane is
 then that fallback profile in every respect: its mark, its name, and the `profile_id` written to
@@ -300,12 +300,12 @@ profile.
 
 ## bash: Git Bash, WSL, and a hand-installed copy
 
-`scripts/shell-integration/betterterminal.bash` is what BetterTerminal injects, and it is also
+`scripts/shell-integration/folio.bash` is what Folio injects, and it is also
 installable by hand for any bash it does not start itself — a shell over ssh, a distribution whose
 login shell you changed. Dot-source it as the last relevant line of `~/.bashrc`:
 
 ```bash
-. "$HOME/betterterminal.bash"
+. "$HOME/folio.bash"
 ```
 
 Loaded that way, `BT_SHELL_INTEGRATION` is unset and the script sources nothing on your behalf:
@@ -320,13 +320,28 @@ then wraps them with standard A/B/C/D markers. Load prompt customizers first, an
 script as the final relevant line in `$PROFILE`:
 
 ```powershell
-. 'D:\Developer\BetterTerminal\scripts\shell-integration\betterterminal.ps1'
+. 'D:\Developer\BetterTerminal\scripts\shell-integration\folio.ps1'
 ```
 
 Restart PowerShell after editing the profile. The script requires PSReadLine and is idempotent within
 one shell process. It works in both PowerShell 7 (`pwsh`) and Windows PowerShell 5.1
 (`powershell.exe`). A `-NoProfile` shell, a profile blocked by execution policy, or a missing
 PSReadLine installation does not emit markers and therefore uses fallback behavior.
+
+### The old names still work
+
+Both scripts were called `betterterminal.ps1` / `betterterminal.bash` before the product was named
+Folio (2026-08-13). Those two filenames still exist beside the new ones, as one-line shims that
+source their sibling, because the line that loads them lives in a file that belongs to you — your
+`$PROFILE` or your `~/.bashrc` — and a rename is not a reason for somebody else's file to stop
+working. They are transitional: point your own line at `folio.ps1` / `folio.bash` and the shims can
+go. Nothing inside the terminal reads them; every injection path names the new file directly.
+
+The environment variable moved with the name. `TERM_PROGRAM` is now `Folio` rather than
+`BetterTerminal`, and the PowerShell script tests for the new value — a tool of your own that keyed
+on the old string needs the same edit. The two halves are held equal by a test
+(`shell_integration::tests::the_integration_script_knows_the_name_this_terminal_announces`), so they
+cannot drift apart again.
 
 The injection pattern follows the standard sequences documented by
 [Windows Terminal](https://learn.microsoft.com/en-us/windows/terminal/tutorials/shell-integration)
@@ -344,7 +359,7 @@ region. Both BEL and ST terminators and arbitrary PTY chunk boundaries are suppo
 A screen that has never emitted OSC 133 is byte-for-byte on the existing fallback path. This is
 important for Codex, Claude Code, and other nested/full-screen TUIs: an outer PowerShell B/C pair
 describes only the lifetime of the TUI process, not its internal composer. When the TUI switches to
-an unmarked alternate screen, BetterTerminal continues using the existing cursor/WRAPLINE/CUP
+an unmarked alternate screen, Folio continues using the existing cursor/WRAPLINE/CUP
 heuristics there.
 
 ## Accepted v1 trust boundary

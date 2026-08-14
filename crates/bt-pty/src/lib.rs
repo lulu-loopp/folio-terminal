@@ -70,7 +70,22 @@ pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
 pub const WINDOWS_POWERSHELL: &str = "powershell.exe";
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
-const TERM_PROGRAM: &str = "BetterTerminal";
+
+/// The name this terminal announces itself under, in `TERM_PROGRAM`.
+///
+/// **Public because it is half of a handshake, not a private label.** The value
+/// crosses into every child process and is read back by the shell integration
+/// script, which turns `FORCE_HYPERLINK` on only for sessions it recognises as
+/// ours; `scripts/shell-integration/folio.ps1` therefore carries this exact
+/// string as a literal, and the two are held equal by
+/// `shell_integration::tests::the_integration_script_knows_the_name_this_terminal_announces`.
+/// Renaming one alone leaves every PowerShell pane quietly without hyperlinks —
+/// a failure whose only symptom is links that used to work and now print as
+/// text, which is why the equality is a gate rather than a convention.
+///
+/// Third-party tools read it too (it is the de-facto terminal identity variable
+/// iTerm2 established), so it is the product's name and not an internal id.
+pub const TERM_PROGRAM: &str = "Folio";
 const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Diagnostic-only byte sink for one ConPTY reader. The main file is byte-for-byte suitable for
@@ -944,7 +959,7 @@ mod tests {
 
         /// `load_profile` runs the host's real `$PROFILE` chain instead of `-NoProfile`. Nothing a
         /// reconstruction can do is as faithful as the user's own conda hook and their own
-        /// dot-source of `scripts/shell-integration/betterterminal.ps1`, so the corruption hunt
+        /// dot-source of `scripts/shell-integration/folio.ps1`, so the corruption hunt
         /// gets the real thing and the reconstruction is kept only as the controlled comparison.
         fn spawn_shell_profile(
             shell: &str,
@@ -1334,7 +1349,7 @@ mod tests {
         let environment = command.resolved_environment();
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
-            Some(std::ffi::OsStr::new("BetterTerminal"))
+            Some(std::ffi::OsStr::new("Folio"))
         );
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM_VERSION"),
@@ -1357,7 +1372,7 @@ mod tests {
         let environment = command.resolved_environment();
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
-            Some(std::ffi::OsStr::new("BetterTerminal"))
+            Some(std::ffi::OsStr::new("Folio"))
         );
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM_VERSION"),
@@ -1510,8 +1525,8 @@ mod tests {
         assert!(
             output
                 .lines()
-                .any(|line| line.trim() == "TERM_PROGRAM=BetterTerminal"),
-            "child environment did not contain TERM_PROGRAM=BetterTerminal: {output:?}"
+                .any(|line| line.trim() == "TERM_PROGRAM=Folio"),
+            "child environment did not contain TERM_PROGRAM=Folio: {output:?}"
         );
         let expected_version = format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION"));
         assert!(
@@ -2133,7 +2148,7 @@ mod tests {
     /// One profile shape the corruption hunt can put a real shell into. The reconstruction shapes
     /// isolate single ingredients; the `Real*` shapes are the reporting host's own environment,
     /// because nothing synthesized here is as faithful as the user's own conda hook and their own
-    /// dot-source of `scripts/shell-integration/betterterminal.ps1`.
+    /// dot-source of `scripts/shell-integration/folio.ps1`.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ProfileScenario {
         /// A plain one-part prompt, no integration: the control.
@@ -2142,7 +2157,7 @@ mod tests {
         /// and returns the rest, so the column the cursor starts in is wider than the string the
         /// line editor was handed.
         Conda,
-        /// BetterTerminal's own OSC 133 / OSC 7 wrappers over a plain prompt.
+        /// Folio's own OSC 133 / OSC 7 wrappers over a plain prompt.
         Integration,
         /// Both, in the order `$PROFILE` produces them: conda's `profile.ps1` first, our
         /// dot-source from `Microsoft.PowerShell_profile.ps1` second.
@@ -2233,7 +2248,7 @@ mod tests {
             .join("..")
             .join("scripts")
             .join("shell-integration")
-            .join("betterterminal.ps1")
+            .join("folio.ps1")
     }
 
     /// Rebuild the reporting host's profile in one `-Command` startup: the base prompt, conda's
@@ -2425,7 +2440,7 @@ mod tests {
     /// against the *reporting host's own profile shape* rather than a sterile prompt.
     ///
     /// Read the `BT_CONPTY_PROFILE_PROBE` lines on stderr. Each row of the sweep is one live child;
-    /// the shapes isolate whether the conda-style two-part prompt, BetterTerminal's own shell
+    /// the shapes isolate whether the conda-style two-part prompt, Folio's own shell
     /// integration, the host's real profile chain, or a screen full of scrollback is what turns a
     /// narrowing resize into a stale render anchor.
     #[test]
@@ -3576,7 +3591,7 @@ mod tests {
     /// the stale anchor. Same wait, same reason, as `BURST_STAGE_RECORDED`.
     const DEFER_PROBE_SETTLE: Duration = Duration::from_millis(2_500);
 
-    /// The prompt above, then BetterTerminal's own shell integration on top of it. The OSC 133 pair
+    /// The prompt above, then Folio's own shell integration on top of it. The OSC 133 pair
     /// is not decoration here: it *is* the mitigation's information source. Without `A`/`B` the
     /// terminal has never been told where input begins, `typed_shell_input_live` answers `false`,
     /// and the gate correctly declines to act — which is the honest-degradation half of the ruling

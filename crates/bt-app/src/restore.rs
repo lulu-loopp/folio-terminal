@@ -84,7 +84,7 @@ const SUB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 14.0;
 /// The sentence is the design: it promises the *folders* and refuses the
 /// *output* in the same breath, which is 「不存输出历史」 stated as a courtesy
 /// instead of an apology. It wraps, so it is drawn as lines — see [`wrap`].
-pub const SUB_TEXT: &str = "These were open when you last closed BetterTerminal. \
+pub const SUB_TEXT: &str = "These were open when you last closed Folio. \
 They come back in the folders you left them, as new shells — the output is not \
 ours to keep.";
 
@@ -1435,6 +1435,14 @@ mod tests {
     /// The two rows and the three-line paragraph the measurement was taken with,
     /// at 1x. The widths are the mock-up's own renderer's, so a rectangle
     /// computed from them is comparable with the one it reported.
+    ///
+    /// The paragraph is input rather than a claim about where [`wrap`] breaks —
+    /// what the stack below it depends on is that there are *three* lines, and
+    /// that survived the rename: `Folio` is nine characters shorter than the name
+    /// it replaced, which moves both breaks and leaves the count where it was
+    /// (135 characters over a line that holds about 58 is three lines under any
+    /// greedy rule). Had it become two, the 232.75 the height pin reports would
+    /// have had to move with it.
     fn measured_content(scale: f32) -> RestoreContent {
         RestoreContent {
             rows: vec![
@@ -1458,9 +1466,9 @@ mod tests {
                 },
             ],
             sub_lines: vec![
-                "These were open when you last closed BetterTerminal.".to_owned(),
-                "They come back in the folders you left them, as new shells".to_owned(),
-                "— the output is not ours to keep.".to_owned(),
+                "These were open when you last closed Folio. They come back".to_owned(),
+                "in the folders you left them, as new shells — the output".to_owned(),
+                "is not ours to keep.".to_owned(),
             ],
             decline_text_width: 62.164_063 * scale,
             restore_text_width: 46.796_875 * scale,
@@ -1575,7 +1583,7 @@ mod tests {
         assert_eq!(RESTORE_TEXT, "Restore");
         assert_eq!(
             SUB_TEXT,
-            "These were open when you last closed BetterTerminal. They come back \
+            "These were open when you last closed Folio. They come back \
 in the folders you left them, as new shells — the output is not ours to keep."
         );
     }

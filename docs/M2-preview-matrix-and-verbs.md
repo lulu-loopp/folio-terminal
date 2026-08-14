@@ -685,7 +685,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   新的登记)。理由是结构性的:live 网格本来就在被持续重扫,要"按打印时的目录钉死"就得给每
   一行转录挂一个目录,而 live 平面上这仍然做不到。一个权威、永远是最新的那个,才是这个终端
   对自己所知的诚实交代。钉死于 `re_detection_resolves_old_text_against_the_current_working_directory`。
-- **集成脚本**:`scripts/shell-integration/betterterminal.ps1` 的 prompt 钩子每次提示符发一条
+- **集成脚本**:`scripts/shell-integration/folio.ps1`(更名前叫 `betterterminal.ps1`)的 prompt 钩子每次提示符发一条
   `ESC ] 7 ; file:///<百分号编码的 $PWD> BEL`,在 `133;A` **之前**。authority 留空(file URI 里
   "本机"的写法,不用每次查主机名,也不会过期)。编码是最小且正确的:UTF-8 逐字节,保留
   RFC 3986 的 unreserved + sub-delims + `:` `@` `/`,其余全部 `%XX`——空格成 `%20`,CJK 成它的

@@ -88,7 +88,7 @@ pub enum LeafNodeV1 {
     /// ①) or opens a column beside it.
     Preview(PreviewLeafV1),
     /// A leaf kind this build does not recognize (written by a newer
-    /// BetterTerminal). Read-time placeholder only — this crate never
+    /// Folio). Read-time placeholder only — this crate never
     /// constructs it on purpose, and the consumer is expected to render it
     /// as an inert placeholder pane (§5.4: "占位 pane(可见但不可用)").
     #[serde(other)]

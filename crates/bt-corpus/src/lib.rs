@@ -43,7 +43,7 @@ pub enum Chunking {
 pub enum CorpusError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    #[error("not a BetterTerminal corpus")]
+    #[error("not a Folio corpus")]
     BadMagic,
     #[error("unknown corpus event tag {0}")]
     BadTag(u8),

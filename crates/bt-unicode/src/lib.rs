@@ -1,4 +1,4 @@
-//! BetterTerminal's single cell-width oracle.
+//! Folio's single cell-width oracle.
 
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;

@@ -178,7 +178,7 @@ pub enum TerminalColor {
 }
 
 bitflags! {
-    /// Stable transcript style flags. Bit positions are owned by BetterTerminal.
+    /// Stable transcript style flags. Bit positions are owned by Folio.
     #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
     pub struct CellFlags: u16 {
         const INVERSE = 1 << 0;
@@ -207,7 +207,7 @@ impl Default for CellStyle {
     fn default() -> Self {
         Self {
             flags: CellFlags::empty(),
-            // Named codes are BetterTerminal-owned; 16/17 mean default foreground/background.
+            // Named codes are Folio-owned; 16/17 mean default foreground/background.
             foreground: TerminalColor::Named(16),
             background: TerminalColor::Named(17),
         }

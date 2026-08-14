@@ -92,7 +92,7 @@ const HINT_TEXT: &str = "default";
 ///
 /// The words are chosen against the alternative of showing nothing. A greyed row
 /// with no caption asks the user to work out *why* it is grey, and the two
-/// available guesses — "not on this machine" and "BetterTerminal is broken" —
+/// available guesses — "not on this machine" and "Folio is broken" —
 /// are not equally actionable.
 const UNAVAILABLE_HINT_TEXT: &str = "not installed";
 
@@ -389,7 +389,7 @@ pub enum ProgramCandidate {
 /// hold for the new shells rather than inventing a second set for them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integration {
-    /// `betterterminal.ps1`, dot-sourced by the user into `$PROFILE`.
+    /// `folio.ps1`, dot-sourced by the user into `$PROFILE`.
     ///
     /// **Opt-in and manual**: this product never injects it
     /// (`docs/shell-integration.md` §83-96), because PowerShell's own startup
@@ -398,14 +398,14 @@ pub enum Integration {
     /// shell. There is no argument to hand `pwsh` that would source a second
     /// file *after* theirs, which is the position this integration must occupy.
     PowerShellOptIn,
-    /// `betterterminal.bash`, handed to the shell as its init file at spawn.
+    /// `folio.bash`, handed to the shell as its init file at spawn.
     ///
     /// Automatic, and the asymmetry with PowerShell is bash's own: `--init-file`
     /// is a documented argument that names the startup file for this one
     /// interactive shell, so the integration can be installed for a session
     /// without touching anything on disk that belongs to the user. What that
     /// argument costs is the startup chain it replaces, which the script itself
-    /// puts back — see `scripts/shell-integration/betterterminal.bash`.
+    /// puts back — see `scripts/shell-integration/folio.bash`.
     BashInitFile,
     /// No script at all — the whole integration is the `PROMPT` variable
     /// `cmd.exe` prints its prompt from, and what fits in there is **one**
@@ -473,7 +473,7 @@ pub const PROFILES: [Profile; 5] = [
         // number because 5.1 is where Windows PowerShell stopped — a fixed value,
         // not a reading. A `pwsh` 8 would be a new line and a new word here.
         //
-        // **`scripts/shell-integration/betterterminal.ps1` carries both of these
+        // **`scripts/shell-integration/folio.ps1` carries both of these
         // strings and must be changed with them, character for character.** The
         // script titles its session with the edition it is running, and
         // `pane_head_title` drops a program title that merely repeats its own
@@ -517,7 +517,7 @@ pub const PROFILES: [Profile; 5] = [
         starting_dir: StartingDir::WindowsHome,
         paths: PathNamespace::Windows,
         qualifier: Qualifier::None,
-        // The same script, and it already handles this shell: `betterterminal.ps1`
+        // The same script, and it already handles this shell: `folio.ps1`
         // is written for 5.1 and 7 alike, and the PSReadLine 2.0.0 anchor repair
         // 5.1 needs is an existing no-op sentinel rather than a second code path.
         integration: Integration::PowerShellOptIn,
@@ -701,7 +701,7 @@ pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
 /// It falls to the *fallback* and deliberately not to the user's configured
 /// default, which is the one place those two answers visibly differ. The setting
 /// says what it is for in the dialog's own words — "What opens on a new tab, and
-/// when BetterTerminal starts" — and a leaf coming back off disk is neither. A
+/// when Folio starts" — and a leaf coming back off disk is neither. A
 /// user who set their default to `cmd` and restores a session written by a build
 /// that spelled a profile differently is owed the pane back, not every such pane
 /// silently converted to their current preference; and the conversion would be
@@ -741,7 +741,7 @@ pub fn has_id(id: &str) -> bool {
 ///
 /// The wording names **the profile and the machine**, in that order, and it is
 /// chosen against two alternatives that read as bug reports. "Not found" alone
-/// invites "where did you look?"; "BetterTerminal could not find Git Bash" makes
+/// invites "where did you look?"; "Folio could not find Git Bash" makes
 /// the terminal the subject of a sentence whose subject is the machine. `— not
 /// found on this machine` says the search happened, that it was for a real thing,
 /// and that the answer is about this computer rather than about the product.
@@ -1135,7 +1135,7 @@ impl ProfilePrograms {
     ///
     /// The picker draws a profile it cannot start greyed rather than hiding it
     /// (user ruling 2026-08-10): the row is the product saying "this is a thing
-    /// BetterTerminal opens", and the grey is it saying "not on this machine".
+    /// Folio opens", and the grey is it saying "not on this machine".
     /// Dropping the row conflates "you have not installed Git" with "we never
     /// thought of Git", and only one of those is something the user can act on.
     #[must_use]
@@ -3764,7 +3764,7 @@ mod tests {
     /// character for character.
     ///
     /// The two files are one decision wearing two syntaxes.
-    /// `scripts/shell-integration/betterterminal.ps1` ends by writing the running
+    /// `scripts/shell-integration/folio.ps1` ends by writing the running
     /// edition as an OSC 0 title; `pane_head_title` then *drops* a program title
     /// equal to the profile's own, because a shell that agrees with its launcher
     /// has announced nothing. That test is string equality and nothing weaker, so
@@ -3791,7 +3791,7 @@ mod tests {
             assert!(
                 script.contains(&quoted),
                 "{id}'s title {title:?} is what the script's {edition} arm writes; \
-                 betterterminal.ps1 does not contain {quoted}"
+                 folio.ps1 does not contain {quoted}"
             );
         }
         // And the arms are told apart the way the script tells them apart, so the

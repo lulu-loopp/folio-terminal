@@ -28,7 +28,7 @@ use std::{
 /// The shell a distribution has to log into before this terminal will hand it an
 /// init file.
 ///
-/// `bash` and nothing else, because `betterterminal.bash` is a bash script:
+/// `bash` and nothing else, because `folio.bash` is a bash script:
 /// `--init-file` is bash's own flag, the `PROMPT_COMMAND`/`DEBUG` pair it
 /// installs is bash's own mechanism, and zsh and fish spell every part of this
 /// differently. A distribution logging into one of those keeps its shell and

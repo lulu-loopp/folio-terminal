@@ -2,7 +2,7 @@
 //!
 //! The companion of `shell_integration_script.rs`: that one pins the PowerShell
 //! script against a real Windows PowerShell, this one pins
-//! `scripts/shell-integration/betterterminal.bash` against a real Git Bash. Both
+//! `scripts/shell-integration/folio.bash` against a real Git Bash. Both
 //! are round trips rather than shape matches — the script's own bytes go into a
 //! session, so the encoder and the decoder are held against each other and
 //! neither can drift alone.
@@ -32,8 +32,8 @@ fn nz(value: u32) -> std::num::NonZeroU32 {
 /// reads no startup file at all, and the shell that comes back looks almost
 /// right. The product hands over an ordinary path for the same reason.
 fn script_path() -> PathBuf {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/shell-integration/betterterminal.bash");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/shell-integration/folio.bash");
     assert!(
         path.is_file(),
         "the integration script ships in the repository: {}",
@@ -86,7 +86,7 @@ fn temporary_directory() -> PathBuf {
     directory
 }
 
-/// Everything a Git Bash started the way BetterTerminal starts it writes, while
+/// Everything a Git Bash started the way Folio starts it writes, while
 /// running `commands`.
 ///
 /// The argument list is the product's: `--init-file <script> -i`, with
@@ -223,7 +223,7 @@ fn git_bash_marks_every_command_region_and_reports_the_exit_code() {
 
 /// PIN — the script leaves the user's own startup files in charge.
 ///
-/// `--init-file` displaces `~/.bashrc` and, because BetterTerminal also drops
+/// `--init-file` displaces `~/.bashrc` and, because Folio also drops
 /// `--login` to make the flag take effect at all, `/etc/profile` with it. On Git
 /// for Windows `/etc/profile` is what puts `/mingw64/bin` on the path, so a
 /// shell that skipped it is a Git Bash that cannot find git — the one thing that

@@ -7,7 +7,7 @@
 //! This is a pure library: it knows how to read/write the two JSON files
 //! given explicit paths, and how to degrade gracefully when either is
 //! missing, corrupt, from a future version, or internally inconsistent. It
-//! does **not** know where `%APPDATA%\BetterTerminal\` is, does not spawn
+//! does **not** know where `%APPDATA%\Folio\` is, does not spawn
 //! any timer or background thread, and is not wired into `bt-app` — per the
 //! implementation brief that wiring (actual storage paths, the ~1-2s
 //! debounce duration, alert UI, actually calling `probe_sentinel` at

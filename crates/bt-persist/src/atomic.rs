@@ -79,7 +79,7 @@ fn temp_sibling_path(path: &Path) -> Result<PathBuf, WriteError> {
 /// monotonic per-process counter (guarantees uniqueness across calls in the
 /// same process even if the clock doesn't advance) combined with wall-clock
 /// nanoseconds and the process ID (guards against collisions with another
-/// BetterTerminal process writing the same directory). Not cryptographic
+/// Folio process writing the same directory). Not cryptographic
 /// randomness — collision avoidance, not secrecy, is the requirement.
 fn unique_suffix() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);

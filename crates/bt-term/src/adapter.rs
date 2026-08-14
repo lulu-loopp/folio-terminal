@@ -226,7 +226,7 @@ fn discard_listener_output(listener: &CaptureListener) {
         .clear();
 }
 
-/// Vendor-facing terminal adapter. It translates upstream facts into stable BetterTerminal facts
+/// Vendor-facing terminal adapter. It translates upstream facts into stable Folio facts
 /// and never owns or mutates the canonical transcript.
 pub struct TerminalAdapter {
     term: Term<CaptureListener>,

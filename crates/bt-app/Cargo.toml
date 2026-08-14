@@ -5,6 +5,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# The package keeps its `bt-` name and the binary carries the product's, which is
+# the whole of the split: `bt-app` is what the other twelve crates in this
+# workspace say when they mean this one, and `folio.exe` is what a person types,
+# pins to a taskbar and sees in Task Manager. Declaring the target explicitly is
+# the only way to have both — cargo names the binary after the package unless a
+# `[[bin]]` says otherwise, and naming one target means naming its path too.
+[[bin]]
+name = "folio"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 bt-doc = { path = "../bt-doc" }

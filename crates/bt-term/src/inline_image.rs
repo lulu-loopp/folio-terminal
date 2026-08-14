@@ -1145,7 +1145,7 @@ fn parse_inline_file_header(header: &[u8]) -> Option<bool> {
 
 /// Streaming OSC prefilter at the existing adapter parser seam.
 ///
-/// The OSC sequences BetterTerminal gives meaning to — `1337;File=` (inline image), `133;` (shell
+/// The OSC sequences Folio gives meaning to — `1337;File=` (inline image), `133;` (shell
 /// integration), `9;4;` (progress), and `7;` (working directory) — are swallowed by
 /// `vte::ansi::Performer` before they
 /// reach `alacritty_terminal::Term`, so they are recognized here instead. This is the whole of the

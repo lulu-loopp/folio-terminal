@@ -1,4 +1,4 @@
-# BetterTerminal 工程约定
+# Folio 工程约定
 
 > 每个会话开工前读一遍。`docs/DESIGN.md` 是**做什么**的权威，这份是**怎么做**的权威。
 >

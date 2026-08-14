@@ -367,7 +367,7 @@ impl SettingsRow {
             // and the reason `profiles::index_of_id` does not read it: a tab and
             // a launch are the two things it answers for, and a pane coming back
             // off disk is neither.
-            Self::DefaultProfile => "What opens on a new tab, and when BetterTerminal starts",
+            Self::DefaultProfile => "What opens on a new tab, and when Folio starts",
         }
     }
 
@@ -3448,8 +3448,8 @@ mod tests {
         );
         assert_eq!(
             SettingsRow::DefaultProfile.description(),
-            "What opens on a new tab, and when BetterTerminal starts",
-            "mock-up 2468, word for word"
+            "What opens on a new tab, and when Folio starts",
+            "mock-up 2468, word for word but for the product's name"
         );
         assert_eq!(
             SettingsRow::DefaultProfile

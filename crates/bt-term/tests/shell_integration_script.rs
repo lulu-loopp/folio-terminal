@@ -1,6 +1,6 @@
 //! The shell integration script is the other half of OSC 7: nothing this terminal does with a
 //! working directory matters if the shell never names one. These pins run
-//! `scripts/shell-integration/betterterminal.ps1` in a real Windows PowerShell 5.1 — the older of
+//! `scripts/shell-integration/folio.ps1` in a real Windows PowerShell 5.1 — the older of
 //! the two supported generations, and the one whose language limits the script is written to — and
 //! feed exactly what it puts on the wire back into a session.
 
@@ -18,7 +18,7 @@ fn nz(value: u32) -> std::num::NonZeroU32 {
 
 fn script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/shell-integration/betterterminal.ps1")
+        .join("../../scripts/shell-integration/folio.ps1")
         .canonicalize()
         .expect("the integration script ships in the repository")
 }

@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn cjk_text_uses_distinct_real_system_glyphs_and_mixed_math_stays_visible() {
         // System fonts remain external OS assets (for example Microsoft YaHei/DengXian on
-        // Windows); BetterTerminal neither embeds nor redistributes their bytes.
+        // Windows); Folio neither embeds nor redistributes their bytes.
         let engine = MathEngine::new();
         let middle = engine.render(r"\text{中}", key()).unwrap();
         let writing = engine.render(r"\text{文}", key()).unwrap();

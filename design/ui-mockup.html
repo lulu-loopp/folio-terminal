@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BetterTerminal UI 原型</title>
+<title>Folio UI 原型</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -2288,9 +2288,9 @@
   <symbol id="i-gear" viewBox="0 0 24 24"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></symbol>
 </svg>
 
-<button class="desk-icon" id="desk-icon" aria-label="Open BetterTerminal">
+<button class="desk-icon" id="desk-icon" aria-label="Open Folio">
   <svg><use href="#i-app"/></svg>
-  <span>BetterTerminal</span>
+  <span>Folio</span>
 </button>
 
 <!-- Not modal and it does not dim: your terminal is already open behind it and
@@ -2301,7 +2301,7 @@
      sentence here because they are on screen. -->
 <div class="restore" id="restore" role="dialog" aria-labelledby="restore-h">
   <h1 id="restore-h">Reopen your other tabs?</h1>
-  <p class="sub">These were open when you last closed BetterTerminal. They come back in the folders you left them, as new shells — the output is not ours to keep.</p>
+  <p class="sub">These were open when you last closed Folio. They come back in the folders you left them, as new shells — the output is not ours to keep.</p>
   <ul class="restore-list" id="restore-list"></ul>
   <div class="restore-actions">
     <button class="btn" id="btn-fresh">No thanks</button>
@@ -2313,7 +2313,7 @@
   <div class="titlebar">
     <div class="drag">
       <button class="panel-toggle" id="btn-rail" title="Toggle sidebar" aria-label="Toggle sidebar"><svg><use href="#i-panel"/></svg></button>
-      <span class="apptitle">BetterTerminal</span>
+      <span class="apptitle">Folio</span>
       <div class="tabs-inline" id="tabstrip"></div>
     </div>
     <button class="attn-chip" id="attn-chip" hidden aria-label="Sessions waiting for you"><span class="adot"></span><span class="acnt">0</span><span>waiting</span></button>
@@ -2510,7 +2510,7 @@
         <div class="row">
           <div class="text">
             <div class="title">Default profile</div>
-            <div class="desc">What opens on a new tab, and when BetterTerminal starts</div>
+            <div class="desc">What opens on a new tab, and when Folio starts</div>
           </div>
           <div class="combo" data-combo="profile">
             <button aria-haspopup="listbox"><span class="value">PowerShell</span><span class="chev">▼</span></button>
@@ -2593,7 +2593,7 @@
   /* ── sessions ── */
   function powershell() {
     return { prompt: `<span class="prompt">❯ </span>`, lines: [
-      `<span class="dim">BetterTerminal v0.1.0 — PowerShell 7.5</span>`,
+      `<span class="dim">Folio v0.1.0 — PowerShell 7.5</span>`,
       `<span class="prompt">❯ </span>cargo --version`,
       `cargo 1.88.0 (873a06493 2026-04-28)`,
       `<span class="prompt">❯ </span>imgcat width-chart.png`,
@@ -2875,7 +2875,7 @@
   function renderAutos() {
     $("auto-content").innerHTML = `
       <div class="auto-intro">Rules are sentences over what the terminal already knows —
-        exit codes, waiting agents, bells, time. BetterTerminal ships the harness;
+        exit codes, waiting agents, bells, time. Folio ships the harness;
         the functions are yours.</div>
       ${state.autos.map(r => `
         <div class="arule" data-id="${r.id}">

@@ -81,8 +81,21 @@ use winit::{
 const INITIAL_WIDTH: f64 = 960.0;
 const INITIAL_HEIGHT: f64 = 600.0;
 
+/// The product's name, in the one place that decides how it is spelled.
+///
+/// Every surface that says it out loud reads it from here — the title bar, the
+/// banner this terminal prefixes its own lines with, the storage directory —
+/// and the handful of sentences that *embed* it are held against it by
+/// `every_surface_that_names_the_product_says_the_same_name`. Those cannot
+/// interpolate a constant (they are `&'static str` and `concat!` takes only
+/// literals), so the pin is what makes them one decision instead of six.
+///
+/// It is not `CARGO_PKG_NAME`: the crate is `bt-app` and stays `bt-app`, because
+/// a crate name is a thing other Rust code says and this is a thing people say.
+pub(crate) const APP_NAME: &str = "Folio";
+
 #[cfg(test)]
-const WINDOW_TITLE: &str = "BetterTerminal M0-beta";
+const WINDOW_TITLE: &str = "Folio M0-beta";
 const WIN32_DEFAULT_DPI: f64 = 96.0;
 const STARTUP_PTY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 /// One 60 Hz frame: coalesce cursor-area churn without leaving the final position unsent.
@@ -10628,7 +10641,7 @@ fn create_leaf_session(
         //
         // A leaf that is handed nothing at all used to reach `bt-pty` as `None`,
         // which resolves to this process's working directory: the folder
-        // BetterTerminal itself was launched from, which for a shell started
+        // Folio itself was launched from, which for a shell started
         // from an installed shortcut is `C:\WINDOWS\system32`. That is not a
         // place anybody meant.
         let place = profiles::spawn_place(
@@ -29391,13 +29404,13 @@ impl Runtime {
     }
 }
 
-struct BetterTerminalApp {
+struct FolioApp {
     runtime: Option<Runtime>,
     proxy: EventLoopProxy<AppEvent>,
     startup_started: Instant,
 }
 
-impl BetterTerminalApp {
+impl FolioApp {
     fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
         Self {
             runtime: None,
@@ -29407,9 +29420,9 @@ impl BetterTerminalApp {
     }
 }
 
-impl BetterTerminalApp {
+impl FolioApp {
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
-        eprintln!("BetterTerminal stopped: {error:#}");
+        eprintln!("{APP_NAME} stopped: {error:#}");
         if let Some(runtime) = self.runtime.as_mut()
             && let Err(shutdown_error) = runtime.shutdown()
         {
@@ -29420,7 +29433,7 @@ impl BetterTerminalApp {
     }
 }
 
-impl ApplicationHandler<AppEvent> for BetterTerminalApp {
+impl ApplicationHandler<AppEvent> for FolioApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.runtime.is_some() {
             return;
@@ -30402,7 +30415,7 @@ fn tab_surface_tip_boxes(
 /// Dim rather than coloured: this is the terminal speaking in a space that
 /// belongs to the shell, and the one visual register that reads as an aside in
 /// every colour scheme — including the ones where red or yellow is the prompt's
-/// own colour — is reduced intensity. The `[BetterTerminal]` prefix is what
+/// own colour — is reduced intensity. The `[Folio]` prefix is what
 /// keeps it from being read as the shell's own first line, which matters most in
 /// precisely the case that produces it: a shell the user did not ask for.
 ///
@@ -30497,7 +30510,7 @@ fn unknown_profile_banner(unknown: &str) -> String {
 /// One dim, prefixed, self-terminating line — the register all of these speak
 /// in, in one place so that two of them cannot drift apart.
 fn banner_line(text: &str) -> String {
-    format!("\x1b[2m[BetterTerminal] {text}\x1b[0m\r\n")
+    format!("\x1b[2m[{APP_NAME}] {text}\x1b[0m\r\n")
 }
 
 /// `title="New tab (${defaultProfile().title})"` — mock-up 4367 and 4369.
@@ -30633,7 +30646,7 @@ fn place_layer(working_directory: Option<&Path>, place: CwdRendering) -> Option<
 /// and the reason the head needed its own ruling is that the old stack could not
 /// tell the two apart. It put OSC 2 above the folder unconditionally, which is
 /// right for a name and wrong for a place — and the shell integration this
-/// window ships makes the difference impossible to miss: `betterterminal.ps1`
+/// window ships makes the difference impossible to miss: `folio.ps1`
 /// ends by writing `ESC ]0;PowerShell BEL`, an honest default title that every
 /// session then carries forever. Under the old order that one static string won
 /// every head in the window, so a four-pane split printed "PowerShell" four
@@ -31352,7 +31365,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
-    let mut application = BetterTerminalApp::new(event_loop.create_proxy());
+    let mut application = FolioApp::new(event_loop.create_proxy());
     event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error))
@@ -33072,7 +33085,7 @@ mod tests {
         let whole = r"D:\Developer\BetterTerminal\crates\bt-app".to_owned();
         let profile = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
 
-        // THE BUG. `scripts/shell-integration/betterterminal.ps1` ends by
+        // THE BUG. `scripts/shell-integration/folio.ps1` ends by
         // writing `ESC ]0;PowerShell BEL`, so every session in this window
         // carries this exact title for its whole life. Under the old order it
         // outranked the folder, and a four-pane split printed one word four
@@ -33300,7 +33313,7 @@ mod tests {
         format!("\u{1b}]7;file:///{}\u{7}", path.replace('\\', "/"))
     }
 
-    /// The title `scripts/shell-integration/betterterminal.ps1` writes, in its
+    /// The title `scripts/shell-integration/folio.ps1` writes, in its
     /// own bytes.
     ///
     /// Copied from the script's last line rather than posted straight into
@@ -36739,15 +36752,72 @@ mod tests {
 
     #[test]
     fn startup_trace_title_is_human_readable_without_console_output() {
-        assert_eq!(startup_scale_title(1.5), "BetterTerminal M0-beta · 1.5x");
+        assert_eq!(startup_scale_title(1.5), "Folio M0-beta · 1.5x");
         assert_eq!(
             startup_trace_title(
                 Duration::from_millis(682),
                 Duration::from_millis(1089),
                 1.25,
             ),
-            "BetterTerminal M0-beta — bg 682ms · text 1089ms · 1.25x"
+            "Folio M0-beta — bg 682ms · text 1089ms · 1.25x"
         );
+    }
+
+    /// PIN — every surface that says the product's name out loud says the same
+    /// name, and none of them still says the old one.
+    ///
+    /// A rename is not one edit, it is seven, spread over five modules and two
+    /// shell scripts, and six of the seven are sentences that *embed* the name
+    /// rather than reading it: `&'static str` constants cannot interpolate
+    /// [`APP_NAME`], because `concat!` takes literals and nothing else. So the
+    /// thing that makes them one decision is this test rather than the type
+    /// system, and it is written as both halves on purpose — the positive one
+    /// (each surface names the product) would pass a sentence that named it
+    /// twice, once under each brand.
+    ///
+    /// The old spelling is checked for by name because that is what a half-done
+    /// rename leaves behind, and because there is no other way to state "and
+    /// nothing here still says the thing we stopped saying".
+    ///
+    /// Red gate: rename any one of these and leave the others, in either
+    /// direction, and this names the surface that moved. It is what the
+    /// BetterTerminal → Folio rename was carried out under.
+    #[test]
+    fn every_surface_that_names_the_product_says_the_same_name() {
+        let banner = banner_line("something failed to start");
+        let surfaces: [(&str, &str); 7] = [
+            ("the window title bar", APP_NAME),
+            ("the startup trace title", WINDOW_TITLE),
+            (
+                "a pane this build cannot draw",
+                seats::PLACEHOLDER_SEAT_NOTICE,
+            ),
+            (
+                "the settings dialog's startup row",
+                settings::SettingsRow::DefaultProfile.description(),
+            ),
+            ("the restore prompt", restore::SUB_TEXT),
+            ("this terminal's own banner", &banner),
+            (
+                "the TERM_PROGRAM this terminal declares",
+                bt_pty::TERM_PROGRAM,
+            ),
+        ];
+        for (surface, text) in surfaces {
+            assert!(
+                text.contains(APP_NAME),
+                "{surface} must name the product ({APP_NAME:?}): {text:?}"
+            );
+            assert!(
+                !text.contains("BetterTerminal"),
+                "{surface} still carries the name this product had before \
+                 2026-08-13: {text:?}"
+            );
+        }
+        // The storage directory is the eighth surface and is deliberately not
+        // touched here: reading it would relocate the directory of whoever is
+        // running the tests. `persist::tests` pins its two names against
+        // `APP_NAME` without going near `%APPDATA%`.
     }
 
     /// PIN — C25: a tab's name is the topmost layer with something to say.
@@ -37098,7 +37168,7 @@ mod tests {
         session.feed(banner.as_bytes()).unwrap();
         let first = session.terminal().visible_text()[0].clone();
         assert!(
-            first.contains("[BetterTerminal]") && first.contains("\"wsl-ubuntu\""),
+            first.contains("[Folio]") && first.contains("\"wsl-ubuntu\""),
             "the line names the terminal and quotes the id that is missing: {first:?}"
         );
         assert!(
@@ -37112,7 +37182,7 @@ mod tests {
         );
         // Same register as its sibling: dim, prefixed, and ending its own line
         // so the shell's first prompt does not print over it.
-        assert!(banner.starts_with("\x1b[2m[BetterTerminal] ") && banner.ends_with("\x1b[0m\r\n"));
+        assert!(banner.starts_with("\x1b[2m[Folio] ") && banner.ends_with("\x1b[0m\r\n"));
     }
 
     /// PIN — a pane that got a shell nobody asked for says so, in the pane, in
@@ -37147,7 +37217,7 @@ mod tests {
         let visible = session.terminal().visible_text();
         assert_eq!(
             visible[0].trim_end(),
-            "[BetterTerminal] Git Bash failed to start; using Windows PowerShell 5.1 instead.",
+            "[Folio] Git Bash failed to start; using Windows PowerShell 5.1 instead.",
             "the line names the terminal and both profiles by the names the \
              picker offers them under, and is not mistakable for the shell's \
              own output"
@@ -37182,7 +37252,7 @@ mod tests {
         one.feed(banner.as_bytes()).unwrap();
         assert_eq!(
             one.terminal().visible_text()[0].trim_end(),
-            "[BetterTerminal] pwsh.exe failed to start; using powershell.exe instead.",
+            "[Folio] pwsh.exe failed to start; using powershell.exe instead.",
             "one profile, two shells: the shells are what the line can tell apart"
         );
 

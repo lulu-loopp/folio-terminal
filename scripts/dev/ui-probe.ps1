@@ -1,4 +1,4 @@
-# ui-probe.ps1 — autonomous UI acceptance probe for bt-app
+# ui-probe.ps1 — autonomous UI acceptance probe for Folio (crate `bt-app`, binary `folio.exe`)
 #
 # Lets the agent (or a human) drive the real window end to end without manual
 # interaction: launch → focus → inject keystrokes → capture physical pixels →
@@ -439,7 +439,7 @@ switch ($Cmd) {
   "launch" {
     if ($TraceDpi) { $env:BT_STARTUP_TRACE = "1" }
     $err = "$env:TEMP\ui-probe-stderr.txt"
-    $p = Start-Process -FilePath "D:\Developer\BetterTerminal\target\release\bt-app.exe" -RedirectStandardError $err -PassThru
+    $p = Start-Process -FilePath "D:\Developer\BetterTerminal\target\release\folio.exe" -RedirectStandardError $err -PassThru
     Start-Sleep -Seconds $WaitSeconds
     $h = Get-AppWindow $p.Id
     "pid=$($p.Id) hwnd=$h stderr=$err"

@@ -1,4 +1,4 @@
-//! BetterTerminal's logic-only terminal actor and alacritty compatibility seam.
+//! Folio's logic-only terminal actor and alacritty compatibility seam.
 
 mod adapter;
 mod cell_capture;

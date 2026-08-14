@@ -2688,7 +2688,7 @@ impl HeadlessRenderProbe {
         let adapter_name = adapter.get_info().name;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("BetterTerminal replay probe device"),
+                label: Some("Folio replay probe device"),
                 ..Default::default()
             })
             .await
@@ -2707,7 +2707,7 @@ impl HeadlessRenderProbe {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let (_, math_bind_group_layout, math_sampler) = create_math_pipeline(&device, format);
         let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("BetterTerminal replay probe target"),
+            label: Some("Folio replay probe target"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -2832,11 +2832,11 @@ impl HeadlessRenderProbe {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("BetterTerminal replay probe frame"),
+                label: Some("Folio replay probe frame"),
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("BetterTerminal replay probe pass"),
+                label: Some("Folio replay probe pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -3020,7 +3020,7 @@ impl Renderer {
         let phase_started = Instant::now();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("BetterTerminal device"),
+                label: Some("Folio device"),
                 ..Default::default()
             })
             .await
@@ -3761,7 +3761,7 @@ impl Renderer {
                         PrepareFailurePolicy::PresentWithoutText => {
                             if self.glyph_degraded_frames == 0 {
                                 eprintln!(
-                                    "BetterTerminal glyph atlas reached the device limit; presenting without text and retrying"
+                                    "Folio glyph atlas reached the device limit; presenting without text and retrying"
                                 );
                             }
                             self.glyph_degraded_frames += 1;
@@ -4106,11 +4106,11 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("BetterTerminal frame"),
+                label: Some("Folio frame"),
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("BetterTerminal terminal pass"),
+                label: Some("Folio terminal pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -7541,7 +7541,7 @@ fn resolve_colors(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
 }
 
 fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
-    // Named codes 16..=28 are the stable BetterTerminal encoding declared by bt-transcript.
+    // Named codes 16..=28 are the stable Folio encoding declared by bt-transcript.
     match color {
         TerminalColor::Rgb(r, g, b) => [r, g, b],
         TerminalColor::Indexed(index) => indexed_color(index),

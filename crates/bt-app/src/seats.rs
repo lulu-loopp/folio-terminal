@@ -6279,7 +6279,7 @@ fn window_chrome(
             }
             let left = app_title_left_px(scale, rail);
             labels.push(ChromeLabel {
-                text: "BetterTerminal".to_owned(),
+                text: crate::APP_NAME.to_owned(),
                 // Out to the caption run, so a narrow window crops the name
                 // rather than running it under the buttons. Vertically centred
                 // in the bar, which every chrome label already is.
@@ -8258,8 +8258,7 @@ pub(crate) fn seat_caption<'a>(
 /// It names the cause rather than apologising, because the cause is the only
 /// actionable thing in it: the tree came off disk carrying a kind this binary has
 /// no code for, which is what a session written by a newer build looks like.
-pub(crate) const PLACEHOLDER_SEAT_NOTICE: &str =
-    "This pane was saved by a newer version of BetterTerminal";
+pub(crate) const PLACEHOLDER_SEAT_NOTICE: &str = "This pane was saved by a newer version of Folio";
 
 // ── the file tree's own numbers, `.files-tree` and `.frow` (mock-up 774-799) ──
 //
@@ -21193,9 +21192,7 @@ mod tests {
         let titles = ["one", "two"];
         let (_, horizontal, _) = rail_chrome_of(1.0, &titles, 0, RailState::default(), None);
         assert!(
-            !horizontal
-                .iter()
-                .any(|label| label.text == "BetterTerminal"),
+            !horizontal.iter().any(|label| label.text == crate::APP_NAME),
             "the strip is standing where the name would be"
         );
         assert!(
@@ -21205,7 +21202,7 @@ mod tests {
         let (_, vertical, _) = rail_chrome_of(1.0, &titles, 0, expanded_rail(), None);
         let name = vertical
             .iter()
-            .find(|label| label.text == "BetterTerminal")
+            .find(|label| label.text == crate::APP_NAME)
             .expect("the vertical layout names the program in its title bar");
         assert_eq!(
             name.font_size_px, 12.5,
