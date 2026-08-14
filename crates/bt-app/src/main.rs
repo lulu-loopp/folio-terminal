@@ -2040,6 +2040,131 @@ fn push_block_scroll_indicator(
     });
 }
 
+/// How a scroll thumb is being touched, which is the only thing that changes its
+/// ink.
+///
+/// It stood in [`file_peek`] until 2026-08-14, when the docked pane and the
+/// preview float grew the very bar the glance card already had. Three surfaces
+/// wearing one control *is* one control, and a state named inside the card's
+/// module would have made the pane's bar read as a borrowing from a hover card
+/// — which is backwards, and is the kind of backwards that ends in two
+/// implementations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollThumbState {
+    Rest,
+    Hovered,
+    Held,
+}
+
+impl ScrollThumbState {
+    /// The state, from the only two facts that decide it.
+    ///
+    /// A hand on the thumb outranks a hand over it, because a drag that left the
+    /// band still owns the thumb — see [`Runtime::drag_preview_body_thumb`].
+    fn of(held: bool, hovered: bool) -> Self {
+        if held {
+            Self::Held
+        } else if hovered {
+            Self::Hovered
+        } else {
+            Self::Rest
+        }
+    }
+}
+
+/// **A scroll bar on a layer of its own** — the overlay's answer to
+/// [`push_block_scroll_indicator`], which is the same bar drawn into a block.
+///
+/// A layer rather than more quads on the surface's own, and that is a z-order
+/// fact rather than tidiness: within one layer the order is the layer's own
+/// fills, then the *document's* fills, then marks, then text — so a thumb pushed
+/// onto a card's or a window's quads would be painted under a diff's line band
+/// and under the very text it is meant to ride over. [`marks::OverlayLayer`]
+/// states the rule this obeys: anything that must cover something else goes on a
+/// later layer.
+///
+/// It is an overlay bar in the sense every modern editor's is — it lies *over*
+/// the last few pixels of the document rather than taking a gutter out of it.
+/// Taking a gutter would change the width the document is laid out at, which
+/// changes its height, which decides whether the bar exists: the reflow loop
+/// that scrollbar-gutter rules exist to break.
+fn scroll_bar_layer(
+    bar: &preview::ScrollBar,
+    state: ScrollThumbState,
+    palette: &bt_render::ChromePalette,
+) -> marks::OverlayLayer {
+    // The divider's three inks — this app's only existing family for a bar a
+    // hand can hold, and the same three the block's bar wears, because they are
+    // the same control.
+    let ink = match state {
+        ScrollThumbState::Held => palette.divider_active,
+        ScrollThumbState::Hovered => palette.files_row_text,
+        ScrollThumbState::Rest => palette.files_row_muted,
+    };
+    marks::OverlayLayer {
+        quads: vec![
+            bt_render::OverlayQuad {
+                rect: bar.track,
+                color: palette.preview_grid_line,
+                alpha: 1.0,
+            },
+            bt_render::OverlayQuad {
+                rect: bar.thumb,
+                color: ink,
+                alpha: 1.0,
+            },
+        ],
+        ..marks::OverlayLayer::default()
+    }
+}
+
+/// **The bar a preview surface wears down its right edge** when its document is
+/// taller than the box it is shown in (user ruling, 2026-08-14).
+///
+/// # Why this exists at all
+///
+/// The glance card got one first, because it was the surface people were
+/// visibly trying to read further into. That left the window upside down: the
+/// 300-pixel hover card said how much of its file it was showing and the docked
+/// pane it opens into — the *real* one, holding the same document at four times
+/// the size — said nothing at all. A page you can scroll and cannot see the
+/// extent of is a page you have to scroll to find the end of.
+///
+/// So the seat, the float and the card wear one bar, and this is the arithmetic
+/// all three go through. It is [`preview::scroll_bar`] with the axis nailed
+/// down, and the axis is nailed down *here* rather than at the three call sites
+/// for the reason the block's bar learned the hard way: a surface that guessed
+/// would move its document sideways when the thumb went down.
+///
+/// `content` is the document's own height — the same number
+/// [`preview_document_max_scroll`] takes the page out of — so the bar's
+/// `overflow` and the clamp on the stored offset are one quantity by
+/// construction, and a thumb dragged to the far end of its track lands exactly
+/// where the wheel stops. The whole `scroll` is taken rather than its vertical
+/// half so that no caller can hand this the horizontal one.
+fn preview_body_bar(
+    body: [f32; 4],
+    scroll: [f32; 2],
+    content: f32,
+    scale: f32,
+) -> Option<preview::ScrollBar> {
+    Some(
+        preview::scroll_bar(
+            body,
+            preview::ScrollAxis::Vertical,
+            scroll[1],
+            content,
+            scale,
+        )?
+        // **The target reaches inward, and stops at the surface's edge.** What
+        // is past that edge is a divider's band or the window's own resize
+        // border, and both of them are asked before this window's code is —
+        // see [`preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX`] for the real-machine
+        // finding that this closes.
+        .grown_inward(preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX * scale),
+    )
+}
+
 /// Every wide block that is on screen this frame, with the rectangle it owns
 /// and the width it wants.
 ///
@@ -3106,6 +3231,11 @@ struct TabState {
     preview_block_drag: Option<PreviewBlockDrag>,
     /// The surface and block whose thumb is lit because the pointer is over it.
     preview_block_hover: Option<(PreviewSurface, usize)>,
+    /// A **body**'s scroll thumb in hand, and the surface whose bar is lit —
+    /// the two above with the block taken out, kept beside them for the same
+    /// reason and answering the same "there is one pointer".
+    preview_body_drag: Option<PreviewBodyDrag>,
+    preview_body_hover: Option<PreviewSurface>,
     /// The surface and link under the pointer, the link held **by its box**
     /// rather than by an index into that surface's list — so a rebuild that moves
     /// or removes it simply stops matching, and there is no stale subscript to
@@ -4636,6 +4766,19 @@ struct PreviewBlockDrag {
     /// under.
     index: usize,
     /// How far into the thumb's own width the hand took hold, so the thumb
+    /// stays under the pointer rather than jumping its centre there.
+    grab: f32,
+}
+
+/// A preview **body**'s own scroll thumb in hand (user ruling, 2026-08-14).
+///
+/// [`PreviewBlockDrag`] minus the block, which is the whole difference between
+/// the two bars: a block is one scrolling region *inside* a document and needs
+/// saying which, and the body is the document, of which each surface has one.
+#[derive(Clone, Copy, Debug)]
+struct PreviewBodyDrag {
+    surface: PreviewSurface,
+    /// How far into the thumb's own length the hand took hold, so the thumb
     /// stays under the pointer rather than jumping its centre there.
     grab: f32,
 }
@@ -8117,6 +8260,19 @@ fn ground_overlay_layers(
 /// "early" silently means "underneath".
 #[derive(Default)]
 struct OverlayStack {
+    /// **A docked preview pane's own vertical scroll bar** (user ruling,
+    /// 2026-08-14) — the lowest thing the overlay carries, and lower than the
+    /// rail on purpose.
+    ///
+    /// Everything else in this list *floats over* the panes; this one belongs
+    /// **to** one. It is in the overlay at all only because the seats' document
+    /// lane runs a whole pass earlier, so a bar handed to that lane would be
+    /// painted under the very text it has to ride over (see
+    /// [`scroll_bar_layer`]) — it is not a surface, and every surface above is
+    /// entitled to cover it, starting with the rail. A float's bar is not here:
+    /// it has to stand above its own window and below the next one, so it rides
+    /// in [`Self::float`] beside the window it belongs to.
+    preview_bars: Vec<marks::OverlayLayer>,
     /// `.rail { z-index: 15 }` — chrome that floats over the panes and over
     /// nothing else. Every surface below is entitled to cover it.
     rail: Vec<marks::OverlayLayer>,
@@ -8182,6 +8338,7 @@ impl OverlayStack {
     /// The whole overlay, bottom to top — **this list is the z-order**.
     fn flattened(self) -> Vec<marks::OverlayLayer> {
         let Self {
+            preview_bars,
             rail,
             ground,
             layout_peek,
@@ -8193,6 +8350,7 @@ impl OverlayStack {
             drag_ghost,
         } = self;
         [
+            preview_bars,
             rail,
             ground,
             layout_peek,
@@ -9517,9 +9675,12 @@ struct FilePeek {
     /// The document's box inside that frame — where a wheel notch lands and what
     /// the scroll is clamped against. Written beside [`Self::frame`].
     body: Option<[f32; 4]>,
-    /// How tall the document turned out, so the scroll bar and the clamp agree
-    /// with what was drawn.
-    content: f32,
+    // **A `content` height stood here** — how tall the document turned out,
+    // filed by the painter for the hit test to read back. It went on 2026-08-14,
+    // when the card's bar became the pane's: `Runtime::preview_surface_bar` asks
+    // the card's own pane how tall its document is, exactly as it asks a seat's,
+    // so the number no longer has to be carried across from the frame that drew
+    // it. One fewer copy of a fact is one fewer copy that can be stale.
     /// When the grace runs out, once the pointer has left the corridor
     /// (`float::FLY_CLOSE`, the constant every other transient surface in this
     /// window closes on — a card that took its own number would be a fourth
@@ -9531,6 +9692,21 @@ struct FilePeek {
     /// [`PreviewBlockDrag::grab`]'s twin, and kept here rather than beside it
     /// because a card that comes down takes its drag with it.
     thumb_grab: Option<f32>,
+    /// **The card the pointer is about to move to** (user ruling, 2026-08-14:
+    /// *停留即换*) — another row's glance, already armed, waiting for its own
+    /// [`file_peek::PEEK_INTENT_MS`] to run out.
+    ///
+    /// A whole `FilePeek` rather than a handful of fields describing one,
+    /// because that is exactly what it is: the ruling says the switch re-walks
+    /// the arm, and a pending card built by the very function that arms the
+    /// first one makes "re-walks" a fact instead of a promise. Its own `dwell`
+    /// is always `None` — a card that is not on screen has no corridor and no
+    /// rows to rest in — and its `due` is the switch's clock.
+    ///
+    /// Held here rather than beside `file_peek` on the window so that it cannot
+    /// outlive the card whose corridor it belongs to: leaving the corridor takes
+    /// the card down, and the dwell goes with it.
+    dwell: Option<Box<FilePeek>>,
 }
 
 /// What a matured glance is looking at, read off the buffer it found.
@@ -10825,6 +11001,8 @@ fn assemble_tab_state(
         preview_selecting: None,
         preview_block_drag: None,
         preview_block_hover: None,
+        preview_body_drag: None,
+        preview_body_hover: None,
         preview_link_hover: None,
     };
     debug_assert!(
@@ -13648,6 +13826,10 @@ impl Runtime {
         // below is entitled to cover it — but it does float over the panes, and
         // one level up from them is all it ever asked for.
         let mut stack = OverlayStack {
+            // Lower still than the rail, because a pane's own scroll bar is not
+            // a surface floating over the window at all — see
+            // [`OverlayStack::preview_bars`].
+            preview_bars: self.preview_seat_bar_layers(),
             rail: self.rail_overlay_layers(),
             ground: ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now)),
             ..OverlayStack::default()
@@ -15322,17 +15504,34 @@ impl Runtime {
         {
             self.preview_selecting = None;
         }
-        if self
-            .preview_block_drag
-            .is_some_and(|drag| !alive.contains(&drag.surface))
-        {
+        // **The card is not in `alive` and must not be swept out by its
+        // absence.** [`PreviewSurface::Peek`] is not in the tree and not in the
+        // float host — that is the same sentence the `Peek` arm above answers
+        // `false` with — so its liveness is `file_peek`'s alone, and
+        // [`Self::hide_file_peek`] is where a gesture on the card is let go.
+        // Without the guard, any seat-set change would drop a hand that is in
+        // the middle of dragging a table sideways inside a glance.
+        if self.preview_block_drag.is_some_and(|drag| {
+            drag.surface != PreviewSurface::Peek && !alive.contains(&drag.surface)
+        }) {
             self.preview_block_drag = None;
         }
-        if self
-            .preview_block_hover
-            .is_some_and(|(surface, _)| !alive.contains(&surface))
-        {
+        if self.preview_block_hover.is_some_and(|(surface, _)| {
+            surface != PreviewSurface::Peek && !alive.contains(&surface)
+        }) {
             self.preview_block_hover = None;
+        }
+        if self
+            .preview_body_drag
+            .is_some_and(|drag| !alive.contains(&drag.surface))
+        {
+            self.preview_body_drag = None;
+        }
+        if self
+            .preview_body_hover
+            .is_some_and(|surface| !alive.contains(&surface))
+        {
+            self.preview_body_hover = None;
         }
         if self
             .preview_link_hover
@@ -15701,6 +15900,18 @@ impl Runtime {
             .is_some_and(|(hovered, _)| hovered == surface)
         {
             self.preview_block_hover = None;
+        }
+        // And the body's own bar with them: the next document is a different
+        // length, so a thumb held across the swap would be dragging a track that
+        // means something else.
+        if self
+            .preview_body_drag
+            .is_some_and(|drag| drag.surface == surface)
+        {
+            self.preview_body_drag = None;
+        }
+        if self.preview_body_hover == Some(surface) {
+            self.preview_body_hover = None;
         }
         if self
             .preview_link_hover
@@ -16088,6 +16299,55 @@ impl Runtime {
         Ok(true)
     }
 
+    /// The box **this surface's document** is drawn in, the glance card
+    /// included.
+    ///
+    /// [`Self::preview_surface_body_rect`] answers for everything that has a
+    /// place in the tree or in the float host and refuses the card, which is in
+    /// neither; the card's box is the one its own layout produced and filed on
+    /// [`FilePeek::body`]. A gesture that took hold of a block inside the card
+    /// has to be able to ask *after the fact* where that document is, and this
+    /// is the reading that can answer for all three surfaces.
+    fn preview_document_box(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
+        if surface == PreviewSurface::Peek {
+            let peek = self.file_peek.as_ref()?;
+            return peek.body.filter(|_| peek.due.is_none());
+        }
+        self.preview_surface_body_rect(surface, scale)
+    }
+
+    /// **Which surface a question about a wide block belongs to** — the pane
+    /// walk, with the glance card in front of it (user ruling, 2026-08-14).
+    ///
+    /// A table too wide for the card is the same scrolling region a table too
+    /// wide for the pane is, and the ruling that gave the card a wheel and a
+    /// thumb gave it the blocks inside it too: what a hand can do to a document
+    /// in a pane it can do to the same document in the glance of it. The wheel
+    /// already agreed — [`Self::mouse_wheel`] hands a notch over the card to
+    /// [`Self::scroll_preview_body`] with [`PreviewSurface::Peek`] — and this is
+    /// the half that was missing, the half a *hand on the bar* goes through.
+    ///
+    /// The card is asked first because it is the topmost thing on the glass, and
+    /// it has to be asked *here* rather than inside
+    /// [`Self::preview_surface_at`]: that walk answers presses, carets,
+    /// selections and the edit focus as well, and the card is read-only —
+    /// putting it in there would hand it every one of those. So the card enters
+    /// exactly the questions it is entitled to, through
+    /// [`file_peek::body_at`].
+    fn preview_block_surface_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(PreviewSurface, [f32; 4])> {
+        let at = [position.x as f32, position.y as f32];
+        if let Some(peek) = self.file_peek.as_ref().filter(|peek| peek.due.is_none())
+            && let Some((frame, body)) = peek.frame.zip(peek.body)
+            && let Some(body) = file_peek::body_at(frame, body, at)
+        {
+            return Some((PreviewSurface::Peek, body));
+        }
+        self.preview_surface_at(position)
+    }
+
     /// The bar the pointer is on, asked of the frame as it stands — and of
     /// whichever surface the pointer is in.
     fn preview_block_bar_under(
@@ -16095,7 +16355,7 @@ impl Runtime {
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, usize, preview::ScrollBar)> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let (surface, body) = self.preview_surface_at(position)?;
+        let (surface, body) = self.preview_block_surface_at(position)?;
         let pane = self.preview_pane(surface)?;
         let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
             return None;
@@ -16127,6 +16387,163 @@ impl Runtime {
                 .preview_block_hover
                 .filter(|(hovered, _)| *hovered == surface)
                 .map(|(_, index)| (index, false)))
+    }
+
+    // ── the body's own bar (user ruling, 2026-08-14) ────────────────────────
+
+    /// **This surface's vertical bar**, as it stands right now.
+    ///
+    /// Re-derived from the live geometry on every question rather than stored,
+    /// which is the block bar's own hard-won rule and the card's: a rectangle
+    /// remembered from the frame it was drawn on is a rectangle the pointer is
+    /// tested against after the thing moved.
+    ///
+    /// The `body` is handed in because one caller cannot ask for it — the glance
+    /// card's box is a number its own layout produced and it is in no tree; see
+    /// [`Self::preview_surface_pane_rect`]'s third arm.
+    fn preview_surface_bar(
+        &self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> Option<preview::ScrollBar> {
+        let scroll = self.preview_pane(surface)?.scroll;
+        let content = self.preview_surface_document_height(surface, body, scale);
+        preview_body_bar(body, scroll, content, scale)
+    }
+
+    /// That bar, painted — or nothing when the whole document fits.
+    ///
+    /// A layer of its own, above whatever it is riding over: see
+    /// [`scroll_bar_layer`] for why a bar cannot be more quads on the surface it
+    /// belongs to.
+    fn preview_body_bar_layer(
+        &self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> Option<marks::OverlayLayer> {
+        let bar = self.preview_surface_bar(surface, body, scale)?;
+        let state = ScrollThumbState::of(
+            self.preview_body_drag
+                .is_some_and(|drag| drag.surface == surface),
+            self.preview_body_hover == Some(surface),
+        );
+        Some(scroll_bar_layer(&bar, state, &bt_render::chrome_palette()))
+    }
+
+    /// Every **docked** preview pane's bar, in seat order.
+    ///
+    /// The floats' are not here: a window's bar has to be drawn directly above
+    /// that window and below the next one, so it rides in the float family
+    /// beside the window it belongs to ([`Self::float_layer`]). These are the
+    /// panes in the tree, and they belong at the very bottom of the overlay —
+    /// see [`OverlayStack::preview_bars`].
+    fn preview_seat_bar_layers(&self) -> Vec<marks::OverlayLayer> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        self.seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| {
+                let surface = PreviewSurface::Seat(seat);
+                let body = self.preview_surface_body_rect(surface, scale)?;
+                self.preview_body_bar_layer(surface, body, scale)
+            })
+            .collect()
+    }
+
+    /// One preview float's bar, on its own layer above that window.
+    fn preview_float_bar_layer(&self, id: float::FloatId) -> Option<marks::OverlayLayer> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let surface = PreviewSurface::Float(id);
+        let body = self.preview_surface_body_rect(surface, scale)?;
+        self.preview_body_bar_layer(surface, body, scale)
+    }
+
+    /// The body bar the pointer is on, and the surface wearing it.
+    ///
+    /// **The card is not asked here.** It has its own press
+    /// ([`Self::press_file_peek`]) and its own drag
+    /// ([`Self::drag_file_peek_thumb`]), both of which run above every path that
+    /// reaches this one, because the card is the topmost thing on the glass.
+    fn preview_body_bar_under(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(PreviewSurface, preview::ScrollBar)> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let at = [position.x as f32, position.y as f32];
+        let (surface, body) = self.preview_surface_at(position)?;
+        let bar = self.preview_surface_bar(surface, body, scale)?;
+        (bar.grab[0] <= at[0]
+            && at[0] <= bar.grab[2]
+            && bar.grab[1] <= at[1]
+            && at[1] <= bar.grab[3])
+            .then_some((surface, bar))
+    }
+
+    /// A press on a body's scroll thumb takes hold of it.
+    ///
+    /// Returns whether the press was the thumb's. **Asked before the link and
+    /// before a block's own thumb**, because this bar is the outermost piece of
+    /// furniture the surface has: it is drawn over both of them, and a hit test
+    /// that disagreed with the picture is the defect the block's bar already had
+    /// once.
+    fn press_preview_body_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((surface, bar)) = self.preview_body_bar_under(position) else {
+            return Ok(false);
+        };
+        self.preview_body_drag = Some(PreviewBodyDrag {
+            surface,
+            grab: (position.y as f32 - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1]),
+        });
+        self.preview_body_hover = Some(surface);
+        self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// The pointer travelling with a body's thumb in hand.
+    ///
+    /// It keeps the pointer *outside* the pane too, which is every scrollbar's
+    /// rule: a drag that stopped tracking the moment it left a seven-pixel band
+    /// would make the end of a long file a matter of aim.
+    fn drag_preview_body_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.preview_body_drag else {
+            return Ok(false);
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        // The gesture's own surface, not the one under the pointer: a hand that
+        // has left the pane it took hold in is still holding that pane's thumb.
+        let Some(body) = self.preview_surface_body_rect(drag.surface, scale) else {
+            return Ok(true);
+        };
+        let Some(bar) = self.preview_surface_bar(drag.surface, body, scale) else {
+            // The document stopped overflowing — the pane grew, the file
+            // changed. The gesture still owns the pointer until the button comes
+            // up; there is simply nothing left for it to move.
+            return Ok(true);
+        };
+        let along = bar.along([position.x as f32, position.y as f32]);
+        let wanted = preview::scroll_dragged_to(&bar, along, drag.grab);
+        let scroll = self.preview_pane_mut(drag.surface).scroll;
+        if (wanted - scroll[1]).abs() < f32::EPSILON {
+            return Ok(true);
+        }
+        let scrolled = self.clamped_preview_scroll(drag.surface, body, scale, [scroll[0], wanted]);
+        self.preview_pane_mut(drag.surface).scroll = scrolled;
+        self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// Light the body thumb under the pointer, or put the last one out.
+    fn note_preview_body_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
+        let over = position
+            .and_then(|position| self.preview_body_bar_under(position))
+            .map(|(surface, _)| surface);
+        if over == self.preview_body_hover {
+            return Ok(());
+        }
+        self.preview_body_hover = over;
+        self.repaint_preview()
     }
 
     /// The markdown link under the pointer, if there is one, and the surface it
@@ -16234,7 +16651,10 @@ impl Runtime {
         let scale = self.renderer.metrics().scale_factor as f32;
         // The gesture's own surface, not the one under the pointer: a hand that
         // has left the pane it took hold in is still holding that pane's thumb.
-        let Some(body) = self.preview_surface_body_rect(drag.surface, scale) else {
+        // Asked of `preview_document_box` rather than of the tree, because the
+        // surface may be the glance card — which is in no tree, and whose thumb
+        // is dragged with the pointer well outside a 300-pixel frame.
+        let Some(body) = self.preview_document_box(drag.surface, scale) else {
             return Ok(true);
         };
         let Some(pane) = self.preview_pane(drag.surface) else {
@@ -19015,13 +19435,26 @@ impl Runtime {
         // intent** — the ruling's own words, and the only reading of them that
         // leaves the reach possible.
         //
-        // It costs the rows the corridor covers: a file listed just under the
-        // one being glanced cannot be glanced until this card is down. That is
-        // the same handful of pixels the corridor already spends, and the way
-        // out is the way in — leave the corridor (a move of a few pixels up, or
-        // out of the tree) and the next row arms normally, at once.
+        // **What it does not cost any more** (user ruling, 2026-08-14). It used
+        // to cost those rows outright: a file listed just under the one being
+        // glanced could not be glanced until the card came down, and the only
+        // way out was to leave the corridor. The rule above now outranks a hand
+        // *crossing* the rows and not a hand that *stops* on one — see
+        // `dwell_file_peek`, which is the whole of the `Kept` arm's second line
+        // — so travelling through still costs nothing and resting on a row
+        // still buys that row's own card.
         match self.file_peek_life(at) {
-            Some(file_peek::Life::Held | file_peek::Life::Kept) => return self.keep_file_peek(),
+            // Inside the card itself. The rows under it are the rows the card is
+            // *drawn over*, and a hand standing in a card is not resting on the
+            // tree behind it — so the dwell below is deliberately not asked.
+            Some(file_peek::Life::Held) => return self.keep_file_peek(),
+            // In the corridor: on the card's row, on the gap, or on one of the
+            // rows the reach crosses. The card stays whatever happens next, and
+            // *which* of those it is decides only whether a dwell is counting.
+            Some(file_peek::Life::Kept) => {
+                self.dwell_file_peek(host, now);
+                return self.keep_file_peek();
+            }
             // A hand that has started carrying something takes the card down
             // now, with no grace: a grace is a courtesy to a hand still reaching
             // for the card, and this one is busy.
@@ -19033,7 +19466,7 @@ impl Runtime {
         let Some((host, index)) = host.filter(|_| self.drag.is_none()) else {
             return self.release_file_peek(now);
         };
-        let Some((root, rows)) = self.host_rows(host) else {
+        let Some((_, rows)) = self.host_rows(host) else {
             return self.release_file_peek(now);
         };
         let Some(row) = rows
@@ -19054,14 +19487,33 @@ impl Runtime {
             return self.keep_file_peek();
         }
         let taken = self.hide_file_peek();
+        self.file_peek = self.armed_file_peek(host, index, now);
+        taken
+    }
+
+    /// **The card this row would put up**, armed and not yet matured.
+    ///
+    /// One construction site for the two ways a glance begins: the pointer
+    /// coming to rest on a row with nothing showing ([`Self::observe_file_peek`])
+    /// and the pointer coming to rest on *another* row with a card already up
+    /// ([`Self::dwell_file_peek`]). The second is the first re-walked — "缓冲、
+    /// 文档、滚动全新", the ruling's own words — and re-walking it is only
+    /// literally true while there is one place that walks it.
+    ///
+    /// `None` for everything that is not a file row of a rooted tree: a
+    /// directory, a notice, a column pointed at nothing, a tree that has not been
+    /// laid out yet.
+    fn armed_file_peek(&mut self, host: RowHost, index: usize, now: Instant) -> Option<FilePeek> {
+        let (root, rows) = self.host_rows(host)?;
         if root.is_empty() {
-            return taken;
+            return None;
         }
-        let Some(rect) = self.row_geometry(host).map(|tree| tree.row_rect(index)) else {
-            return taken;
-        };
+        let row = rows
+            .get(index)
+            .filter(|row| matches!(row.kind, files::RowKind::File))?;
         let (key, name) = (row.key.clone(), row.name.clone());
-        self.file_peek = Some(FilePeek {
+        let rect = self.row_geometry(host)?.row_rect(index);
+        Some(FilePeek {
             host,
             path: files::full_path(&root, &key),
             key,
@@ -19070,11 +19522,120 @@ impl Runtime {
             due: Some(now + Duration::from_millis(file_peek::PEEK_INTENT_MS)),
             frame: None,
             body: None,
-            content: 0.0,
             closing_at: None,
             thumb_grab: None,
-        });
-        taken
+            dwell: None,
+        })
+    }
+
+    /// **The pointer resting on another row while a card is up** (user ruling,
+    /// 2026-08-14: *穿行不换,停留即换*).
+    ///
+    /// The corridor's rule is that a row under the reach may neither take the
+    /// card nor restart its intent ([`file_peek::corridor`]), and it had to be
+    /// that way round or the reach could never land. What it cost was the rows
+    /// themselves: a file listed just below the one being glanced could not be
+    /// glanced at all until the card came down. This pays that back without
+    /// giving the corridor up, by telling the two gestures apart — a hand
+    /// *crossing* those rows on its way to the card, and a hand that has
+    /// *stopped* on one of them.
+    ///
+    /// The clock is [`file_peek::PEEK_INTENT_MS`], the same 350ms the first card
+    /// was armed on, because it is the same question asked of the same hand. It
+    /// runs against the row rather than against the pointer, so crossing three
+    /// rows starts three clocks and finishes none — see [`file_peek::dwell`].
+    ///
+    /// The card is untouched here whatever the answer: a dwell that matures is
+    /// fired by the tick ([`Self::switch_file_peek`]), which is the only place
+    /// that can, because a hand at rest sends no events for a pointer path to
+    /// notice. Nothing is drawn for a dwell either, so this owes no frame — the
+    /// same asymmetry [`Self::observe_file_peek`] reports for arming an intent,
+    /// and the reason it answers nothing at all.
+    fn dwell_file_peek(&mut self, host: Option<(RowHost, usize)>, now: Instant) {
+        // A row of the card's own is not another row, and neither is a folder,
+        // a notice, or the empty space past the end of the list: all of them
+        // answer `Idle` and drop whatever was counting, so the card is neither
+        // moved nor taken down *on this account*.
+        //
+        // Whether it survives at all is the corridor's answer, made one line up
+        // and untouched here. A folder is worth a word, because the tree's own
+        // order settles it: directories sort above files, and a card hangs
+        // *below* the row it is about — so a folder row is essentially never
+        // inside a living card's envelope, and moving onto one leaves the
+        // corridor. What happens then is the standing behaviour and not this
+        // ruling's: the grace starts, and the card comes down when it runs out
+        // (real-machine capture, 2026-08-14).
+        let over = host
+            .filter(|_| self.drag.is_none())
+            .and_then(|(host, index)| {
+                let (_, rows) = self.host_rows(host)?;
+                let key = rows
+                    .get(index)
+                    .filter(|row| matches!(row.kind, files::RowKind::File))?
+                    .key
+                    .clone();
+                let showing = self
+                    .file_peek
+                    .as_ref()
+                    .is_some_and(|peek| peek.host == host && peek.key == key);
+                (!showing).then_some((host, index, key))
+            });
+        let row = over.as_ref().map(|(host, _, key)| (*host, key.clone()));
+        let waiting = self
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.dwell.as_ref())
+            .map(|dwell| (dwell.host, dwell.key.clone()));
+        match file_peek::dwell(row.as_ref(), waiting.as_ref()) {
+            // Already counting on this very row: leave the clock alone, exactly
+            // as a running intent is left alone. **This is 穿行不换** — a hand
+            // crossing rows never reaches this arm twice on one row.
+            file_peek::Dwell::Keep => {}
+            file_peek::Dwell::Idle => {
+                if let Some(peek) = self.file_peek.as_mut() {
+                    peek.dwell = None;
+                }
+            }
+            file_peek::Dwell::Start => {
+                let (host, index, _) = over.expect("a start is a start on some row");
+                let next = self.armed_file_peek(host, index, now).map(Box::new);
+                if let Some(peek) = self.file_peek.as_mut() {
+                    peek.dwell = next;
+                }
+            }
+        }
+    }
+
+    /// **The dwell has run out: the card moves to the row the hand stopped on.**
+    ///
+    /// The switch is the arm re-walked and nothing else — the pending card was
+    /// built by [`Self::armed_file_peek`] when the dwell started, so promoting it
+    /// is a move rather than a construction, and everything the old card was
+    /// holding (its buffer, its parsed document, its scroll, its picture) is let
+    /// go by [`Self::hide_file_peek`] on the way past. "缓冲、文档、滚动全新" is
+    /// therefore true by construction rather than by a list of fields to clear.
+    ///
+    /// Fired from the tick because a hand that has come to rest sends no pointer
+    /// events at all: the very gesture this exists for is the one that would
+    /// never be noticed by a pointer path.
+    fn switch_file_peek(&mut self, now: Instant) -> bool {
+        let due = self
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.dwell.as_ref())
+            .and_then(|dwell| dwell.due);
+        if due.is_none_or(|due| due > now) {
+            return false;
+        }
+        let Some(next) = self.file_peek.as_mut().and_then(|peek| peek.dwell.take()) else {
+            return false;
+        };
+        self.hide_file_peek();
+        self.file_peek = Some(*next);
+        // Straight onto the glass rather than into another 350ms: the hand has
+        // already spent that on the row, and a card that made it spend it twice
+        // would be charging for the same wait.
+        self.mature_file_peek(now)
     }
 
     /// Whether a card is **on screen and holding the pointer** — the card's own
@@ -19185,8 +19746,26 @@ impl Runtime {
             buffer: Some(path.clone()),
             ..PreviewPane::default()
         };
-        if self.preview_pool.get(&path).is_some() {
+        if let Some(pooled) = self.preview_pool.get(&path) {
+            // A restored pool remembers names, never text (P151) — so "in the
+            // pool" is not "has something to show". A buffer that still wants
+            // its head read gets the same request a stranger would; the answer
+            // lands in the pool and the card lights up through the same
+            // repaint path every head read already takes. (User-reported
+            // 2026-08-14: hovering a restored, never-opened pool entry showed
+            // an empty card forever.)
+            let wants_read = pooled.wants_head_read();
             self.peek_buffer = None;
+            if wants_read {
+                let tab = self.id;
+                if !self.preview_worker.request(preview::PreviewRequest {
+                    tab,
+                    path,
+                    want: preview::PreviewWant::Head,
+                }) {
+                    self.disable_preview_worker();
+                }
+            }
             return true;
         }
         let buffer = preview::PreviewBuffer::new(path.clone(), name);
@@ -19225,6 +19804,22 @@ impl Runtime {
         // markdown layout for a file nobody is looking at.
         self.peek_pane = PreviewPane::default();
         self.peek_picture = None;
+        // And any hand that was on a block inside it. The card's surface is the
+        // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
+        // because its life is this field's — so this is where that life ends for
+        // the gestures too.
+        if self
+            .preview_block_drag
+            .is_some_and(|drag| drag.surface == PreviewSurface::Peek)
+        {
+            self.preview_block_drag = None;
+        }
+        if self
+            .preview_block_hover
+            .is_some_and(|(surface, _)| surface == PreviewSurface::Peek)
+        {
+            self.preview_block_hover = None;
+        }
         showing
     }
 
@@ -19347,11 +19942,15 @@ impl Runtime {
 
     /// The 350ms is up — put the card on screen (P145).
     fn advance_file_peek(&mut self, now: Instant) -> Result<()> {
-        // The card's two clocks, in the order they can fire: the 350ms that puts
-        // it up and the grace that takes it down. Both through one tick, because
-        // a card that matured and expired between two wakes owes exactly one
-        // frame and not two.
-        if !(self.mature_file_peek(now) | self.expire_file_peek(now)) {
+        // The card's three clocks, in the order they can fire: the dwell that
+        // moves it to another row, the 350ms that puts it up and the grace that
+        // takes it down. All through one tick, because a card that matured and
+        // expired between two wakes owes exactly one frame and not two.
+        //
+        // The switch is first because it *is* an arm-and-mature: it puts a fresh
+        // card up on the same beat, and asking the maturity clock afterwards is
+        // what lets the two share the one frame this owes.
+        if !(self.switch_file_peek(now) | self.mature_file_peek(now) | self.expire_file_peek(now)) {
             return Ok(());
         }
         if self.refresh_overlay() {
@@ -19433,13 +20032,14 @@ impl Runtime {
         let palette = bt_render::chrome_palette();
         let mut layer = file_peek::build(&layout, &content, picture, &palette, scale);
         // **Where the card came to rest, filed before anything is drawn into
-        // it** — every pointer question about the card reads these three, so a
+        // it** — every pointer question about the card reads these two, so a
         // frame that painted a card without recording it would be a card on
-        // screen that nothing could touch.
+        // screen that nothing could touch. How tall the document turned out is
+        // no longer filed with them: the hit test asks the card's own pane, the
+        // way it asks a seat's.
         if let Some(peek) = self.file_peek.as_mut() {
             peek.frame = Some(layout.frame);
             peek.body = Some(layout.body);
-            peek.content = document;
         }
         if !matches!(content.body, file_peek::PeekBody::Document(_)) {
             return vec![layer];
@@ -19461,24 +20061,17 @@ impl Runtime {
         // reason: the body has to be drawn *above* the card's own face, and
         // the seats' document lane is a whole pass below the overlays.
         layer.body = self.build_preview_body_in(PreviewSurface::Peek, layout.body);
-        let Some(bar) = file_peek::scroll_bar(&layout, scroll[1], document, scale) else {
+        let Some(bar) = preview_body_bar(layout.body, scroll, document, scale) else {
             return vec![layer];
         };
-        let state = if self
-            .file_peek
-            .as_ref()
-            .is_some_and(|p| p.thumb_grab.is_some())
-        {
-            file_peek::ThumbState::Held
-        } else if self
-            .pointer_position
-            .is_some_and(|at| file_peek::contains(bar.grab, [at.x as f32, at.y as f32]))
-        {
-            file_peek::ThumbState::Hovered
-        } else {
-            file_peek::ThumbState::Rest
-        };
-        vec![layer, file_peek::build_scroll_bar(&bar, state, &palette)]
+        let state = ScrollThumbState::of(
+            self.file_peek
+                .as_ref()
+                .is_some_and(|peek| peek.thumb_grab.is_some()),
+            self.pointer_position
+                .is_some_and(|at| file_peek::contains(bar.grab, [at.x as f32, at.y as f32])),
+        );
+        vec![layer, scroll_bar_layer(&bar, state, &palette)]
     }
 
     /// **A press inside the card**, and what it means (user ruling, 2026-08-14).
@@ -19532,6 +20125,17 @@ impl Runtime {
                 Ok(true)
             }
             file_peek::Press::Open => {
+                // **A wide block in the card is a scrolling region, and the bar
+                // under it is a bar** (user ruling, 2026-08-14). Asked between
+                // the card's own thumb and the door, which is the order the
+                // three are drawn in: the card's bar rides over everything, a
+                // block's bar rides over the block, and the door is the whole
+                // face underneath both. It is the same order a docked pane takes
+                // its presses in — see the `press_preview_body_thumb` /
+                // `press_preview_block_thumb` pair.
+                if self.press_preview_block_thumb(position)? {
+                    return Ok(true);
+                }
                 let Some(path) = self.file_peek.as_ref().map(|peek| peek.path.clone()) else {
                     return Ok(false);
                 };
@@ -19602,14 +20206,17 @@ impl Runtime {
     /// the block bar's own hard-won rule: a rectangle remembered from the frame
     /// it was drawn on is a rectangle the pointer is tested against after the
     /// thing moved.
-    fn file_peek_bar(&self) -> Option<crate::preview::ScrollBar> {
+    fn file_peek_bar(&self) -> Option<preview::ScrollBar> {
         let peek = self.file_peek.as_ref()?;
         let body = peek.body.filter(|_| peek.due.is_none())?;
-        crate::preview::scroll_bar(
+        // The same door the seat's bar and the float's go through, asked with
+        // the one thing the card has to hand in: the box its own layout
+        // produced. The document's height is read off the card's pane exactly as
+        // a pane's is read off its own, so the hand and the painter cannot end
+        // up with two answers.
+        self.preview_surface_bar(
+            PreviewSurface::Peek,
             body,
-            crate::preview::ScrollAxis::Vertical,
-            self.peek_pane.scroll[1],
-            peek.content,
             self.renderer.metrics().scale_factor as f32,
         )
     }
@@ -20651,8 +21258,23 @@ impl Runtime {
             // A buffer's body is an edit surface: the press puts the caret where
             // the pointer is and arms the drag that selects, exactly as it does
             // in a docked pane.
+            //
+            // **And its furniture answers before its content, in the docked
+            // pane's own order** (user ruling, 2026-08-14): the body's vertical
+            // bar rides over the whole document, a wide block's bar rides over
+            // that block, and the caret is what is left underneath both. The
+            // docked pane states this order in `chrome_mouse_input`; a float
+            // cannot borrow that statement, because a press inside a window is
+            // claimed *here* — `press_float` is asked before the chrome router
+            // ever runs, which is what makes a window opaque to the layout
+            // beneath it. So the order is restated, and a bar drawn on a float
+            // is a bar a hand can take.
             float::FloatPart::Body if holds_a_buffer => {
-                self.press_preview_body(position)?;
+                if !(self.press_preview_body_thumb(position)?
+                    || self.press_preview_block_thumb(position)?)
+                {
+                    self.press_preview_body(position)?;
+                }
             }
             // The body away from any row: a press lands on the window and goes no
             // further, which is what makes a float opaque to the layout beneath.
@@ -21151,9 +21773,29 @@ impl Runtime {
     /// there and merely obeyed here.
     fn float_layer(&mut self, now: Instant) -> Vec<marks::OverlayLayer> {
         let ids: Vec<float::FloatId> = self.float.drawn().map(|win| win.epoch).collect();
-        ids.into_iter()
-            .filter_map(|id| self.float_window_layer(id, now))
-            .collect()
+        let mut layers = Vec::new();
+        for id in ids {
+            let Some(window) = self.float_window_layer(id, now) else {
+                continue;
+            };
+            // **The window's own scroll bar, on the layer directly above it**
+            // (user ruling, 2026-08-14). Not further up, because a window in
+            // front has to cover this one whole — bar included; and not on the
+            // window's own layer, because a layer paints its quads *before* the
+            // document it carries (see [`scroll_bar_layer`]).
+            //
+            // It fades with the window it belongs to, for the reason the tenant
+            // does: `opacity` here is the CSS declaration on the element the
+            // layer is, and a bar that stayed at full strength through an
+            // entrance would be a scrollbar arriving before its window.
+            let opacity = window.opacity;
+            layers.push(window);
+            layers.extend(self.preview_float_bar_layer(id).map(|mut bar| {
+                bar.opacity = opacity;
+                bar
+            }));
+        }
+        layers
     }
 
     /// One floating window, drawn — dispatched on **who is inside it**.
@@ -24377,7 +25019,11 @@ impl Runtime {
             return Ok(());
         }
         // A thumb in hand owns the pointer for the same reason, and outside its
-        // own band for the same reason.
+        // own band for the same reason. The body's bar before the block's, the
+        // order they are drawn in and the order their presses are taken in.
+        if self.drag_preview_body_thumb(position)? {
+            return Ok(());
+        }
         if self.drag_preview_block_thumb(position)? {
             return Ok(());
         }
@@ -24388,6 +25034,7 @@ impl Runtime {
         let free = self.settings_layout().is_none()
             && self.dirty_gate_layout().is_none()
             && self.chrome_target_at(position).is_none();
+        self.note_preview_body_hover(free.then_some(position))?;
         self.note_preview_block_hover(free.then_some(position))?;
         self.note_preview_link_hover(free.then_some(position))?;
         // The overlay owns the pointer the way it owns the next click: no chrome
@@ -26222,7 +26869,13 @@ impl Runtime {
         if state == ElementState::Released {
             // A thumb is let go wherever the hand lets go of it — the offset it
             // wrote on the way is already the answer, so this only puts the
-            // accent out.
+            // accent out. The body's bar first, the order everything else about
+            // these two is in.
+            if self.preview_body_drag.take().is_some() {
+                self.note_preview_body_hover(Some(position))?;
+                self.repaint_preview()?;
+                return Ok(true);
+            }
             if self.preview_block_drag.take().is_some() {
                 self.note_preview_block_hover(Some(position))?;
                 self.repaint_preview()?;
@@ -26327,6 +26980,13 @@ impl Runtime {
             // every terminal leaf answers for itself; see [`press_reaches_no_grid`]
             // for the primary-seat version this replaced and what it cost.
             self.tab_clicks.interrupt();
+            // The body's own bar answers first of all: it is the outermost piece
+            // of furniture the pane has, drawn over the document, over every
+            // block in it and over every link in those — and a press on it was
+            // never a press on what it is standing over.
+            if self.press_preview_body_thumb(position)? {
+                return Ok(true);
+            }
             // A link is a control standing in the prose and answers before the
             // prose does.
             if self.press_preview_link(position)? {
@@ -29104,6 +29764,15 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             // when it could not be touched.
             runtime.file_peek.as_ref().and_then(|peek| peek.due),
             runtime.file_peek.as_ref().and_then(|peek| peek.closing_at),
+            // And the dwell's own 350ms, which is the one clock in this window
+            // that has to fire under a pointer that is not moving at all — a
+            // hand resting on another row sends no events, so without this wake
+            // "停留即换" would only ever happen on the next thing to twitch.
+            runtime
+                .file_peek
+                .as_ref()
+                .and_then(|peek| peek.dwell.as_ref())
+                .and_then(|dwell| dwell.due),
             // The intent's 180ms, the grace's 220/420, and the entrance's own
             // frames until it lands. A window with no float and no hovered
             // trigger reports nothing and costs no wake-ups at all.
@@ -30735,6 +31404,7 @@ mod tests {
             }]
         };
         let stack = OverlayStack {
+            preview_bars: mark(0),
             rail: mark(1),
             ground: mark(2),
             layout_peek: mark(3),
@@ -30752,8 +31422,9 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
-            "bottom to top: rail, ground, schematic, float, modal, file menu, tip, glance, ghost"
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "bottom to top: pane bars, rail, ground, schematic, float, modal, file menu, tip, \
+             glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -42040,7 +42711,7 @@ mod tests {
                 rows_height,
                 columns,
             )[1];
-            match file_peek::scroll_bar(&layout, 0.0, height, scale) {
+            match preview_body_bar(layout.body, [0.0, 0.0], height, scale) {
                 Some(bar) => {
                     assert!(
                         clamp > 0.0,
@@ -42130,6 +42801,121 @@ mod tests {
             text_metrics.line_height * 2.0,
             0,
         );
+    }
+
+    /// PIN (user ruling, 2026-08-14) — **the pane wears the card's own bar**.
+    ///
+    /// The glance card got a scroll bar first, because it was the surface people
+    /// were visibly trying to read further into. That left the window upside
+    /// down: a 300-pixel hover card said how much of its file it was showing,
+    /// and the docked pane it opens into — the same document, four times the
+    /// size, scrolling under the same wheel — said nothing at all. A page you
+    /// can scroll and cannot see the extent of is a page you have to scroll to
+    /// find the end of.
+    ///
+    /// So the three faces are asked the same four questions here, in one loop,
+    /// against one function. That is what "同原语" has to mean to be worth
+    /// anything: not three implementations that agree today, but one arithmetic
+    /// none of them can drift from — the lesson the block's bar already paid for
+    /// when its picture and its hit test disagreed.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① have `preview_body_bar` answer `None` for a box taller than it is wide
+    ///    — which is exactly "a docked pane draws no bar": both pane shapes go
+    ///    red and the 300×246 card stays green, which is the upside-down window
+    ///    this ruling overturned;
+    /// ② hand `preview::scroll_bar` `ScrollAxis::Horizontal` — the rule lands
+    ///    along the bottom edge and ① goes red for all three;
+    /// ③ read the offset from `scroll[0]` — ③ goes red, the thumb having stopped
+    ///    following the wheel.
+    #[test]
+    fn a_docked_pane_and_a_float_wear_the_same_bar_the_glance_card_does() {
+        const SCALE: f32 = 2.0;
+        // A tall docked pane, a squat float, and the card — the three surfaces
+        // the ruling names, in the three shapes they actually come in.
+        let faces = [
+            ("seat", [0.0, 80.0, 420.0, 900.0]),
+            ("float", [300.0, 120.0, 760.0, 420.0]),
+            (
+                "card",
+                [
+                    40.0,
+                    300.0,
+                    40.0 + file_peek::body_width(SCALE),
+                    300.0 + file_peek::body_max_height(SCALE),
+                ],
+            ),
+        ];
+        for (what, body) in faces {
+            let page = body[3] - body[1];
+            let content = page * 4.0;
+
+            // ① Down the right edge of the body, never across it, and never past
+            //    the bottom of the box the document is drawn in — the truncation
+            //    bar and the foot stand below `body` and are not scrolled over.
+            let bar = preview_body_bar(body, [0.0, 0.0], content, SCALE)
+                .unwrap_or_else(|| panic!("{what}: a document four pages long wears a bar"));
+            assert_eq!(bar.axis, preview::ScrollAxis::Vertical, "{what}");
+            assert_eq!([bar.track[1], bar.track[3]], [body[1], body[3]], "{what}");
+            assert_eq!(bar.track[2], body[2], "{what}: the bar hugs the far edge");
+            assert!(
+                bar.track[0] > body[0] + (body[2] - body[0]) / 2.0,
+                "{what}: a rule down the edge, not a curtain across the body"
+            );
+
+            // ② The overflow it offers is the overflow the clamp allows, so the
+            //    end of the track and the end of the wheel are one place.
+            assert_eq!(bar.overflow, content - page, "{what}");
+            assert!(
+                bar.thumb[3] - bar.thumb[1] >= preview::BLOCK_SCROLL_MIN_THUMB_LOGICAL_PX * SCALE,
+                "{what}: a thumb no hand can see is a thumb no hand can take"
+            );
+
+            // ③ The thumb is a picture of the offset: at rest at the head of the
+            //    track, at the end of the document at the end of it.
+            assert_eq!(bar.thumb[1], body[1], "{what}: at rest, at the top");
+            let end = preview_body_bar(body, [0.0, bar.overflow], content, SCALE)
+                .expect("still overflowing");
+            assert!(
+                (end.thumb[3] - body[3]).abs() < 0.5,
+                "{what}: at the end of the file, at the end of the track"
+            );
+
+            // ④ And dragging reads that picture backwards, stopping where the
+            //    wheel stops at both ends.
+            let held = 5.0_f32;
+            let dragged = |y: f32| preview::scroll_dragged_to(&bar, bar.along([body[2], y]), held);
+            assert_eq!(dragged(bar.thumb[1] + held), 0.0, "{what}");
+            assert_eq!(
+                dragged(bar.thumb[1] + held + bar.travel * 9.0),
+                bar.overflow,
+                "{what}: past the end of the track is the end of the document"
+            );
+
+            // ⑤ **The hand's target reaches inward and stops at the edge**
+            //    (real-machine finding, 2026-08-14). The two pixels of rule sit
+            //    on the surface's own far edge, and everything past that edge
+            //    has an owner that is asked first: a divider's seam band, or the
+            //    window's resize border, which is answered in `WM_NCHITTEST`
+            //    before this window sees a pointer at all. A bar that only
+            //    reached five pixels each way was a bar drawn inside somebody
+            //    else's band — visible, wheel-accurate, and impossible to take.
+            assert!(
+                bar.grab[0] <= bar.thumb[0] - preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX * SCALE,
+                "{what}: the target has to clear the divider band and the resize border"
+            );
+            assert_eq!(
+                bar.grab[2], body[2],
+                "{what}: and it stops at the edge — the far side belongs to somebody else"
+            );
+
+            // ⑥ A document that fits wears nothing at all: a track with no thumb
+            //    is a promise of somewhere to go in a pane that has nowhere.
+            assert!(
+                preview_body_bar(body, [0.0, 0.0], page, SCALE).is_none(),
+                "{what}: a file that fits its pane draws no bar"
+            );
+        }
     }
 
     /// MUTATION: make the fence scanner require a *bare* ```` ``` ```` to close

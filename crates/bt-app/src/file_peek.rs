@@ -35,11 +35,22 @@
 //!
 //! ## What is still read-only
 //!
-//! The card takes three gestures and no more: the wheel scrolls it, the thumb
-//! drags, a click opens the real pane. There is no caret in it, no selection, no
-//! typing and no focus — [`crate::PreviewSurface::Peek`] is still absent from
-//! the roll of surfaces the keyboard can reach, and "read-only" now names that
-//! absence exactly instead of naming the absence of a hit test.
+//! The card takes the gestures its *document* takes and no others: the wheel
+//! scrolls it, its bar drags, a wide table or a fence inside it scrolls
+//! sideways under Shift and under its own bar exactly as the same block does in
+//! the pane ([`body_at`]), and a click anywhere else opens the real pane. There
+//! is no caret in it, no selection, no typing and no focus —
+//! [`crate::PreviewSurface::Peek`] is still absent from the roll of surfaces the
+//! keyboard can reach, and "read-only" now names that absence exactly instead of
+//! naming the absence of a hit test.
+//!
+//! ## Which file it is about, while it is up
+//!
+//! The card is not nailed to the row that raised it. A pointer that comes to
+//! rest on **another** file row for the same 350ms moves the card to that file,
+//! re-armed from nothing; a pointer merely crossing those rows on its way into
+//! the card moves nothing at all. See [`dwell`], and [`corridor`] for the debt
+//! that pays off.
 //!
 //! # What it borrows rather than re-decides
 //!
@@ -211,10 +222,30 @@ pub fn contains(rect: [f32; 4], at: [f32; 2]) -> bool {
 /// down under the hand that was reaching for it. The corridor would be
 /// protecting the empty gap and nothing else.
 ///
-/// The price is that a file listed just under the one being glanced cannot be
-/// glanced until this card is down, and the way out is the way in: leave the
-/// corridor — a few pixels up, or out of the tree — and the next row arms
-/// normally and at once. See [`crate::Runtime::observe_file_peek`].
+/// # What it costs, and how that debt is paid (user ruling, 2026-08-14)
+///
+/// It used to cost those rows outright: *a file listed just under the one being
+/// glanced could not be glanced until this card was down*, and the only way out
+/// was to leave the corridor — a few pixels up, or out of the tree — and let
+/// the next row arm normally.
+///
+/// That was too much to charge. The rows a reach happens to cross are ordinary
+/// rows of an ordinary tree, and being unable to glance one because a card is
+/// standing over it is the corridor solving its own problem with somebody
+/// else's rows. So the outranking above is narrowed to what it was actually for:
+/// it outranks a hand **crossing** those rows, and not a hand that **stops** on
+/// one.
+///
+/// The two are told apart by the clock the first card was already armed on —
+/// [`PEEK_INTENT_MS`], see [`dwell`]. Cross three rows in less than that and
+/// three clocks start and none finishes, so the reach is exactly as protected as
+/// it was. Rest on one for that long and the card moves to it, re-armed from
+/// scratch: a new buffer, a new document, a new scroll, placed against the new
+/// row. Nothing about the envelope changes; what changed is that standing still
+/// inside it is no longer read as travelling through it.
+///
+/// See [`crate::Runtime::observe_file_peek`] and
+/// [`crate::Runtime::dwell_file_peek`].
 #[must_use]
 pub fn corridor(row: [f32; 4], frame: [f32; 4]) -> [f32; 4] {
     [
@@ -297,30 +328,14 @@ pub fn press_at(frame: [f32; 4], bar: Option<&crate::preview::ScrollBar>, at: [f
     }
 }
 
-/// **The card's own scroll bar**, when its document is taller than it is.
-///
-/// [`crate::preview::scroll_bar`] stood on its end — the block bar's machinery
-/// and the block bar's form, which is the 2026-08-14 ruling's own instruction
-/// and also the standing one: something that looks like a scrollbar has to be
-/// draggable, so there had better be only one of them to keep honest.
-///
-/// `None` when the whole document fits, and then nothing is drawn: a track with
-/// no thumb is a promise of somewhere to go in a card that has nowhere.
-#[must_use]
-pub fn scroll_bar(
-    layout: &PeekLayout,
-    offset: f32,
-    content: f32,
-    scale: f32,
-) -> Option<crate::preview::ScrollBar> {
-    crate::preview::scroll_bar(
-        layout.body,
-        crate::preview::ScrollAxis::Vertical,
-        offset,
-        content,
-        scale,
-    )
-}
+// **The card's own `scroll_bar` stood here** until 2026-08-14, when the docked
+// pane and the preview float grew the same bar. It was `preview::scroll_bar`
+// stood on its end with the card's body filled in — and once three surfaces
+// wore it, "the card's bar" stopped being a thing there could be one of: the
+// arithmetic moved to `crate::preview_body_bar`, which every one of the three
+// goes through, and the card hands it the box its own layout produced exactly as
+// a pane hands it the box the tree gave. A wrapper here would have been the
+// second door the block bar's history warns about.
 
 /// What the card's middle is showing.
 ///
@@ -802,57 +817,75 @@ pub fn build(
     }
 }
 
-/// How the card's scroll thumb is being touched, which is the only thing that
-/// changes its ink.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ThumbState {
-    Rest,
-    Hovered,
-    Held,
+/// **Where a pointer question about the card's document goes.**
+///
+/// The card is not in the layout tree and not in the float host, so
+/// [`crate::Runtime::preview_surface_at`] — the walk that answers every other
+/// surface — cannot see it at all. Anything that wants to ask the *document* in
+/// the card a question (which wide block is under the pointer, whose scroll
+/// thumb this is) has to be handed the card's body box instead, and this is the
+/// one place that hands it over.
+///
+/// `frame` is where the card came to rest and `body` is the document's box
+/// inside it; the answer is the body when the pointer is in the card, and
+/// nothing when it is not. Written as a function rather than as two lines at the
+/// call site because "the card takes the question first, and it takes it by its
+/// whole frame" is the rule, and a rule with one reader is still a rule.
+#[must_use]
+pub fn body_at(frame: [f32; 4], body: [f32; 4], at: [f32; 2]) -> Option<[f32; 4]> {
+    contains(frame, at).then_some(body)
 }
 
-/// **The scroll bar, on a layer of its own.**
+/// **What a pointer resting inside the corridor does to the card that is up**
+/// (user ruling, 2026-08-14: *穿行不换,停留即换* — crossing does not move the
+/// card, resting does).
 ///
-/// A layer rather than more quads on the card's, and that is a z-order fact
-/// rather than tidiness: within one layer the order is the layer's own fills,
-/// then the *document's* fills, then marks, then text — so a thumb pushed onto
-/// the card's quads would be painted under a diff's line band and under the very
-/// text it is meant to ride over. [`crate::marks::OverlayLayer`] states the rule
-/// this obeys: anything that must cover something else goes on a later layer.
+/// The corridor's own rule ([`corridor`]) says another row may neither take the
+/// card nor restart its intent while the pointer is inside the envelope. That
+/// bought the reach and cost the rows underneath it: a file listed just below
+/// the one being glanced could not be glanced at all until the card came down.
+/// The ruling pays that back without giving the corridor up, by distinguishing
+/// the two things a pointer can be doing over those rows — *crossing* them on
+/// the way to the card, and *stopping* on one of them.
 ///
-/// It is an overlay bar in the sense every modern editor's is — it lies *over*
-/// the last few pixels of the document rather than taking a gutter out of it.
-/// Taking a gutter would change the width the document is laid out at, which
-/// changes its height, which decides whether the bar exists: the reflow loop
-/// that scrollbar-gutter rules exist to break.
+/// The distinction is the same 350ms the first card was armed on
+/// ([`PEEK_INTENT_MS`]), because it is the same question: a hand that has held
+/// still on a row for that long is asking about that row. A hand crossing three
+/// rows in less starts three clocks and finishes none — every crossing is a
+/// [`Dwell::Start`] that replaces the one before it — which is exactly why
+/// travelling through costs nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Dwell {
+    /// Nothing to count. The pointer is on the card's own row, on a directory,
+    /// on the card itself, or on no row at all — and any clock that was running
+    /// is dropped, because a hand that has left the row it was resting on has
+    /// stopped resting on it.
+    ///
+    /// **The card is untouched either way**: a directory row inside the corridor
+    /// neither moves the card nor takes it down, which is the corridor's own
+    /// standing answer and is deliberately left alone.
+    Idle,
+    /// A row the clock is not already on: start [`PEEK_INTENT_MS`] against it.
+    Start,
+    /// The row the clock is already on: leave it alone, exactly as
+    /// [`crate::Runtime::observe_file_peek`] leaves a running intent alone.
+    /// Restarting here would mean a hand that trembles never dwells.
+    Keep,
+}
+
+/// [`Dwell`] for a pointer over `over`, with `waiting` the row a dwell is
+/// already counting against.
+///
+/// Generic in the row's identity because *which* row is the caller's fact — a
+/// host and a key over there, nothing at all in here — while the rule is this
+/// module's. It is the same division [`life`] makes: the geometry is handed in,
+/// the judgement is here.
 #[must_use]
-pub fn build_scroll_bar(
-    bar: &crate::preview::ScrollBar,
-    state: ThumbState,
-    palette: &ChromePalette,
-) -> OverlayLayer {
-    // The divider's three inks — this app's only existing family for a bar a
-    // hand can hold, and the same three the block's bar wears, because they are
-    // the same control.
-    let ink = match state {
-        ThumbState::Held => palette.divider_active,
-        ThumbState::Hovered => palette.files_row_text,
-        ThumbState::Rest => palette.files_row_muted,
-    };
-    OverlayLayer {
-        quads: vec![
-            OverlayQuad {
-                rect: bar.track,
-                color: palette.preview_grid_line,
-                alpha: 1.0,
-            },
-            OverlayQuad {
-                rect: bar.thumb,
-                color: ink,
-                alpha: 1.0,
-            },
-        ],
-        ..OverlayLayer::default()
+pub fn dwell<T: PartialEq + ?Sized>(over: Option<&T>, waiting: Option<&T>) -> Dwell {
+    match (over, waiting) {
+        (None, _) => Dwell::Idle,
+        (Some(over), Some(waiting)) if over == waiting => Dwell::Keep,
+        (Some(_), _) => Dwell::Start,
     }
 }
 
@@ -1286,6 +1319,122 @@ mod tests {
         assert_eq!(at(140.0, frame[3] + 20.0), Life::Released, "below both");
     }
 
+    /// PIN — **the card's document takes the questions its document is entitled
+    /// to** (user ruling, 2026-08-14).
+    ///
+    /// A table too wide for the card is the same scrolling region a table too
+    /// wide for the pane is, and the ruling that gave the card a wheel and a
+    /// thumb gave it the blocks inside it too. But the card is in no layout tree
+    /// and in no float host, so the walk that answers "which surface is the
+    /// pointer in" cannot see it: without this, a hand on the bar under a wide
+    /// table in a glance finds nothing, the offset stays nailed to zero, and the
+    /// press falls through to the door instead.
+    ///
+    /// It is deliberately *not* the whole pane walk. The card is read-only, and
+    /// that walk also answers presses, carets, selections and the edit focus —
+    /// so the card enters through here, by name, for exactly the questions it is
+    /// entitled to.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① have `body_at` answer `None` always — "the card's blocks never move",
+    ///    which is the bug this closes;
+    /// ② have it answer the *frame* rather than the body — the block hit test
+    ///    would be run against the head and the foot as well, and a press on the
+    ///    file's name would scroll a table.
+    #[test]
+    fn a_wide_block_inside_the_card_is_asked_about_in_the_cards_own_body() {
+        let row = [40.0, 300.0, 240.0, 320.0];
+        let card = tall_card(row);
+
+        // ① Inside the card, the document's box — not the frame, so the head and
+        //    the foot are outside every question the document answers.
+        let middle = [
+            (card.body[0] + card.body[2]) / 2.0,
+            (card.body[1] + card.body[3]) / 2.0,
+        ];
+        assert_eq!(body_at(card.frame, card.body, middle), Some(card.body));
+        assert!(
+            card.body[1] > card.frame[1] && card.body[3] < card.frame[3],
+            "the fixture's body really is inset from its frame, or ② proves nothing"
+        );
+
+        // ② The head is the card, so the question still belongs to the card —
+        //    and it is still asked against the *body*, which is what keeps a
+        //    press on the file's name from landing on a table's thumb.
+        assert_eq!(
+            body_at(card.frame, card.body, [card.name[0], card.name[1] + 1.0]),
+            Some(card.body)
+        );
+
+        // ③ Outside the card the card answers nothing at all, and the pane walk
+        //    behind it gets the question it was always going to get.
+        assert_eq!(
+            body_at(card.frame, card.body, [card.frame[2] + 4.0, middle[1]]),
+            None
+        );
+        assert_eq!(
+            body_at(card.frame, card.body, [middle[0], card.frame[3] + 4.0]),
+            None
+        );
+    }
+
+    /// PIN — **穿行不换,停留即换** (user ruling, 2026-08-14): a hand crossing the
+    /// rows under the corridor does not move the card, and a hand that stops on
+    /// one of them does.
+    ///
+    /// [`corridor`] bought the reach by ruling that a row under the envelope may
+    /// neither take the card nor restart its intent, and it had to be that way
+    /// round: the card hangs *below* the row it is about, so a hand reaching for
+    /// its middle crosses a dozen rows of the very tree it came from. What that
+    /// cost was those rows — a file listed just under the one being glanced
+    /// could not be glanced at all until the card came down.
+    ///
+    /// The way out is not to weaken the corridor but to tell the two gestures
+    /// apart, and the thing that tells them apart is the clock the first card was
+    /// already armed on: [`PEEK_INTENT_MS`]. Crossing three rows in less than
+    /// that starts three clocks and finishes none, because every crossing
+    /// replaces the one before it.
+    ///
+    /// MUTATIONS that must turn it red:
+    /// ① answer `Keep` when the rows differ — 掠过即换: the card follows the
+    ///    pointer down the list and the reach can never land, which is the
+    ///    corridor undone;
+    /// ② answer `Start` when the rows are the same — a hand that trembles
+    ///    restarts its own clock and never dwells at all;
+    /// ③ answer anything but `Idle` for no row — a folder or the gap between
+    ///    two trees would keep a stale clock running and switch the card to a
+    ///    row the pointer left long ago.
+    #[test]
+    fn crossing_the_rows_under_the_corridor_does_not_move_the_card_but_resting_does() {
+        // Rows as the caller identifies them: a host and a key. The rule knows
+        // nothing about either — see [`dwell`].
+        let (a, b, c) = ("tree/a.rs", "tree/b.rs", "tree/c.rs");
+
+        // ① Nothing is counting and the hand arrives on a row: start.
+        assert_eq!(dwell(Some(b), None), Dwell::Start);
+
+        // ② **穿行.** Three rows crossed is three starts and no maturity: each
+        //    one replaces the clock the last one set, so no single row ever
+        //    holds the pointer for its own 350ms.
+        assert_eq!(dwell(Some(c), Some(b)), Dwell::Start);
+        assert_eq!(dwell(Some(a), Some(c)), Dwell::Start);
+
+        // ③ **停留.** The same row again leaves the clock alone, which is the
+        //    only way it can ever run out — and it runs out at the same number
+        //    the first card was armed on, not a second one invented for this.
+        assert_eq!(dwell(Some(b), Some(b)), Dwell::Keep);
+        assert_eq!(
+            PEEK_INTENT_MS, 350,
+            "the dwell is the intent, so there is one number and this is it"
+        );
+
+        // ④ A folder, a notice, the card's own row, the space past the end of
+        //    the list: all of them are "no row", and all of them drop the clock
+        //    without touching the card.
+        assert_eq!(dwell(None, Some(b)), Dwell::Idle);
+        assert_eq!(dwell::<str>(None, None), Dwell::Idle);
+    }
+
     /// PIN — **a hand that has taken hold of something puts the card down at
     /// once, with no grace at all.**
     ///
@@ -1362,7 +1511,7 @@ mod tests {
             "the fixture overflows the card, or there is no bar to test"
         );
 
-        let bar = scroll_bar(&card, 0.0, document, SCALE)
+        let bar = crate::preview_body_bar(card.body, [0.0, 0.0], document, SCALE)
             .expect("a document taller than the card wears a bar");
         assert_eq!(bar.axis, crate::preview::ScrollAxis::Vertical);
 
@@ -1382,19 +1531,32 @@ mod tests {
             "the thumb is a picture of how much of the file is showing"
         );
         assert_eq!(bar.thumb[1], card.body[1]);
-        let scrolled = scroll_bar(&card, bar.overflow, document, SCALE).expect("still overflowing");
+        let scrolled = crate::preview_body_bar(card.body, [0.0, bar.overflow], document, SCALE)
+            .expect("still overflowing");
         assert!(
             (scrolled.thumb[3] - card.body[3]).abs() < 0.5,
             "and at the end of the document it is at the end of the track"
         );
 
-        // ③ Wider to a hand than to the eye, on every side.
+        // ③ Wider to a hand than to the eye — **inward, and up to the card's own
+        //    edge but never across it** (real-machine finding, 2026-08-14). The
+        //    sentence this replaces was "on every side", and it was written when
+        //    this bar was the only one of its kind: a card floats over the
+        //    terminal, so five pixels past its edge cost nobody anything. The
+        //    same bar on a docked pane lands inside a divider's seam band or the
+        //    window's own resize border, both of which are asked before this
+        //    window is — so the growth is inward for all three faces, and the
+        //    tolerance is now a property of the hand *and* of what the far side
+        //    already belongs to.
         assert!(
-            bar.grab[0] < bar.thumb[0]
-                && bar.grab[2] > bar.thumb[2]
+            bar.grab[0] <= bar.thumb[0] - crate::preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX * SCALE
                 && bar.grab[1] < bar.thumb[1]
                 && bar.grab[3] > bar.thumb[3],
-            "the tolerance is a property of the hand, not of a direction"
+            "the tolerance reaches into the card, and reaches past both ends of the thumb"
+        );
+        assert_eq!(
+            bar.grab[2], card.body[2],
+            "and stops at the edge it rides, whoever is on the other side"
         );
 
         // ④ Dragging reads that picture backwards, on the bar's own axis,
@@ -1414,7 +1576,7 @@ mod tests {
         //    promise of somewhere to go in a card that has nowhere.
         let short = self::layout(&content(lines(2)), row, (1200.0, 800.0), 60.0, 24.0, SCALE);
         assert!(
-            scroll_bar(&short, 0.0, LINE_HEIGHT * 2.0, SCALE).is_none(),
+            crate::preview_body_bar(short.body, [0.0, 0.0], LINE_HEIGHT * 2.0, SCALE).is_none(),
             "a two-line file has nowhere to scroll and says so by drawing nothing"
         );
     }
@@ -1446,7 +1608,8 @@ mod tests {
         let row = [40.0, 300.0, 240.0, 320.0];
         let card = tall_card(row);
         let document = LINE_HEIGHT * 40.0;
-        let bar = scroll_bar(&card, 0.0, document, SCALE).expect("the fixture overflows");
+        let bar = crate::preview_body_bar(card.body, [0.0, 0.0], document, SCALE)
+            .expect("the fixture overflows");
 
         // ① On the thumb — asked first, and carrying how far into it the hand
         //    took hold.

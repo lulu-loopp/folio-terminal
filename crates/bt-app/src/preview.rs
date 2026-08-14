@@ -2004,6 +2004,38 @@ pub const BLOCK_SCROLL_THICKNESS_LOGICAL_PX: f32 = 2.0;
 /// grown around the drawn rule on every side, so the tolerance is the same
 /// whether the approach is from inside the block or from the gap below it.
 pub const BLOCK_SCROLL_HIT_LOGICAL_PX: f32 = 7.0;
+/// How far **inward** a bar riding a *surface's own edge* reaches for a hand
+/// (real-machine finding, 2026-08-14).
+///
+/// # The pixels at a surface's edge are already somebody's
+///
+/// [`BLOCK_SCROLL_HIT_LOGICAL_PX`] grows a bar's target on every side, and that
+/// is right for a block's bar: it lies inside a document, and the pixels just
+/// past it are the same document's. A *surface's* bar is at the surface's own
+/// edge, and what lies past that edge is never content — it is the next
+/// sovereign band along, and both of the ones this window has are wider than the
+/// growth:
+///
+/// * a **divider** between two panes claims [`crate::seats`]'s
+///   `SEAT_DIVIDER_HIT_LOGICAL_PX` around the seam, and it claims it first —
+///   the pane bar of a preview with a neighbour lies entirely inside that band;
+/// * the **window's own resize border** claims eight logical pixels of the far
+///   edge before the application is asked at all. A press there is a
+///   `WM_NCHITTEST` answer, not a pointer event: the pane bar of the right-most
+///   preview never reached this window's code.
+///
+/// Measured on a real window (2026-08-14): a docked preview's bar could be seen,
+/// tracked the wheel exactly, and could not be taken by any hand — at the window
+/// edge because the press was a resize, at a seam because the press was a
+/// divider.
+///
+/// So the *picture* stays where the ruling put it — a rule on the surface's own
+/// far edge — and the *target* grows inward instead, which is what every overlay
+/// scrollbar on the desk does when a pointer approaches it. Nothing is taken
+/// from either sovereign: the band grows into the surface's own content, and the
+/// far side is clamped to the edge rather than reaching across it.
+pub const BODY_SCROLL_INWARD_HIT_LOGICAL_PX: f32 = 16.0;
+
 /// The shortest a thumb may be *drawn* (ruling 2026-08-14, both axes): the
 /// honest proportional share of a long document collapses toward one pixel,
 /// and a thumb that cannot be seen cannot be taken. Every desktop scrollbar
@@ -2063,6 +2095,33 @@ impl ScrollBar {
             ScrollAxis::Horizontal => self.track[0],
             ScrollAxis::Vertical => self.track[1],
         }
+    }
+
+    /// The same bar with its target reaching `inward` pixels **into** the
+    /// surface, and not one pixel past the surface's own edge.
+    ///
+    /// See [`BODY_SCROLL_INWARD_HIT_LOGICAL_PX`] for what lives on the other
+    /// side of that edge and why nothing may be taken from it. The growth along
+    /// the bar's own axis is left exactly as [`scroll_bar`] made it — the ends
+    /// of a thumb are as hard to land on as they ever were, and nothing on that
+    /// axis belongs to anybody else.
+    #[must_use]
+    pub fn grown_inward(self, inward: f32) -> Self {
+        let grab = match self.axis {
+            ScrollAxis::Vertical => [
+                (self.thumb[0] - inward).min(self.grab[0]),
+                self.grab[1],
+                self.track[2],
+                self.grab[3],
+            ],
+            ScrollAxis::Horizontal => [
+                self.grab[0],
+                (self.thumb[1] - inward).min(self.grab[1]),
+                self.grab[2],
+                self.track[3],
+            ],
+        };
+        Self { grab, ..self }
     }
 
     /// Where a pointer at `at` stands on the bar's own axis.
