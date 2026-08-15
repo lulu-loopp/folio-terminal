@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Folio Wordmark · Round Two</title>
+<style>
+  * { box-sizing: border-box; }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    margin: 0; padding: 56px 40px 96px;
+    background: #FBFBFA; color: #37352F;
+    font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, sans-serif;
+    font-size: 13.5px; line-height: 1.62;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+
+  /* ── sheet head ─────────────────────────────────────────── */
+  .eyebrow {
+    font-size: 10.5px; font-weight: 600; letter-spacing: .13em;
+    text-transform: uppercase; color: rgba(55,53,47,.45); margin: 0 0 10px;
+  }
+  h1 { font-size: 27px; font-weight: 600; letter-spacing: -.022em; margin: 0 0 4px; }
+  .accentrule { height: 2px; width: 34px; background: #3059D8; margin: 18px 0 22px; border-radius: 1px; }
+  .standfirst { max-width: 62ch; color: rgba(55,53,47,.72); margin: 0 0 10px; }
+  .standfirst b { font-weight: 600; color: #37352F; }
+  .notebox {
+    max-width: 74ch; margin: 26px 0 0; padding: 14px 16px;
+    border: 1px solid #ECECE8; border-radius: 9px; background: #fff;
+    font-size: 12.5px; color: rgba(55,53,47,.68);
+  }
+  .notebox p { margin: 0 0 7px; }
+  .notebox p:last-child { margin: 0; }
+  .notebox code { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-size: 11.5px; background: #F4F4F1; padding: 1px 4px; border-radius: 3px; }
+
+  hr.sep { border: 0; border-top: 1px solid #EAEAE6; margin: 46px 0 0; }
+
+  /* ── option card ────────────────────────────────────────── */
+  .opt { margin: 46px 0 0; }
+  .opt-head { display: flex; align-items: baseline; gap: 12px; margin: 0 0 4px; }
+  .tag {
+    font-size: 11px; font-weight: 700; letter-spacing: .06em;
+    width: 22px; height: 22px; border-radius: 5px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: #37352F; color: #fff; transform: translateY(2px);
+  }
+  .opt-head h2 { font-size: 17px; font-weight: 600; letter-spacing: -.015em; margin: 0; }
+  .gesture { max-width: 84ch; margin: 6px 0 20px 34px; color: rgba(55,53,47,.78); }
+  .gesture .lead { font-weight: 600; color: #37352F; }
+
+  .renders {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+    margin-left: 34px; border: 1px solid #E7E7E3; border-radius: 10px;
+    overflow: hidden; background: #E7E7E3;
+  }
+  .col { padding: 0; }
+  .colhead {
+    font-size: 10px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+    padding: 11px 16px 0; color: var(--muted);
+    font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; letter-spacing: .04em;
+    text-transform: none;
+  }
+  .col.light { --bar:#F7F7F5; --seat:#FFFFFF; --ink:#7A7974; --muted:#A1A09C; background: #F7F7F5; }
+  .col.dark  { --bar:#252525; --seat:#1B1B1B; --ink:#9D9D9D; --muted:#787878; background: #252525; }
+
+  /* mock window fragment: 40px title bar over seat body */
+  .frag { margin: 10px 0 0; }
+  .bar {
+    height: 40px; background: var(--bar);
+    display: flex; align-items: center;
+    padding-left: 12px; gap: 8px;          /* .titlebar .drag */
+    position: relative;
+  }
+  .ptoggle { width: 30px; height: 26px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+  .ptoggle svg { width: 14px; height: 14px; }
+  .caps { position: absolute; right: 0; top: 0; height: 40px; display: flex; align-items: center; }
+  .caps span { width: 46px; height: 40px; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+  .caps svg { width: 10px; height: 10px; }
+  .seat { height: 26px; background: var(--seat); }
+
+  .measure {
+    font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
+    font-size: 10px; color: var(--muted); padding: 8px 16px 0; letter-spacing: .01em;
+  }
+  .mag {
+    padding: 16px 16px 18px; background: var(--bar);
+    display: flex; align-items: flex-end; gap: 30px; flex-wrap: wrap;
+  }
+  .spec { display: flex; align-items: flex-end; gap: 9px; }
+  .maglabel {
+    font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
+    font-size: 10px; color: var(--muted); padding-bottom: 2px; flex: none;
+  }
+
+  /* the marks themselves */
+  /* `fill` is an inherited property, so it crosses the <use> shadow boundary;
+     a `.mk path` selector would not. */
+  .mk { display: block; overflow: visible; fill: currentColor; }
+  .ink   { color: var(--ink); }
+  .inkmu { color: var(--muted); }
+
+  /* option B's two inks, handed to the symbol as custom properties */
+  .foldB { --recto: var(--ink); --verso: var(--muted); }
+
+  .port {
+    margin: 14px 0 0 34px; max-width: 96ch;
+    font-size: 12px; color: rgba(55,53,47,.6);
+    padding-left: 13px; border-left: 2px solid #E7E7E3;
+  }
+  .port b { font-weight: 600; color: rgba(55,53,47,.82); }
+  .port code { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<!-- ══════════ glyph library · every path hand-drawn, no webfont ══════════ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<defs>
+
+  <!-- shared geometric skeleton, plain: cap 100, x-height 74, stem 11,
+       o = true circle r 38.5 (1.5 overshoot), counter 27.5 × 29,
+       o centres 108.5 / 263.5, l stem 165–176, i stem 196–207.
+       F crossbar at the conventional height (45.5–56.5). -->
+  <g id="w-plain">
+    <path d="M0 0H58V11H11V45.5H50V56.5H11V100H0Z"/>
+    <path fill-rule="evenodd" d="M70 63a38.5 38.5 0 1 0 77 0a38.5 38.5 0 1 0-77 0ZM81 63a27.5 29 0 1 0 55 0a27.5 29 0 1 0-55 0Z"/>
+    <path d="M165 0H176V100H165Z"/>
+    <path d="M196 26H207V100H196Z"/>
+    <path d="M195 13a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0-13 0Z"/>
+    <path fill-rule="evenodd" d="M225 63a38.5 38.5 0 1 0 77 0a38.5 38.5 0 1 0-77 0ZM236 63a27.5 29 0 1 0 55 0a27.5 29 0 1 0-55 0Z"/>
+  </g>
+
+  <!-- A · two leaves.  Identical to the plain skeleton except that each o's
+       counter is displaced 4 units toward the l/i gap, so the ring is 15 thick
+       on the fore-edge and 7 at the fold.  Mirror axis x = 186. -->
+  <symbol id="m-a" viewBox="0 0 302 101.5">
+    <path d="M0 0H58V11H11V45.5H50V56.5H11V100H0Z"/>
+    <path fill-rule="evenodd" d="M70 63a38.5 38.5 0 1 0 77 0a38.5 38.5 0 1 0-77 0ZM85 63a27.5 29 0 1 0 55 0a27.5 29 0 1 0-55 0Z"/>
+    <path d="M165 0H176V100H165Z"/>
+    <path d="M196 26H207V100H196Z"/>
+    <path d="M195 13a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0-13 0Z"/>
+    <path fill-rule="evenodd" d="M225 63a38.5 38.5 0 1 0 77 0a38.5 38.5 0 1 0-77 0ZM232 63a27.5 29 0 1 0 55 0a27.5 29 0 1 0-55 0Z"/>
+  </symbol>
+
+  <!-- B · one fold.  No line is drawn.  The plain skeleton is laid twice and
+       clipped at x = 108.5, the centre of the first o; the far leaf drops one
+       ink step. -->
+  <clipPath id="cB-l"><rect x="-20" y="-20" width="128.5" height="150"/></clipPath>
+  <clipPath id="cB-r"><rect x="108.5" y="-20" width="220" height="150"/></clipPath>
+  <symbol id="m-b" viewBox="0 0 302 101.5">
+    <g clip-path="url(#cB-l)" style="fill:var(--recto)"><use href="#w-plain"/></g>
+    <g clip-path="url(#cB-r)" style="fill:var(--verso)"><use href="#w-plain"/></g>
+  </symbol>
+
+  <!-- D · the through-line.  The plain skeleton with one number changed: the F's
+       crossbar centre moved from y 51 to y 63, the exact vertical centre of both
+       o counters. -->
+  <symbol id="m-d" viewBox="0 0 302 101.5">
+    <path d="M0 0H58V11H11V57.5H50V68.5H11V100H0Z"/>
+    <path fill-rule="evenodd" d="M70 63a38.5 38.5 0 1 0 77 0a38.5 38.5 0 1 0-77 0ZM81 63a27.5 29 0 1 0 55 0a27.5 29 0 1 0-55 0Z"/>
+    <path d="M165 0H176V100H165Z"/>
+    <path d="M196 26H207V100H196Z"/>
+    <path d="M195 13a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0-13 0Z"/>
+    <path fill-rule="evenodd" d="M225 63a38.5 38.5 0 1 0 77 0a38.5 38.5 0 1 0-77 0ZM236 63a27.5 29 0 1 0 55 0a27.5 29 0 1 0-55 0Z"/>
+  </symbol>
+
+  <!-- C · the imprint.  A different alphabet: cap 100, x-height 68, stem 12,
+       hairline ~7.5, bracketed serifs, oblique stress at −25°.  Drawn after
+       Palatino.  The lone ornament is the folio itself — a centred point and an
+       old-style 1, at 62%, set out in the margin. -->
+  <symbol id="m-c" viewBox="0 0 345 101">
+    <path d="M1 0H63V17H55Q54.5 10.5 52 9.5H21V41H51V54H45Q44.5 51 42.5 50H21V88Q24 89.5 30 91V100H0V91Q6 89.5 9 88V12Q6 10.5 1 9Z"/>
+    <path fill-rule="evenodd" d="M58 66a35 35 0 1 0 70 0a35 35 0 1 0-70 0ZM75.78 74.03a19 29 -25 1 1 34.44-16.06a19 29 -25 1 1-34.44 16.06Z"/>
+    <path d="M133 0H151V88Q154 89.5 160 91V100H130V91Q136 89.5 139 88V10Q136 8.5 133 7Z"/>
+    <path d="M175 32H193V88Q196 89.5 202 91V100H172V91Q178 89.5 181 88V42Q178 40.5 175 39Z"/>
+    <path d="M181 18a6 6 0 1 0 12 0a6 6 0 1 0-12 0Z"/>
+    <path fill-rule="evenodd" d="M206 66a35 35 0 1 0 70 0a35 35 0 1 0-70 0ZM223.78 74.03a19 29 -25 1 1 34.44-16.06a19 29 -25 1 1-34.44 16.06Z"/>
+    <path d="M307.5 66a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0Z"/>
+    <path d="M339.4 58V95Q341 96 344.4 96.8V100H327V96.8Q330.4 96 332 95V68L325 72L323.5 68.5L332 58Z"/>
+  </symbol>
+
+  <!-- chrome furniture for the mock bar (context only, not part of any option) -->
+  <symbol id="i-panel" viewBox="0 0 16 16">
+    <rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+    <path d="M6.2 2.6V13.4" stroke="currentColor" stroke-width="1.3"/>
+  </symbol>
+  <symbol id="i-min" viewBox="0 0 10 10"><path d="M0 5H10" stroke="currentColor" stroke-width="1"/></symbol>
+  <symbol id="i-max" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></symbol>
+  <symbol id="i-close" viewBox="0 0 10 10"><path d="M0 0L10 10M10 0L0 10" stroke="currentColor" stroke-width="1"/></symbol>
+</defs>
+</svg>
+
+<div class="wrap">
+
+  <p class="eyebrow">Folio · identity · round two</p>
+  <h1>Four wordmarks, one gesture each</h1>
+  <div class="accentrule"></div>
+
+  <p class="standfirst">
+    Round one was generic because it drew from “document”. This round draws only from the word.
+    <b>Folio</b> has two literal meanings in the printing trade: a sheet folded <b>once</b>, giving two leaves —
+    a pair of facing pages; and the <b>page number</b> printed on a page. Nothing below is a page-curl,
+    a stack, or a file. Each option makes exactly one move and every other stroke is silent.
+  </p>
+
+  <div class="notebox">
+    <p><b>Where this lives.</b> <code>.apptitle</code> in the mock-up: 12.5&nbsp;px, colour <code>--ink3</code>, inside a
+    40&nbsp;px <code>.titlebar</code>. Its left edge falls at <b>x&nbsp;=&nbsp;50&nbsp;px</b> — 12 (<code>.drag</code> padding-left)
+    + 30 (<code>.panel-toggle</code> width) + 8 (<code>gap</code>). It appears in the vertical-tab layout only; horizontal tabs hide it.</p>
+    <p><b>Colour.</b> Only real tokens from <code>theme.rs</code>. Actual-size renderings use
+    <code>title_text_muted</code> (<code>#A1A09C</code> / <code>#787878</code>) because that is literally what <code>--ink3</code> resolves to;
+    the 3× proofs use <code>title_text</code> (<code>#7A7974</code> / <code>#9D9D9D</code>) so the forms can be read.
+    <b>No option uses the accent anywhere.</b> Each time an accent was tried it was the first thing that
+    looked borrowed, so it came off — the cobalt rule above is this sheet’s own chrome, not part of any mark.</p>
+    <p><b>One skeleton.</b> A, B and D are drawn on the <em>same</em> hand-built geometric sans — cap 100, x-height 74,
+    stem 11, <code>o</code> a true circle — so that each option’s signature is the only variable between them.
+    C is a different alphabet entirely.</p>
+  </div>
+
+  <hr class="sep">
+
+  <!-- ══════════════════════ A ══════════════════════ -->
+  <article class="opt">
+    <div class="opt-head"><span class="tag">A</span><h2>Two leaves</h2></div>
+    <p class="gesture">
+      <span class="lead">The signature:</span> the word’s own two <code>o</code>s are exact mirrors of one another about
+      the vertical axis that falls in the gap between the <code>l</code> and the <code>i</code> — and each ring is drawn
+      thick on its outer side and thin on the side facing that axis, the way an open book is a solid block of paper at
+      the fore-edge and vanishes into the fold. <em>It belongs to Folio because the word already contains the spread:</em>
+      the two bowls sit at 108.5 and 263.5, whose midpoint is 186 — precisely the middle of the <code>l</code>/<code>i</code>
+      gap. Nothing was added to find it; the fold was already in the name.
+    </p>
+    <div class="renders">
+      <div class="col light">
+        <div class="colhead">light · title_bar #F7F7F5</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk inkmu" viewBox="0 0 302 101.5" style="width:27.48px;height:9.24px"><use href="#m-a"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:27.47px;height:9.23px"><use href="#m-a"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:82.4px;height:27.7px"><use href="#m-a"/></svg></span>
+        </div>
+      </div>
+      <div class="col dark">
+        <div class="colhead">dark · title_bar #252525</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk inkmu" viewBox="0 0 302 101.5" style="width:27.48px;height:9.24px"><use href="#m-a"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:27.47px;height:9.23px"><use href="#m-a"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:82.4px;height:27.7px"><use href="#m-a"/></svg></span>
+        </div>
+      </div>
+    </div>
+    <p class="port"><b>Portability — 1 sprite.</b> One closed-path set, one <code>currentColor</code>, one
+      <code>[u8;3]</code>: exactly the shape <code>marks.rs</code> already rasterises. Costs one new
+      <code>ChromeMark</code> variant and one row each in <code>SYMBOL_VIEW_BOX</code> / <code>SYMBOL_BODY</code>
+      (both arrays grow 27 → 28). No system font. Caveat: at 1× DPI the thin side of each ring is
+      0.73&nbsp;device px, so resvg renders it as a grey hairline rather than solid ink — that is the intended
+      up-close reward, but it means the leaf reading is a texture at actual size, not a statement.</p>
+  </article>
+
+  <!-- ══════════════════════ B ══════════════════════ -->
+  <article class="opt">
+    <div class="opt-head"><span class="tag">B</span><h2>One fold</h2></div>
+    <p class="gesture">
+      <span class="lead">The signature:</span> there is no line — the fold is only a change of ink, a single vertical
+      edge at <code>x&nbsp;=&nbsp;108.5</code> cutting straight through the bowl of the first <code>o</code>, with everything
+      beyond it dropped one step to <code>title_text_muted</code>. <em>It belongs to Folio because a folio is defined by
+      one fold and by nothing else,</em> and because a real fold has never been a drawn line: it is only ever the place
+      where the light changes. A hairline was drawn here first and deleted — at 12.5&nbsp;px a hairline is a full stem.
+    </p>
+    <div class="renders">
+      <div class="col light foldB">
+        <div class="colhead">light · recto #7A7974 · verso #A1A09C</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk" viewBox="0 0 302 101.5" style="width:27.48px;height:9.24px"><use href="#m-b"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk" viewBox="0 0 302 101.5" style="width:27.47px;height:9.23px"><use href="#m-b"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk" viewBox="0 0 302 101.5" style="width:82.4px;height:27.7px"><use href="#m-b"/></svg></span>
+        </div>
+      </div>
+      <div class="col dark foldB">
+        <div class="colhead">dark · recto #9D9D9D · verso #787878</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk" viewBox="0 0 302 101.5" style="width:27.48px;height:9.24px"><use href="#m-b"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk" viewBox="0 0 302 101.5" style="width:27.47px;height:9.23px"><use href="#m-b"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk" viewBox="0 0 302 101.5" style="width:82.4px;height:27.7px"><use href="#m-b"/></svg></span>
+        </div>
+      </div>
+    </div>
+    <p class="port"><b>Portability — 2 sprites.</b> <code>svg_document</code> substitutes one RGB per sprite, so two
+      inks means two marks: the same word laid twice, clipped left-of-fold and right-of-fold, drawn as abutting rects.
+      Both follow the theme (recto = <code>title_text</code>, verso = <code>title_text_muted</code>); nothing is
+      hard-coded. Arrays grow 27 → 29. No system font. The one real cost: the fold seam must be snapped to a whole
+      device pixel at layout time, or a sub-pixel gap or overlap will show at the join — the layout code must round
+      the split x, not just the sprite rects.</p>
+  </article>
+
+  <!-- ══════════════════════ C ══════════════════════ -->
+  <article class="opt">
+    <div class="opt-head"><span class="tag">C</span><h2>The imprint</h2></div>
+    <p class="gesture">
+      <span class="lead">The signature:</span> the word is set as book type — oblique stress, bracketed serifs, no
+      geometry at all — and its only ornament is a folio: a centred point and an old-style <code>1</code> at 62%,
+      standing off in the margin where a page number stands. <em>It belongs to Folio because in typography the folio
+      literally is the page number</em>, so the mark states its own name twice, once in letters and once in the thing
+      the letters mean. The period that first sat after the word was deleted; it was decoration, the numeral is the pun.
+    </p>
+    <div class="renders">
+      <div class="col light">
+        <div class="colhead">light · title_bar #F7F7F5</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk inkmu" viewBox="0 0 345 101" style="width:31.40px;height:9.19px"><use href="#m-c"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk ink" viewBox="0 0 345 101" style="width:31.4px;height:9.2px"><use href="#m-c"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk ink" viewBox="0 0 345 101" style="width:94.2px;height:27.6px"><use href="#m-c"/></svg></span>
+        </div>
+      </div>
+      <div class="col dark">
+        <div class="colhead">dark · title_bar #252525</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk inkmu" viewBox="0 0 345 101" style="width:31.40px;height:9.19px"><use href="#m-c"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk ink" viewBox="0 0 345 101" style="width:31.4px;height:9.2px"><use href="#m-c"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk ink" viewBox="0 0 345 101" style="width:94.2px;height:27.6px"><use href="#m-c"/></svg></span>
+        </div>
+      </div>
+    </div>
+    <p class="port"><b>Portability — 1 sprite, zero accent.</b> Drawn after <b>Palatino</b> (Hermann Zapf, 1949) —
+      specifically its humanist proportions, its moderate contrast (stem 12 against a 7.5 hairline, about 1.9:1) and
+      the −25° stress of its <code>o</code>, which is what makes the bowls read as written rather than constructed;
+      the serifs are Palatino’s flared brackets rather than Caslon’s finer, flatter ones, because a flare survives
+      a 9-pixel cap height and a hairline serif does not. It is a drawing <em>after</em> Palatino, not a revival, and
+      no Palatino outline is used. One <code>currentColor</code>, one <code>[u8;3]</code>, arrays grow 27 → 28.
+      No system font. Caveat: this is the option most punished by low DPI — at 1× the hairlines land near
+      0.7&nbsp;px and the folio numeral is about 4&nbsp;px tall, so it is a whisper by construction; it wants a
+      hinted minimum size or a 125%+ display to be fully itself.</p>
+  </article>
+
+  <!-- ══════════════════════ D ══════════════════════ -->
+  <article class="opt">
+    <div class="opt-head"><span class="tag">D</span><h2>The through-line</h2></div>
+    <p class="gesture">
+      <span class="lead">The signature:</span> one number is different from the neutral skeleton — the <code>F</code>’s
+      crossbar is dropped from the customary y&nbsp;51 to y&nbsp;63, the exact vertical centre of both <code>o</code>
+      counters, so an invisible rule runs from the crossbar straight through the middle of both bowls and out the far
+      side of the word. <em>It belongs to Folio because that line is the line of reading</em> — the one a terminal that
+      reads should be built on — and because it is achieved by moving a stroke that already existed rather than adding
+      one. There is no graphic element here at all; take anything away and it is a plain sans.
+    </p>
+    <div class="renders">
+      <div class="col light">
+        <div class="colhead">light · title_bar #F7F7F5</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk inkmu" viewBox="0 0 302 101.5" style="width:27.48px;height:9.24px"><use href="#m-d"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:27.47px;height:9.23px"><use href="#m-d"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:82.4px;height:27.7px"><use href="#m-d"/></svg></span>
+        </div>
+      </div>
+      <div class="col dark">
+        <div class="colhead">dark · title_bar #252525</div>
+        <div class="frag">
+          <div class="bar">
+            <span class="ptoggle"><svg viewBox="0 0 16 16"><use href="#i-panel"/></svg></span>
+            <svg class="mk inkmu" viewBox="0 0 302 101.5" style="width:27.48px;height:9.24px"><use href="#m-d"/></svg>
+            <span class="caps"><span><svg viewBox="0 0 10 10"><use href="#i-min"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-max"/></svg></span><span><svg viewBox="0 0 10 10"><use href="#i-close"/></svg></span></span>
+          </div>
+          <div class="seat"></div>
+        </div>
+        <div class="measure">actual size · 12.5px · left edge x=50</div>
+        <div class="mag">
+          <span class="spec"><span class="maglabel">actual</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:27.47px;height:9.23px"><use href="#m-d"/></svg></span>
+          <span class="spec"><span class="maglabel">3×</span><svg class="mk ink" viewBox="0 0 302 101.5" style="width:82.4px;height:27.7px"><use href="#m-d"/></svg></span>
+        </div>
+      </div>
+    </div>
+    <p class="port"><b>Portability — 1 sprite.</b> The cheapest and safest of the four: monolinear at stem 11, every
+      edge either vertical, horizontal, or a full circular arc, so it quantises cleanly at any DPI and is the only
+      option whose signature survives intact at 1×. One <code>currentColor</code>, one <code>[u8;3]</code>,
+      arrays grow 27 → 28. No system font, no clip paths, no second ink.</p>
+  </article>
+
+</div>
+</body>
+</html>
