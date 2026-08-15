@@ -291,16 +291,6 @@ pub struct PeekLeaf {
     /// a peek that draws a PowerShell square over the pane whose head says
     /// `Git Bash` is a schematic of a different window.
     pub profile_mark: Option<ChromeMark>,
-    /// Which file this leaf is showing, when it is a preview — `None` for every
-    /// other kind, and for a preview pane that has nothing open.
-    ///
-    /// Carried rather than read off [`Self::title`], for the reason
-    /// [`Self::profile_mark`] is carried rather than derived, and for one more:
-    /// a title is *whatever the pane calls itself*, which for a preview showing
-    /// nothing is a fallback word and not a file name. Classifying that word
-    /// would give an empty pane whatever icon the word's extension happened to
-    /// suggest.
-    pub document: Option<String>,
     /// What this pane calls itself — see `seats::seat_caption`, the one channel
     /// both this and the pane head read.
     pub title: String,
@@ -888,12 +878,7 @@ fn push_mark_slot(
             ));
         }
         None => {
-            let (mark, color) = leaf_mark(
-                leaf.kind,
-                leaf.profile_mark,
-                leaf.document.as_deref(),
-                palette,
-            );
+            let (mark, color) = leaf_mark(leaf.kind, leaf.profile_mark, palette);
             sprites.push(ChromeSprite {
                 mark,
                 rect: mark_rect,
@@ -927,10 +912,9 @@ fn push_mark_slot(
 fn leaf_mark(
     kind: SeatKind,
     profile_mark: Option<ChromeMark>,
-    document: Option<&str>,
     palette: &ChromePalette,
 ) -> (ChromeMark, [u8; 3]) {
-    let (mark, _size, color) = crate::seats::pane_mark(kind, profile_mark, document, *palette);
+    let (mark, _size, color) = crate::seats::pane_mark(kind, profile_mark, *palette);
     (mark, color)
 }
 
@@ -964,7 +948,6 @@ mod tests {
     fn leaf(title: &str) -> PeekLeaf {
         PeekLeaf {
             profile_mark: Some(ChromeMark::ProfilePowerShell),
-            document: None,
             kind: SeatKind::Terminal,
             title: title.to_owned(),
             focused: false,
@@ -2033,12 +2016,7 @@ mod tests {
             ),
             "and reports the reading it was handed"
         );
-        let (kind_mark, _) = leaf_mark(
-            cast[0].kind,
-            cast[0].profile_mark,
-            cast[0].document.as_deref(),
-            &palette,
-        );
+        let (kind_mark, _) = leaf_mark(cast[0].kind, cast[0].profile_mark, &palette);
         assert!(
             !over.iter().any(|s| s.mark == kind_mark),
             "the leaf's own mark was replaced, not drawn under the ring"

@@ -2825,18 +2825,7 @@ pub fn preview_menu_build(
         push_row(
             &Row {
                 rect: *rect,
-                // A switcher row names a **file**, so it takes that file's page
-                // (file-type icons, 2026-08-15) — the seventh surface, and the
-                // one the original sweep missed, because it lives in the menu
-                // module rather than beside the tree. It is a list of documents
-                // by any reading: the same names, in the same pool, that the
-                // tree behind it is showing.
-                //
-                // The three-verb menu above (`file_menu_build`) deliberately
-                // does *not* do this: its rows are `Open` / `Copy path` /
-                // `Insert path`, its glyphs label actions, and `#i-file` there
-                // is the picture of a verb rather than of a file.
-                mark: crate::preview::file_icon_class(&item.name).mark(),
+                mark: ChromeMark::File,
                 name: &item.name,
                 // Reserved on every row and inked on the dirty ones. Drawn as an
                 // empty string rather than omitted so the name's box ends in the
@@ -2969,38 +2958,6 @@ mod tests {
                 "{name} is in the inventory"
             );
         }
-        // …each wearing its own page (file-type icons, 2026-08-15). The
-        // switcher is a list of documents, so it answers the same classifier
-        // the tree behind it answers — a `.rs` that is a code page in the
-        // column and a plain one in this dropdown would be the same file drawn
-        // two ways inside one window.
-        //
-        // Mutation: hard-code `ChromeMark::File` in `preview_menu_build`'s row.
-        let pages: Vec<ChromeMark> = layer
-            .sprites
-            .iter()
-            .map(|sprite| sprite.mark)
-            .filter(|mark| {
-                matches!(
-                    mark,
-                    ChromeMark::File
-                        | ChromeMark::FileImage
-                        | ChromeMark::FileMarkdown
-                        | ChromeMark::FileCode
-                        | ChromeMark::FileConfig
-                        | ChromeMark::FileTable
-                )
-            })
-            .collect();
-        assert_eq!(
-            pages,
-            vec![
-                ChromeMark::File,
-                ChromeMark::FileMarkdown,
-                ChromeMark::FileCode
-            ],
-            "prose, markdown and source — three names, three pages"
-        );
         let palette = chrome_palette();
         let dots: Vec<_> = layer
             .labels

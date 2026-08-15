@@ -136,74 +136,8 @@ pub enum ChromeMark {
     /// not be the same colour as either — which is why this is `#3A3A3A` inside
     /// a `#606060` hairline and why nobody may "fix" it back to black.
     ProfileCmd,
-    /// `#i-file` — the page with no claim on it.
-    ///
-    /// Still the whole of a **plain document**, and still the whole of a name
-    /// this build cannot type: see [`crate::preview::IconClass`] for why the
-    /// neutral class is the unbadged one.
+    /// `#i-file`.
     File,
-    // ── the five typed pages (2026-08-15) ──
-    //
-    // "Every file in the product wears one document icon" was the user's report
-    // of 2026-08-13, and these five are the answer. Each is `#i-file`'s own two
-    // paths — the page and its folded corner, byte for byte — with one small
-    // badge struck into the clear ground below the fold. **The outline is not
-    // re-cut per type**, and that is the point: a tree of these has to read as
-    // one family of documents differing in a detail, not as six unrelated
-    // glyphs, which is what a per-type silhouette would have produced.
-    //
-    // No icon library. `design/ui-mockup.html`'s own rule for the mark sheet —
-    // "Drawn, not fetched: identity may not depend on a CDN" — applies to a
-    // file's identity exactly as it applies to a profile's, so these are hand
-    // struck in the sheet's own sixteen-unit box at the sheet's own stroke.
-    //
-    // **The badge sits in the page's lower band, not in its bottom-right
-    // corner**, and the reason is arithmetic rather than taste. The page's clear
-    // interior below the fold is 8.3 × 7.8 units of sixteen; at the 15px a tree
-    // row draws these at, one unit is 0.94 physical pixels, so a badge confined
-    // to the bottom-right quadrant would be under four pixels across — a smudge
-    // that says only "there is something here". Given the whole lower band a
-    // badge is six pixels, which is the difference between a shape you read and
-    // a shape you notice. Legibility at the size the thing is actually drawn
-    // outranks the tidier composition it would have had at 64px.
-    //
-    // Every badge is stroked at the page's own 1.15 in `currentColor`, so a
-    // typed page differs from a plain one by a drawing and never by a weight.
-    /// A picture — `#i-file` with a hill and a sun.
-    ///
-    /// The oldest idiom for "image" there is, and the one that survives being
-    /// shrunk: a diagonal and a disc are the two shapes nothing else in this set
-    /// contains, so it stays itself at six pixels where a camera or a mountain
-    /// range would not.
-    FileImage,
-    /// Markdown — `#i-file` with a down arrow.
-    ///
-    /// Not an invention: the down arrow **is** markdown's mark. CommonMark's own
-    /// logo is an `M` beside exactly this arrow, and at this size the `M` is the
-    /// half that dies first, so what is kept is the half that reads.
-    FileMarkdown,
-    /// Source — `#i-file` with `<>`.
-    FileCode,
-    /// Configuration and data — `#i-file` with `{}`.
-    ///
-    /// Braces and not a gear or a wrench, which are the other two conventions:
-    /// both are silhouettes of many small teeth and both turn to mush below ten
-    /// pixels, while `{}` is two strokes. It is also the honest reading of what
-    /// this class actually holds — `json`, `toml`, `yaml`, `lock` are key-value
-    /// data, and a brace is what data looks like.
-    ///
-    /// It is the one badge that risks being confused with [`Self::FileCode`]'s
-    /// `<>`, and the answer to that is the second half of this pass: the two
-    /// wear different inks, and no other pair in the set leans on colour at all.
-    FileConfig,
-    /// A table — `#i-file` with a grid.
-    ///
-    /// Two rules crossed by two rules, rather than the three ruled lines a
-    /// tabular icon is often drawn as: ruled lines alone are what *prose* looks
-    /// like, and the plain document this set falls back to is a page of prose.
-    /// The verticals are the whole of what makes it a table, so they are not
-    /// optional.
-    FileTable,
     /// `#i-folder`.
     Folder,
     /// `#i-panel` — a pane whose kind this build cannot name.
@@ -421,15 +355,6 @@ impl ChromeMark {
             Self::ProfileGit => "p-git",
             Self::ProfileCmd => "p-cmd",
             Self::File => "i-file",
-            // One id each, because each is a different drawing and `mark_key`
-            // keys the raster cache on this string: sharing `i-file` would give
-            // six pages one cache slot, and the second one on screen would wear
-            // the first one's pixels.
-            Self::FileImage => "i-file-image",
-            Self::FileMarkdown => "i-file-markdown",
-            Self::FileCode => "i-file-code",
-            Self::FileConfig => "i-file-config",
-            Self::FileTable => "i-file-table",
             Self::Folder => "i-folder",
             Self::FolderOpen => "i-folder-open",
             // One id for every angle, on `Self::Chevron`'s precedent above.
@@ -1182,11 +1107,6 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Plus => 4,
         ChromeMark::ProfilePowerShell => 5,
         ChromeMark::File => 6,
-        ChromeMark::FileImage => 27,
-        ChromeMark::FileMarkdown => 28,
-        ChromeMark::FileCode => 29,
-        ChromeMark::FileConfig => 30,
-        ChromeMark::FileTable => 31,
         ChromeMark::Folder => 7,
         ChromeMark::FolderOpen => 15,
         ChromeMark::TreeDisclosure { .. } => 16,
@@ -1220,7 +1140,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 32] = [
+const SYMBOL_VIEW_BOX: [&str; 27] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1262,40 +1182,11 @@ const SYMBOL_VIEW_BOX: [&str; 32] = [
     "0 0 16 16",
     // `#i-dock-right`, the mirrored dock, in its twin's box.
     "0 0 16 16",
-    // The five typed pages, all in `#i-file`'s own box — they *are* `#i-file`
-    // plus a badge, so any other box would be a second page.
-    "0 0 16 16",
-    "0 0 16 16",
-    "0 0 16 16",
-    "0 0 16 16",
-    "0 0 16 16",
 ];
-
-/// `#i-file`'s page, and one badge struck into it.
-///
-/// A macro rather than six hand-copied outlines, because the family rule — every
-/// typed page is *the* page plus a detail — has to be true of the bytes and not
-/// merely of the intent. Six copies of a path is six chances for one of them to
-/// drift by a tenth of a unit, and a page whose corner folds differently from
-/// its siblings' is a different icon wearing the same name.
-///
-/// `concat!` takes literals, which is exactly the constraint that makes this
-/// honest: the outline cannot be a `const` the six merely *reference*, so it is
-/// a macro the six are *expanded from*, and `the_typed_pages_are_all_the_same_page`
-/// pins the result.
-macro_rules! typed_page {
-    ($badge:expr) => {
-        concat!(
-            r#"<path d="M3.5 1.8h5.2l3.8 3.8v8.6c0 .3-.2.5-.5.5H3.5c-.3 0-.5-.2-.5-.5V2.3c0-.3.2-.5.5-.5z" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
-            r#"<path d="M8.6 1.9v3.8h3.8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/>"#,
-            $badge,
-        )
-    };
-}
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 32] = [
+const SYMBOL_BODY: [&str; 27] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1315,9 +1206,11 @@ const SYMBOL_BODY: [&str; 32] = [
         r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#fff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
         r##"<path d="M8.5 10.9h3.2" stroke="#fff" stroke-width="1.35" stroke-linecap="round"/>"##,
     ),
-    // #i-file — the page, and no badge. The neutral member of the family, and
-    // the one the other five are struck from.
-    typed_page!(""),
+    // #i-file
+    concat!(
+        r#"<path d="M3.5 1.8h5.2l3.8 3.8v8.6c0 .3-.2.5-.5.5H3.5c-.3 0-.5-.2-.5-.5V2.3c0-.3.2-.5.5-.5z" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+        r#"<path d="M8.6 1.9v3.8h3.8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/>"#,
+    ),
     // #i-folder
     r#"<path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v6.6c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1z" fill="currentColor"/>"#,
     // #i-panel
@@ -1435,69 +1328,6 @@ const SYMBOL_BODY: [&str; 32] = [
     concat!(
         r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
         r##"<rect x="9.4" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/>"##,
-    ),
-    // ── the five badges, all inside x ∈ [4.5, 11.1], y ∈ [7.4, 13.4] ──
-    //
-    // That box is the page's clear interior below the fold, inset by about one
-    // unit so a badge never touches the outline it stands in: the page's own
-    // inner edges are x ∈ [3.6, 11.9] and y ∈ [6.3, 14.1].
-    //
-    // i-file-image — one hill and a sun. The hill's peak sits left of centre so
-    // the sun has somewhere to be: at x = 9.9 the slope has fallen to y = 11.6,
-    // two units below the disc, which is the clearance that keeps them two
-    // objects rather than one blob.
-    typed_page!(concat!(
-        r#"<path d="M4.7 12.9L7.4 8.9l3.7 4" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>"#,
-        r#"<circle cx="9.9" cy="8.5" r=".95" fill="currentColor"/>"#,
-    )),
-    // i-file-markdown — the arrow from CommonMark's own mark, on the page's
-    // vertical centre line. Stem and head are one path so the join at the tip is
-    // the renderer's rather than two strokes meeting by arithmetic.
-    typed_page!(
-        r#"<path d="M7.75 7.4v5.4M5.85 10.9l1.9 2.05 1.9-2.05" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>"#
-    ),
-    // i-file-code — `<>`, symmetric about x = 7.75.
-    //
-    // **The gap is the whole badge**, and the first cut got it wrong: at 2.3
-    // units between the inner tips and 4.6 units of height, the two chevrons
-    // closed into a single rhombus on the real machine — a shape that says
-    // nothing at all. Re-struck against the page's true interior, which allows a
-    // stroke centre out to x = 11.2 either side: the tips take the whole of that
-    // width, the arms are 2.0 wide instead of 2.1, and the gap is 2.9. The V is
-    // shallower too — 3.8 units of height where it was 4.6 — because a deep V is
-    // half a diamond and a shallow one is an angle bracket.
-    typed_page!(
-        r#"<path d="M6.3 8.4L4.3 10.3l2 1.9M9.2 8.4l2 1.9-2 1.9" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>"#
-    ),
-    // i-file-config — two rules with a knob each, at different points along
-    // their runs: the slider pair every settings surface is drawn with.
-    //
-    // **Not `{}`, and that is the second lesson of the monochrome ruling.** The
-    // braces were the honest idiom for what this class holds — `json`, `toml`,
-    // `yaml`, `lock` are all key-value data — and they failed twice at fifteen
-    // pixels: the nib that makes a brace a brace is half a pixel deep there, so
-    // the pair read as `()`, and what it read as *next* was the chevrons above,
-    // because both are two small marks facing away from a gap. With no colour
-    // left to tell them apart, one of the two had to change silhouette class
-    // altogether.
-    //
-    // Horizontal-plus-round is a class nothing else in the set occupies: the
-    // grid is a lattice, the chevrons are angles, the arrow is a stem, the
-    // picture is a diagonal and a disc. Two bars survive any size, and the knobs
-    // sit at different x so that even when they blur they blur asymmetrically —
-    // which is the difference between a slider pair and two ruled lines.
-    typed_page!(concat!(
-        r#"<path d="M4.5 9.2h6.7M4.5 11.6h6.7" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>"#,
-        r#"<circle cx="6.2" cy="9.2" r="1.35" fill="currentColor"/>"#,
-        r#"<circle cx="9.5" cy="11.6" r="1.35" fill="currentColor"/>"#,
-    )),
-    // i-file-table — two rules crossed by two rules: three columns and three
-    // rows, which is the least grid that is unmistakably a grid. The strokes run
-    // past their intersections rather than stopping in a closed frame, because a
-    // frame would need a third horizontal and there is no room for one — at 15px
-    // the badge is six pixels tall and holds two.
-    typed_page!(
-        r#"<path d="M4.5 9.4h6.5M4.5 11.6h6.5M6.65 7.6v5.8M8.85 7.6v5.8" fill="none" stroke="currentColor" stroke-width="1.15"/>"#
     ),
 ];
 
@@ -1988,19 +1818,6 @@ mod tests {
             (ChromeMark::ProfileGit, 15.0),
             (ChromeMark::ProfileCmd, 15.0),
             (ChromeMark::File, 14.0),
-            // The five typed pages, at the two sizes they are actually asked
-            // for: a preview head's 14 and a tree row's 15. A badge that
-            // survives the head and dies in the tree is a badge that failed.
-            (ChromeMark::FileImage, 14.0),
-            (ChromeMark::FileMarkdown, 14.0),
-            (ChromeMark::FileCode, 14.0),
-            (ChromeMark::FileConfig, 14.0),
-            (ChromeMark::FileTable, 14.0),
-            (ChromeMark::FileImage, 15.0),
-            (ChromeMark::FileMarkdown, 15.0),
-            (ChromeMark::FileCode, 15.0),
-            (ChromeMark::FileConfig, 15.0),
-            (ChromeMark::FileTable, 15.0),
             (ChromeMark::Folder, 13.0),
             (ChromeMark::Panel, 13.0),
             // 13 in a 17px box, deliberately not the close mark's 8 (mock-up
@@ -2046,135 +1863,6 @@ mod tests {
                 assert!(
                     clear > 0,
                     "{mark:?} at {side}px is a solid block — the placeholder this pass removes"
-                );
-            }
-        }
-    }
-
-    /// The six pages, in the order their badges get denser.
-    const PAGES: [ChromeMark; 6] = [
-        ChromeMark::File,
-        ChromeMark::FileImage,
-        ChromeMark::FileMarkdown,
-        ChromeMark::FileCode,
-        ChromeMark::FileConfig,
-        ChromeMark::FileTable,
-    ];
-
-    /// PIN (file-type icons, 2026-08-15) — **the five typed pages are the plain
-    /// page plus something, byte for byte.**
-    ///
-    /// The family rule, checked at the source rather than at the pixels: every
-    /// typed body *begins* with the whole of `#i-file`'s body, so no badge can
-    /// be added by re-cutting the outline it stands in. This is what the
-    /// `typed_page!` macro exists to guarantee and what a future hand-written
-    /// sixth page would break.
-    ///
-    /// Mutation: expand one of the five without the macro — paste the outline
-    /// and move a control point by a tenth — and this goes red while every
-    /// pixel test still passes, which is the whole reason it is written at this
-    /// level.
-    #[test]
-    fn the_typed_pages_are_all_the_same_page() {
-        let plain = SYMBOL_BODY[symbol_index(ChromeMark::File)];
-        assert!(!plain.is_empty(), "the plain page is drawn at all");
-        for page in PAGES {
-            let body = SYMBOL_BODY[symbol_index(page)];
-            assert!(
-                body.starts_with(plain),
-                "{page:?} is not {:?} with something added to it",
-                ChromeMark::File
-            );
-            assert_eq!(
-                SYMBOL_VIEW_BOX[symbol_index(page)],
-                SYMBOL_VIEW_BOX[symbol_index(ChromeMark::File)],
-                "{page:?} is drawn in a different box from the page it is"
-            );
-        }
-        // …and each typed one really does add something.
-        for page in PAGES.into_iter().skip(1) {
-            assert!(
-                SYMBOL_BODY[symbol_index(page)].len() > plain.len(),
-                "{page:?} added no badge"
-            );
-        }
-    }
-
-    /// PIN (file-type icons, 2026-08-15) — **six pages are six rasters, and the
-    /// badge is legible at the size a tree row draws it.**
-    ///
-    /// Two failures this catches, both of which would ship looking almost
-    /// right. The first is a shared cache slot: `mark_key` keys on
-    /// `ChromeMark::id`, so two pages that answered the same id would be one
-    /// picture wearing six names. The second is a badge that dissolves — a
-    /// drawing can be *present* at 15px and still be a grey haze, so the badge's
-    /// own region is required to hold ink that is genuinely dark, not merely
-    /// non-zero.
-    ///
-    /// The badge region is the box the five badges are drawn inside — x and y
-    /// from 4.4 to 11.1 and 7.0 to 13.4 of sixteen — and the plain page is
-    /// required to be *empty* there, which is what makes this a test about
-    /// badges rather than about pages.
-    ///
-    /// Mutation: give two of the five the same `id`, or shrink a badge into the
-    /// bottom-right quadrant the way the first sketch had it.
-    #[test]
-    fn each_page_is_its_own_raster_and_its_badge_survives_a_tree_row() {
-        let ink = [0xff, 0xff, 0xff];
-        let side = 15.0_f32;
-        let mut rasters = ChromeMarkRasters::default();
-        let icons = rasters.resolve(
-            &PAGES
-                .into_iter()
-                .map(|page| sprite(page, side, side, ink))
-                .collect::<Vec<_>>(),
-        );
-        assert_eq!(icons.len(), PAGES.len());
-        let keys: std::collections::HashSet<_> = icons.iter().map(|icon| &icon.key).collect();
-        assert_eq!(
-            keys.len(),
-            PAGES.len(),
-            "six pages must be six cache slots, or the second one on screen \
-             wears the first one's pixels"
-        );
-        // The badge's own box, in raster pixels.
-        let unit = side / 16.0;
-        let lo = |units: f32| (units * unit).ceil() as u32;
-        let hi = |units: f32| (units * unit).floor() as u32;
-        let (x0, x1, y0, y1) = (lo(4.4), hi(11.1), lo(7.0), hi(13.4));
-        let strongest_in_badge = |icon: &ChromeIcon| {
-            (y0..y1)
-                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
-                .map(|(x, y)| alpha_at(icon, x, y))
-                .max()
-                .unwrap_or_default()
-        };
-        for (page, icon) in PAGES.into_iter().zip(&icons) {
-            let strongest = strongest_in_badge(icon);
-            if page == ChromeMark::File {
-                assert_eq!(
-                    strongest, 0,
-                    "the plain page has no badge, so its badge box is bare"
-                );
-            } else {
-                // A hairline centred between two pixel rows splits its coverage,
-                // so the bar is "plainly there" and not "opaque" — the same
-                // floor `every_chrome_mark_rasterizes…` sets for a whole glyph,
-                // applied to the part of the glyph this pass added.
-                assert!(
-                    strongest >= 100,
-                    "{page:?}'s badge is too faint to read at {side}px ({strongest})"
-                );
-            }
-        }
-        // And no two pages draw the same picture: a badge that landed outside
-        // the raster, or a `symbol_index` that pointed two variants at one body,
-        // would leave two identical bitmaps behind.
-        for (index, (page, icon)) in PAGES.into_iter().zip(&icons).enumerate() {
-            for (other_page, other) in PAGES.into_iter().zip(&icons).skip(index + 1) {
-                assert_ne!(
-                    icon.rgba, other.rgba,
-                    "{page:?} and {other_page:?} rasterize to the same pixels"
                 );
             }
         }

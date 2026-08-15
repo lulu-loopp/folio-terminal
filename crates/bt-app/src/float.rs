@@ -1559,12 +1559,7 @@ pub struct FloatBody {
 #[derive(Clone, Copy)]
 pub struct FloatChrome<'a> {
     pub mode: FloatMode,
-    /// The head's own icon: `#i-folder` for a tree, one of the six pages for a
-    /// buffer (file-type icons, 2026-08-15).
-    ///
-    /// Only the *drawing* varies. There is deliberately no companion ink field:
-    /// this head is `--accent` for every mark it can wear, because a file's type
-    /// is said by the badge and never by a colour (user ruling, 2026-08-15).
+    /// The head's own icon: `#i-folder` for a tree, `#i-file` for a buffer.
     pub mark: ChromeMark,
     /// What the head says. Upper-cased **by the caller** — the files head shouts
     /// its root in caps and a filename keeps its case (P51), and a

@@ -4315,36 +4315,6 @@ impl TabState {
         }
     }
 
-    /// **The file name** one preview surface is showing — not the caption above
-    /// it (file-type icons, 2026-08-15).
-    ///
-    /// [`Self::preview_head_name`]'s twin, and the difference is one branch: a
-    /// picture's *caption* is `sunset.png — 800×600`, because a head has room to
-    /// say what size the picture is, and its *name* is `sunset.png`. Everything
-    /// that classifies — which page a mark draws, and nothing else so far —
-    /// reads this one; everything that prints reads that one.
-    ///
-    /// They are separate methods rather than one with a flag because the two
-    /// answers are wanted in the same breath at almost every call site, and a
-    /// boolean argument at each of those would be six chances to pass the wrong
-    /// one. The bug this exists to close was exactly that shape: one string
-    /// serving both, and the classifier reading `png — 800×600` as an extension.
-    fn preview_document_name(&self, surface: PreviewSurface) -> Option<String> {
-        let pane = self.preview_panes.get(surface)?;
-        match pane.image.as_ref() {
-            Some(image) => Some(image.file_name()),
-            None => self
-                .preview_pool
-                .get(pane.buffer.as_deref()?)
-                .map(|buffer| buffer.name.clone()),
-        }
-    }
-
-    /// [`Self::preview_document_name`] for a docked seat.
-    fn preview_seat_document(&self, seat: SeatId) -> Option<String> {
-        self.preview_document_name(PreviewSurface::Seat(seat))
-    }
-
     /// Every files column of this tab, named for its head.
     ///
     /// The files half of [`Self::terminal_names`], resolved the same way and
@@ -12641,14 +12611,6 @@ impl Runtime {
                 Some((seat, title))
             })
             .collect();
-        // …and the name behind each of those captions, which is a different
-        // fact: see `ChromeContent::preview_documents`.
-        let preview_documents: Vec<(SeatId, String)> = self
-            .seats
-            .preview_seats()
-            .into_iter()
-            .filter_map(|seat| Some((seat, self.preview_seat_document(seat)?)))
-            .collect();
         // C28, per leaf: every terminal pane head names its *own* shell. Resolved
         // here rather than in `seats`, which knows nothing about sessions (L1).
         let terminal_names = self.terminal_names();
@@ -12826,10 +12788,6 @@ impl Runtime {
             .iter()
             .map(|(seat, title)| (*seat, title.as_str()))
             .collect();
-        let preview_documents: Vec<(SeatId, &str)> = preview_documents
-            .iter()
-            .map(|(seat, name)| (*seat, name.as_str()))
-            .collect();
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
@@ -12854,7 +12812,6 @@ impl Runtime {
                 rail: self.sampled_rail(now),
                 rail_scroll: self.rail_scroll,
                 preview_titles: &preview_titles,
-                preview_documents: &preview_documents,
                 float_shown: &float_shown,
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
@@ -13331,10 +13288,6 @@ impl Runtime {
                     // fourth reader of `seat_short_caption`, beside the drag
                     // ghost, the drop preview and a collapsed bar, and a label
                     // for the same reason all three are.
-                    // This leaf's own document — the mark's half of what the
-                    // title says in words, and the *name* rather than that
-                    // title (`Runtime::preview_document_name`).
-                    document: self.preview_seat_document(seat.id),
                     title: {
                         let preview_title = preview_title(seat.id);
                         seats::seat_short_caption(
@@ -13953,13 +13906,6 @@ impl Runtime {
                     self.sessions
                         .get(&seat)
                         .map(|leaf| profiles::PROFILES[leaf.profile].mark),
-                    // …and the file it is showing, when it is showing one: the
-                    // sentence above is about shells only because a shell was
-                    // the only thing a pane's mark could be about. The name and
-                    // not the caption `title` holds — a picture's caption
-                    // carries its pixel size, which is not part of any file
-                    // name (`Runtime::preview_document_name`).
-                    self.preview_seat_document(seat).as_deref(),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -14267,21 +14213,19 @@ impl Runtime {
             }
             DragSource::Pane(seat) => {
                 let kind = self.seats.tree().find_seat(*seat)?.kind;
+                let (mark, size, colour) = seats::pane_mark(
+                    kind,
+                    self.sessions
+                        .get(seat)
+                        .map(|leaf| profiles::PROFILES[leaf.profile].mark),
+                    palette,
+                );
                 // The dragged seat's own name, by id — the ghost and the
                 // stand-in it hands off to are two pictures of one pane, so they
                 // read the same door ([`Runtime::strip_stand_in`]).
                 let name = self.terminal_name(*seat);
                 let files_name = self.files_head_name(*seat);
                 let title = self.preview_head_name(*seat);
-                let (mark, size, colour) = seats::pane_mark(
-                    kind,
-                    self.sessions
-                        .get(seat)
-                        .map(|leaf| profiles::PROFILES[leaf.profile].mark),
-                    // The name, never the caption — `Runtime::preview_document_name`.
-                    self.preview_seat_document(*seat).as_deref(),
-                    palette,
-                );
                 Some((
                     mark,
                     size,
@@ -14305,15 +14249,8 @@ impl Runtime {
             // dragging — a page for a file, a folder for a folder, exactly what
             // the pane it becomes will wear in its head.
             DragSource::Row(payload) => {
-                // …and "a page for a file" is now "*this* file's page": the row
-                // being dragged has a name, so the ghost can say which kind of
-                // document is in the air rather than only that one is.
-                let (mark, size, colour) = seats::pane_mark(
-                    payload.kind.leaf_kind(),
-                    None,
-                    Some(payload.name.as_str()),
-                    palette,
-                );
+                let (mark, size, colour) =
+                    seats::pane_mark(payload.kind.leaf_kind(), None, palette);
                 Some((mark, size, colour, payload.name.clone()))
             }
         }
@@ -21986,12 +21923,6 @@ impl Runtime {
                 )
             }
         };
-        // The *name*, never `title`: that one is a caption — a picture's says
-        // `sunset.png — 800×600` — and it is about to be shadowed by its
-        // ellipsized self besides, so a name cut to fit a header is a name whose
-        // extension may have been the part that was cut.
-        let document_class =
-            preview::file_icon_class_of(self.preview_document_name(surface).as_deref());
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float(id), now);
         // **A torn-off buffer confirms its own save** (user ruling, 2026-08-15,
         // as a consequence). "Saved" was drawn only in a docked pane's foot, and
@@ -22050,10 +21981,10 @@ impl Runtime {
             &geometry,
             &float::FloatChrome {
                 mode,
-                // This document's own page and a right-hand dock panel: the
-                // window holds a buffer, and P54's side-honesty puts the filled
-                // half where the pane will land.
-                mark: document_class.mark(),
+                // `#i-file` and a right-hand dock panel: this window holds a
+                // buffer, and P54's side-honesty puts the filled half where the
+                // pane will land.
+                mark: marks::ChromeMark::File,
                 title: &title,
                 path: &foot.lead,
                 notice: &foot.notice,

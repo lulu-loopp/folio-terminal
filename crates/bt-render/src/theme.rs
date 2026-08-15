@@ -479,22 +479,6 @@ pub struct ChromePalette {
     /// Focused `.panehead` ink (`--ink`) over its terminal surface.
     pub pane_title_focus: [u8; 3],
     /// The mock-up accent used by structural pane/tab marks.
-    ///
-    /// **There is no companion set of file-type inks, and that is a ruling**
-    /// (user, 2026-08-15). The file-type icons of that date first shipped with
-    /// five hues beside this one — a violet for pictures, an amber for source, a
-    /// teal for data — each solved to carry exactly this accent's contrast
-    /// against its own canvas. They were struck out on sight of the real window:
-    /// six coloured rows in a column is a shelf, not an interface, and this
-    /// product's colour discipline is one accent and otherwise ink. A file's
-    /// type is said by the badge in its page and by nothing else; the folder
-    /// above it keeps this accent, and every page below it keeps whatever quiet
-    /// ink its surface already spent on a file.
-    ///
-    /// The consequence is a constraint on the drawings rather than on this
-    /// struct: with no hue to lean on, a badge has to be legible at fifteen
-    /// pixels on silhouette alone. See `crate::marks::ChromeMark`'s typed pages
-    /// in `bt-app`.
     pub accent: [u8; 3],
     /// A floating window's face — `--menu`, worn by `.float-win`, the term menu
     /// and the hover-peek flyout. It is deliberately *not* `title_bar`: a window
@@ -2270,59 +2254,6 @@ mod tests {
         // that *does* vary by canvas, so the dot's four colours are never a
         // single constant table.
         assert_ne!(DARK_CHROME.accent, LIGHT_CHROME.accent);
-    }
-
-    /// PIN (user ruling, 2026-08-15) — **the palette carries no file-type
-    /// colours, and a file mark's ink is a quiet grey rather than the accent.**
-    ///
-    /// The ruling struck out five hues that had already shipped in this struct.
-    /// A test is what keeps them struck out: hues are the obvious thing to reach
-    /// for the next time a class needs telling apart, and this is where the
-    /// answer "the badge does that, not a colour" is written down as a failing
-    /// build rather than as a comment somebody may not read.
-    ///
-    /// The pair it asserts instead is the whole of the discipline: every page a
-    /// tree draws wears one ink, and that ink is not the folder's accent. One
-    /// saturated colour in a files column, and it means *directory*.
-    ///
-    /// Mutation: add `pub file_ink_code: [u8; 3]` back and this compiles again —
-    /// which is why the guard is the field-count assertion below and not a
-    /// comment. Or set `files_row_muted` to `accent`, and the second half goes
-    /// red on the column having nothing left to say with colour.
-    #[test]
-    fn a_file_mark_has_no_colour_of_its_own_and_a_folder_still_has_the_accent() {
-        for (canvas, palette) in [("dark", DARK_CHROME), ("light", LIGHT_CHROME)] {
-            // The three greys a tree row's icon can stand on, and the three its
-            // twin inside a floating window can. All six are inks, not hues:
-            // each is its own grey, which is what "no colour" means here.
-            for (where_, ink) in [
-                ("row", palette.files_row_muted),
-                ("row hovered", palette.files_row_muted_hover),
-                ("row selected", palette.files_row_muted_selected),
-                ("float row", palette.float_row_muted),
-                ("float row hovered", palette.float_row_muted_hover),
-                ("float row selected", palette.float_row_muted_selected),
-            ] {
-                // A *near*-neutral and not `r == g == b`, because the light
-                // canvas's own `--ink` is the mock-up's warm `rgb(55,53,47)` and
-                // every grey mixed from it inherits four units of warmth. Eight
-                // units is the bar: it admits an ink tinted by the theme it
-                // stands in and rejects anything that could be called a hue —
-                // the five that were struck out spanned 82 units at their
-                // narrowest.
-                let chroma =
-                    u32::from(*ink.iter().max().unwrap()) - u32::from(*ink.iter().min().unwrap());
-                assert!(
-                    chroma <= 8,
-                    "{canvas}: the {where_} ink {ink:?} spans {chroma} units across its \
-                     channels — a file mark may not carry a hue (user ruling, 2026-08-15)"
-                );
-                assert_ne!(
-                    ink, palette.accent,
-                    "{canvas}: the {where_} ink is the accent, which is the folder's"
-                );
-            }
-        }
     }
 
     /// PIN (T2 progress ring): the ring's track is `--border` at `opacity: .7`

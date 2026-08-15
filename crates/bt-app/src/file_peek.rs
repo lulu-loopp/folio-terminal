@@ -82,7 +82,7 @@
 
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 
-use crate::marks::{ChromeSprite, OverlayLayer};
+use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::settings::push_float_window;
 
 /// How long the pointer must rest on a row before the card comes up — "350ms
@@ -705,12 +705,8 @@ pub fn build(
     );
 
     let mut labels: Vec<ChromeLabel> = Vec::new();
-    // The card's head wears the same page the pane it mirrors would — the whole
-    // of C39's "a glance is a reflection" applied to the mark as well as to the
-    // body. The ink is the accent it always was: a class changes the drawing and
-    // never the colour (user ruling, 2026-08-15).
     let mut sprites = vec![ChromeSprite::new(
-        crate::preview::file_icon_class(&content.name).mark(),
+        ChromeMark::File,
         layout.mark,
         palette.accent,
     )];
@@ -972,65 +968,6 @@ mod tests {
     }
 
     const LINE_HEIGHT: f32 = 18.0;
-
-    /// PIN (file-type icons, 2026-08-15) — **the glance card's head wears the
-    /// same page the pane it mirrors would.**
-    ///
-    /// C39's rule is that a glance is a reflection of the true pane, and the
-    /// mark is part of the reflection: a card whose head showed a generic page
-    /// while the row it was born from and the pane it opens both showed a code
-    /// page would be a reflection of a different window.
-    ///
-    /// The ink is asserted too, and asserted to be **one** ink: the accent, for
-    /// every class alike (user ruling, 2026-08-15). The card is the surface
-    /// where a stray hue would be least noticeable — it is up for a second and
-    /// gone — so it is worth pinning here that the class changes the drawing and
-    /// nothing else.
-    ///
-    /// Mutation: hard-code `ChromeMark::File` in `build`'s head sprite — the
-    /// card goes back to one page while the tree behind it stays typed.
-    #[test]
-    fn the_glance_cards_head_wears_the_page_its_document_earns() {
-        let window = (1600.0, 900.0);
-        let palette = bt_render::chrome_palette();
-        let head_mark = |name: &str| {
-            let mut card = content(lines(6));
-            card.name = name.to_owned();
-            let layout = layout(
-                &card,
-                [40.0, 300.0, 240.0, 320.0],
-                window,
-                60.0,
-                24.0,
-                SCALE,
-            );
-            let dressed = foot(&layout, "");
-            let layer = build(&layout, &card, &dressed, None, &palette, SCALE);
-            layer
-                .sprites
-                .iter()
-                .find(|sprite| sprite.rect == layout.mark)
-                .cloned()
-                .expect("the card's head slot holds a mark")
-        };
-        for (name, expected_mark) in [
-            ("sunset.png", crate::marks::ChromeMark::FileImage),
-            ("NOTES.md", crate::marks::ChromeMark::FileMarkdown),
-            ("main.rs", crate::marks::ChromeMark::FileCode),
-            ("Cargo.toml", crate::marks::ChromeMark::FileConfig),
-            ("rows.csv", crate::marks::ChromeMark::FileTable),
-            ("notes.txt", crate::marks::ChromeMark::File),
-            ("bundle.zip", crate::marks::ChromeMark::File),
-        ] {
-            let sprite = head_mark(name);
-            assert_eq!(sprite.mark, expected_mark, "{name} on the card's head");
-            assert_eq!(
-                sprite.color, palette.accent,
-                "{name} took an ink of its own — a class changes the drawing and \
-                 never the colour"
-            );
-        }
-    }
 
     /// PIN (user ruling, 2026-08-15) — **the glance card's foot hangs the same
     /// phrase on the same side, and the way out survives it.**
