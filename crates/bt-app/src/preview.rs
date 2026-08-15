@@ -887,8 +887,19 @@ fn widest_line_columns(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The read-only degradation §7.1.3 asks for, as a sentence.
-pub const PREVIEW_TRUNCATED_NOTICE: &str = "Read-only — showing the first 64 KB of this file";
+/// The read-only degradation §7.1.3 asks for, **as the phrase the pane's foot
+/// hangs on its right hand** (user ruling, 2026-08-15).
+///
+/// It was a sentence — "Read-only — showing the first 64 KB of this file" —
+/// standing in a 28px bar of its own directly above the path strip. The ruling
+/// retired that bar (two strips of identical height stacked at the bottom of one
+/// pane), and a phrase that has to share a 28px strip with a path is a phrase
+/// that says the two facts and stops: what the file is (read-only) and how much
+/// of it you are looking at.
+///
+/// The size is [`PREVIEW_HEAD_BYTES`] said the way [`format_byte_size`] says it,
+/// pinned by a test rather than left as two numbers that can drift apart.
+pub const PREVIEW_TRUNCATED_NOTICE: &str = "Read-only · 64 KB";
 
 /// A byte count the way a file manager says it.
 ///
@@ -1517,9 +1528,10 @@ pub enum SaveOutcome {
 ///
 /// Ruling 6 (2026-08-12): the mock-up's four feedback durations collapse to the
 /// one the foot's "Revealed" already used. The word belongs to the pane foot,
-/// which is slice 4's; until there is one it is printed on the same strip the
-/// truncation notice stands on, which is the body's existing channel for a
-/// sentence about the file rather than of it.
+/// and since 2026-08-15 it is printed there on every surface that has one — a
+/// docked pane, a torn-off float — in the strip's **left** hand, where the
+/// reveal's confirmation goes, while the strip's right hand steps aside for as
+/// long as it stands.
 pub const PREVIEW_SAVED_NOTICE: &str = "Saved";
 
 /// What the window says instead of overwriting somebody else's write.
@@ -1527,8 +1539,14 @@ pub const PREVIEW_SAVED_NOTICE: &str = "Saved";
 /// It says what happened, what was *not* done, and what is still true — the
 /// edits are still here — because a conflict notice that only announces failure
 /// leaves the user believing their work is gone.
-pub const PREVIEW_CONFLICT_NOTICE: &str =
-    "Not saved — this file changed on disk since it was opened; your edits are still here";
+///
+/// **All three facts, in a phrase** (user ruling, 2026-08-15). It used to be a
+/// full sentence on a floating strip inside the body; the ruling moved every
+/// standing notice to the right hand of the path foot, so the sentence had to
+/// become something that fits beside a path. What it must not lose is the third
+/// clause, and it has not: a user who reads only "Not saved" is the reader this
+/// wording exists for.
+pub const PREVIEW_CONFLICT_NOTICE: &str = "Not saved · changed on disk · edits kept";
 
 /// When a file was last written, or `None` if it will not say.
 pub fn file_mtime(path: &Path) -> Option<SystemTime> {
@@ -3073,6 +3091,39 @@ mod tests {
         assert_eq!(buffer.truncation_notice(), None);
         buffer.accept(read("fn main() {}\n", true));
         assert_eq!(buffer.truncation_notice(), Some(PREVIEW_TRUNCATED_NOTICE));
+    }
+
+    /// PIN (user ruling, 2026-08-15) — **the conflict phrase still says all
+    /// three things it was written to say.**
+    ///
+    /// The ruling moved every standing notice out of the body and onto the right
+    /// hand of the path foot, which meant a sentence had to become something
+    /// that fits beside a path. That is exactly the edit that quietly loses a
+    /// clause, and the clause at risk is the third one: a user who reads only
+    /// "Not saved" believes their work is gone. It is not — the buffer survives
+    /// the refusal intact, and saying so is the whole reason this string is not
+    /// two words.
+    ///
+    /// Mutation: shorten it to "Not saved · changed on disk" — a perfectly
+    /// reasonable-looking abbreviation — and the third assertion goes red.
+    #[test]
+    fn the_conflict_phrase_says_what_happened_what_was_not_done_and_what_survived() {
+        let phrase = PREVIEW_CONFLICT_NOTICE;
+        assert!(phrase.contains("Not saved"), "what was not done: {phrase}");
+        assert!(
+            phrase.contains("changed on disk"),
+            "what happened: {phrase}"
+        );
+        assert!(
+            phrase.contains("edits kept"),
+            "and what is still true — the clause a shortening drops first: {phrase}"
+        );
+        // Short enough to share a 28px strip with a path, which is the whole
+        // reason it stopped being a sentence.
+        assert!(
+            phrase.chars().count() < PREVIEW_TRUNCATED_NOTICE.chars().count() * 3,
+            "and it is a phrase, not a paragraph: {phrase}"
+        );
     }
 
     /// PIN — the widest line is measured in **columns**, not bytes or chars,

@@ -5562,21 +5562,26 @@ pub fn build_chrome_for_tabs(
                 // list, and an unrooted column saying "No folder opened" in its
                 // body still owes the strip its hairline.
                 //
-                // **The truncation bar and this one cannot collide, and the order
-                // is settled here**: this bar is chrome and stands on the pane's
-                // own floor, while the read-only notice is furniture *inside* the
-                // body and therefore lands above it (`preview_content_body`
-                // subtracts this bar's height before the notice is placed). Bottom
-                // to top: the path, then the truncation notice, then the document.
+                // **There is one strip, and the read-only fact rides in it**
+                // (user ruling, 2026-08-15). The truncation notice used to be a
+                // second 28px bar standing directly on this one, and two
+                // identical strips stacked at the bottom of one pane was the
+                // report that retired it. Bottom to top there are now two things
+                // and not three: the path strip, then the document.
                 if let Some(geometry) = files_pane {
                     let strip = match placement.kind {
                         // This placement's own path, by the head's rule and for
                         // the head's reason: a foot printing the file a *sibling*
                         // pane is showing is the same lie one strip lower.
                         SeatKind::Preview => preview_foot(placement.id),
+                        // A folder has no standing fact to state: truncation and
+                        // a save's refusal are both about a *buffer*, and a tree
+                        // holds none.
                         _ => files_tree.map(|tree| FootStrip {
                             path: tree.foot_path.as_str(),
                             revealed: tree.foot_revealed,
+                            notice: "",
+                            notice_width: 0.0,
                         }),
                     };
                     let target = match placement.kind {
@@ -9616,7 +9621,7 @@ fn push_preview_head(
 /// One shape for both kinds, because there is one strip: the mock-up gives
 /// `.files-pane .files-foot` and `.preview-pane .files-foot` a single rule (P33),
 /// and a files column and a preview differ only in *which* path they are naming.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FootStrip<'a> {
     /// Already cut to the room it has, and already left-truncated — the
     /// `direction: rtl` ellipsis that keeps the file name and drops the drive
@@ -9625,6 +9630,127 @@ pub struct FootStrip<'a> {
     /// Whether it is confirming rather than reporting, which takes the mark as
     /// well as the words.
     pub revealed: bool,
+    /// The standing fact hung on the strip's **right hand** — "Read-only ·
+    /// 64 KB", "Not saved · changed on disk · edits kept" — or empty when there
+    /// is none (user ruling, 2026-08-15). See [`dress_foot`].
+    pub notice: &'a str,
+    /// How wide that phrase draws, measured beside the renderer by the caller
+    /// for [`files_root_box`]'s reason: nothing in this module holds a font, and
+    /// a box sized by a guess is a box whose letters end somewhere else.
+    pub notice_width: f32,
+}
+
+/// **The gap between the path and the phrase hung beside it.**
+///
+/// The strip's own horizontal padding rather than the six pixels that separate
+/// the mark from the path: those two are one control's contents and read as a
+/// unit, while the path and the notice are two different sentences that must not
+/// look like one run-on.
+pub const FILES_FOOT_NOTICE_GAP_LOGICAL_PX: f32 = FILES_FOOT_PADDING_X_LOGICAL_PX;
+
+/// Divide a foot's text run between the path on the left and the phrase hung on
+/// the right.
+///
+/// **The path is what yields** (user ruling, 2026-08-15). It was always going to
+/// be cut — P35 gives it a left ellipsis precisely because a full path rarely
+/// fits — so a rule that shortened the notice instead would be trading a
+/// complete standing fact for a few more characters of something already
+/// abbreviated.
+///
+/// `notice_width` of zero means there is no phrase, and the run is the path's
+/// entire.
+#[must_use]
+pub fn foot_notice_split(run: [f32; 4], notice_width: f32, gap: f32) -> ([f32; 4], [f32; 4]) {
+    if notice_width <= 0.0 {
+        return (run, [run[2], run[1], run[2], run[3]]);
+    }
+    let left = (run[2] - notice_width).max(run[0]);
+    let notice = [left, run[1], run[2], run[3]];
+    let path = [run[0], run[1], (left - gap).max(run[0]), run[3]];
+    (path, notice)
+}
+
+/// Everything a foot's own text run says this frame, and where each piece stands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FootWords {
+    /// The left-hand sentence, already cut to the room the notice left it.
+    pub lead: String,
+    pub lead_box: [f32; 4],
+    /// The right-hand phrase, **never cut**, and empty whenever the strip is
+    /// flashing.
+    pub notice: String,
+    pub notice_box: [f32; 4],
+    pub notice_width: f32,
+    /// Whether the lead is a confirmation rather than the sentence it usually is.
+    pub flashing: bool,
+}
+
+/// What to dress one foot with, before it is measured.
+#[derive(Clone, Copy, Debug)]
+pub struct FootDress<'a> {
+    /// The foot's whole text run: everything right of the mark and left of the
+    /// strip's trailing padding.
+    pub run: [f32; 4],
+    /// What stands on the left when nothing is being confirmed — a path in a
+    /// pane or a float, the glance card's fixed sentence.
+    pub lead: &'a str,
+    /// The word the strip is flashing **instead of** `lead`: "Revealed in File
+    /// Explorer", "Saved".
+    pub flash: Option<&'a str>,
+    /// The standing fact this surface owes, or empty.
+    pub notice: &'a str,
+    /// Cut the lead from the front (a path — P35 keeps the file name) rather
+    /// than from the back (a sentence, which reads forwards).
+    pub cut_left: bool,
+    pub font_px: f32,
+    pub gap_px: f32,
+}
+
+/// Lay one foot's words out: the phrase on the right, the lead in what is left.
+///
+/// **One function for all three surfaces** (Seat, Float, Peek). The ruling of
+/// 2026-08-15 is a single sentence — the notice hangs right, the lead yields,
+/// and a flash owns the strip alone — and three copies of it are three chances
+/// for one surface to disagree with the other two about what a foot is.
+///
+/// The flash's precedence is the whole of the third clause: while the strip is
+/// confirming a reveal or a save, the right hand is **empty**. A confirmation is
+/// an answer to something the user just did, and a standing fact printed beside
+/// it turns one unambiguous word into two things to read.
+#[must_use]
+pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f32) -> FootWords {
+    let FootDress {
+        run,
+        lead,
+        flash,
+        notice,
+        cut_left,
+        font_px,
+        gap_px,
+    } = dress;
+    let flashing = flash.is_some();
+    let notice = if flashing { "" } else { notice };
+    let notice_width = if notice.is_empty() {
+        0.0
+    } else {
+        measure(notice, font_px)
+    };
+    let (lead_box, notice_box) = foot_notice_split(run, notice_width, gap_px);
+    let lead = flash.unwrap_or(lead);
+    let room = lead_box[2] - lead_box[0];
+    let lead = if cut_left {
+        crate::settings::ellipsized_left(lead, room, font_px, measure)
+    } else {
+        crate::settings::ellipsized(lead, room, font_px, measure)
+    };
+    FootWords {
+        lead,
+        lead_box,
+        notice: notice.to_owned(),
+        notice_box,
+        notice_width,
+        flashing,
+    }
 }
 
 /// Draw one docked files column's foot — `.files-pane .files-foot`.
@@ -9691,18 +9817,49 @@ fn push_files_foot(
         geometry.foot_mark,
         ink,
     ));
+    let font = FILES_FOOT_FONT_LOGICAL_PX * scale;
+    // **The right hand, and the room it takes off the path** (user ruling,
+    // 2026-08-15). The truncation fact used to stand in a 28px bar of its own,
+    // directly above this one; two strips of identical height stacked at the
+    // bottom of one pane was the report. It hangs here instead, and the path —
+    // which P35 was already cutting — gives up the width.
+    let (path_box, notice_box) = foot_notice_split(
+        geometry.foot_path,
+        strip.map_or(0.0, |strip| strip.notice_width),
+        FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
+    );
     labels.push(ChromeLabel {
         text: path.to_owned(),
-        rect: geometry.foot_path,
-        font_size_px: FILES_FOOT_FONT_LOGICAL_PX * scale,
+        rect: path_box,
+        font_size_px: font,
         color: ink,
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
-        clip: Some(geometry.foot_path),
+        clip: Some(path_box),
     });
+    if let Some(notice) = strip
+        .map(|strip| strip.notice)
+        .filter(|notice| !notice.is_empty())
+    {
+        labels.push(ChromeLabel {
+            text: notice.to_owned(),
+            rect: notice_box,
+            font_size_px: font,
+            // The paler of the strip's two inks whatever the hover is doing:
+            // this half is a fact about the file, not part of the button's own
+            // label, and lighting it with the path would offer to open it.
+            color: palette.files_row_muted,
+            align_right: true,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(notice_box),
+        });
+    }
 }
 
 /// How tall a tree of `rows` rows wants its body to be.
@@ -12525,15 +12682,109 @@ mod tests {
         );
     }
 
+    /// PIN (user ruling, 2026-08-15) — **the preview foot draws one bar, with
+    /// the standing phrase in its right hand.**
+    ///
+    /// The report was two 28px strips stacked at the bottom of one pane: the
+    /// read-only bar, which was furniture *inside* the body, standing directly
+    /// on the path strip, which is chrome. This is the drawn half of the fix —
+    /// one hairline, one ground, and two text runs sharing it — and the
+    /// assertions are the three things that make it one strip rather than two
+    /// dressed as one: the phrase is right-aligned, it is clipped to its own
+    /// box, and the path's box stops before it begins.
+    ///
+    /// It also pins the phrase's **ink**: `--ink3` whatever the pointer is
+    /// doing. The strip is one button and hovering it lights the path, but the
+    /// phrase is a fact about the file rather than part of the button's label,
+    /// and lighting it too would be the strip offering to open a warning.
+    ///
+    /// MUTATION ①: draw the notice with `align_right: false` and the flush-right
+    /// assertion goes red — the phrase drifts left and butts into the path.
+    /// MUTATION ②: give the path `geometry.foot_path` again instead of its
+    /// shortened box and the disjointness assertion goes red, which is the two
+    /// runs printing through each other.
+    /// MUTATION ③: colour the notice with `ink` and the last assertion goes red
+    /// on a hovered strip.
+    #[test]
+    fn the_preview_foot_hangs_its_phrase_in_one_bars_right_hand() {
+        let palette = bt_render::chrome_palette();
+        let geometry = pane_foot_geometry([0.0, 0.0, 400.0, 300.0], SeatKind::Preview, 1.0);
+        let notice = "Read-only · 64 KB";
+        let notice_width = 96.0;
+        let (mut quads, mut labels, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
+        push_files_foot(
+            &geometry,
+            Some(FootStrip {
+                path: r"C:\w\huge.txt",
+                revealed: false,
+                notice,
+                notice_width,
+            }),
+            true,
+            1.0,
+            &palette,
+            (&mut quads, &mut labels, &mut sprites),
+        );
+
+        // One strip: the hover fill and the hairline are the same bar's, and
+        // there is no second ground anywhere.
+        assert!(
+            quads.iter().all(|quad| quad.rect[1] >= geometry.foot[1]),
+            "every fill this foot draws is inside the one strip: {quads:?}"
+        );
+        assert_eq!(
+            quads.len(),
+            2,
+            "a hover fill and a hairline, and nothing else"
+        );
+
+        let path = labels
+            .iter()
+            .find(|label| label.text.ends_with("huge.txt"))
+            .expect("the path");
+        let hung = labels
+            .iter()
+            .find(|label| label.text == notice)
+            .expect("the phrase");
+        assert!(hung.align_right, "flush with the strip's right edge");
+        assert_eq!(hung.rect[2], geometry.foot_path[2]);
+        assert_eq!(hung.clip, Some(hung.rect), "and cut to its own box");
+        assert_eq!(
+            hung.rect[0],
+            geometry.foot_path[2] - notice_width,
+            "which is exactly as wide as the caller measured it"
+        );
+        assert!(
+            path.rect[2] < hung.rect[0],
+            "the path's box stops before the phrase's begins"
+        );
+        assert_eq!(path.clip, Some(path.rect), "and it is cut to that box");
+        assert_eq!(
+            hung.color, palette.files_row_muted,
+            "the phrase keeps the palest ink even on a hovered strip"
+        );
+        assert_ne!(
+            path.color, hung.color,
+            "which is the whole difference: the hover lit the button's own label"
+        );
+    }
+
     /// PIN (P32-P35) — **a preview pane wears the files column's own foot**, and
     /// its body is shortened by exactly the strip's height.
     ///
     /// The second half is the assertion that matters: the day a foot appears,
     /// every reader of "the seat less its head" is wrong by 28 pixels at once.
     ///
+    /// **Exactly one strip, and this is the one** (user ruling, 2026-08-15).
+    /// There were two for a while — a read-only bar of the same 28 pixels stood
+    /// on this one whenever the buffer was truncated — and the equality below is
+    /// now the whole story of what a preview pane's body gives up, for every
+    /// buffer, truncated or not.
+    ///
     /// Mutation: return `pane_body_viewport`'s answer unchanged from
     /// `preview_body_viewport` and the reservation assertion goes red — which is
-    /// the picture of a document scrolling under its own path strip.
+    /// the picture of a document scrolling under its own path strip. Subtract a
+    /// second strip and it goes red the other way.
     #[test]
     fn a_preview_pane_reserves_its_path_strip_out_of_its_body() {
         let metrics = seat_metrics(1_000);

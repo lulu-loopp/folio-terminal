@@ -173,7 +173,28 @@ pub const PEEK_VIEWPORT_MARGIN_LOGICAL_PX: f32 = 8.0;
 /// It never varies, and that is the point: the card exists to say "there is more
 /// of this behind a real gesture", and a foot whose words changed with the file
 /// would be a second thing to read.
+///
+/// It keeps the strip's left hand. The right hand is the one place on this card
+/// that *does* change with the file (user ruling, 2026-08-15) — see
+/// [`crate::seats::dress_foot`] — and this sentence is what gives up the width
+/// when the two meet, because it is the half you have already read.
 pub const PEEK_FOOT_TEXT: &str = "Enter / double-click opens the preview pane";
+
+/// The foot's own text run: the strip inside its horizontal padding.
+///
+/// Handed out so the caller can measure the card's words beside the renderer,
+/// exactly as it already measures the name and the type chip — this module holds
+/// no font.
+#[must_use]
+pub fn foot_run(layout: &PeekLayout, scale: f32) -> [f32; 4] {
+    let pad = PEEK_FOOT_PADDING_X_LOGICAL_PX * scale;
+    [
+        layout.foot[0] + pad,
+        layout.foot[1] + PEEK_FOOT_PADDING_Y_LOGICAL_PX * scale,
+        layout.foot[2] - pad,
+        layout.foot[3],
+    ]
+}
 
 /// **The refusal** (6406) — the same sentence the preview pane's unknown card
 /// says, said in one line.
@@ -656,6 +677,7 @@ pub fn layout(
 pub fn build(
     layout: &PeekLayout,
     content: &PeekContent,
+    foot: &crate::seats::FootWords,
     picture: Option<PeekPicture<'_>>,
     palette: &ChromePalette,
     scale: f32,
@@ -796,17 +818,28 @@ pub fn build(
         color: palette.menu_border,
         alpha: alpha(palette.menu_border_alpha),
     });
+    // The way out on the left, the standing fact on the right — the same strip
+    // every other foot in this window now keeps (user ruling, 2026-08-15). The
+    // sentence is what yields, because it is the same sentence on every card and
+    // the phrase is the only thing on the strip that is news.
     labels.push(label(
-        PEEK_FOOT_TEXT,
-        [
-            layout.foot[0] + px(PEEK_FOOT_PADDING_X_LOGICAL_PX),
-            layout.foot[1] + px(PEEK_FOOT_PADDING_Y_LOGICAL_PX),
-            layout.foot[2] - px(PEEK_FOOT_PADDING_X_LOGICAL_PX),
-            layout.foot[3],
-        ],
+        &foot.lead,
+        foot.lead_box,
         px(PEEK_FOOT_FONT_LOGICAL_PX),
         palette.body_hint_text,
     ));
+    if !foot.notice.is_empty() {
+        labels.push(ChromeLabel {
+            align_right: true,
+            clip: Some(foot.notice_box),
+            ..label(
+                &foot.notice,
+                foot.notice_box,
+                px(PEEK_FOOT_FONT_LOGICAL_PX),
+                palette.body_hint_text,
+            )
+        });
+    }
 
     OverlayLayer {
         quads,
@@ -910,7 +943,105 @@ mod tests {
         PeekBody::Document(LINE_HEIGHT * count as f32)
     }
 
+    /// Half the point size a glyph — about what Segoe UI averages — so an
+    /// assertion about a strip's division is arithmetic rather than a
+    /// measurement of the shipped font.
+    fn ruler(text: &str, size: f32) -> f32 {
+        text.chars().count() as f32 * size / 2.0
+    }
+
+    /// The card's foot, dressed the way [`crate::Runtime::file_peek_layer`]
+    /// dresses it — the fixed sentence, and whatever phrase is hung beside it.
+    fn foot(layout: &PeekLayout, notice: &str) -> crate::seats::FootWords {
+        crate::seats::dress_foot(
+            crate::seats::FootDress {
+                run: foot_run(layout, SCALE),
+                lead: PEEK_FOOT_TEXT,
+                flash: None,
+                notice,
+                cut_left: false,
+                font_px: PEEK_FOOT_FONT_LOGICAL_PX * SCALE,
+                gap_px: crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * SCALE,
+            },
+            &mut ruler,
+        )
+    }
+
     const LINE_HEIGHT: f32 = 18.0;
+
+    /// PIN (user ruling, 2026-08-15) — **the glance card's foot hangs the same
+    /// phrase on the same side, and the way out survives it.**
+    ///
+    /// The card used to be excluded from every notice by name, and the argument
+    /// was good: its foot is one fixed sentence and that sentence is the card's
+    /// only exit, so a warning that *took* the strip would have replaced the way
+    /// out with a complaint about a file you were merely looking at. The ruling
+    /// keeps the exit and drops the exclusion, because the phrase does not take
+    /// the strip — it takes the right-hand end of it, and the sentence is what
+    /// gives up the width.
+    ///
+    /// The card is the one foot in this window whose lead is not a path, which
+    /// is why it is cut from the **back**: a sentence reads forwards, and
+    /// "…double-click opens the preview pane" is a sentence with its verb
+    /// missing.
+    ///
+    /// MUTATION ①: pass `cut_left: true` for the card and the ellipsis assertion
+    /// goes red on a sentence beheaded instead of trimmed.
+    /// MUTATION ②: draw the phrase before the sentence without the split — give
+    /// both the whole run — and the disjointness assertion goes red, which is
+    /// the two printing through each other in 280 pixels.
+    #[test]
+    fn the_glance_cards_foot_keeps_its_way_out_beside_the_phrase() {
+        let window = (1600.0, 900.0);
+        let card = content(lines(6));
+        let layout = layout(
+            &card,
+            [40.0, 300.0, 240.0, 320.0],
+            window,
+            60.0,
+            24.0,
+            SCALE,
+        );
+        let notice = crate::preview::PREVIEW_TRUNCATED_NOTICE;
+        let dressed = foot(&layout, notice);
+        let layer = build(
+            &layout,
+            &card,
+            &dressed,
+            None,
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
+
+        let hung = layer
+            .labels
+            .iter()
+            .find(|label| label.text == notice)
+            .expect("the phrase is on the card");
+        let exit = layer
+            .labels
+            .iter()
+            .find(|label| label.text.starts_with("Enter / double-click"))
+            .expect("and the way out is still printed");
+        assert!(hung.align_right, "flush with the strip's right edge");
+        assert_eq!(hung.rect[2], foot_run(&layout, SCALE)[2]);
+        assert!(
+            exit.rect[2] < hung.rect[0],
+            "the sentence stops before the phrase begins: {:?} vs {:?}",
+            exit.rect,
+            hung.rect
+        );
+        assert!(
+            !dressed.lead.starts_with('…'),
+            "a sentence is cut from the back, not the front: {}",
+            dressed.lead
+        );
+
+        // And with nothing hung on it the card is exactly what it was.
+        let bare = foot(&layout, "");
+        assert_eq!(bare.lead, PEEK_FOOT_TEXT, "the sentence, whole");
+        assert_eq!(bare.lead_box, foot_run(&layout, SCALE), "in the whole run");
+    }
 
     /// PIN — **P148: the card stands to the right of its row, and flips to the
     /// left rather than running off the screen.**
@@ -1102,7 +1233,14 @@ mod tests {
             matches!(layout.body_kind, PeekBody::Document(_)),
             "a text file is a document, not a list of lines"
         );
-        let layer = build(&layout, &card, None, &bt_render::chrome_palette(), SCALE);
+        let layer = build(
+            &layout,
+            &card,
+            &foot(&layout, ""),
+            None,
+            &bt_render::chrome_palette(),
+            SCALE,
+        );
 
         let inside =
             |rect: [f32; 4]| rect[1] >= layout.body[1] - 0.5 && rect[3] <= layout.body[3] + 0.5;
@@ -1203,6 +1341,7 @@ mod tests {
         let layer = build(
             &layout,
             &card,
+            &foot(&layout, ""),
             Some(PeekPicture {
                 key: "peek:wide.png@280x70",
                 rgba: &rgba,

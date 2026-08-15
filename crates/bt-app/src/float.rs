@@ -1567,7 +1567,17 @@ pub struct FloatChrome<'a> {
     pub title: &'a str,
     /// What the foot says, in full. That division is the mock-up's own note at
     /// line 731: the header names the leaf, the foot says where you are.
+    ///
+    /// Already cut to the room [`Self::notice`] left it — see
+    /// [`crate::seats::dress_foot`], which every foot in this window goes
+    /// through.
     pub path: &'a str,
+    /// The standing fact hung on the foot's **right hand** — "Read-only ·
+    /// 64 KB" — or empty (user ruling, 2026-08-15). A tree never has one.
+    pub notice: &'a str,
+    /// How wide that phrase draws, measured beside the renderer by the caller:
+    /// this module holds no font.
+    pub notice_width: f32,
     pub dock_label: &'a str,
     /// Side-honest (P54): the filled panel sits where the pane will land —
     /// [`ChromeMark::DockLeft`] for a tree, [`ChromeMark::DockRight`] for a
@@ -1602,6 +1612,8 @@ pub fn build(
         mark,
         title: root_name,
         path,
+        notice,
+        notice_width,
         dock_label,
         dock_mark,
         hover,
@@ -1850,9 +1862,16 @@ pub fn build(
         geometry.foot_mark,
         foot_ink,
     ));
+    // The right hand and what it costs the path — the docked foot's rule, in
+    // the float's own numbers (user ruling, 2026-08-15).
+    let (path_box, notice_box) = crate::seats::foot_notice_split(
+        geometry.foot_path,
+        notice_width,
+        px(crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX),
+    );
     labels.push(ChromeLabel {
         text: path.to_owned(),
-        rect: geometry.foot_path,
+        rect: path_box,
         font_size_px: px(FLOAT_FOOT_FONT_LOGICAL_PX),
         color: foot_ink,
         align_right: false,
@@ -1860,8 +1879,24 @@ pub fn build(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
-        clip: None,
+        clip: Some(path_box),
     });
+    if !notice.is_empty() {
+        labels.push(ChromeLabel {
+            text: notice.to_owned(),
+            rect: notice_box,
+            font_size_px: px(FLOAT_FOOT_FONT_LOGICAL_PX),
+            // The strip's palest ink whatever the hover is doing: this half is a
+            // fact about the file, not part of the button's label.
+            color: palette.dialog_muted_text,
+            align_right: true,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(notice_box),
+        });
+    }
     if let Some(grip) = geometry.grip {
         let glyph = px(FLOAT_GRIP_GLYPH_LOGICAL_PX);
         let inset = px(FLOAT_GRIP_GLYPH_INSET_LOGICAL_PX);
@@ -2275,6 +2310,8 @@ mod tests {
                 mark: ChromeMark::Folder,
                 title: "WEIYI",
                 path: "C:\\Users\\Weiyi",
+                notice: "",
+                notice_width: 0.0,
                 dock_label: "DOCK",
                 dock_mark: ChromeMark::DockLeft,
                 hover: Some(FloatPart::Foot),

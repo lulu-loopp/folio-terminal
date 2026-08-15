@@ -1498,7 +1498,6 @@ fn build_preview_text_body(
         quads,
         paragraphs,
         blocks: Vec::new(),
-        foot: None,
     }
 }
 
@@ -1544,7 +1543,6 @@ fn build_preview_diff_body(
         quads,
         paragraphs,
         blocks: Vec::new(),
-        foot: None,
     }
 }
 
@@ -1645,7 +1643,6 @@ fn build_preview_table_body(
         quads,
         paragraphs,
         blocks: Vec::new(),
-        foot: None,
     }
 }
 
@@ -1949,7 +1946,6 @@ fn build_preview_markdown_body(
             quads,
             paragraphs,
             blocks: scrollers.into_iter().map(|(block, _)| block).collect(),
-            foot: None,
         },
         links,
     }
@@ -2551,140 +2547,6 @@ fn preview_document_height(
             seats::preview_markdown_metrics(scale).padding_y * 2.0
                 + layout.last().map_or(0.0, |last| last.top + last.height)
         }
-    }
-}
-
-/// The read-only degradation, pinned to the foot of the body.
-///
-/// Pinned rather than appended, because a notice that scrolled with the content
-/// would be a sentence about the *file* that only appears once you have already
-/// read to the end of what there is — which is exactly the moment it is too late
-/// to be useful. Its family and its ink are the "no preview" card's, so the two
-/// things this window says about a file it cannot fully show say them the same
-/// way.
-fn push_preview_truncation_notice(
-    body: &mut bt_render::PreviewBody,
-    rect: [f32; 4],
-    scale: f32,
-    notice: &str,
-    palette: &bt_render::ChromePalette,
-) {
-    let font_size = PREVIEW_META_FONT_LOGICAL_PX * scale;
-    let line_height = (font_size * 1.4).round().max(1.0);
-    let padding = (6.0 * scale).round();
-    let strip = [
-        rect[0],
-        rect[3] - line_height - padding * 2.0,
-        rect[2],
-        rect[3],
-    ];
-    body.quads.push(bt_render::PreviewQuad {
-        rect: strip,
-        color: palette.files_row_hover,
-    });
-    body.paragraphs.push(bt_render::PreviewParagraph {
-        runs: vec![bt_render::PreviewRun {
-            text: notice.to_owned(),
-            color: palette.body_hint_text,
-            mono: false,
-            bold: false,
-        }],
-        rect: [strip[0], strip[1] + padding, strip[2], strip[3] - padding],
-        font_size_px: font_size,
-        line_height_px: line_height,
-        wrap: false,
-        letter_spacing_em: 0.0,
-        align_right: false,
-        align_center: false,
-    });
-}
-
-/// `.preview-foot` — **the truncation bar, which is furniture and not a
-/// caption** (user report, 2026-08-13).
-///
-/// It began as a line of text laid over the body's last rows, and that is
-/// exactly how it read on a real file: the sentence and the file's own words
-/// printed through each other, and the words underneath were unreachable because
-/// the scroll had already ended. A message that cannot be moved out from under
-/// has to have somewhere of its own to stand.
-///
-/// So this is a **bar with height**, in the docked files foot's own shape — 28px
-/// tall, a hairline of `--border` along its top, an opaque ground in the pane's
-/// own colour, 11px `--ink3` text inset 12px. The height is not decoration: it
-/// comes off the body before a single block is laid out
-/// ([`Runtime::preview_surface_body_rect`]), so the scroll extent ends where the
-/// bar begins and nothing can be scrolled under it.
-///
-/// It appears **only for a truncated buffer**, which is also why it can afford
-/// to be structural: truncation is a standing fact about the file for as long as
-/// the file is open, not news about a keystroke. The `Saved` flash, which *is*
-/// news, keeps the old floating strip and cannot collide with this one — a
-/// truncated buffer is read-only, so it has no save to report.
-const PREVIEW_FOOT_HEIGHT_LOGICAL_PX: f32 = 28.0;
-const PREVIEW_FOOT_PADDING_X_LOGICAL_PX: f32 = 12.0;
-const PREVIEW_FOOT_FONT_LOGICAL_PX: f32 = 11.0;
-
-/// How tall the truncation bar stands at this scale, border included.
-fn preview_foot_height(scale: f32) -> f32 {
-    (PREVIEW_FOOT_HEIGHT_LOGICAL_PX * scale).round().max(1.0)
-}
-
-/// The box the **document** lives in inside a pane body, given whether that
-/// body owes a truncation bar.
-///
-/// A free function so the reservation can be asserted without a window, which is
-/// the only way to state "every pixel the bar takes is a pixel the document does
-/// not have" as a property rather than as a screenshot.
-fn preview_content_body(body: [f32; 4], scale: f32, foot: bool) -> [f32; 4] {
-    if !foot {
-        return body;
-    }
-    let top = (body[3] - preview_foot_height(scale)).max(body[1]);
-    [body[0], body[1], body[2], top]
-}
-
-/// The bar for one notice, standing at the foot of `rect` (the **whole** body,
-/// bar included).
-fn preview_foot(
-    rect: [f32; 4],
-    scale: f32,
-    notice: &str,
-    palette: &bt_render::ChromePalette,
-) -> bt_render::PreviewFoot {
-    let height = preview_foot_height(scale);
-    let border = scale.round().max(1.0);
-    let bar = [rect[0], (rect[3] - height).max(rect[1]), rect[2], rect[3]];
-    let font_size = PREVIEW_FOOT_FONT_LOGICAL_PX * scale;
-    let line_height = (font_size * 1.4).round().max(1.0);
-    let inset = (PREVIEW_FOOT_PADDING_X_LOGICAL_PX * scale).round();
-    let top = bar[1]
-        + border
-        + (((bar[3] - bar[1]) - border - line_height) / 2.0)
-            .max(0.0)
-            .round();
-    bt_render::PreviewFoot {
-        bar,
-        border_px: border,
-        // The pane's own ground and nothing paler: an opaque bar is the whole of
-        // "content never prints through it", and a tint over the background
-        // would be the reported bug with one extra step.
-        ground: bt_render::background_rgb(),
-        border: palette.preview_grid_line,
-        label: bt_render::PreviewParagraph {
-            runs: vec![bt_render::PreviewRun {
-                text: notice.to_owned(),
-                color: palette.files_row_muted,
-                mono: false,
-                bold: false,
-            }],
-            rect: [bar[0] + inset, top, bar[2] - inset, top + line_height],
-            font_size_px: font_size,
-            line_height_px: line_height,
-            wrap: false,
-            letter_spacing_em: 0.0,
-            align_right: false,
-            align_center: false,
-        },
     }
 }
 
@@ -12841,7 +12703,7 @@ impl Runtime {
             .into_iter()
             .filter_map(|seat| Some((seat, self.dress_preview_head(seat, scale)?)))
             .collect();
-        let preview_feet: Vec<(SeatId, (String, bool))> = self
+        let preview_feet: Vec<(SeatId, seats::FootWords)> = self
             .seats
             .preview_seats()
             .into_iter()
@@ -12910,12 +12772,14 @@ impl Runtime {
             .collect();
         let preview_feet: Vec<(SeatId, seats::FootStrip<'_>)> = preview_feet
             .iter()
-            .map(|(seat, (path, revealed))| {
+            .map(|(seat, words)| {
                 (
                     *seat,
                     seats::FootStrip {
-                        path,
-                        revealed: *revealed,
+                        path: &words.lead,
+                        revealed: words.flashing,
+                        notice: &words.notice,
+                        notice_width: words.notice_width,
                     },
                 )
             })
@@ -15574,25 +15438,16 @@ impl Runtime {
         Some(PreviewSurface::Seat(seat))
     }
 
-    /// The box **this surface's document** lives in — its body, less the
-    /// truncation bar when it has one.
-    fn preview_surface_body_rect(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
-        let truncated = self
-            .preview_buffer_on(surface)
-            .and_then(preview::PreviewBuffer::truncation_notice)
-            .is_some();
-        let body = self.preview_surface_pane_rect(surface, scale)?;
-        Some(preview_content_body(body, scale, truncated))
-    }
-
-    /// The **whole** body of a surface, before any of the document's own
-    /// furniture is taken out of it.
+    /// The box **this surface's document** lives in — its body, whole.
     ///
-    /// [`Self::preview_surface_body_rect`] is this less the truncation bar, and
-    /// is what every question about the *document* asks. This is the rectangle
-    /// the bar itself is drawn in, which is the one thing that has to be told
-    /// about the pane rather than about what is on it.
-    fn preview_surface_pane_rect(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
+    /// **It holds no furniture and gives up no height to any** (user ruling,
+    /// 2026-08-15). There used to be a second derivation here: the body less a
+    /// 28px read-only bar, for a truncated buffer only. The bar retired when the
+    /// ruling moved the fact it stated into the right hand of the path strip
+    /// below it, and with it went the one reason a document's box ever depended
+    /// on what was in the document. One rectangle, asked one way, for every
+    /// buffer.
+    fn preview_surface_body_rect(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
         match surface {
             PreviewSurface::Seat(seat) => {
                 seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
@@ -16047,41 +15902,57 @@ impl Runtime {
     ///
     /// **One strip, two confirmations, one duration** (P34, and ruling 6): the
     /// foot flashes "Saved" the same way it flashes "Revealed", and both stand
-    /// for [`FOOT_REVEAL_FEEDBACK`]. The save's *refusals* do not come here —
-    /// a conflict is a sentence, not a word, and it does not expire — so they
-    /// keep the body's own notice strip.
+    /// for [`FOOT_REVEAL_FEEDBACK`].
+    ///
+    /// **And one standing phrase on its right hand** (user ruling, 2026-08-15).
+    /// The strip's two halves answer two questions — "where is this file" on the
+    /// left, "what is true of it" on the right — and a flash owns both: while
+    /// the left is confirming, the right is empty, which is
+    /// [`seats::dress_foot`]'s rule and not this function's.
     fn dress_preview_foot(
         &mut self,
         seat: SeatId,
         scale: f32,
         now: Instant,
-    ) -> Option<(String, bool)> {
+    ) -> Option<seats::FootWords> {
         let surface = PreviewSurface::Seat(seat);
         let path = match self.preview_buffer_on(surface) {
             Some(buffer) => buffer.path.clone(),
             None => self.preview_pane(surface)?.image.as_ref()?.path.clone(),
         };
+        let path = path.to_string_lossy().into_owned();
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
         let saved = self.preview_save_notice(surface, now) == Some(preview::PREVIEW_SAVED_NOTICE);
-        let text = if revealed {
-            FOOT_REVEALED_LABEL.to_owned()
+        let flash = if revealed {
+            Some(FOOT_REVEALED_LABEL)
         } else if saved {
-            preview::PREVIEW_SAVED_NOTICE.to_owned()
+            Some(preview::PREVIEW_SAVED_NOTICE)
         } else {
-            path.to_string_lossy().into_owned()
+            None
         };
-        let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
-            return Some((text, revealed || saved));
-        };
-        let box_ = seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
-        let room = box_[2] - box_[0];
+        let notice = self
+            .preview_foot_notice(surface, now)
+            .unwrap_or_default()
+            .to_owned();
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let run = seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
         let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
         let renderer = &mut self.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
-        // **Left-truncated** (P35): the ellipsis goes at the head so the file
-        // name — the part you actually care about — survives.
-        let cut = settings::ellipsized_left(&text, room, font, &mut measure);
-        Some((cut, revealed || saved))
+        Some(seats::dress_foot(
+            seats::FootDress {
+                run,
+                lead: &path,
+                flash,
+                notice: &notice,
+                // **Left-truncated** (P35): the ellipsis goes at the head so the
+                // file name — the part you actually care about — survives.
+                cut_left: true,
+                font_px: font,
+                gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
+            },
+            &mut measure,
+        ))
     }
 
     /// Show the file on the seat in File Explorer — `.preview-pane .files-foot`
@@ -17196,14 +17067,31 @@ impl Runtime {
         self.repaint_preview()
     }
 
-    /// The sentence this surface's truncation bar carries, if it is owed one.
+    /// **The standing fact this surface's foot hangs on its right hand**, if it
+    /// is owed one (user ruling, 2026-08-15).
     ///
-    /// Truncation only. The `Saved` flash is *news* and keeps the old floating
-    /// strip — and the two cannot collide, because a truncated buffer is
-    /// read-only and has no save to report.
-    fn preview_foot_notice(&self, surface: PreviewSurface) -> Option<&'static str> {
+    /// Standing facts only, and the word is doing work: what belongs here is
+    /// true of the buffer for as long as you are looking at it, which is what
+    /// earns a permanent corner of the strip. Truncation is one — a read-only
+    /// head read stays a read-only head read. A save's *refusal* is the other,
+    /// and it qualifies for the same reason the wording says it does: it does
+    /// not expire, because a warning that fades is a warning the user is
+    /// entitled to have missed.
+    ///
+    /// A successful save is **not** one. It is news, it expires, and it has its
+    /// own place at the strip's left where the reveal's confirmation goes —
+    /// which is also why it is filtered out here rather than ranked below the
+    /// others: the two halves of the strip answer different questions.
+    ///
+    /// The two can never both be owed: a truncated buffer is read-only and has
+    /// no save to report.
+    fn preview_foot_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
         self.preview_buffer_on(surface)
             .and_then(preview::PreviewBuffer::truncation_notice)
+            .or_else(|| {
+                self.preview_save_notice(surface, now)
+                    .filter(|notice| *notice != preview::PREVIEW_SAVED_NOTICE)
+            })
     }
 
     /// How many lines this surface's edit surface can show — what a page is.
@@ -18087,48 +17975,24 @@ impl Runtime {
                 quads: Vec::new(),
                 paragraphs: Vec::new(),
                 blocks: Vec::new(),
-                foot: None,
             },
         };
-        // **Three notices, three homes, and no frame owes two of them.**
+        // **Every notice, one home** (user ruling, 2026-08-15).
         //
-        // * Truncation is a standing fact about the file, so it gets a bar with
-        //   height that the document was already made shorter for — `body` above
-        //   is the pane's body *minus* that bar, and minus the path strip below
-        //   it (bottom to top: the path, the read-only bar, the document).
-        // * A *successful* save is one word and it expires, so it goes where the
-        //   mock-up puts it: the pane's own foot, flashed exactly as "Revealed"
-        //   is (P34, ruling 6). It reserves nothing, because the strip it borrows
-        //   is already there.
-        // * A save's **refusals** stay here, on the floating strip. A conflict is
-        //   a sentence rather than a word, it does not expire (a warning that
-        //   fades is a warning you are entitled to have missed), and it would not
-        //   fit a 28px foot cut to a path's width.
+        // Nothing about the file is drawn *into* the document any more. There
+        // were three homes and this was two of them — a 28px read-only bar with
+        // height the body was shortened for, and a floating strip laid over the
+        // body's last rows for a save's refusals — and both are gone. Every
+        // sentence this window says *about* a buffer now hangs on the right hand
+        // of the one strip that was always going to be there, the path foot
+        // ([`seats::dress_foot`]); the flashed word keeps its own place at that
+        // strip's left, and steps in front of the phrase while it stands.
         //
-        // A truncated buffer is read-only and has no save to report, so the first
-        // two can never both be owed.
-        //
-        // **The glance card is owed none of them.** Its foot is one fixed
-        // sentence — "Enter / double-click opens the preview pane" (P147) — and
-        // that sentence is the card's only exit; a notice that took the strip
-        // would have replaced the way out with a warning about a file you are
-        // merely looking at. The card cannot be saved into either, so only the
-        // truncation bar could ever have been owed, and the truncation is a fact
-        // the pane it opens will state.
-        if surface == PreviewSurface::Peek {
-            // Fall through to the links below with no strip taken.
-        } else if let Some(notice) = self.preview_foot_notice(surface) {
-            let bar = self
-                .preview_surface_pane_rect(surface, scale)
-                .unwrap_or(body);
-            built.foot = Some(preview_foot(bar, scale, notice, &palette));
-        } else if let Some(notice) = self
-            .preview_save_notice(surface, Instant::now())
-            .filter(|notice| *notice != preview::PREVIEW_SAVED_NOTICE)
-            .map(str::to_owned)
-        {
-            push_preview_truncation_notice(&mut built, body, scale, &notice, &palette);
-        }
+        // What is left here is the document and nothing else, which is why the
+        // glance card — whose foot is a fixed sentence rather than a path, and
+        // which used to be excluded from this whole paragraph by name — now
+        // takes exactly the same path through this function as the other two,
+        // and hangs the same phrase on the same side of its own foot.
         // The links last, because measuring one asks the shaper where a
         // paragraph landed and that answer is only true of the body as it now
         // stands. The hover's rule is drawn from the same boxes, so the line
@@ -18296,7 +18160,6 @@ impl Runtime {
                 align_right: false,
                 align_center: true,
             }],
-            foot: None,
         })
     }
 
@@ -20042,8 +19905,34 @@ impl Runtime {
                 width_px: picture.width_px,
                 height_px: picture.height_px,
             });
+        // The foot's two halves, measured here for the reason the name and the
+        // chip were: only something holding a font can say how wide a line is.
+        // The card is never saved into and never reveals a folder, so it has no
+        // flash — its left hand is the fixed sentence, always.
+        let notice = self
+            .preview_foot_notice(PreviewSurface::Peek, Instant::now())
+            .unwrap_or_default()
+            .to_owned();
+        let foot = {
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            seats::dress_foot(
+                seats::FootDress {
+                    run: file_peek::foot_run(&layout, scale),
+                    lead: file_peek::PEEK_FOOT_TEXT,
+                    flash: None,
+                    notice: &notice,
+                    // A sentence reads forwards, so it is cut from the back —
+                    // the one foot in this window whose lead is not a path.
+                    cut_left: false,
+                    font_px: file_peek::PEEK_FOOT_FONT_LOGICAL_PX * scale,
+                    gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
+                },
+                &mut measure,
+            )
+        };
         let palette = bt_render::chrome_palette();
-        let mut layer = file_peek::build(&layout, &content, picture, &palette, scale);
+        let mut layer = file_peek::build(&layout, &content, &foot, picture, &palette, scale);
         // **Where the card came to rest, filed before anything is drawn into
         // it** — every pointer question about the card reads these two, so a
         // frame that painted a card without recording it would be a card on
@@ -21969,6 +21858,11 @@ impl Runtime {
                 mark: marks::ChromeMark::Folder,
                 title: &name,
                 path: &path,
+                // A folder is not a buffer: there is no head read to be
+                // truncated and no save to refuse, so this foot's right hand is
+                // empty by construction rather than by this frame's luck.
+                notice: "",
+                notice_width: 0.0,
                 dock_label: FLOAT_DOCK_LABEL,
                 dock_mark: marks::ChromeMark::DockLeft,
                 hover,
@@ -22030,14 +21924,25 @@ impl Runtime {
             }
         };
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float(id), now);
-        let path = if revealed {
-            FOOT_REVEALED_LABEL.to_owned()
+        // **A torn-off buffer confirms its own save** (user ruling, 2026-08-15,
+        // as a consequence). "Saved" was drawn only in a docked pane's foot, and
+        // a float's went to the body strip that the ruling retired — so without
+        // this the word would have had nowhere left to be printed at all.
+        let saved = self.preview_save_notice(surface, now) == Some(preview::PREVIEW_SAVED_NOTICE);
+        let flash = if revealed {
+            Some(FOOT_REVEALED_LABEL)
+        } else if saved {
+            Some(preview::PREVIEW_SAVED_NOTICE)
         } else {
-            path
+            None
         };
+        let notice = self
+            .preview_foot_notice(surface, now)
+            .unwrap_or_default()
+            .to_owned();
         let head_font = float::FLOAT_HEAD_FONT_LOGICAL_PX * scale;
         let foot_font = float::FLOAT_FOOT_FONT_LOGICAL_PX * scale;
-        let (title, path) = {
+        let (title, foot) = {
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             (
@@ -22050,12 +21955,19 @@ impl Runtime {
                     head_font,
                     &mut measure,
                 ),
-                // Left-truncated, exactly as the docked foot is (P35): the
-                // ellipsis goes at the head so the file name survives.
-                settings::ellipsized_left(
-                    &path,
-                    geometry.foot_path[2] - geometry.foot_path[0],
-                    foot_font,
+                seats::dress_foot(
+                    seats::FootDress {
+                        run: geometry.foot_path,
+                        lead: &path,
+                        flash,
+                        notice: &notice,
+                        // Left-truncated, exactly as the docked foot is (P35):
+                        // the ellipsis goes at the head so the file name
+                        // survives.
+                        cut_left: true,
+                        font_px: foot_font,
+                        gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
+                    },
                     &mut measure,
                 ),
             )
@@ -22074,11 +21986,13 @@ impl Runtime {
                 // pane will land.
                 mark: marks::ChromeMark::File,
                 title: &title,
-                path: &path,
+                path: &foot.lead,
+                notice: &foot.notice,
+                notice_width: foot.notice_width,
                 dock_label: FLOAT_DOCK_LABEL,
                 dock_mark: marks::ChromeMark::DockRight,
                 hover,
-                revealed,
+                revealed: foot.flashing,
                 dirty,
                 flip_to_source,
             },
@@ -22533,7 +22447,7 @@ impl Runtime {
         // row count is one, so the honest answer is "as tall as the pane you took
         // it out of", and `float_opening_size` cuts that to min(64vh, 520).
         let body_height = self
-            .preview_surface_pane_rect(surface, scale)
+            .preview_surface_body_rect(surface, scale)
             .map_or(0.0, |body| body[3] - body[1]);
         let size = float::float_opening_size(
             float::float_height_for_body(body_height, scale),
@@ -44429,128 +44343,212 @@ mod tests {
         );
     }
 
-    /// PIN — the flashed notice is pinned to the foot of the body, not appended
-    /// to the end of the document.
+    /// A measurer for the foot tests: every glyph half the point size wide,
+    /// which is about what Segoe UI averages and is exact enough to do
+    /// arithmetic with.
     ///
-    /// A sentence that only appears once you have scrolled to the end of what
-    /// there is arrives at exactly the moment it is too late to be useful. This
-    /// is now the `Saved` flash's strip alone: truncation graduated to a bar
-    /// with height of its own (see the pin below).
-    ///
-    /// Mutation: place the strip at `rect[1]` instead of against `rect[3]`.
-    #[test]
-    fn the_flashed_notice_is_pinned_to_the_foot_of_the_body() {
-        let palette = bt_render::chrome_palette();
-        let body = [40.0, 100.0, 440.0, 400.0];
-        let mut built = bt_render::PreviewBody {
-            blocks: Vec::new(),
-            clip: body,
-            quads: Vec::new(),
-            paragraphs: Vec::new(),
-            foot: None,
-        };
-        push_preview_truncation_notice(&mut built, body, 1.0, "Saved", &palette);
-        let strip = built.quads[0].rect;
-        assert_eq!(strip[3], body[3], "flush with the floor");
-        assert_eq!([strip[0], strip[2]], [body[0], body[2]]);
-        let line = &built.paragraphs[0];
-        assert_eq!(line.runs[0].text, "Saved");
-        assert_eq!(line.runs[0].color, palette.body_hint_text);
-        assert!(!line.runs[0].mono, "the card's family, not the file's");
-        assert!(line.rect[1] >= strip[1] && line.rect[3] <= strip[3]);
+    /// Deliberately not the real shaper. What these tests are about is the
+    /// *division* of a strip between two runs, and a fixture whose widths a
+    /// reader cannot compute in their head would be measuring the font instead
+    /// of the rule.
+    fn ruler(text: &str, size: f32) -> f32 {
+        text.chars().count() as f32 * size / 2.0
     }
 
-    /// PIN (user report, 2026-08-13) — **the truncation notice is a bar with
-    /// height, and the document is shorter for it.**
+    /// PIN (user ruling, 2026-08-15) — **the read-only fact hangs on the path
+    /// foot's right hand, and the document gets back the bar it used to lose.**
     ///
-    /// The report: on `huge.txt` the sentence "Read-only — showing the first
-    /// 64 KB of this file" was bare text laid over the body's last rows, and the
-    /// file's own words printed through it. Worse than ugly — the words
-    /// underneath were unreachable, because the scroll had already ended.
+    /// The report was about the picture: on `huge.txt` the pane ended in two
+    /// 28px strips stacked on each other, the read-only bar sitting on the path
+    /// bar, and two horizontal rules of identical height at the bottom of one
+    /// pane read as a mistake however each one was justified on its own.
     ///
-    /// Three things make it a bar rather than a caption, and all three are here:
+    /// So the upper strip retired and the fact it carried moved into the lower
+    /// one's right hand. Three things had to become true and all three are here:
     ///
-    /// ① it stands in [`bt_render::PreviewBody::foot`], **outside the clip the
-    ///    content is cut to**, so the document cannot be drawn into it at all —
-    ///    which is a stronger statement than "the fill is opaque";
-    /// ② it is opaque, in the pane's own ground, so nothing shows through even
-    ///    where the two do meet;
-    /// ③ the body handed to the layout is the pane's body *minus* the bar, so
-    ///    the scroll extent ends at the bar's top edge.
+    /// ① the wording is a **phrase** and not a sentence, because it now shares
+    ///    28 pixels with a path — and it still says the size, which is the half
+    ///    of the old sentence that was information;
+    /// ② the phrase stands flush against the strip's right edge with the path
+    ///    stopping a gap short of it, so the two are two runs and not one;
+    /// ③ the body the document is laid out in is the pane's body **whole** — the
+    ///    28 pixels the bar used to reserve are the document's again.
     ///
-    /// MUTATION ①: return the full body from `preview_surface_body_rect` — the
-    /// clip assertion goes red, and that is the reported bug exactly: the
-    /// document is laid out over the bar again.
-    /// MUTATION ②: push the bar's fill into `quads` instead of `foot` and the
-    /// clip assertion goes red the other way, because the fill would then be cut
-    /// to the content's clip and never drawn.
+    /// MUTATION for ①: give the constant back its old sentence and the size
+    /// assertion goes red on a phrase that no longer names 64 KB.
+    /// MUTATION for ②: hand `foot_notice_split` the run unchanged (return
+    /// `(run, run)`) and the disjointness assertion goes red — the path prints
+    /// through the phrase, which is the collision the split exists to prevent.
+    /// MUTATION for ③ is a **compile error**, and that is the point:
+    /// `bt_render::PreviewBody` no longer has a slot for furniture at all, so
+    /// the reservation cannot be reintroduced by an edit to one branch. The
+    /// height it used to take is pinned one layer down, by
+    /// `seats::a_preview_pane_reserves_its_path_strip_out_of_its_body`, which
+    /// asserts the pane gives up exactly one strip.
     #[test]
-    fn the_truncation_notice_is_a_bar_the_document_is_shortened_for() {
-        let palette = bt_render::chrome_palette();
-        let pane = [40.0, 100.0, 440.0, 400.0];
-        let scale = 2.0;
-        let height = preview_foot_height(scale);
-        assert_eq!(height, 56.0, "28 logical pixels at 2x");
-
-        let foot = preview_foot(pane, scale, preview::PREVIEW_TRUNCATED_NOTICE, &palette);
+    fn the_read_only_fact_hangs_on_the_path_foots_right_hand() {
+        // ① The phrase, and the size it names.
         assert_eq!(
-            foot.bar,
-            [pane[0], pane[3] - height, pane[2], pane[3]],
-            "the bar is flush with the floor and the full width of the pane"
-        );
-        assert_eq!(
-            foot.ground,
-            bt_render::background_rgb(),
-            "opaque, in the pane's own ground"
-        );
-        assert_eq!(foot.border, palette.preview_grid_line);
-        assert_eq!(foot.border_px, 2.0, "one device pixel at 2x");
-        assert_eq!(foot.label.runs[0].text, preview::PREVIEW_TRUNCATED_NOTICE);
-        assert_eq!(foot.label.runs[0].color, palette.files_row_muted);
-        assert!(
-            foot.label.rect[0] > foot.bar[0] && foot.label.rect[2] < foot.bar[2],
-            "the sentence is inset from both edges"
-        );
-        assert!(
-            foot.label.rect[1] >= foot.bar[1] + foot.border_px && foot.label.rect[3] <= foot.bar[3],
-            "and stands inside the bar, below its hairline"
+            preview::PREVIEW_TRUNCATED_NOTICE,
+            format!(
+                "Read-only · {}",
+                preview::format_byte_size(preview::PREVIEW_HEAD_BYTES as u64)
+            ),
+            "the phrase names the head read's real size, not a number typed twice"
         );
 
-        // ③ The content is laid out in a body that stops where the bar begins,
-        //    which is what makes the reserved height real rather than a promise.
-        let content = preview_content_body(pane, scale, true);
-        assert_eq!(
-            preview_content_body(pane, scale, false),
-            pane,
-            "a buffer that was not truncated keeps the whole pane"
+        // ② The division of the strip.
+        let run = [100.0, 400.0, 500.0, 428.0];
+        let gap = 12.0;
+        let words = seats::dress_foot(
+            seats::FootDress {
+                run,
+                lead: r"C:\w\huge.txt",
+                flash: None,
+                notice: preview::PREVIEW_TRUNCATED_NOTICE,
+                cut_left: true,
+                font_px: 10.0,
+                gap_px: gap,
+            },
+            &mut ruler,
         );
-        let document = PreviewDocument::Text {
-            lines: vec!["one".to_owned(); 40],
-            wrap: preview_edit::WrapLayout::unwrapped(&vec!["one".to_owned(); 40]),
-        };
-        let metrics = seats::preview_text_metrics(scale);
-        let rows = metrics.line_height * 40.0;
-        let full = preview_document_max_scroll(&document, pane, scale, 8.0, rows, 0);
-        let shortened = preview_document_max_scroll(&document, content, scale, 8.0, rows, 0);
+        assert_eq!(words.notice, preview::PREVIEW_TRUNCATED_NOTICE);
         assert_eq!(
-            shortened[1] - full[1],
-            height,
-            "every pixel the bar takes is a pixel further the document must scroll"
+            words.notice_box[2], run[2],
+            "flush with the strip's right edge"
+        );
+        assert_eq!(
+            words.notice_box[2] - words.notice_box[0],
+            ruler(preview::PREVIEW_TRUNCATED_NOTICE, 10.0),
+            "and no wider than its own words"
+        );
+        assert_eq!(
+            words.lead_box[2],
+            words.notice_box[0] - gap,
+            "the path stops a gap short of the phrase"
+        );
+        assert!(
+            words.lead_box[2] < words.notice_box[0],
+            "two runs, not one: nothing of the path is inside the phrase's box"
+        );
+        assert!(!words.flashing, "nothing is being confirmed");
+    }
+
+    /// PIN (user ruling, 2026-08-15) — **when the path and the phrase meet, the
+    /// path is what gives way.**
+    ///
+    /// The path was always going to be cut: P35 gives it a left ellipsis
+    /// precisely because a full path rarely fits a pane's foot, and one that has
+    /// already lost its drive letter loses nothing new by losing three more
+    /// characters. The phrase has no such slack — "Read-only · 64" is not an
+    /// abbreviation of anything, it is a broken fact — so it is never cut, and a
+    /// rule that cut the shorter run to save the longer one would have had it
+    /// exactly backwards.
+    ///
+    /// MUTATION ①: ellipsize the lead against the whole `run` instead of
+    /// `lead_box` and the first assertion goes red — the path is cut to a width
+    /// it does not have and prints straight through the phrase.
+    /// MUTATION ②: pass the notice through `ellipsized` as well and the
+    /// second goes red on a truncated truncation notice.
+    #[test]
+    fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
+        let run = [0.0, 0.0, 300.0, 28.0];
+        let gap = 12.0;
+        let long = r"C:\Users\somebody\Developer\BetterTerminal\crates\bt-app\src\main.rs";
+        let words = seats::dress_foot(
+            seats::FootDress {
+                run,
+                lead: long,
+                flash: None,
+                notice: preview::PREVIEW_TRUNCATED_NOTICE,
+                cut_left: true,
+                font_px: 10.0,
+                gap_px: gap,
+            },
+            &mut ruler,
+        );
+        assert!(
+            ruler(&words.lead, 10.0) <= words.lead_box[2] - words.lead_box[0],
+            "the path was cut to the room the phrase left it, not to the whole strip"
+        );
+        assert!(
+            words.lead.starts_with('…') && words.lead.ends_with("main.rs"),
+            "cut from the front, so the file name survives (P35): {}",
+            words.lead
+        );
+        assert_eq!(
+            words.notice,
+            preview::PREVIEW_TRUNCATED_NOTICE,
+            "and the phrase is whole"
         );
 
-        // ① The body the renderer is handed keeps the content's clip above the
-        //    bar, and the bar rides the slot that is not clipped with it.
-        let built = bt_render::PreviewBody {
-            clip: content,
-            quads: Vec::new(),
-            paragraphs: Vec::new(),
-            blocks: Vec::new(),
-            foot: Some(foot),
-        };
-        assert!(
-            built.clip[3] <= built.foot.as_ref().unwrap().bar[1],
-            "nothing the document draws can reach the bar"
+        // The same strip with nothing hung on it gives the path all of it, which
+        // is what makes the loss above the phrase's doing and not the run's.
+        let alone = seats::dress_foot(
+            seats::FootDress {
+                run,
+                lead: long,
+                flash: None,
+                notice: "",
+                cut_left: true,
+                font_px: 10.0,
+                gap_px: gap,
+            },
+            &mut ruler,
         );
+        assert_eq!(alone.lead_box, run, "no phrase, no toll");
+        assert!(
+            alone.lead.chars().count() > words.lead.chars().count(),
+            "and more of the path survives"
+        );
+    }
+
+    /// PIN (user ruling, 2026-08-15) — **while the foot is flashing, its right
+    /// hand is empty.**
+    ///
+    /// "Revealed in File Explorer" and "Saved" are answers to something the user
+    /// just did, and they stand for 1300ms before the path comes back. A
+    /// standing fact printed beside a confirmation turns one unambiguous word
+    /// into two things to read at the one moment the strip has to be read at a
+    /// glance — so the phrase steps aside for as long as the word stands, and
+    /// comes back on its own when the word expires.
+    ///
+    /// The pairing is real rather than hypothetical: a truncated buffer is
+    /// read-only and can never flash "Saved", but its foot is still a button,
+    /// and pressing it flashes "Revealed" over a file whose read-only phrase is
+    /// standing right there.
+    ///
+    /// MUTATION: drop the `flashing` guard in `dress_foot` and both the empty
+    /// assertion and the full-width assertion go red at once — the confirmation
+    /// shares its strip with a warning.
+    #[test]
+    fn a_flashing_foot_gives_the_whole_strip_to_the_word_it_is_flashing() {
+        let run = [0.0, 0.0, 300.0, 28.0];
+        for flash in [FOOT_REVEALED_LABEL, preview::PREVIEW_SAVED_NOTICE] {
+            let words = seats::dress_foot(
+                seats::FootDress {
+                    run,
+                    lead: r"C:\w\huge.txt",
+                    flash: Some(flash),
+                    notice: preview::PREVIEW_TRUNCATED_NOTICE,
+                    cut_left: true,
+                    font_px: 10.0,
+                    gap_px: 12.0,
+                },
+                &mut ruler,
+            );
+            assert!(words.flashing, "{flash}: the strip is confirming");
+            assert_eq!(
+                words.lead, flash,
+                "{flash}: and says so instead of the path"
+            );
+            assert_eq!(words.notice, "", "{flash}: the phrase steps aside");
+            assert_eq!(words.notice_width, 0.0);
+            assert_eq!(
+                words.lead_box, run,
+                "{flash}: and pays no toll for a phrase that is not there"
+            );
+        }
     }
 
     // ── slice 3: quick edit ─────────────────────────────────────────────────

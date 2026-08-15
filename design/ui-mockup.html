@@ -760,6 +760,29 @@
      showed "bt/x.png/~" for "~/bt/x.png"; user-reported). */
   .foot-path { overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
   .float-win .fly-foot.done { color: var(--accent); }
+  /* 2026-08-15 (user ruling) — the strip's RIGHT HAND, on all three surfaces that
+     wear a foot: the preview pane, the torn-off float, and the glance card.
+
+     Whatever this window has to say ABOUT a buffer — "Read-only · 64 KB" for a
+     truncated head read, "Not saved · changed on disk · edits kept" for a save
+     that found the file moved — is hung here, in the palest ink, flush with the
+     strip's trailing edge. It used to be a 28px bar of its own standing directly
+     on this one, and two horizontal strips of identical height at the bottom of
+     one pane read as a mistake however each was justified alone.
+
+     Three clauses, and the order matters:
+     · the phrase is never cut. `.foot-path` was always going to be (that is what
+       the rule above is for), and one that has already lost its drive letter
+       loses nothing new by losing three more characters — "Read-only · 64" is
+       not an abbreviation, it is a broken fact. So the PATH yields.
+     · while the strip is flashing `.done` — "Revealed in File Explorer",
+       "Saved" — the right hand is EMPTY. A confirmation answers something the
+       user just did, and a standing warning printed beside it turns one
+       unambiguous word into two things to read.
+     · on the glance card the left hand is the fixed sentence rather than a path,
+       so it is cut from the BACK: a sentence reads forwards. */
+  .foot-notice { flex: none; margin-left: auto; color: var(--ink3); white-space: nowrap; }
+  .fly-foot.done .foot-notice, .files-foot.done .foot-notice { display: none; }
 
   /* The folder trigger on a header. On a tab it stays out of the way until the
      tab is active or hovered; on a pane header it sits quietly at ~.6 until
