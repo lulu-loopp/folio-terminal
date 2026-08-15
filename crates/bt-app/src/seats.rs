@@ -3812,7 +3812,7 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
         SeatKind::Preview => PREVIEW_HEAD_PADDING_LEFT_LOGICAL_PX,
         _ => SEAT_TITLE_PADDING_LOGICAL_PX,
     } * scale;
-    let (_, mark_logical_px, _) = pane_mark(kind, None, chrome_palette());
+    let (_, mark_logical_px, _) = pane_mark(kind, None, None, chrome_palette());
     let mark_size = (mark_logical_px * scale).round().max(1.0);
     let mark_left = (rect[0] + pad).round();
     let mark_top = (rect[1] + ((content_bottom - rect[1]) - mark_size) / 2.0).round();
@@ -4427,6 +4427,11 @@ pub fn build_chrome_with_preview(
                 .collect()
         })
         .unwrap_or_default();
+    // The fixture hands one string to both lists, which is exactly as much of
+    // the product's rule as a fixture can carry: in the window the caption and
+    // the name are two different reads (`ChromeContent::preview_documents`), and
+    // a test that wants them to differ builds the two lists itself.
+    let preview_documents = preview_titles.clone();
     // Spread the same way `preview_title` is, and stated as plainly: a test
     // about two panes saying two different things builds the list itself.
     let preview_messages: Vec<(SeatId, &str)> = preview_message
@@ -4455,6 +4460,7 @@ pub fn build_chrome_with_preview(
             rail: RailState::default(),
             rail_scroll: 0.0,
             preview_titles: &preview_titles,
+            preview_documents: &preview_documents,
             terminal_names: &NO_TERMINAL_NAMES,
             leaf_marks: &all_powershell(seats),
             files_names: &NO_FILES_NAMES,
@@ -4690,6 +4696,20 @@ pub struct ChromeContent<'a> {
     /// two preview panes show two files, and a collapsed bar printing its
     /// neighbour's name is the same lie in a narrower strip.
     pub preview_titles: &'a [(SeatId, &'a str)],
+    /// The **file name** each preview seat is showing, which is not the same
+    /// fact as [`Self::preview_titles`] (file-type icons, 2026-08-15).
+    ///
+    /// A caption is what a head *prints* and a name is what a file *is*, and the
+    /// two part company the moment a caption has anything to add: a picture's
+    /// caption is `sunset.png — 800×600`, whose last dot is followed by
+    /// `png — 800×600`. Handed that as a name, the classifier reads an extension
+    /// nobody has ever registered and draws the plain page — which is exactly
+    /// what shipped for one build and was caught on the real machine rather than
+    /// by a test, because every fixture in the suite was a buffer.
+    ///
+    /// So the two travel separately. This one is never printed and never cut to
+    /// fit a box; it exists to be classified.
+    pub preview_documents: &'a [(SeatId, &'a str)],
     /// Which tabs' floating trees are on screen, for the floats summoned from a
     /// tab's own trigger — `.vtab.shown` (Q173).
     ///
@@ -4994,6 +5014,7 @@ pub fn build_chrome_for_tabs(
         rail,
         rail_scroll,
         preview_titles,
+        preview_documents,
         float_shown,
         terminal_names,
         leaf_marks,
@@ -5039,6 +5060,15 @@ pub fn build_chrome_for_tabs(
             .iter()
             .find(|(seat, _)| *seat == id)
             .map(|(_, title)| *title)
+    };
+    // The name behind that caption, looked up the same way and kept apart from
+    // it for the reason `ChromeContent::preview_documents` gives: a mark is
+    // classified from a name, never from a printed line.
+    let preview_document = |id: SeatId| {
+        preview_documents
+            .iter()
+            .find(|(seat, _)| *seat == id)
+            .map(|(_, name)| *name)
     };
     let palette = chrome_palette();
     let mut quads = Vec::new();
@@ -5161,6 +5191,12 @@ pub fn build_chrome_for_tabs(
                     scale,
                     placement.kind,
                     leaf_marks.get(&placement.id).copied(),
+                    // **This placement's own document**, by id — the same rule
+                    // the head below states at length. A collapsed preview is
+                    // still showing a file, and a bar is exactly the case where
+                    // the mark is the whole message. The *name*, not the caption
+                    // beside it: see `ChromeContent::preview_documents`.
+                    preview_document(placement.id),
                     placement.presentation,
                     seat_short_caption(
                         placement.kind,
@@ -5249,6 +5285,10 @@ pub fn build_chrome_for_tabs(
                 let (mark, _, mark_color) = pane_mark(
                     placement.kind,
                     leaf_marks.get(&placement.id).copied(),
+                    // This placement's own document, looked up by id for the
+                    // reason `preview_head` below is: the kind says *whether*
+                    // this head names a file, and only the identity says which.
+                    preview_document(placement.id),
                     palette,
                 );
                 pane_sprites.push(ChromeSprite::new(mark, head.mark, mark_color).with_opacity(
@@ -8137,6 +8177,8 @@ fn collapse_bar_contents(
     kind: SeatKind,
     // Which shell this seat is running, when it is a terminal — see `pane_mark`.
     terminal_mark: Option<ChromeMark>,
+    // Which file this seat is showing, when it is a preview — see `pane_mark`.
+    document: Option<&str>,
     presentation: Presentation,
     title: &str,
     labels: &mut Vec<ChromeLabel>,
@@ -8145,7 +8187,7 @@ fn collapse_bar_contents(
     let palette = chrome_palette();
     let width = rect[2] - rect[0];
     let height = rect[3] - rect[1];
-    let (mark, mark_logical_px, mark_color) = pane_mark(kind, terminal_mark, palette);
+    let (mark, mark_logical_px, mark_color) = pane_mark(kind, terminal_mark, document, palette);
     let size = (mark_logical_px * scale)
         .round()
         .max(1.0)
@@ -9396,7 +9438,19 @@ pub(crate) fn push_files_tree(
                     middle(icon) + icon,
                 ];
                 if wholly_inside(icon_rect) {
-                    sprites.push(ChromeSprite::new(ChromeMark::File, icon_rect, muted));
+                    // **The tree is where a file-type icon earns its keep**, and
+                    // the class is asked of the row's own name rather than
+                    // carried on the row: `FilesRow` is what the worker found on
+                    // disk, and which page this build draws for it is a fact
+                    // about this build.
+                    //
+                    // `muted` unchanged, for every class alike (user ruling,
+                    // 2026-08-15): the row's own state grey is the file ink and
+                    // there is no second one. What tells a `.rs` from a `.csv`
+                    // here is the badge and nothing else — the accent in this
+                    // column means *directory*, and it goes on meaning only that.
+                    let class = crate::preview::file_icon_class(&row.name);
+                    sprites.push(ChromeSprite::new(class.mark(), icon_rect, muted));
                 }
             }
         }
@@ -11093,9 +11147,22 @@ fn seat_title(kind: SeatKind) -> &'static str {
 /// than picking a shell's artwork at random. The one honest caller of it is
 /// [`pane_head_geometry`], which wants the mark's *size* — the same 15px slot for
 /// all four profiles — and throws the mark itself away.
+///
+/// `document` is the exact counterpart on the Preview side (file-type icons,
+/// 2026-08-15): **which file** a preview seat is showing, by name. It is the one
+/// other thing a `SeatKind` cannot answer, for the same reason `terminal` is —
+/// every preview is the same kind and they are not the same document — and it
+/// arrived for the same reason, which is that without it every head, bar, ghost
+/// and schematic in the product drew one page over whatever was actually open.
+///
+/// `None` here is honest rather than broken, unlike its twin: a preview pane
+/// with no buffer really is showing nothing, and nothing is a plain page. So the
+/// size-only caller can pass `None` too, and does — the slot is 14px whichever
+/// page lands in it.
 pub(crate) fn pane_mark(
     kind: SeatKind,
     terminal: Option<ChromeMark>,
+    document: Option<&str>,
     palette: bt_render::ChromePalette,
 ) -> (ChromeMark, f32, [u8; 3]) {
     match kind {
@@ -11110,8 +11177,11 @@ pub(crate) fn pane_mark(
             palette.accent,
         ),
         SeatKind::Preview => (
-            ChromeMark::File,
+            crate::preview::file_icon_class_of(document).mark(),
             PANE_HEAD_FILE_MARK_LOGICAL_PX,
+            // `.preview-head .files-ico { color: var(--accent) }`, unchanged by
+            // the file-type pass: the page differs by class and the ink does
+            // not (user ruling, 2026-08-15).
             palette.accent,
         ),
         SeatKind::Placeholder => (
@@ -12143,6 +12213,69 @@ mod tests {
         );
     }
 
+    /// PIN (file-type icons, 2026-08-15) — **the preview head's `files-ico` is
+    /// the page the open document earns**, and a head with nothing open is the
+    /// unbadged page in the accent it always wore.
+    ///
+    /// The head is the second surface the report was about and the one that
+    /// proves the mark is not a tree-only decoration: `pane_mark` is what the
+    /// head, the collapsed bar, the drag ghost, the drop stand-in and the peek
+    /// schematic all read, so an assertion here is an assertion about five
+    /// surfaces that cannot disagree.
+    ///
+    /// Mutation: drop the `document` argument at the head's `pane_mark` call and
+    /// pass `None` — every head goes back to one page while the tree beside it
+    /// stays typed, which is exactly the half-done state this test exists to
+    /// catch.
+    #[test]
+    fn the_preview_head_wears_the_page_its_document_earns() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let palette = chrome_palette();
+        let head_mark = |title: Option<&str>| {
+            let (_, _, sprites) = build_chrome_with_preview(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                None,
+                title,
+                None,
+            );
+            sprites
+                .iter()
+                .find(|sprite| {
+                    is_a_page(sprite.mark)
+                        && sprite.rect[2] - sprite.rect[0] == PANE_HEAD_FILE_MARK_LOGICAL_PX
+                })
+                .cloned()
+                .expect("the preview head draws a page at its own 14px")
+        };
+        for (title, expected_mark) in [
+            ("sunset.png", ChromeMark::FileImage),
+            ("NOTES.md", ChromeMark::FileMarkdown),
+            ("main.rs", ChromeMark::FileCode),
+            ("Cargo.toml", ChromeMark::FileConfig),
+            ("rows.csv", ChromeMark::FileTable),
+            ("notes.txt", ChromeMark::File),
+        ] {
+            let sprite = head_mark(Some(title));
+            assert_eq!(sprite.mark, expected_mark, "{title} in the head");
+            assert_eq!(
+                sprite.color, palette.accent,
+                "{title} took an ink of its own — `.preview-head .files-ico` is \
+                 `--accent` whatever page stands in it (user ruling, 2026-08-15)"
+            );
+        }
+        // A pane with no document open: the page with no claim on it, in the
+        // accent `.preview-head .files-ico` has always been.
+        let empty = head_mark(None);
+        assert_eq!(empty.mark, ChromeMark::File);
+        assert_eq!(empty.color, palette.accent);
+    }
+
     /// PIN (styling pass): a preview state notice is a quiet centred note in the
     /// body — dim ink, horizontally centred, below the title bar — while the
     /// title keeps full-strength ink. The notice is the only centred label, so
@@ -12232,6 +12365,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 preview_titles: &titles,
+                preview_documents: &titles,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &marks,
                 files_names: &NO_FILES_NAMES,
@@ -12297,6 +12431,7 @@ mod tests {
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     preview_titles: &[],
+                    preview_documents: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &marks,
                     files_names: &NO_FILES_NAMES,
@@ -13979,6 +14114,7 @@ mod tests {
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     preview_titles: &[],
+                    preview_documents: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
@@ -14191,6 +14327,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -14286,6 +14423,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -14389,12 +14527,26 @@ mod tests {
             .filter(|sprite| sprite.mark == ChromeMark::FolderOpen)
             .count();
         assert_eq!(folders, 1, "and it is open, so it wears the open folder");
+        // Both file rows wear a page — and since 2026-08-15 not necessarily the
+        // *same* page: `main.rs` is source and `a.txt` is prose, so the two are
+        // one family and two drawings. The family is what this test is about,
+        // and `a_file_row_wears_the_page_its_name_earns` is about the drawings.
         let files = chrome
             .sprites
             .iter()
-            .filter(|sprite| sprite.mark == ChromeMark::File)
+            .filter(|sprite| {
+                matches!(
+                    sprite.mark,
+                    ChromeMark::File
+                        | ChromeMark::FileImage
+                        | ChromeMark::FileMarkdown
+                        | ChromeMark::FileCode
+                        | ChromeMark::FileConfig
+                        | ChromeMark::FileTable
+                )
+            })
             .count();
-        assert_eq!(files, 2, "both file rows wear the file mark");
+        assert_eq!(files, 2, "both file rows wear a page");
         // The slot is held: a file's name starts where a folder's name starts.
         let folder_name = chrome
             .labels
@@ -14407,6 +14559,107 @@ mod tests {
             .find(|label| label.text == "a.txt")
             .expect("the file row is drawn");
         assert_eq!(folder_name.rect[0], file_name.rect[0]);
+    }
+
+    /// PIN (file-type icons, 2026-08-15) — **the tree row draws the page its
+    /// row's name earns, and every page in the column wears one ink.**
+    ///
+    /// The report this pass answers was "every file in the tree wears one
+    /// document icon", so the tree is where it has to be true first. Eight rows,
+    /// one per class plus the three ways a name reaches the neutral one.
+    ///
+    /// The second half is the user's ruling of the same day, and it is asserted
+    /// here rather than only in the palette because this is the surface it was
+    /// ruled on: a column of eight files is one grey and the folder among them
+    /// is the accent, so the only saturated thing in a files tree is a
+    /// directory. Colour says *where you can go*; the badge says *what a file
+    /// is*.
+    ///
+    /// Mutation: draw `ChromeMark::File` unconditionally in `push_files_tree`'s
+    /// `RowKind::File` arm — the classifier can keep answering correctly and the
+    /// picture will still be the one the user reported. Or hand the typed pages
+    /// `palette.accent` instead of `muted`, and the column goes back to being a
+    /// shelf.
+    #[test]
+    fn a_file_row_wears_the_page_its_name_earns_and_every_page_wears_one_ink() {
+        use crate::marks::ChromeMark as M;
+        let palette = chrome_palette();
+        let cases: [(&str, M); 8] = [
+            ("photo.png", M::FileImage),
+            ("README.md", M::FileMarkdown),
+            ("main.rs", M::FileCode),
+            ("Cargo.toml", M::FileConfig),
+            ("rows.csv", M::FileTable),
+            // The neutral page, reached three ways: prose, a dotfile, and a name
+            // this build cannot read at all.
+            ("notes.txt", M::File),
+            (".gitignore", M::File),
+            ("bundle.zip", M::File),
+        ];
+        let rows = cases
+            .iter()
+            .map(|(name, _)| tree_row(&format!("/{name}"), name, 0, crate::files::RowKind::File))
+            .chain(std::iter::once(tree_row(
+                "/src",
+                "src",
+                0,
+                crate::files::RowKind::Directory { open: false },
+            )))
+            .collect::<Vec<_>>();
+        let (_, _, _, chrome) = files_chrome(
+            FilesTreeContent {
+                rows,
+                ..three_row_tree()
+            },
+            None,
+        );
+        // One icon per row, and the rows run down the column, so the pages in
+        // top-to-bottom order are the file rows in order.
+        let mut pages: Vec<&ChromeSprite> = chrome
+            .sprites
+            .iter()
+            .filter(|sprite| is_a_page(sprite.mark))
+            .collect();
+        pages.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]));
+        assert_eq!(
+            pages.len(),
+            cases.len(),
+            "every file row draws exactly one page and the folder draws none"
+        );
+        for (icon, (name, expected_mark)) in pages.into_iter().zip(cases) {
+            assert_eq!(icon.mark, expected_mark, "{name} wears the wrong page");
+            // One ink for all eight, and it is the row's own resting grey — the
+            // very ink the single file mark wore before this pass existed.
+            assert_eq!(
+                icon.color, palette.files_row_muted,
+                "{name} took an ink of its own — a page differs from its \
+                 neighbours by its badge and by nothing else (user ruling, \
+                 2026-08-15)"
+            );
+        }
+        // And the folder below them is untouched: the accent, and a folder.
+        let folder = chrome
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == M::Folder)
+            .expect("the directory row still draws a folder");
+        assert_eq!(
+            folder.color, palette.accent,
+            "a directory is not a document and keeps the accent"
+        );
+    }
+
+    /// Whether a mark is one of the six pages a file can wear.
+    fn is_a_page(mark: ChromeMark) -> bool {
+        matches!(
+            mark,
+            ChromeMark::File
+                | ChromeMark::FileImage
+                | ChromeMark::FileMarkdown
+                | ChromeMark::FileCode
+                | ChromeMark::FileConfig
+                | ChromeMark::FileTable
+        )
     }
 
     /// PIN — C33. The triangle is turned, not swapped: a shut row and an open
@@ -17941,6 +18194,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -18135,6 +18389,7 @@ mod tests {
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     preview_titles: &[],
+                    preview_documents: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
@@ -18238,6 +18493,7 @@ mod tests {
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     preview_titles: &[],
+                    preview_documents: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
@@ -18446,6 +18702,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &all_powershell(seats),
                 files_names: &NO_FILES_NAMES,
@@ -20227,6 +20484,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -20284,6 +20542,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -20572,7 +20831,7 @@ mod tests {
         ];
         let parts = chrome_of(&seats, &layout, None);
         let palette = chrome_palette();
-        let (expected_mark, _, _) = pane_mark(SeatKind::Preview, None, palette);
+        let (expected_mark, _, _) = pane_mark(SeatKind::Preview, None, None, palette);
         let marks: Vec<_> = parts
             .sprites
             .iter()
@@ -21071,6 +21330,7 @@ mod tests {
                 rail: state,
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -21312,6 +21572,7 @@ mod tests {
                 rail: state,
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -21561,6 +21822,7 @@ mod tests {
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -21715,6 +21977,7 @@ mod tests {
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
@@ -22899,6 +23162,7 @@ mod tests {
                 rail: icon_rail(1.0),
                 rail_scroll: 0.0,
                 preview_titles: &[],
+                preview_documents: &[],
                 terminal_names: &names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
