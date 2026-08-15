@@ -389,7 +389,10 @@ pub fn parse_iso8601_utc(text: &str) -> Option<SystemTime> {
 }
 
 /// Days since 1970-01-01 for a proleptic-Gregorian civil date.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+///
+/// Shared with [`crate::git`], which reads git's own timestamps the same way and
+/// for the same reason: one Gregorian calendar in this crate, not two.
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     // Shift the year so it starts in March, which puts the leap day last and
     // makes the day-of-year a single linear expression.
     let year = year - i64::from(month <= 2);
@@ -401,7 +404,12 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 /// The inverse of [`days_from_civil`].
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+///
+/// Shared with [`crate::git::relative_time`], which needs the same calendar for
+/// the same reason this one does — a date to show, from a number of seconds, in
+/// a workspace with no date-time dependency. One implementation of the Gregorian
+/// calendar, not two that can disagree about a leap year.
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let days = days + 719_468;
     let era = days.div_euclid(146_097);
     let day_of_era = days - era * 146_097;

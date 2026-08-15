@@ -1055,6 +1055,53 @@ fn search_path(environment: &dyn ShellEnvironment, file_name: &str) -> Option<Pa
         .find(|candidate| environment.is_file(candidate))
 }
 
+/// The installs `git.exe` is looked for in when it is not on `PATH`.
+///
+/// The same three the Git Bash profile falls back to — the system-wide, the
+/// 32-bit and the per-user installers' defaults — pointed at `cmd\git.exe`
+/// instead of `bin\bash.exe`, because they are two files of one install.
+const GIT_FALLBACKS: &[ProgramCandidate] = &[
+    ProgramCandidate::Under {
+        variable: "ProgramFiles",
+        tail: r"Git\cmd\git.exe",
+    },
+    ProgramCandidate::Under {
+        variable: "ProgramFiles(x86)",
+        tail: r"Git\cmd\git.exe",
+    },
+    ProgramCandidate::Under {
+        variable: "LocalAppData",
+        tail: r"Programs\Git\cmd\git.exe",
+    },
+];
+
+/// Where `git.exe` is on this machine, or `None` when it is nowhere.
+///
+/// **`PATH` first, and it is more than a shortcut.** The Git block asks `git`
+/// questions whose answers sit three inches from a pane where the user types
+/// `git status` themselves — so the binary that answers must be *the one they
+/// are already using*, not merely one that exists. `PATH` names that binary; the
+/// three fallbacks under it only catch a machine where Git was installed but
+/// never put on the path, and a Git found that way is still the only one there
+/// is.
+///
+/// This is the same locator the `gitbash` profile resolves through, one level
+/// down: that profile asks `PATH` for `git.exe` in order to find `bash.exe`
+/// *beside* it, and this asks for the anchor itself. One implementation of "is
+/// there a Git on this machine", not two that can disagree about it.
+///
+/// `None` is an answer and not a failure (W5): a machine with no Git gets a Git
+/// page that says so once, and every other part of the product is untouched.
+#[must_use]
+pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
+    search_path(environment, "git.exe").or_else(|| {
+        GIT_FALLBACKS.iter().copied().find_map(|candidate| {
+            ProfilePrograms::candidate_path(candidate, environment)
+                .filter(|path| environment.is_file(path))
+        })
+    })
+}
+
 /// Which executable each profile resolves to **on this machine**, probed once.
 ///
 /// Once, and that is the whole reason this is a value rather than a function.
@@ -1105,7 +1152,7 @@ impl ProfilePrograms {
     /// is nowhere on `PATH`.
     ///
     /// Naming a place is not finding a file there; the caller still probes.
-    fn candidate_path(
+    pub(crate) fn candidate_path(
         candidate: ProgramCandidate,
         environment: &dyn ShellEnvironment,
     ) -> Option<PathBuf> {

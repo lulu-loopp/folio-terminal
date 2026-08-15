@@ -15,6 +15,7 @@ use std::{
 mod file_peek;
 mod files;
 mod float;
+mod git;
 mod input;
 mod marks;
 mod peek_strip;
@@ -174,6 +175,13 @@ enum AppEvent {
     /// lane where the answer is allowed to be seconds late without anything else
     /// noticing.
     PreviewReady,
+    /// Something a repository was asked has been answered.
+    ///
+    /// The fourth of the same family and separate for the same reason: a `git
+    /// status` on a large repository is the slowest answer in the window, and it
+    /// must wake only the seat that asked rather than every tree, every preview
+    /// and every formula in the tab.
+    GitReady,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -3029,6 +3037,16 @@ struct TabState {
     /// rebuilt from the filesystem every run. Merging them would put a hundred
     /// thousand cached names behind `files_state`, which every caller clones.
     file_trees: BTreeMap<SeatId, files::DirCache>,
+    /// What each files column knows about the repository under its root.
+    ///
+    /// The third table of the same family and separate from the two above for
+    /// the same reasons: it is partial (a column nobody has opened a Git page on
+    /// has no entry), it holds no durable truth (every answer in it can be asked
+    /// for again), and it is expensive to clone. Keyed by the seat, because a
+    /// repository is only ever read on behalf of a column that is pointed at it —
+    /// two columns on one repository are two entries with two lifetimes, which is
+    /// what lets one of them be re-rooted without disturbing the other.
+    git_trees: BTreeMap<SeatId, git::GitCache>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
     ///
     /// **Always a Terminal seat in this build**, which is what lets `sessions`
@@ -3214,6 +3232,31 @@ struct Runtime {
     preview_worker: preview::PreviewWorker,
     preview_worker_running: bool,
     preview_worker_notice_pending: bool,
+    /// The thread that asks `git` about the repositories the columns are in.
+    ///
+    /// Its own lane for the reason the other three are separate, and one degree
+    /// more strongly: a `git status` on a large repository is the slowest answer
+    /// in this window, and a directory read queued behind one would make the
+    /// tree — which reads the *same* disk far faster — appear to hang.
+    git_worker: git::GitWorker,
+    git_worker_running: bool,
+    git_worker_notice_pending: bool,
+    /// Where to write what the git worker answers, when anyone asked for it
+    /// (`BT_GIT_TRACE=<path>`).
+    ///
+    /// **A debug channel, not a feature.** This slice is the data plane: nothing
+    /// on screen consumes a repository yet, so without a door like this one the
+    /// only proof the thread works would be a test that never touches the event
+    /// loop. With it set, every docked Files column drives [`git::GitCache`]'s own
+    /// driver — the same one the Git page will drive in G-2 — and each answer is
+    /// appended as it lands. It goes when the panel arrives to ask for real.
+    ///
+    /// **A file and not stderr**, which is `BT_CHROME_DUMP`'s shape and for the
+    /// same reason: this window cannot be started with its output redirected —
+    /// ConPTY refuses to open a pseudo console for a process whose standard
+    /// handles are pipes — so a trace that only reached stderr could not be read
+    /// back by anything that started the window.
+    git_trace: Option<PathBuf>,
     /// How wide the "no preview" card's button caption is drawn.
     ///
     /// Measured into the runtime where the picture is built, for the reason
@@ -10870,6 +10913,7 @@ fn assemble_tab_state(
         sessions,
         files,
         file_trees: BTreeMap::new(),
+        git_trees: BTreeMap::new(),
         focused_leaf,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
@@ -11160,6 +11204,14 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
         if let Some(cache) = source.file_trees.remove(was) {
             target.file_trees.insert(*now, cache);
         }
+        // And what it had learned about the repository under it, for the same
+        // reason and re-keyed the same way: a column that changed tabs is looking
+        // at the same folder, so it is looking at the same repository, and making
+        // it re-run a `git status` to find that out would blank the Git page of a
+        // pane that merely moved.
+        if let Some(cache) = source.git_trees.remove(was) {
+            target.git_trees.insert(*now, cache);
+        }
         // **P126/§7.1.3 「pane 拆出/被顶出时携带其当前缓冲(同一对象)」 — the whole
         // view crosses with the seat, re-keyed the same way.**
         //
@@ -11374,6 +11426,92 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
         renamed: name_after != name_before,
         moved: name_after.1 != name_before.1,
     })
+}
+
+/// One repository answer, in one line (`BT_GIT_TRACE`).
+///
+/// A summary rather than the value's own `Debug`, because the value's own
+/// `Debug` is the whole answer: two thousand status entries and fifty commits,
+/// each with two hashes and a subject, is a megabyte of trace per refresh and a
+/// line nobody can read. What a look at the data plane wants to know is that the
+/// shapes came back filled — how many of each, and which branch — which is what
+/// this says.
+fn summarise_git_answer(answer: &git::GitAnswer) -> String {
+    match answer {
+        git::GitAnswer::Repo { dir, outcome } => match outcome {
+            Ok(root) => format!("Repo({}) -> {}", dir.display(), root.display()),
+            Err(fault) => format!("Repo({}) -> {fault:?}", dir.display()),
+        },
+        git::GitAnswer::Status { root, outcome } => match outcome {
+            Ok(status) => format!(
+                "Status({}) -> branch={:?} upstream={:?} ahead={} behind={} staged={} changes={} \
+                 untracked={} dropped={}",
+                root.display(),
+                status.branch,
+                status.upstream,
+                status.ahead,
+                status.behind,
+                status.count(git::GitGroup::Staged),
+                status.count(git::GitGroup::Changes),
+                status.count(git::GitGroup::Untracked),
+                status.dropped,
+            ),
+            Err(fault) => format!("Status({}) -> {fault:?}", root.display()),
+        },
+        git::GitAnswer::Branches { root, outcome } => match outcome {
+            Ok(branches) => format!(
+                "Branches({}) -> {} branches, head={:?}",
+                root.display(),
+                branches.len(),
+                branches.iter().find(|branch| branch.is_head).map(|branch| (
+                    &branch.name,
+                    branch.ahead,
+                    branch.behind,
+                    &branch.committerdate_relative
+                )),
+            ),
+            Err(fault) => format!("Branches({}) -> {fault:?}", root.display()),
+        },
+        git::GitAnswer::Log {
+            root,
+            skip,
+            outcome,
+        } => match outcome {
+            Ok(log) => format!(
+                "Log({}, skip={skip}) -> {} commits, has_more={}, first={:?}",
+                root.display(),
+                log.commits.len(),
+                log.has_more,
+                log.commits.first().map(|commit| (
+                    &commit.short,
+                    &commit.time_relative,
+                    commit.parents.len(),
+                    commit.subject.chars().take(40).collect::<String>()
+                )),
+            ),
+            Err(fault) => format!("Log({}, skip={skip}) -> {fault:?}", root.display()),
+        },
+        git::GitAnswer::Diff {
+            root,
+            path,
+            staged,
+            outcome,
+        } => format!(
+            "Diff({}, {path}, staged={staged}) -> {:?}",
+            root.display(),
+            outcome.as_ref().map(String::len),
+        ),
+        git::GitAnswer::Show {
+            root,
+            hash,
+            path,
+            outcome,
+        } => format!(
+            "Show({}, {hash}, {path}) -> {:?}",
+            root.display(),
+            outcome.as_ref().map(String::len),
+        ),
+    }
 }
 
 /// Drain every shell this tab holds.
@@ -11615,6 +11753,7 @@ impl Runtime {
         let math_worker = MathWorker::spawn(proxy.clone())?;
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
+        let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut runtime = Self {
             renderer,
             tabs,
@@ -11630,6 +11769,10 @@ impl Runtime {
             preview_worker,
             preview_worker_running: true,
             preview_worker_notice_pending: false,
+            git_worker,
+            git_worker_running: true,
+            git_worker_notice_pending: false,
+            git_trace: std::env::var_os("BT_GIT_TRACE").map(PathBuf::from),
             preview_button_width: 0.0,
             preview_opened_at: None,
             pending_frames: LatestFrameSlot::default(),
@@ -14953,6 +15096,10 @@ impl Runtime {
             // more confusing shape: the next column would come up already
             // showing somebody else's directories under its own root.
             self.file_trees.remove(&seat);
+            // And what it had learned about the repository under it, for exactly
+            // the same reason: a re-minted seat id must not come up already
+            // holding another column's branches.
+            self.git_trees.remove(&seat);
         }
         debug_assert!(
             self.sessions_match_terminals(),
@@ -18688,6 +18835,12 @@ impl Runtime {
         {
             terminal_frame.status_text = Some(notice.to_owned());
         }
+        // The fourth, in the same queue and last for the same reason.
+        if terminal_frame.status_text.is_none()
+            && let Some(notice) = git::take_git_worker_notice(&mut self.git_worker_notice_pending)
+        {
+            terminal_frame.status_text = Some(notice.to_owned());
+        }
         let composed = compose_preedit(&terminal_frame, self.shell_preedit())
             .context("reject non-rectangular frame before IME composition")?;
         if skip_unchanged
@@ -18767,6 +18920,111 @@ impl Runtime {
             &mut self.preview_worker_running,
             &mut self.preview_worker_notice_pending,
         )
+    }
+
+    /// Append one line to the git trace, when one was asked for.
+    ///
+    /// Opened and closed per line rather than held open: this is a debug channel
+    /// written a handful of times per repository, and a file handle kept for the
+    /// life of the window would be a resource held for a feature that is not
+    /// there yet. A trace that cannot be written is a trace that is not written —
+    /// there is nothing here worth ending a session over.
+    fn trace_git(&self, line: &str) {
+        use std::io::Write as _;
+        let Some(path) = self.git_trace.as_ref() else {
+            return;
+        };
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "BT_GIT_TRACE {line}");
+        }
+    }
+
+    fn disable_git_worker(&mut self) -> bool {
+        git::disable_git_worker_state(
+            &mut self.git_worker_running,
+            &mut self.git_worker_notice_pending,
+        )
+    }
+
+    /// Take every repository answer the worker has finished.
+    ///
+    /// The third of the same shape, down to the silence: a tab or a column that
+    /// went away while a `git status` was running has nowhere to put the answer,
+    /// and a column that has since been re-rooted refuses it — both are the
+    /// cancellation, arriving as a dropped result. Only an answer that actually
+    /// changed something the active tab is drawing asks for a new frame.
+    fn apply_git_results(&mut self) -> Result<()> {
+        let mut changed = false;
+        loop {
+            match self.git_worker.responses.try_recv() {
+                Ok(response) => {
+                    let host = response.host;
+                    let Some(index) = self.tabs.iter().position(|tab| tab.id == host.tab) else {
+                        continue;
+                    };
+                    self.trace_git(&format!(
+                        "seat={:?} {}",
+                        host.seat,
+                        summarise_git_answer(&response.answer)
+                    ));
+                    let tab = &mut self.tabs[index];
+                    if !tab.files.contains_key(&host.seat) {
+                        continue;
+                    }
+                    let Some(cache) = tab.git_trees.get_mut(&host.seat) else {
+                        continue;
+                    };
+                    let filed = cache.accept(response.answer);
+                    changed |= filed && index == self.active_tab;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    changed |= self.disable_git_worker();
+                    break;
+                }
+            }
+        }
+        if changed && self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Put everything the repository under this column has not been asked yet.
+    ///
+    /// **The seam G-2 will keep.** The plan is derived from the cache
+    /// ([`git::GitCache::pending_questions`]) rather than remembered here, so
+    /// this is idempotent and R31 holds however often it is called: a slot that
+    /// is already in flight or already answered asks for nothing. What is
+    /// temporary is only *who calls it* — today the debug channel, tomorrow the
+    /// Git page being open.
+    fn ask_git_for_column(&mut self, seat: SeatId, root: &str) {
+        if root.trim().is_empty() {
+            return;
+        }
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let cache = self.tabs[active].git_trees.entry(seat).or_default();
+        cache.retarget(std::path::Path::new(root));
+        let questions = cache.pending_questions();
+        // Marked before any send, so a second call on the same frame sees
+        // questions already asked rather than asking them twice.
+        for question in &questions {
+            cache.mark_pending(question);
+        }
+        for question in questions {
+            if !self.git_worker.request(git::GitRequest {
+                host: LeafId { tab: tab_id, seat },
+                question,
+            }) {
+                self.disable_git_worker();
+                return;
+            }
+        }
     }
 
     /// Take every file head the preview worker has finished.
@@ -18943,6 +19201,26 @@ impl Runtime {
             if !self.files_worker.request(ask) {
                 self.disable_files_worker();
                 break;
+            }
+        }
+        // The Git page's questions ride the same walk, for the same reason the
+        // directory ones do: this is the only place that knows which columns are
+        // on screen and where each of them is rooted. Behind the debug channel
+        // until G-2 gives the answers somewhere to be drawn — see `trace_git`.
+        if self.git_trace.is_some() {
+            let rooted: Vec<(SeatId, String)> = views
+                .keys()
+                .map(|seat| {
+                    let root = self.tabs[active]
+                        .files
+                        .get(seat)
+                        .map(|state| state.root.clone())
+                        .unwrap_or_default();
+                    (*seat, root)
+                })
+                .collect();
+            for (seat, root) in rooted {
+                self.ask_git_for_column(seat, &root);
             }
         }
         views
@@ -19334,6 +19612,7 @@ impl Runtime {
                     },
                 );
                 self.tabs[active].file_trees.remove(&seat);
+                self.tabs[active].git_trees.remove(&seat);
                 self.mark_session_dirty(Instant::now());
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
@@ -20305,6 +20584,9 @@ impl Runtime {
             return Ok(());
         }
         self.tabs[active].file_trees.remove(&seat);
+        // A column pointed somewhere else is a column that may be in another
+        // repository — or in none. Everything it knew was about the old root.
+        self.tabs[active].git_trees.remove(&seat);
         self.mark_session_dirty(Instant::now());
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -29505,6 +29787,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::PreviewReady => {
                 if let Some(runtime) = self.runtime.as_mut()
                     && let Err(error) = runtime.apply_preview_results()
+                {
+                    self.fail(event_loop, error);
+                }
+            }
+            AppEvent::GitReady => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.apply_git_results()
                 {
                     self.fail(event_loop, error);
                 }

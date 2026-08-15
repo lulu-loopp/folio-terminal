@@ -265,6 +265,7 @@ dependencies = [
  "bt-unicode",
  "bt-viewport",
  "pollster",
+ "serde_json",
  "winit",
 ]
 
