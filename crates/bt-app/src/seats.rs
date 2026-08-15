@@ -1927,6 +1927,25 @@ pub enum ChromeTarget {
     /// `.newtab.chevbtn.nt-chev` — the profile picker that shares the `+`'s box
     /// and stands immediately beside it.
     NewTabMenu,
+    /// **The rail's own rectangle, on none of its controls** — a gap between two
+    /// rows, the empty run below the list, the padding at its edges.
+    ///
+    /// Not a control, and pressing it does nothing. It exists because a hit-test
+    /// ladder reads `None` as *"keep asking"*, and the next thing asked after the
+    /// rail is a pane the rail is **drawn on top of**: an icon rail opens over
+    /// the panes rather than reflowing them ([`RailState::terminal_inset_logical_px`]
+    /// keeps only the parked width clear), so the pixels it covers still belong,
+    /// in the seat layout, to a real pane with real rows. Answering `None` for
+    /// them handed every one to whatever was underneath — which is how a files
+    /// tree row that nobody could see went on lighting up under the pointer and
+    /// popping its glance card open (user-reported, 2026-08-15; the sixth case in
+    /// the cross-channel z-order family).
+    ///
+    /// So the rail claims every pixel it covers, exactly as [`crate::float`]'s
+    /// own hit test claims every pixel of a window's frame
+    /// (`FloatPart::Body`): **a surface drawn over another surface answers for
+    /// its whole rectangle, including the answer "nothing here".**
+    RailBody,
 }
 
 /// How much room a tab has, measured the way the mock-up's own
@@ -3040,6 +3059,21 @@ pub struct RailGeometry {
     pub text_opacity: f32,
 }
 
+impl RailGeometry {
+    /// Whether the rail's own rectangle is over this point.
+    ///
+    /// [`hit_rail_chrome`]'s outer guard, asked by name for the second question
+    /// the same rectangle settles: `.pane:hover` is not read off a
+    /// [`ChromeTarget`] at all (most of a pane is a terminal, which is not
+    /// chrome), so the pane under an open icon rail would go on lighting up for
+    /// a pointer that is resting on the rail. Same rectangle, same answer, one
+    /// place it is written down.
+    #[must_use]
+    pub fn covers(&self, x: f64, y: f64) -> bool {
+        contains(self.body, x as f32, y as f32)
+    }
+}
+
 /// The rail's rows, furniture and shade, scrolled by `scroll` physical pixels.
 ///
 /// `height` is the whole window's client height; the rail starts at the title
@@ -3360,6 +3394,11 @@ pub fn pinned_run_len(trailers: &[TabTrailer]) -> usize {
 /// Row order is the strip's own — the trailing glyph before the body — so "the
 /// button is not the row" holds on this axis too.
 ///
+/// **Total over its own rectangle.** Outside the rail it answers `None`, which
+/// in a ladder means "ask the next surface"; *inside* it, every pixel that is
+/// not one of its controls is [`ChromeTarget::RailBody`] rather than `None` —
+/// see that variant for the bug the difference closes.
+///
 /// One argument longer than [`hit_tab_chrome`], and the extra one is
 /// [`RailState`]: a hit test cannot be run against a rail without being told
 /// which rail. Folding the rest into a struct would move the argument list
@@ -3393,9 +3432,11 @@ pub fn hit_rail_chrome(
     }
     // Scrolled-off rows are not clickable, for the same reason the strip's are
     // not: the clip box is the surface, and a row outside it is not on screen.
+    // **Not clickable is not the same as not there**: this is still the rail's
+    // own pixel, and it is opaque.
     let [list_top, list_bottom] = geometry.viewport;
     if y < list_top || y >= list_bottom {
-        return None;
+        return Some(ChromeTarget::RailBody);
     }
     for (index, tab) in geometry.tabs.iter().enumerate() {
         // The folder joins the run at its head, and is asked first for the same
@@ -3414,7 +3455,8 @@ pub fn hit_rail_chrome(
             return Some(ChromeTarget::Tab(index));
         }
     }
-    None
+    // Inside the list's clip box but between two rows, or past the last one.
+    Some(ChromeTarget::RailBody)
 }
 
 /// The mock-up's two measured thresholds, read off the tab's own logical width.
@@ -22273,6 +22315,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **An open rail answers for every pixel it covers, so nothing beneath it
+    /// ever does** (user-reported, 2026-08-15 — the sixth cross-channel z-order
+    /// case).
+    ///
+    /// The reported symptom was a files tree row that was not on screen: with
+    /// the rail open over the tree, running the pointer down the covered strip
+    /// lit rows up and popped the glance card open for them. The mechanism is
+    /// the ladder's, not the tree's — `hit_rail_chrome` named only its
+    /// *controls*, so a gap between two rows, or the empty run below the list,
+    /// answered `None`, and `None` in a `.or_else` chain means "ask the next
+    /// surface". The next surface is a pane the rail is standing on: an icon
+    /// rail keeps only [`RAIL_PARK_LOGICAL_PX`] clear of the seats
+    /// ([`RailState::terminal_inset_logical_px`]) and opens over the rest, so
+    /// the layout underneath is a real column with real rows.
+    ///
+    /// Both halves are asserted, and the second is what makes the first mean
+    /// anything: the tree really is under there, answering for its own rows —
+    /// and the rail claims every one of those points anyway.
+    ///
+    /// MUTATION: put either `None` back in `hit_rail_chrome` — the one for a
+    /// point outside the list's clip box, or the one at the end of the row walk
+    /// — and the covered rows are handed straight back to the tree.
+    #[test]
+    fn an_open_rail_answers_for_every_pixel_it_covers_and_the_tree_beneath_it_never_does() {
+        let dpi_milli = 1_000_u32;
+        let scale = 1.0_f32;
+        let (width, height) = (960_u32, 618_u32);
+        // The window as an *icon* rail lays it out: the seats begin at the
+        // parked width, whatever the rail is currently doing.
+        let parked = logical_to_device(RAIL_PARK_LOGICAL_PX, scale_ppm(dpi_milli));
+        // The column on the **left**, which is where a sidebar puts it and the
+        // only side an open rail can stand over.
+        let seats = Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 300_000,
+            children: [
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                    bt_persist::FilesLeafV1 {
+                        root: "D:\\".to_owned(),
+                        open: Vec::new(),
+                        sel: None,
+                        width: 240,
+                    },
+                ))),
+                term_leaf(),
+            ],
+        }))
+        .expect("a column beside a terminal restores");
+        let column = seats.files().first().copied().expect("a files column");
+        let layout = solved(
+            &seats,
+            logical_viewport(width, height, scale_ppm(dpi_milli), parked),
+            &seat_metrics(dpi_milli),
+        );
+        let mut trees = BTreeMap::new();
+        trees.insert(column, three_row_tree());
+
+        let trailers = resting(2);
+        let state = icon_rail(1.0);
+        let rail = rail_geometry(height as f32, scale, &trailers, 0, 0.0, state)
+            .expect("an open icon rail is on screen");
+
+        // Every point the rail's rectangle covers, on a one-pixel-in grid.
+        let mut covered_rows = 0_usize;
+        let mut x = rail.body[0] + 1.0;
+        while x < rail.body[2] {
+            let mut y = rail.body[1] + 1.0;
+            while y < rail.body[3] {
+                let (px, py) = (f64::from(x), f64::from(y));
+                assert!(
+                    hit_rail_chrome(height as f32, scale, &trailers, 0, 0.0, state, px, py)
+                        .is_some(),
+                    "({px}, {py}) is inside the rail and the rail said nothing"
+                );
+                if matches!(
+                    hit_files_tree(&layout, &trees, scale, px, py),
+                    Some(ChromeTarget::FilesRow { .. })
+                ) {
+                    covered_rows += 1;
+                }
+                y += 3.0;
+            }
+            x += 3.0;
+        }
+        assert!(
+            covered_rows > 0,
+            "the tree really is under the open rail, answering for its own rows — \
+             without that this test would pass over an empty window"
+        );
+
+        // And a parked rail claims only the strip the seats already keep clear,
+        // so the tree beside it goes on answering for itself.
+        let parked_rail = rail_geometry(height as f32, scale, &trailers, 0, 0.0, icon_rail(0.0))
+            .expect("a parked icon rail is still on screen");
+        assert!(
+            parked_rail.body[2] <= parked as f32,
+            "a parked rail is no wider than the inset the seats were given"
+        );
     }
 
     /// **The two hit tests are exclusive by construction, not by the router

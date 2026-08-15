@@ -31,5 +31,13 @@ bt-viewport = { path = "../bt-viewport" }
 pollster.workspace = true
 winit.workspace = true
 
+# Tests only. This crate writes `session.json` through `bt-persist` and never
+# touches JSON itself — which is exactly why one test needs to: the promise that
+# a restored session reads bytes the previous build could have written is a
+# promise about the *file*, and a test that compared two Rust structs would go on
+# passing through a field rename or a serde attribute that changed the shape.
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

@@ -161,6 +161,13 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
 /// The judgement is the name's rather than the type's because `.diff` and
 /// `.patch` sit inside the text list: they are text, they are shown as a diff,
 /// and *editing a diff edits nothing real* (mock-up 4970-4978).
+///
+/// **This is about files, and it stays about files** (R24, 2026-08-15). A real
+/// `.diff` on a disk earns the diff view here, by its name, as it always has.
+/// What no longer comes through this door is a *git* diff: it is one because of
+/// what [`PreviewBuffer::source`] says it is, decided in [`PreviewBuffer::view`],
+/// and never because somebody gave it a display name ending in `.diff` so that
+/// this rule would sweep it up.
 #[allow(dead_code)]
 pub fn is_diff_name(name: &str) -> bool {
     matches!(extension_of(name).as_str(), "diff" | "patch")
@@ -1006,16 +1013,84 @@ pub enum PreviewLoad {
     Refused(PreviewRefusal),
 }
 
-/// One file's live buffer.
+/// **Where a buffer's content comes from** — the identity every preview surface
+/// is keyed on.
+///
+/// This used to be a bare `PathBuf` carrying a comment that said "deliberately a
+/// `PathBuf`", and that was right for as long as every preview was a file. The
+/// Git block's two surfaces are not: a diff of a working-tree file and a repo's
+/// commit graph are *documents this window composes*, with no file behind them
+/// that could be opened, saved, or revealed. The mock-up's answer was to smuggle
+/// them through as pseudo-paths — `gitgraph:{root}` and `git:{root}:{path}` —
+/// which on this platform is not merely ugly but ambiguous: a Windows root
+/// already contains a `:`, so `git:C:\w\repo:src\main.rs` cannot be split back
+/// into its parts by any rule that does not already know the answer.
+///
+/// So the identity is a sum, and the disk file is one of its cases. Everything
+/// downstream — the pool's key, a pane's pointer, the view a body is drawn as,
+/// what gets written to `session.json` — asks the variant rather than parsing a
+/// string, and a case that has no file simply has no file rather than having a
+/// path that lies.
+///
+/// **Only [`Self::File`] is constructed today.** The git cases are the shape
+/// G-1 (data plane) and G-3 (diff wiring) will fill; this slice moves the
+/// skeleton and implements no git.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum PreviewSource {
+    /// A file on a disk. Deliberately the whole path: two files called `main.rs`
+    /// are two buffers.
+    File(PathBuf),
+    /// One file's diff in one repository, staged or not.
+    ///
+    /// `root` is the repository's top level (`rev-parse --show-toplevel`) and
+    /// `path` is repo-relative in git's own grammar — forward slashes, no drive
+    /// — because that is what a `git diff` command takes and what its output
+    /// names. `staged` is the whole of the `--cached` mapping (R25): the staged
+    /// and unstaged diffs of one file are two different documents, so they are
+    /// two different buffers.
+    #[allow(dead_code)]
+    GitDiff {
+        root: PathBuf,
+        path: String,
+        staged: bool,
+    },
+    /// One repository's commit graph. Keyed by the repo alone: there is one
+    /// graph per repository and it is the same graph whoever asks.
+    #[allow(dead_code)]
+    GitGraph { root: PathBuf },
+}
+
+impl PreviewSource {
+    /// The common case, spelled short.
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self::File(path.into())
+    }
+
+    /// **The disk file behind this content, when there is one.**
+    ///
+    /// The one door every file-only capability asks through — saving, revealing
+    /// in Explorer, opening with the system handler, resolving a relative
+    /// markdown link, the head read. A git-backed document answers `None`, and
+    /// `None` is not a failure: those verbs are about a file, and this content
+    /// has none. What a git document offers in their place is G-1's and G-3's to
+    /// add here, beside this.
+    pub fn file_path(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::GitDiff { .. } | Self::GitGraph { .. } => None,
+        }
+    }
+}
+
+/// One buffer's live content.
 ///
 /// Owned by the tab's [`PreviewPool`] and *referred* to by the panes showing it,
 /// which is what makes "a file open in two panes is one buffer" true by
 /// construction rather than by two panes agreeing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewBuffer {
-    /// The identity. Deliberately a `PathBuf` and deliberately the whole path:
-    /// two files called `main.rs` are two buffers.
-    pub path: PathBuf,
+    /// The identity — see [`PreviewSource`].
+    pub source: PreviewSource,
     /// What the header and the switcher call it.
     pub name: String,
     pub ftype: PreviewFtype,
@@ -1060,25 +1135,42 @@ pub struct PreviewBuffer {
 }
 
 impl PreviewBuffer {
-    /// A buffer for this path, with everything answerable without a disk already
-    /// answered.
-    pub fn new(path: PathBuf, name: String) -> Self {
+    /// A buffer for this source, with everything answerable without a disk
+    /// already answered.
+    ///
+    /// **`ftype` stays the name's judgement for every source**, and that is the
+    /// point of asking it of the name in the first place (see [`preview_ftype`]):
+    /// a git diff of `main.rs` is named `main.rs` and is text for exactly the
+    /// reasons the file is. What the source decides is the *load* — whether
+    /// there is a disk to go to — and, at [`Self::view`], which body is drawn.
+    pub fn new(source: PreviewSource, name: String) -> Self {
         let ftype = preview_ftype(&name);
-        let load = if is_network_path(&path) {
-            PreviewLoad::Refused(PreviewRefusal::NetworkPath)
-        } else {
-            match ftype {
-                PreviewFtype::Text | PreviewFtype::Markdown | PreviewFtype::Table => {
-                    PreviewLoad::Pending
+        let load = match &source {
+            PreviewSource::File(path) => {
+                if is_network_path(path) {
+                    PreviewLoad::Refused(PreviewRefusal::NetworkPath)
+                } else {
+                    match ftype {
+                        PreviewFtype::Text | PreviewFtype::Markdown | PreviewFtype::Table => {
+                            PreviewLoad::Pending
+                        }
+                        // A picture's pixels come down the decode lane that
+                        // already exists, so its buffer is complete the moment
+                        // it is made.
+                        PreviewFtype::Image => PreviewLoad::Ready,
+                        PreviewFtype::Unknown => PreviewLoad::Refused(PreviewRefusal::Type),
+                    }
                 }
-                // A picture's pixels come down the decode lane that already
-                // exists, so its buffer is complete the moment it is made.
-                PreviewFtype::Image => PreviewLoad::Ready,
-                PreviewFtype::Unknown => PreviewLoad::Refused(PreviewRefusal::Type),
             }
+            // Git-backed content is composed rather than read: nothing about it
+            // is answerable without asking a repository, so it waits in the same
+            // `Pending` a head read waits in — but for the git worker G-1 builds,
+            // never for [`PreviewWorker`], which reads disks (see
+            // [`Self::wants_head_read`]).
+            PreviewSource::GitDiff { .. } | PreviewSource::GitGraph { .. } => PreviewLoad::Pending,
         };
         Self {
-            path,
+            source,
             name,
             ftype,
             content: None,
@@ -1092,8 +1184,14 @@ impl PreviewBuffer {
     }
 
     /// Whether this buffer is still waiting on a head read.
+    ///
+    /// **A head read is a question for a disk**, so it is asked only of a source
+    /// that has one. This is the gate that keeps a git-backed buffer off
+    /// [`PreviewWorker`]'s lane entirely rather than letting it arrive there and
+    /// be dropped.
     pub fn wants_head_read(&self) -> bool {
-        self.load == PreviewLoad::Pending
+        self.source.file_path().is_some()
+            && self.load == PreviewLoad::Pending
             && matches!(
                 self.ftype,
                 PreviewFtype::Text | PreviewFtype::Markdown | PreviewFtype::Table
@@ -1116,8 +1214,14 @@ impl PreviewBuffer {
     /// has, so whether this file is editable right now is a question about the
     /// surface looking at it. Two surfaces on one markdown file can answer it
     /// differently at the same moment, and both are right.
+    ///
+    /// **And one fact only the source knows**: an edit surface exists to write
+    /// bytes back, and a document with no file behind it has nowhere to write
+    /// them. A git diff is a reading of a repository, not a second place to type
+    /// into it.
     pub fn is_editable(&self, md_source: bool) -> bool {
-        self.load == PreviewLoad::Ready
+        self.source.file_path().is_some()
+            && self.load == PreviewLoad::Ready
             && self.content.is_some()
             && !self.truncated
             && is_editable(&self.name, self.ftype, md_source)
@@ -1149,7 +1253,9 @@ impl PreviewBuffer {
     /// Three refusals and one write, in this order and for this reason:
     ///
     /// * A buffer with no body has nothing to write, and writing "nothing"
-    ///   would empty the file a failed read was about.
+    ///   would empty the file a failed read was about. **A buffer with no
+    ///   *file*** — a git-backed document — is the same refusal one level up:
+    ///   there is no path a save could name, which is why it is asked first.
     /// * A body the disk has moved on from is [`SaveOutcome::Conflict`]
     ///   (ruling 8⑨). **Not a prompt and not a blind write** — this slice's
     ///   minimum is that the window says so and keeps the edits, because the
@@ -1160,16 +1266,19 @@ impl PreviewBuffer {
     /// remembered from the write, so the next save compares against what the
     /// filesystem actually recorded.
     pub fn save(&mut self) -> SaveOutcome {
+        let Some(path) = self.source.file_path().map(Path::to_path_buf) else {
+            return SaveOutcome::Failed("there is no file behind this view".to_owned());
+        };
         let Some(content) = self.content.as_deref() else {
             return SaveOutcome::Failed("there is nothing to save".to_owned());
         };
-        if file_mtime(&self.path) != self.disk_mtime {
+        if file_mtime(&path) != self.disk_mtime {
             return SaveOutcome::Conflict;
         }
-        if let Err(error) = save_atomically(&self.path, content) {
+        if let Err(error) = save_atomically(&path, content) {
             return SaveOutcome::Failed(error.to_string());
         }
-        self.disk_mtime = file_mtime(&self.path);
+        self.disk_mtime = file_mtime(&path);
         self.dirty = false;
         SaveOutcome::Saved
     }
@@ -1189,8 +1298,25 @@ impl PreviewBuffer {
     /// Parameterised for [`Self::is_editable`]'s reason: the flip is the view's,
     /// so a markdown file is a rendered page in one pane and a text surface in
     /// another at the same instant.
+    ///
+    /// **The source is asked before the name** (R24, 2026-08-15). A file's body
+    /// is still decided by [`preview_view`]'s ladder, extension and all — that
+    /// ladder is about what a *file* is and nothing here changes it, including
+    /// the `.diff`/`.patch` suffix that earns a real patch file its diff view.
+    /// What the mock-up did instead was hand a git diff a *display name* ending
+    /// in `.diff` so that the same suffix rule would sweep it into the diff view
+    /// by accident, and that is the mechanism this branch retires: a git diff is
+    /// a diff because of what it *is*, stated here, and never because of how it
+    /// happens to be spelled.
     pub fn view(&self, md_source: bool) -> PreviewView {
-        preview_view(&self.name, self.ftype, md_source)
+        match &self.source {
+            PreviewSource::File(_) => preview_view(&self.name, self.ftype, md_source),
+            PreviewSource::GitDiff { .. } => PreviewView::Diff,
+            // G-4's full graph is its own surface and has no body in this
+            // vocabulary yet; until it exists the honest answer is the card that
+            // says there is nothing to show.
+            PreviewSource::GitGraph { .. } => PreviewView::None,
+        }
     }
 
     /// Why there is no body to show, when there is none.
@@ -1231,8 +1357,8 @@ impl PreviewBuffer {
 ///
 /// A `Vec` and not a map, because the order *is* the history the filename
 /// switcher lists and the order the eviction law is written in terms of
-/// ("the earliest clean one"). One entry per path is an invariant of
-/// [`Self::open`], which is the only door in.
+/// ("the earliest clean one"). One entry per [`PreviewSource`] is an invariant
+/// of [`Self::open`], which is the only door in.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PreviewPool {
     buffers: Vec<PreviewBuffer>,
@@ -1246,12 +1372,14 @@ impl PreviewPool {
         self.buffers.len()
     }
 
-    pub fn get(&self, path: &Path) -> Option<&PreviewBuffer> {
-        self.buffers.iter().find(|buffer| buffer.path == path)
+    pub fn get(&self, source: &PreviewSource) -> Option<&PreviewBuffer> {
+        self.buffers.iter().find(|buffer| &buffer.source == source)
     }
 
-    pub fn get_mut(&mut self, path: &Path) -> Option<&mut PreviewBuffer> {
-        self.buffers.iter_mut().find(|buffer| buffer.path == path)
+    pub fn get_mut(&mut self, source: &PreviewSource) -> Option<&mut PreviewBuffer> {
+        self.buffers
+            .iter_mut()
+            .find(|buffer| &buffer.source == source)
     }
 
     /// The buffer for this file, found or made — the one door into the pool.
@@ -1268,24 +1396,24 @@ impl PreviewPool {
     /// not worth losing an unsaved edit for.
     pub fn open(
         &mut self,
-        path: PathBuf,
+        source: PreviewSource,
         name: String,
-        displayed: &[PathBuf],
+        displayed: &[PreviewSource],
     ) -> &mut PreviewBuffer {
-        if let Some(index) = self.index_of(&path) {
+        if let Some(index) = self.index_of(&source) {
             return &mut self.buffers[index];
         }
-        self.buffers.push(PreviewBuffer::new(path.clone(), name));
+        self.buffers.push(PreviewBuffer::new(source.clone(), name));
         while self.buffers.len() > PV_BUFFER_CAP {
             let Some(index) = self.buffers.iter().position(|buffer| {
-                !buffer.dirty && buffer.path != path && !displayed.contains(&buffer.path)
+                !buffer.dirty && buffer.source != source && !displayed.contains(&buffer.source)
             }) else {
                 break;
             };
             self.buffers.remove(index);
         }
         let index = self
-            .index_of(&path)
+            .index_of(&source)
             .expect("the buffer just opened is never the one evicted");
         &mut self.buffers[index]
     }
@@ -1297,8 +1425,8 @@ impl PreviewPool {
     /// `open`'s business and must not be — `open` is the only door that ever
     /// reads a disk, and a buffer that has travelled is a buffer whose edits and
     /// whose dirty bit have to arrive intact rather than be read again.
-    pub fn take(&mut self, path: &Path) -> Option<PreviewBuffer> {
-        let index = self.index_of(path)?;
+    pub fn take(&mut self, source: &PreviewSource) -> Option<PreviewBuffer> {
+        let index = self.index_of(source)?;
         Some(self.buffers.remove(index))
     }
 
@@ -1310,7 +1438,7 @@ impl PreviewPool {
     /// keep a ceiling would be the ceiling costing exactly what it is not worth
     /// (see `open`'s own note).
     pub fn insert(&mut self, buffer: PreviewBuffer) {
-        match self.index_of(&buffer.path) {
+        match self.index_of(&buffer.source) {
             Some(index) => self.buffers[index] = buffer,
             None => self.buffers.push(buffer),
         }
@@ -1346,13 +1474,13 @@ impl PreviewPool {
     /// the body it no longer holds.
     ///
     /// Panes need no redirecting afterwards, and that falls out of the port
-    /// rather than being arranged: a surface names its buffer **by path**
-    /// ([`crate::PreviewPane::buffer`] is a `PathBuf`), so "one buffer per file"
-    /// and "every pane showing the loser now reads the winner" are the same
-    /// sentence here. The mock-up needed a redirect pass because its panes held
-    /// object references.
+    /// rather than being arranged: a surface names its buffer **by source**
+    /// ([`crate::PreviewPane::buffer`] is a [`PreviewSource`]), so "one buffer
+    /// per file" and "every pane showing the loser now reads the winner" are the
+    /// same sentence here. The mock-up needed a redirect pass because its panes
+    /// held object references.
     pub fn merge_buffer(&mut self, mut incoming: PreviewBuffer) {
-        let Some(index) = self.index_of(&incoming.path) else {
+        let Some(index) = self.index_of(&incoming.source) else {
             self.buffers.push(incoming);
             return;
         };
@@ -1381,8 +1509,10 @@ impl PreviewPool {
         }
     }
 
-    fn index_of(&self, path: &Path) -> Option<usize> {
-        self.buffers.iter().position(|buffer| buffer.path == path)
+    fn index_of(&self, source: &PreviewSource) -> Option<usize> {
+        self.buffers
+            .iter()
+            .position(|buffer| &buffer.source == source)
     }
 
     /// Every buffer in the pool, in the order the switcher lists them.
@@ -1401,10 +1531,10 @@ impl PreviewPool {
     /// already speaks for that one and a badge that also lit for it would be the
     /// same fact twice (P19's `othersDirty`); the three dirty gates ask it with
     /// `None`, because a gate is about *everything* that would be lost (P120).
-    pub fn dirty_names(&self, shown: Option<&Path>) -> impl Iterator<Item = &str> {
+    pub fn dirty_names(&self, shown: Option<&PreviewSource>) -> impl Iterator<Item = &str> {
         self.buffers
             .iter()
-            .filter(move |buffer| buffer.dirty && Some(buffer.path.as_path()) != shown)
+            .filter(move |buffer| buffer.dirty && Some(&buffer.source) != shown)
             .map(|buffer| buffer.name.as_str())
     }
 
@@ -1454,10 +1584,17 @@ pub enum PreviewWant {
 /// Addressed by [`TabId`] rather than by a seat, because the pool is the tab's:
 /// the answer belongs to the buffer, and which pane happens to be showing it
 /// when the disk answers is none of the worker's business.
+///
+/// **Addressed by [`PreviewSource`] rather than by a path** for the reason the
+/// buffer is: the answer has to find its way back to one entry of a pool keyed
+/// on sources, and a route that re-wrapped a path on arrival would be a second
+/// place that decides what a path means. This lane only ever carries
+/// [`PreviewSource::File`] — a source with no disk behind it never gets here,
+/// because [`PreviewBuffer::wants_head_read`] is the only thing that sends.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
     pub tab: TabId,
-    pub path: PathBuf,
+    pub source: PreviewSource,
     pub want: PreviewWant,
 }
 
@@ -1469,7 +1606,7 @@ impl PreviewRequest {
     /// supersede the head read of the same picture and the body would never
     /// arrive, which is coalescing turned into cancellation.
     fn same_target(&self, other: &Self) -> bool {
-        self.tab == other.tab && self.path == other.path && self.want == other.want
+        self.tab == other.tab && self.source == other.source && self.want == other.want
     }
 }
 
@@ -1477,7 +1614,7 @@ impl PreviewRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewResponse {
     pub tab: TabId,
-    pub path: PathBuf,
+    pub source: PreviewSource,
     pub answer: PreviewAnswer,
 }
 
@@ -1768,14 +1905,24 @@ impl PreviewWorker {
             .name("bt-preview-worker".to_owned())
             .spawn(move || {
                 run_preview_worker(request_rx, |request| {
+                    // **This thread is a disk**, and both of its questions are
+                    // about bytes at a path. A source with nothing at a path is
+                    // never sent here — [`PreviewBuffer::wants_head_read`] is the
+                    // gate, and a picture's size is asked of a file the decode
+                    // lane already holds — so this is the same shape a request
+                    // for a tab that has since closed takes: no answer, which is
+                    // the cancellation §7.1.3 asks for.
+                    let Some(path) = request.source.file_path() else {
+                        return;
+                    };
                     let answer = match request.want {
-                        PreviewWant::Head => PreviewAnswer::Head(read_head(&request.path)),
-                        PreviewWant::Size => PreviewAnswer::Size(read_size(&request.path)),
+                        PreviewWant::Head => PreviewAnswer::Head(read_head(path)),
+                        PreviewWant::Size => PreviewAnswer::Size(read_size(path)),
                     };
                     if response_tx
                         .send(PreviewResponse {
                             tab: request.tab,
-                            path: request.path,
+                            source: request.source,
                             answer,
                         })
                         .is_ok()
@@ -2279,7 +2426,8 @@ mod tests {
     }
 
     fn buffer<'pool>(pool: &'pool PreviewPool, path: &str) -> &'pool PreviewBuffer {
-        pool.get(Path::new(path)).expect("the pool holds this path")
+        pool.get(&PreviewSource::file(path))
+            .expect("the pool holds this path")
     }
 
     /// A worker answer for a body that never came off a disk.
@@ -2291,13 +2439,160 @@ mod tests {
         }
     }
 
+    /// The file a buffer built by [`opened`] is reading.
+    fn on_disk(buffer: &PreviewBuffer) -> &Path {
+        buffer
+            .source
+            .file_path()
+            .expect("this fixture's buffers are files")
+    }
+
     /// A file on disk, with a buffer already reading from it.
     fn opened(dir: &Path, name: &str, body: &str) -> PreviewBuffer {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
-        let mut buffer = PreviewBuffer::new(path.clone(), name.to_owned());
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(path.clone()), name.to_owned());
         buffer.accept(read_head(&path));
         buffer
+    }
+
+    /// **G-0 — the identity is a structure, and a pseudo-path was not one.**
+    ///
+    /// The mock-up named a git diff `git:{root}:{path}` and a graph
+    /// `gitgraph:{root}`, and on this platform that grammar cannot be read back:
+    /// a Windows root already carries a `:`, so `git:C:\w\repo:src/main.rs` has
+    /// three colons and no rule that says which one was the separator. Worse
+    /// than unreadable, it is *lossy* — there is nowhere in it for `staged`, so
+    /// the two diffs of one file (working tree, and `--cached`) would be one
+    /// identity and therefore one buffer, showing whichever landed last.
+    ///
+    /// This asserts the four things the sum type buys: colon-bearing roots stay
+    /// apart, `staged` is part of who you are, a repeat of the same triple is the
+    /// same buffer, and a *file* whose name happens to spell a pseudo-path is
+    /// still a file. It runs through [`PreviewPool`] rather than on `==` alone
+    /// because the pool is where an identity is actually used.
+    ///
+    /// MUTATION: collapse the key back to a bare path — give `PreviewBuffer` a
+    /// `path: PathBuf` again and render each source into `git:{root}:{path}` on
+    /// the way in. The staged/unstaged pair collides, `pool.len()` reads 4
+    /// instead of 5, and the "a file is not a diff" lookup finds the wrong
+    /// buffer.
+    #[test]
+    fn two_repositories_and_two_stages_are_four_identities_no_string_could_keep_apart() {
+        let repo_a = PathBuf::from(r"C:\w\repo");
+        let repo_b = PathBuf::from(r"D:\w\repo");
+        let diff = |root: &PathBuf, staged| PreviewSource::GitDiff {
+            root: root.clone(),
+            path: "src/main.rs".to_owned(),
+            staged,
+        };
+
+        let mut pool = PreviewPool::default();
+        for (source, name) in [
+            (diff(&repo_a, false), "main.rs"),
+            (diff(&repo_a, true), "main.rs"),
+            (diff(&repo_b, false), "main.rs"),
+            (diff(&repo_b, true), "main.rs"),
+            // The pseudo-path the mock-up would have minted for the first of
+            // them, arriving as what it literally is: a file name.
+            (PreviewSource::file(r"git:C:\w\repo:src/main.rs"), "main.rs"),
+        ] {
+            pool.open(source, name.to_owned(), &[]);
+        }
+        assert_eq!(
+            pool.len(),
+            5,
+            "two repositories on two drives, two stages each, and one file that \
+             merely looks like one of them"
+        );
+
+        // Asked for again, each is the buffer that is already there — the whole
+        // of "finding beats making", now for an identity that has no path.
+        pool.open(diff(&repo_a, true), "main.rs".to_owned(), &[])
+            .dirty = true;
+        assert_eq!(pool.len(), 5, "a repeat of one triple opens nothing new");
+        assert!(
+            pool.get(&diff(&repo_a, true))
+                .expect("staged, repo A")
+                .dirty,
+            "and it is the same buffer, edits and all"
+        );
+        assert!(
+            !pool
+                .get(&diff(&repo_a, false))
+                .expect("unstaged, repo A")
+                .dirty,
+            "while the *unstaged* diff of the same file in the same repo is a \
+             different buffer — the fact the mock-up's string had no room for"
+        );
+        assert!(
+            !pool
+                .get(&diff(&repo_b, true))
+                .expect("staged, repo B")
+                .dirty,
+            "and so is the same question asked of another repository"
+        );
+
+        // A source has no path unless it is a file, and a file's path is never
+        // read as anything but a path.
+        assert_eq!(diff(&repo_a, false).file_path(), None);
+        assert_eq!(PreviewSource::GitGraph { root: repo_a }.file_path(), None);
+        assert_eq!(
+            pool.get(&PreviewSource::file(r"git:C:\w\repo:src/main.rs"))
+                .and_then(|buffer| buffer.source.file_path()),
+            Some(Path::new(r"git:C:\w\repo:src/main.rs")),
+            "a file that spells a pseudo-path is a file with a strange name"
+        );
+    }
+
+    /// **G-0 — git-backed content never reaches the lane that reads disks.**
+    ///
+    /// [`PreviewBuffer::wants_head_read`] is the only thing that puts a request
+    /// on [`PreviewWorker`]'s channel, and the worker's two questions are both
+    /// "what is at this path". A source with no path there would be a request
+    /// nothing could answer and a `Pending` that never resolved.
+    ///
+    /// MUTATION: drop the `self.source.file_path().is_some()` clause from
+    /// `wants_head_read` — a git diff, which is `Pending` and whose *name* is
+    /// text, starts asking a disk for a file that is not there.
+    #[test]
+    fn a_git_backed_buffer_waits_for_the_git_worker_and_never_for_a_disk() {
+        let diff = PreviewBuffer::new(
+            PreviewSource::GitDiff {
+                root: PathBuf::from(r"C:\w\repo"),
+                path: "src/main.rs".to_owned(),
+                staged: false,
+            },
+            "main.rs".to_owned(),
+        );
+        assert_eq!(diff.load, PreviewLoad::Pending, "nothing has answered yet");
+        assert_eq!(
+            diff.ftype,
+            PreviewFtype::Text,
+            "the name is still the name's judgement"
+        );
+        assert!(
+            !diff.wants_head_read(),
+            "but the disk is not who is being waited on"
+        );
+        assert_eq!(
+            diff.view(false),
+            PreviewView::Diff,
+            "and the body it earns is decided by what it *is* (R24), not by a \
+             display name ending in `.diff`"
+        );
+        assert!(
+            !diff.is_editable(false),
+            "a reading of a repository is not a second place to type into it"
+        );
+
+        // The same file, as a file, still goes down the lane it always did.
+        let file = PreviewBuffer::new(
+            PreviewSource::file(r"C:\w\repo\src\main.rs"),
+            "main.rs".to_owned(),
+        );
+        assert!(file.wants_head_read());
+        assert_eq!(file.view(false), PreviewView::Text);
     }
 
     /// ① One file, one buffer — a second open of the same path is the same
@@ -2308,9 +2603,9 @@ mod tests {
     #[test]
     fn a_second_open_of_the_same_path_is_the_same_buffer() {
         let mut pool = PreviewPool::default();
-        pool.open(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned(), &[])
+        pool.open(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned(), &[])
             .dirty = true;
-        pool.open(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned(), &[]);
+        pool.open(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned(), &[]);
         assert_eq!(pool.len(), 1);
         assert!(buffer(&pool, r"C:\w\a.rs").dirty);
     }
@@ -2324,19 +2619,25 @@ mod tests {
     fn the_cap_evicts_the_oldest_clean_unshown_buffer() {
         let mut pool = PreviewPool::default();
         for index in 0..PV_BUFFER_CAP {
-            let path = PathBuf::from(format!(r"C:\w\f{index}.rs"));
-            pool.open(path, format!("f{index}.rs"), &[]);
+            let source = PreviewSource::file(format!(r"C:\w\f{index}.rs"));
+            pool.open(source, format!("f{index}.rs"), &[]);
         }
         // The oldest is dirty and the second oldest is on screen, so the third
         // is the first evictable one.
-        pool.get_mut(Path::new(r"C:\w\f0.rs")).unwrap().dirty = true;
-        let shown = vec![PathBuf::from(r"C:\w\f1.rs")];
-        pool.open(PathBuf::from(r"C:\w\new.rs"), "new.rs".to_owned(), &shown);
+        pool.get_mut(&PreviewSource::file(r"C:\w\f0.rs"))
+            .unwrap()
+            .dirty = true;
+        let shown = vec![PreviewSource::file(r"C:\w\f1.rs")];
+        pool.open(
+            PreviewSource::file(r"C:\w\new.rs"),
+            "new.rs".to_owned(),
+            &shown,
+        );
         assert_eq!(pool.len(), PV_BUFFER_CAP);
-        assert!(pool.get(Path::new(r"C:\w\f0.rs")).is_some());
-        assert!(pool.get(Path::new(r"C:\w\f1.rs")).is_some());
-        assert!(pool.get(Path::new(r"C:\w\f2.rs")).is_none());
-        assert!(pool.get(Path::new(r"C:\w\new.rs")).is_some());
+        assert!(pool.get(&PreviewSource::file(r"C:\w\f0.rs")).is_some());
+        assert!(pool.get(&PreviewSource::file(r"C:\w\f1.rs")).is_some());
+        assert!(pool.get(&PreviewSource::file(r"C:\w\f2.rs")).is_none());
+        assert!(pool.get(&PreviewSource::file(r"C:\w\new.rs")).is_some());
     }
 
     /// ② (b) When everything left is dirty or on screen, nothing is evicted.
@@ -2347,9 +2648,9 @@ mod tests {
     fn a_pool_of_dirty_buffers_grows_past_the_cap_rather_than_lose_one() {
         let mut pool = PreviewPool::default();
         for index in 0..=PV_BUFFER_CAP {
-            let path = PathBuf::from(format!(r"C:\w\f{index}.rs"));
-            pool.open(path.clone(), format!("f{index}.rs"), &[]);
-            pool.get_mut(&path).unwrap().dirty = true;
+            let source = PreviewSource::file(format!(r"C:\w\f{index}.rs"));
+            pool.open(source.clone(), format!("f{index}.rs"), &[]);
+            pool.get_mut(&source).unwrap().dirty = true;
         }
         assert_eq!(pool.len(), PV_BUFFER_CAP + 1);
     }
@@ -2372,11 +2673,11 @@ mod tests {
     fn the_pool_answers_two_different_dirty_questions() {
         let mut pool = PreviewPool::default();
         for name in ["a.txt", "b.md", "c.rs"] {
-            let path = PathBuf::from(format!(r"C:\w\{name}"));
-            pool.open(path.clone(), name.to_owned(), &[]);
-            pool.get_mut(&path).unwrap().dirty = name != "c.rs";
+            let source = PreviewSource::file(format!(r"C:\w\{name}"));
+            pool.open(source.clone(), name.to_owned(), &[]);
+            pool.get_mut(&source).unwrap().dirty = name != "c.rs";
         }
-        let shown = PathBuf::from(r"C:\w\a.txt");
+        let shown = PreviewSource::file(r"C:\w\a.txt");
         // The badge: everything dirty except the one on screen.
         assert_eq!(
             pool.dirty_names(Some(&shown)).collect::<Vec<_>>(),
@@ -2389,7 +2690,9 @@ mod tests {
         );
         // And a pool with nothing dirty asks nothing of anybody.
         pool.get_mut(&shown).unwrap().dirty = false;
-        pool.get_mut(Path::new(r"C:\w\b.md")).unwrap().dirty = false;
+        pool.get_mut(&PreviewSource::file(r"C:\w\b.md"))
+            .unwrap()
+            .dirty = false;
         assert_eq!(pool.dirty_names(None).count(), 0);
         pool.clear();
         assert_eq!(pool.len(), 0);
@@ -2411,9 +2714,9 @@ mod tests {
     fn a_discarded_edit_takes_its_own_buffer_and_leaves_the_history() {
         let mut pool = PreviewPool::default();
         for name in ["a.txt", "b.md", "c.rs"] {
-            let path = PathBuf::from(format!(r"C:\w\{name}"));
-            pool.open(path.clone(), name.to_owned(), &[]);
-            pool.get_mut(&path).unwrap().dirty = name == "b.md";
+            let source = PreviewSource::file(format!(r"C:\w\{name}"));
+            pool.open(source.clone(), name.to_owned(), &[]);
+            pool.get_mut(&source).unwrap().dirty = name == "b.md";
         }
         pool.discard_dirty();
         assert_eq!(
@@ -2561,7 +2864,7 @@ mod tests {
         assert!(!is_network_path(Path::new(r"\\?\C:\w\notes.txt")));
 
         let buffer = PreviewBuffer::new(
-            PathBuf::from(r"\\server\share\notes.txt"),
+            PreviewSource::file(r"\\server\share\notes.txt"),
             "notes.txt".to_owned(),
         );
         assert_eq!(
@@ -2576,10 +2879,10 @@ mod tests {
     /// Mutation: give [`PreviewFtype::Unknown`] `PreviewLoad::Pending`.
     #[test]
     fn an_unreadable_type_is_refused_before_the_disk_is_asked() {
-        let buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.exe"), "a.exe".to_owned());
+        let buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
         assert_eq!(buffer.load, PreviewLoad::Refused(PreviewRefusal::Type));
         assert!(!buffer.wants_head_read());
-        let text = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        let text = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         assert_eq!(text.load, PreviewLoad::Pending);
         assert!(text.wants_head_read());
     }
@@ -3086,7 +3389,7 @@ mod tests {
     /// Mutation: return the notice unconditionally.
     #[test]
     fn only_a_truncated_buffer_carries_the_read_only_notice() {
-        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         buffer.accept(read("fn main() {}\n", false));
         assert_eq!(buffer.truncation_notice(), None);
         buffer.accept(read("fn main() {}\n", true));
@@ -3136,7 +3439,7 @@ mod tests {
     /// Mutation: `line.chars().count()` instead of the display width.
     #[test]
     fn the_widest_line_is_measured_in_the_columns_it_will_draw_as() {
-        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         buffer.accept(read("ab\n\t\tx\n\u{4f60}\u{597d}\n", false));
         // Two tabs are eight columns, plus the `x`.
         assert_eq!(buffer.max_columns, 9);
@@ -3198,7 +3501,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let ask = |want| PreviewRequest {
             tab: crate::TabId(1),
-            path: PathBuf::from("a.png"),
+            source: PreviewSource::file("a.png"),
             want,
         };
         sender.send(ask(PreviewWant::Head)).unwrap();
@@ -3229,7 +3532,7 @@ mod tests {
     /// file for a keystroke that changed nothing.
     #[test]
     fn the_first_real_change_dirties_the_buffer_and_nothing_cleans_it_but_a_save() {
-        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         buffer.accept(read("fn main() {}\n", false));
         assert!(!buffer.dirty, "a freshly read buffer is clean");
 
@@ -3263,7 +3566,7 @@ mod tests {
     /// Mutation: stop incrementing `revision` in [`PreviewBuffer::edit_content`].
     #[test]
     fn an_edit_that_keeps_the_length_still_counts() {
-        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         buffer.accept(read("abc", false));
         let before = buffer.revision;
         assert!(buffer.edit_content(|content| {
@@ -3293,7 +3596,7 @@ mod tests {
     /// [`PreviewBuffer::is_editable`].
     #[test]
     fn a_truncated_buffer_is_read_only_however_editable_its_name_is() {
-        let mut buffer = PreviewBuffer::new(PathBuf::from(r"C:\w\a.rs"), "a.rs".to_owned());
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.rs"), "a.rs".to_owned());
         assert!(
             !buffer.is_editable(false),
             "a buffer with no body has no caret"
@@ -3320,7 +3623,7 @@ mod tests {
         assert_eq!(buffer.save(), SaveOutcome::Saved);
         assert!(!buffer.dirty, "a saved buffer is clean");
         assert_eq!(
-            std::fs::read_to_string(&buffer.path).unwrap(),
+            std::fs::read_to_string(on_disk(&buffer)).unwrap(),
             "one\ntwo\nthree\n",
             "the bytes on the disk are the bytes in the buffer"
         );
@@ -3332,7 +3635,7 @@ mod tests {
         });
         assert_eq!(buffer.save(), SaveOutcome::Saved);
         // Nothing is left behind beside the file.
-        assert!(!preview_temp_path(&buffer.path).exists());
+        assert!(!preview_temp_path(on_disk(&buffer)).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3391,18 +3694,18 @@ mod tests {
 
         assert_eq!(buffer.save(), SaveOutcome::Conflict);
         assert_eq!(
-            std::fs::read_to_string(&buffer.path).unwrap(),
+            std::fs::read_to_string(on_disk(&buffer)).unwrap(),
             "as it was read\n",
             "the other writer's file is still theirs"
         );
         assert!(buffer.dirty, "and the edits are still here");
-        assert!(!preview_temp_path(&buffer.path).exists());
+        assert!(!preview_temp_path(on_disk(&buffer)).exists());
 
         // Re-reading the file settles the conflict, and the same save lands.
-        buffer.disk_mtime = file_mtime(&buffer.path);
+        buffer.disk_mtime = file_mtime(on_disk(&buffer));
         assert_eq!(buffer.save(), SaveOutcome::Saved);
         assert_eq!(
-            std::fs::read_to_string(&buffer.path).unwrap(),
+            std::fs::read_to_string(on_disk(&buffer)).unwrap(),
             "as it was read\nand as it was edited\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3417,7 +3720,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let ask = |path: &str| PreviewRequest {
             tab: crate::TabId(1),
-            path: PathBuf::from(path),
+            source: PreviewSource::file(path),
             want: PreviewWant::Head,
         };
         sender.send(ask("a.rs")).unwrap();
@@ -3425,10 +3728,10 @@ mod tests {
         sender.send(ask("a.rs")).unwrap();
         drop(sender);
         let mut asked = Vec::new();
-        run_preview_worker(receiver, |request| asked.push(request.path.clone()));
+        run_preview_worker(receiver, |request| asked.push(request.source.clone()));
         assert_eq!(
             asked,
-            vec![PathBuf::from("b.rs"), PathBuf::from("a.rs")],
+            vec![PreviewSource::file("b.rs"), PreviewSource::file("a.rs")],
             "the superseded first question is never read"
         );
     }

@@ -687,7 +687,7 @@ struct PreviewDocumentKey {
 /// a window crosses monitors, which is exactly the moment a re-measure is owed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreviewParseKey {
-    path: PathBuf,
+    source: preview::PreviewSource,
     md_source: bool,
     revision: u64,
     scale_ppm: u32,
@@ -801,13 +801,13 @@ struct PreviewPane {
     /// The picture on this surface, if it is showing one. Mutually exclusive
     /// with [`Self::buffer`] — the two doors clear each other on the way in.
     image: Option<PreviewImageState>,
-    /// Which buffer this surface is showing, by path.
+    /// Which buffer this surface is showing, by [`preview::PreviewSource`].
     ///
-    /// A path rather than an index or a reference: the pool is a `Vec` whose
-    /// order is its history, and an index into a list that evicts is an index
-    /// that goes stale between the frame that took it and the frame that reads
-    /// it.
-    buffer: Option<PathBuf>,
+    /// An identity rather than an index or a reference: the pool is a `Vec`
+    /// whose order is its history, and an index into a list that evicts is an
+    /// index that goes stale between the frame that took it and the frame that
+    /// reads it.
+    buffer: Option<preview::PreviewSource>,
     /// The parsed body, and what it was parsed from.
     doc: PreviewDocument,
     doc_key: Option<PreviewDocumentKey>,
@@ -900,8 +900,8 @@ impl PreviewPanes {
         self.panes.iter_mut().map(|(id, pane)| (*id, pane))
     }
 
-    /// Which surfaces are showing this path right now.
-    fn showing(&self) -> Vec<PathBuf> {
+    /// Which buffers are on a surface right now.
+    fn showing(&self) -> Vec<preview::PreviewSource> {
         self.panes
             .iter()
             .filter_map(|(_, pane)| pane.buffer.clone())
@@ -911,27 +911,27 @@ impl PreviewPanes {
 
 /// What each buffer looked like the last time a pane was on it.
 ///
-/// Keyed by path, exactly as the pool is, so a buffer and the view of it are
-/// found by the same question. Bounded by nothing on purpose: an entry is three
-/// numbers, the pool that gives them meaning is capped at eight, and an entry
-/// for a buffer that has been evicted is the memory that makes re-opening a file
-/// feel like coming back to it.
+/// Keyed by [`preview::PreviewSource`], exactly as the pool is, so a buffer and
+/// the view of it are found by the same question. Bounded by nothing on purpose:
+/// an entry is three numbers, the pool that gives them meaning is capped at
+/// eight, and an entry for a buffer that has been evicted is the memory that
+/// makes re-opening a file feel like coming back to it.
 #[derive(Clone, Debug, Default)]
 struct PreviewViewStore {
-    views: HashMap<PathBuf, PreviewViewState>,
+    views: HashMap<preview::PreviewSource, PreviewViewState>,
 }
 
 impl PreviewViewStore {
     /// File what a pane is leaving behind.
-    fn remember(&mut self, path: &Path, view: PreviewViewState) {
-        self.views.insert(path.to_owned(), view);
+    fn remember(&mut self, source: &preview::PreviewSource, view: PreviewViewState) {
+        self.views.insert(source.clone(), view);
     }
 
     /// What a pane arriving at this file already knows. A file never looked at
     /// starts at the top with the caret at its head, which is
     /// [`PreviewViewState::default`].
-    fn restore(&self, path: &Path) -> PreviewViewState {
-        self.views.get(path).copied().unwrap_or_default()
+    fn restore(&self, source: &preview::PreviewSource) -> PreviewViewState {
+        self.views.get(source).copied().unwrap_or_default()
     }
 
     /// Another tab's memory, arriving with that tab's pool.
@@ -942,8 +942,8 @@ impl PreviewViewStore {
     /// *you* were in that file when you were last in this tab, and an arrival
     /// overwriting it would move a place you had marked.
     fn absorb(&mut self, other: PreviewViewStore) {
-        for (path, view) in other.views {
-            self.views.entry(path).or_insert(view);
+        for (source, view) in other.views {
+            self.views.entry(source).or_insert(view);
         }
     }
 }
@@ -961,7 +961,7 @@ fn preview_document_key(
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
-            path: buffer.path.clone(),
+            source: buffer.source.clone(),
             md_source,
             revision: buffer.revision,
             scale_ppm: (scale * 1_000_000.0).round() as u32,
@@ -4121,10 +4121,16 @@ impl TabState {
     /// mutually exclusive on it ([`PreviewPane::image`]), so "which file is this
     /// pane on" has to ask both — a reader that only knew about the pool would
     /// write a pinned pane full of picture back to disk as an empty one.
+    ///
+    /// **A path, and therefore only what has one.** Both of this function's
+    /// readers write a path to disk — the tab's content section and the Recent
+    /// vault — and the file section of `session.json` has no vocabulary for a
+    /// document composed out of a repository (see [`Self::preview_content`]).
     fn preview_showing(&self, seat: SeatId) -> Option<&Path> {
         let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
         pane.buffer
-            .as_deref()
+            .as_ref()
+            .and_then(preview::PreviewSource::file_path)
             .or_else(|| pane.image.as_ref().map(|image| image.path.as_path()))
     }
 
@@ -4166,12 +4172,28 @@ impl TabState {
         // of files it held, so a restored pane shows what is on disk rather than
         // pretending an unsaved edit was never lost. The three dirty gates are
         // what stop that loss being silent.
+        //
+        // **Files only, and the shape on disk is unchanged** (G-0, 2026-08-15;
+        // pinned by `the_content_section_writes_a_file_exactly_as_it_always_did`).
+        // A pool entry is a `{path, name}` pair and it still is, byte for byte,
+        // for every buffer that has a file behind it — a session written before
+        // [`preview::PreviewSource`] existed reads back identically and one
+        // written now is identical to what that build would have written. A
+        // git-backed buffer is skipped rather than spelled: `session.json` has
+        // no field for a repository and a pseudo-path smuggled into `path`
+        // would be exactly the ambiguity the source type was introduced to
+        // retire. Bringing one back across a restart is the G-series' own
+        // question (it needs a schema field, and it needs the repo to still be
+        // there), and it is deliberately not answered by a string that looks
+        // like a path.
         let pool: Vec<bt_persist::PreviewPoolEntryV1> = self
             .preview_pool
             .buffers()
-            .map(|buffer| bt_persist::PreviewPoolEntryV1 {
-                path: buffer.path.to_string_lossy().into_owned(),
-                name: buffer.name.clone(),
+            .filter_map(|buffer| {
+                Some(bt_persist::PreviewPoolEntryV1 {
+                    path: buffer.source.file_path()?.to_string_lossy().into_owned(),
+                    name: buffer.name.clone(),
+                })
             })
             .collect();
         (!panes.is_empty() || !pool.is_empty()).then_some(bt_persist::TabPreviewV1 { panes, pool })
@@ -4310,7 +4332,7 @@ impl TabState {
             Some(image) => Some(image.title()),
             None => self
                 .preview_pool
-                .get(pane.buffer.as_deref()?)
+                .get(pane.buffer.as_ref()?)
                 .map(|buffer| buffer.name.clone()),
         }
     }
@@ -10755,9 +10777,16 @@ fn create_tab_state(
     // clean: `PreviewBuffer::new` answers everything that can be answered
     // without a disk, and the bytes are the worker's to fetch when the pane is
     // actually looked at.
+    //
+    // Every entry the file carries is a file — that is all the section can say
+    // (see [`TabState::preview_content`]) — so every buffer minted here is a
+    // [`preview::PreviewSource::File`].
     let mut preview_pool = preview::PreviewPool::default();
     for (path, name) in &preview.pool {
-        preview_pool.insert(preview::PreviewBuffer::new(path.clone(), name.clone()));
+        preview_pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::file(path.clone()),
+            name.clone(),
+        ));
     }
     let mut preview_panes = PreviewPanes::default();
     for seat in seats.preview_seats() {
@@ -10771,13 +10800,14 @@ fn create_tab_state(
                 Some(PreviewImageState::new(path.clone()));
             continue;
         }
-        if preview_pool.get(path).is_none() {
+        let source = preview::PreviewSource::file(path.clone());
+        if preview_pool.get(&source).is_none() {
             preview_pool.insert(preview::PreviewBuffer::new(
-                path.clone(),
+                source.clone(),
                 files_row_display_name(path),
             ));
         }
-        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(path.clone());
+        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(source);
     }
     Ok((
         assemble_tab_state(
@@ -12101,25 +12131,28 @@ impl Runtime {
             return;
         };
         let id = tab.id;
-        let wants: Vec<(PathBuf, preview::PreviewWant)> = tab
+        let wants: Vec<(preview::PreviewSource, preview::PreviewWant)> = tab
             .preview_panes
             .iter()
             .filter_map(|(_, pane)| {
                 if let Some(image) = pane.image.as_ref() {
                     // The one field of the meta line no decoder can answer.
-                    return Some((image.path.clone(), preview::PreviewWant::Size));
+                    return Some((
+                        preview::PreviewSource::file(image.path.clone()),
+                        preview::PreviewWant::Size,
+                    ));
                 }
-                let path = pane.buffer.as_ref()?;
+                let source = pane.buffer.as_ref()?;
                 tab.preview_pool
-                    .get(path)
+                    .get(source)
                     .filter(|buffer| buffer.wants_head_read())
-                    .map(|_| (path.clone(), preview::PreviewWant::Head))
+                    .map(|_| (source.clone(), preview::PreviewWant::Head))
             })
             .collect();
-        for (path, want) in wants {
+        for (source, want) in wants {
             if !self.preview_worker.request(preview::PreviewRequest {
                 tab: id,
-                path,
+                source,
                 want,
             }) {
                 self.disable_preview_worker();
@@ -13230,7 +13263,7 @@ impl Runtime {
                 Some(image) => Some(image.title()),
                 None => tab
                     .preview_pool
-                    .get(pane.buffer.as_deref()?)
+                    .get(pane.buffer.as_ref()?)
                     .map(|buffer| buffer.name.clone()),
             }
         };
@@ -15198,12 +15231,12 @@ impl Runtime {
         surface: PreviewSurface,
     ) -> Option<&mut preview::PreviewBuffer> {
         let index = self.preview_tab_index(surface);
-        let path = self.tabs[index]
+        let source = self.tabs[index]
             .preview_panes
             .get(surface)?
             .buffer
             .clone()?;
-        self.tabs[index].preview_pool.get_mut(&path)
+        self.tabs[index].preview_pool.get_mut(&source)
     }
 
     /// The buffer this surface is on, looked up in **its own** tab's one pool.
@@ -15213,16 +15246,16 @@ impl Runtime {
     /// and its own off-pool slot when there is not.
     fn preview_buffer_on(&self, surface: PreviewSurface) -> Option<&preview::PreviewBuffer> {
         if surface == PreviewSurface::Peek {
-            let path = self.peek_pane.buffer.as_deref()?;
-            return self.preview_pool.get(path).or_else(|| {
+            let source = self.peek_pane.buffer.as_ref()?;
+            return self.preview_pool.get(source).or_else(|| {
                 self.peek_buffer
                     .as_ref()
-                    .filter(|buffer| buffer.path == path)
+                    .filter(|buffer| &buffer.source == source)
             });
         }
         let tab = self.preview_tab(surface)?;
         tab.preview_pool
-            .get(tab.preview_panes.get(surface)?.buffer.as_deref()?)
+            .get(tab.preview_panes.get(surface)?.buffer.as_ref()?)
     }
 
     /// Whether this surface is showing its buffer's **source** face (P28).
@@ -15571,7 +15604,7 @@ impl Runtime {
         let tab = self.id;
         if !self.preview_worker.request(preview::PreviewRequest {
             tab,
-            path: path.clone(),
+            source: preview::PreviewSource::file(path.clone()),
             want: preview::PreviewWant::Size,
         }) {
             self.disable_preview_worker();
@@ -15637,32 +15670,55 @@ impl Runtime {
     /// see [`Self::open_preview_image_on`] for why the two are separable.
     fn open_preview_file_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
         let name = files_row_display_name(&path);
+        self.open_preview_source_on(surface, preview::PreviewSource::file(path), name)
+    }
+
+    /// **The pool's own door, told an identity rather than a path** (G-0).
+    ///
+    /// [`Self::open_preview_file_on`] is this with the one step a *file* needs
+    /// in front of it — deriving the display name from the path — and it is the
+    /// only step that could not be written for a document that has no path. The
+    /// switcher already comes through here with a name it read off the pool
+    /// rather than off a filesystem, and G-1's git surfaces will come the same
+    /// way: everything below this line is about a buffer and a view of it, and
+    /// nothing below it asks where the bytes are.
+    fn open_preview_source_on(
+        &mut self,
+        surface: PreviewSurface,
+        source: preview::PreviewSource,
+        name: String,
+    ) -> Result<()> {
         // The picture on this surface, if there was one, is not what it is
         // showing any more. Cleared before the buffer lands so no frame between
         // the two can find both.
         self.clear_preview_image(surface);
         let tab = self.id;
         let shown = self.preview_panes.showing();
-        let buffer = self.preview_pool.open(path.clone(), name, &shown);
+        let buffer = self.preview_pool.open(source.clone(), name, &shown);
         let wants_read = buffer.wants_head_read();
         // The outgoing view is filed and the incoming one is found: a caret and
         // a scroll are the pane's memory of a file, and a switch that reset them
         // would make the switcher a thing you pay for using (ruling 8⑧).
         self.leave_preview_buffer(surface);
-        let view = self.preview_views.restore(&path);
+        let view = self.preview_views.restore(&source);
         let pane = self.preview_pane_mut(surface);
-        pane.buffer = Some(path.clone());
+        pane.buffer = Some(source.clone());
         pane.caret = view.caret;
         pane.scroll = view.scroll;
         if wants_read
             && !self.preview_worker.request(preview::PreviewRequest {
                 tab,
-                path,
+                source,
                 want: preview::PreviewWant::Head,
             })
         {
             self.disable_preview_worker();
         }
+        // `cur` on disk is which file each pane was reading (slice 7): a switch
+        // that never marked the session dirty shipped yesterday's answer — the
+        // restored pane reopened the file you had already moved on from
+        // (found during G-0's real-machine pass, pre-existing).
+        self.mark_session_dirty(Instant::now());
         self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.present_chrome_change()
@@ -15743,10 +15799,10 @@ impl Runtime {
             // nothing.
             pane.links.clear();
             pane.notice = None;
-            if let Some(path) = left {
+            if let Some(source) = left {
                 // The memory is per buffer and the buffer is the tab's, so it is
                 // filed in the same tab the view came out of.
-                self.tabs[index].preview_views.remember(&path, view);
+                self.tabs[index].preview_views.remember(&source, view);
             }
         }
         if self.preview_edit_focus == Some(surface) {
@@ -15841,7 +15897,7 @@ impl Runtime {
             .and_then(|pane| pane.buffer.clone());
         let others_dirty = self
             .preview_pool
-            .dirty_names(shown.as_deref())
+            .dirty_names(shown.as_ref())
             .next()
             .is_some();
         let count = if pool > 1 {
@@ -15916,8 +15972,16 @@ impl Runtime {
         now: Instant,
     ) -> Option<seats::FootWords> {
         let surface = PreviewSurface::Seat(seat);
-        let path = match self.preview_buffer_on(surface) {
-            Some(buffer) => buffer.path.clone(),
+        // **A path, because the left hand of this strip is "where is this".**
+        // A document with no file behind it has no answer to that question in
+        // this vocabulary; what a git diff writes here instead — the repo and
+        // the repo-relative name — is G-3's, and belongs beside this line rather
+        // than inside a path that was never one.
+        let path = match self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.source.file_path())
+        {
+            Some(path) => path.to_owned(),
             None => self.preview_pane(surface)?.image.as_ref()?.path.clone(),
         };
         let path = path.to_string_lossy().into_owned();
@@ -15959,9 +16023,12 @@ impl Runtime {
     /// (P32), the same verb and the same confirmation a files column's foot has.
     fn reveal_preview_file(&mut self, seat: SeatId) -> Result<()> {
         let surface = PreviewSurface::Seat(seat);
+        // Explorer points at files, so this door is a file's: a view composed
+        // out of a repository has nothing in a folder to be highlighted.
         let Some(path) = self
             .preview_buffer_on(surface)
-            .map(|buffer| buffer.path.clone())
+            .and_then(|buffer| buffer.source.file_path())
+            .map(Path::to_path_buf)
             .or_else(|| {
                 self.preview_pane(surface)
                     .and_then(|pane| pane.image.as_ref())
@@ -16457,9 +16524,12 @@ impl Runtime {
         else {
             return Ok(false);
         };
+        // A relative link is resolved against the document's **own folder**, so
+        // a document that is not in a folder cannot resolve one.
         let Some(document) = self
             .preview_buffer_on(surface)
-            .map(|buffer| buffer.path.clone())
+            .and_then(|buffer| buffer.source.file_path())
+            .map(Path::to_path_buf)
         else {
             return Ok(false);
         };
@@ -16648,9 +16718,12 @@ impl Runtime {
     /// says "Opened" over a launch that was refused is the one thing worse than
     /// silence — the foot's own rule, applied to the card.
     fn open_preview_externally(&mut self) -> Result<()> {
+        // The system's handler is asked to open a *file*; there is no such door
+        // for a document this window composed out of a repository.
         let Some(path) = self
             .current_preview_buffer()
-            .map(|buffer| buffer.path.clone())
+            .and_then(|buffer| buffer.source.file_path())
+            .map(Path::to_path_buf)
         else {
             return Ok(());
         };
@@ -18714,18 +18787,18 @@ impl Runtime {
                     let tab = &mut self.tabs[index];
                     match response.answer {
                         preview::PreviewAnswer::Head(outcome) => {
-                            let Some(buffer) = tab.preview_pool.get_mut(&response.path) else {
+                            let Some(buffer) = tab.preview_pool.get_mut(&response.source) else {
                                 // **The glance's own slot** (P145): a hover
                                 // read is not an open file and never enters the
                                 // pool, so its answer lands here or nowhere.
-                                // Matched by path, exactly as the pool's is —
+                                // Matched by source, exactly as the pool's is —
                                 // the pointer may have moved on to another row
                                 // during the read, and that is the cancellation
                                 // §7.1.3 asks for, arriving as a dropped result.
                                 if let Some(peek) = self
                                     .peek_buffer
                                     .as_mut()
-                                    .filter(|peek| peek.path == response.path)
+                                    .filter(|peek| peek.source == response.source)
                                 {
                                     peek.accept(outcome);
                                     changed |= index == self.active_tab;
@@ -18749,9 +18822,7 @@ impl Runtime {
                             let showing: Vec<PreviewSurface> = tab
                                 .preview_panes
                                 .iter()
-                                .filter(|(_, pane)| {
-                                    pane.buffer.as_deref() == Some(response.path.as_path())
-                                })
+                                .filter(|(_, pane)| pane.buffer.as_ref() == Some(&response.source))
                                 .map(|(surface, _)| surface)
                                 .collect();
                             if let Some(content) = content {
@@ -18769,12 +18840,15 @@ impl Runtime {
                         // a second copy of the picture owes the same sentence
                         // even though only one of them holds the texture.
                         preview::PreviewAnswer::Size(bytes) => {
+                            // A size is only ever asked of a picture, and a
+                            // picture is a file.
+                            let Some(answered) = response.source.file_path() else {
+                                continue;
+                            };
                             let mut told = false;
                             for (_, pane) in tab.preview_panes.iter_mut() {
-                                if let Some(image) = pane
-                                    .image
-                                    .as_mut()
-                                    .filter(|image| image.path == response.path)
+                                if let Some(image) =
+                                    pane.image.as_mut().filter(|image| image.path == answered)
                                 {
                                     image.bytes = bytes;
                                     told = true;
@@ -19618,11 +19692,14 @@ impl Runtime {
         // holds the parsed document, and re-aiming it per frame would be a
         // document key that changed per frame and a markdown file re-parsed at
         // sixty hertz.
+        // A glance is always over a row of a files tree, so what it is about is
+        // always a file.
+        let source = preview::PreviewSource::file(path);
         self.peek_pane = PreviewPane {
-            buffer: Some(path.clone()),
+            buffer: Some(source.clone()),
             ..PreviewPane::default()
         };
-        if let Some(pooled) = self.preview_pool.get(&path) {
+        if let Some(pooled) = self.preview_pool.get(&source) {
             // A restored pool remembers names, never text (P151) — so "in the
             // pool" is not "has something to show". A buffer that still wants
             // its head read gets the same request a stranger would; the answer
@@ -19636,7 +19713,7 @@ impl Runtime {
                 let tab = self.id;
                 if !self.preview_worker.request(preview::PreviewRequest {
                     tab,
-                    path,
+                    source,
                     want: preview::PreviewWant::Head,
                 }) {
                     self.disable_preview_worker();
@@ -19644,14 +19721,14 @@ impl Runtime {
             }
             return true;
         }
-        let buffer = preview::PreviewBuffer::new(path.clone(), name);
+        let buffer = preview::PreviewBuffer::new(source.clone(), name);
         let wants_read = buffer.wants_head_read();
         self.peek_buffer = Some(buffer);
         if wants_read {
             let tab = self.id;
             if !self.preview_worker.request(preview::PreviewRequest {
                 tab,
-                path,
+                source,
                 want: preview::PreviewWant::Head,
             }) {
                 self.disable_preview_worker();
@@ -19713,11 +19790,12 @@ impl Runtime {
             return None;
         }
         // The pool's copy wins whenever there is one — the glance shows the file
-        // as this tab has it, edits and all.
-        let buffer = self
-            .preview_pool
-            .get(&peek.path)
-            .or(self.peek_buffer.as_ref())?;
+        // as this tab has it, edits and all. Asked through the card's *surface*
+        // rather than off the peek's path, because that is the same door every
+        // other reader of a preview buffer uses and it is the door that knows
+        // about the off-pool slot; `mature_file_peek` points the surface at the
+        // row in the same breath it clears `due`, so the two cannot disagree.
+        let buffer = self.preview_buffer_on(PreviewSurface::Peek)?;
         Some(FilePeekSubject {
             path: peek.path.clone(),
             name: peek.name.clone(),
@@ -20484,13 +20562,13 @@ impl Runtime {
     fn preview_menu_items(&self, seat: SeatId) -> Vec<profiles::PreviewMenuItem> {
         let current = self
             .preview_pane(PreviewSurface::Seat(seat))
-            .and_then(|pane| pane.buffer.as_deref());
+            .and_then(|pane| pane.buffer.as_ref());
         self.preview_pool
             .buffers()
             .map(|buffer| profiles::PreviewMenuItem {
                 name: buffer.name.clone(),
                 dirty: buffer.dirty,
-                current: Some(buffer.path.as_path()) == current,
+                current: Some(&buffer.source) == current,
             })
             .collect()
     }
@@ -20567,22 +20645,29 @@ impl Runtime {
     /// §7.1.3 promises the switch costs "零提示零打断".
     fn choose_preview_buffer(&mut self, seat: SeatId, index: usize) -> Result<()> {
         self.close_preview_menu()?;
-        let Some(path) = self
+        // **The pool's own identity and the pool's own name.** The row was
+        // drawn from this buffer, so re-deriving either from a filesystem would
+        // be a second opinion about a question the pool has already answered —
+        // and one that a buffer with no file behind it could not be asked.
+        let Some((source, name)) = self
             .preview_pool
             .buffers()
             .nth(index)
-            .map(|buffer| buffer.path.clone())
+            .map(|buffer| (buffer.source.clone(), buffer.name.clone()))
         else {
             return Ok(());
         };
         if self
             .preview_pane(PreviewSurface::Seat(seat))
-            .and_then(|pane| pane.buffer.as_deref())
-            == Some(path.as_path())
+            .and_then(|pane| pane.buffer.as_ref())
+            == Some(&source)
         {
             return Ok(());
         }
-        self.open_preview_file(path)
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_source_on(surface, source, name)
     }
 
     // ── the file row's context menu (K143-K146) ─────────────────────────────
@@ -21280,9 +21365,11 @@ impl Runtime {
     /// it is in" is not an answer to "where is this file").
     fn reveal_float_file(&mut self, id: float::FloatId) -> Result<()> {
         let surface = PreviewSurface::Float(id);
+        // A file's door, for [`Self::reveal_preview_file`]'s reason.
         let Some(path) = self
             .preview_buffer_on(surface)
-            .map(|buffer| buffer.path.clone())
+            .and_then(|buffer| buffer.source.file_path())
+            .map(Path::to_path_buf)
             .or_else(|| {
                 self.preview_pane(surface)
                     .and_then(|pane| pane.image.as_ref())
@@ -21903,7 +21990,13 @@ impl Runtime {
         let (title, path, dirty, flip_to_source) = match self.preview_buffer_on(surface) {
             Some(buffer) => (
                 buffer.name.clone(),
-                buffer.path.to_string_lossy().into_owned(),
+                // The foot's left hand is "where is this", which only a file
+                // answers — see [`Self::dress_preview_foot`].
+                buffer
+                    .source
+                    .file_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 buffer.dirty,
                 // This window's own face, not the file's — a pane behind it may
                 // be reading the same file the other way round.
@@ -25548,7 +25641,17 @@ impl Runtime {
         // to be asked here rather than derived from `hover`: over a terminal's
         // body `hover` is `None`, because a terminal is not chrome, and that is
         // most of the pane.
-        let pane = seats::pane_at(&self.seat_layout, position.x, position.y);
+        //
+        // **And therefore it needs the rail's sovereignty stated separately.**
+        // `hover` gets it from [`seats::ChromeTarget::RailBody`]; this question
+        // reads the seat layout, and the seat layout keeps only the *parked*
+        // width clear of an icon rail — so under an open one it would go on
+        // naming the pane the rail is standing over.
+        let pane = (!self
+            .rail_geometry_now(Instant::now())
+            .is_some_and(|rail| rail.covers(position.x, position.y)))
+        .then(|| seats::pane_at(&self.seat_layout, position.x, position.y))
+        .flatten();
         self.update_chrome_hover_target_in_pane(hover, pane)
     }
 
@@ -27194,6 +27297,11 @@ impl Runtime {
                     .map_err(|error| anyhow!(error))
                     .context("request self-drawn caption close")?;
             }
+            // **The rail, on none of its controls.** Nothing happens, and the
+            // `Ok(true)` below is the whole point of the arm: the press was
+            // *taken*, so it does not fall through to a pane the rail is drawn
+            // on top of. See [`seats::ChromeTarget::RailBody`].
+            seats::ChromeTarget::RailBody => {}
         }
         Ok(true)
     }
@@ -32646,10 +32754,14 @@ mod tests {
         let focused = seats.terminal();
         let mut pool = preview::PreviewPool::default();
         for (path, name) in &restored.pool {
-            pool.insert(preview::PreviewBuffer::new(path.clone(), name.clone()));
+            pool.insert(preview::PreviewBuffer::new(
+                preview::PreviewSource::file(path.clone()),
+                name.clone(),
+            ));
         }
         let mut panes = PreviewPanes::default();
-        panes.entry(PreviewSurface::Seat(pinned)).buffer = Some(readme.clone());
+        panes.entry(PreviewSurface::Seat(pinned)).buffer =
+            Some(preview::PreviewSource::file(readme.clone()));
         let (layout, overflow) = cross_solve(&seats);
         let tab = assemble_tab_state(
             TabId(1),
@@ -32679,6 +32791,87 @@ mod tests {
             tab.preview_pages(),
             vec![readme.to_string_lossy().into_owned()],
             "and the vault takes the files, skipping the pane that had none (裁决 10)"
+        );
+    }
+
+    /// **G-0 — the content section's bytes did not move when the identity did.**
+    ///
+    /// [`preview::PreviewSource`] replaced a bare `PathBuf` everywhere a preview
+    /// is keyed, and the one place that change must not be visible is the file
+    /// on disk: a `session.json` written by the build before it has to read back
+    /// here, and one written here has to be the same bytes that build would have
+    /// produced. So the assertion is against the JSON itself rather than against
+    /// a struct — a struct comparison would go on passing through a rename, a
+    /// reordering, or a field that started serializing as an object.
+    ///
+    /// The second half is the ruling the skeleton comes with: a buffer with no
+    /// file behind it is **left out** rather than spelled. The schema has no
+    /// field for a repository, and writing `"path": "git:C:\\w\\repo:src/main.rs"`
+    /// would put back the exact ambiguity the sum type was introduced to retire
+    /// — this time on disk, where it would outlive the process. Carrying git
+    /// buffers across a restart is the G-series' own question and needs a schema
+    /// field, not a string that looks like a path.
+    ///
+    /// MUTATIONS: ① render a git source into `path` instead of skipping it (the
+    /// entry count and the JSON both go red); ② change the `File` arm to write
+    /// anything but the path verbatim — a normalised separator, a display name —
+    /// and the fixture goes red on the exact byte.
+    #[test]
+    fn the_content_section_writes_a_file_exactly_as_it_always_did() {
+        let mut pool = preview::PreviewPool::default();
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"D:\notes\README.md"),
+            "README.md".to_owned(),
+        ));
+        // A dirty git buffer, which is the hardest case for "skipped": the pool
+        // is full of it, the switcher lists it, and it still owns no path.
+        let mut diff = preview::PreviewBuffer::new(
+            preview::PreviewSource::GitDiff {
+                root: PathBuf::from(r"C:\w\repo"),
+                path: "src/main.rs".to_owned(),
+                staged: true,
+            },
+            "main.rs".to_owned(),
+        );
+        diff.dirty = true;
+        pool.insert(diff);
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"D:\notes\todo.txt"),
+            "todo.txt".to_owned(),
+        ));
+
+        let mut seats = seats::Seats::lone_terminal();
+        let seat = seats
+            .add_preview(&cross_metrics())
+            .expect("a preview lands");
+        let focused = seats.terminal();
+        let mut panes = PreviewPanes::default();
+        panes.entry(PreviewSurface::Seat(seat)).buffer =
+            Some(preview::PreviewSource::file(r"D:\notes\README.md"));
+        let (layout, overflow) = cross_solve(&seats);
+        let tab = assemble_tab_state(
+            TabId(1),
+            BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+            BTreeMap::new(),
+            pool,
+            panes,
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+
+        let written = tab.preview_content().expect("this tab has previews");
+        assert_eq!(
+            written.pool.len(),
+            2,
+            "the two files, and not the git buffer standing between them"
+        );
+        assert_eq!(
+            serde_json::to_string(&written).expect("the section serializes"),
+            r#"{"panes":[{"leaf":"leaf-1","cur":"D:\\notes\\README.md"}],"pool":[{"path":"D:\\notes\\README.md","name":"README.md"},{"path":"D:\\notes\\todo.txt","name":"todo.txt"}]}"#,
+            "byte for byte the shape a session written before PreviewSource had"
         );
     }
 
@@ -43831,8 +44024,10 @@ mod tests {
         let cell = 8.0_f32;
 
         // ① The parse survives every width; only the layout key moves.
-        let mut buffer =
-            preview::PreviewBuffer::new(PathBuf::from(r"C:\w\UI-UX.md"), "UI-UX.md".to_owned());
+        let mut buffer = preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"C:\w\UI-UX.md"),
+            "UI-UX.md".to_owned(),
+        );
         buffer.accept(preview::HeadOutcome::Read {
             text: source.to_owned(),
             truncated: false,
@@ -44555,8 +44750,10 @@ mod tests {
 
     /// A buffer with a body, for the document tests below.
     fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
-        let mut buffer =
-            preview::PreviewBuffer::new(PathBuf::from(format!(r"C:\w\{name}")), name.to_owned());
+        let mut buffer = preview::PreviewBuffer::new(
+            preview::PreviewSource::file(format!(r"C:\w\{name}")),
+            name.to_owned(),
+        );
         buffer.accept(preview::HeadOutcome::Read {
             text: body.to_owned(),
             truncated: false,
@@ -44582,11 +44779,11 @@ mod tests {
     #[test]
     fn two_surfaces_on_one_markdown_buffer_flip_independently() {
         let mut panes = PreviewPanes::default();
-        let path = PathBuf::from(r"C:\w\notes.md");
+        let source = preview::PreviewSource::file(r"C:\w\notes.md");
         let pane = PreviewSurface::Seat(SeatId(1));
         let float = PreviewSurface::Float(7);
         for surface in [pane, float] {
-            panes.entry(surface).buffer = Some(path.clone());
+            panes.entry(surface).buffer = Some(source.clone());
         }
         let mut pool = preview::PreviewPool::default();
         pool.insert(text_buffer("notes.md", "# Title\n\nbody\n"));
@@ -44604,7 +44801,7 @@ mod tests {
         );
 
         // Which is what every reader downstream of the flag now answers with.
-        let buffer = pool.get(&path).expect("the one buffer");
+        let buffer = pool.get(&source).expect("the one buffer");
         assert_eq!(
             (
                 buffer.view(panes.entry(pane).md_source),
@@ -44625,7 +44822,7 @@ mod tests {
 
         // And the buffer itself is still one buffer: the ruling moved the view
         // mode, not the file.
-        let buffer = pool.get_mut(&path).expect("the one buffer");
+        let buffer = pool.get_mut(&source).expect("the one buffer");
         buffer.edit_content(|content| {
             content.push_str("more\n");
             true
@@ -44688,8 +44885,8 @@ mod tests {
     #[test]
     fn a_caret_and_a_scroll_survive_a_switch_to_another_buffer_and_back() {
         let mut store = PreviewViewStore::default();
-        let one = Path::new(r"C:\w\one.rs");
-        let two = Path::new(r"C:\w\two.rs");
+        let one = &preview::PreviewSource::file(r"C:\w\one.rs");
+        let two = &preview::PreviewSource::file(r"C:\w\two.rs");
         // A file never looked at starts at the top with the caret at its head.
         assert_eq!(store.restore(one), PreviewViewState::default());
 
@@ -45680,7 +45877,8 @@ mod tests {
     /// without a disk. `dirty` is the caller's — it is the field every clause of
     /// the migration law turns on.
     fn buffer_saying(path: &str, name: &str, body: &str) -> preview::PreviewBuffer {
-        let mut buffer = preview::PreviewBuffer::new(PathBuf::from(path), name.to_owned());
+        let mut buffer =
+            preview::PreviewBuffer::new(preview::PreviewSource::file(path), name.to_owned());
         buffer.accept(preview::HeadOutcome::Read {
             text: body.to_owned(),
             truncated: false,
@@ -45699,7 +45897,7 @@ mod tests {
             .expect("the preview seat lands");
         let focused = seats.terminal();
         let mut pool = preview::PreviewPool::default();
-        let showing = buffers.first().map(|buffer| buffer.path.clone());
+        let showing = buffers.first().map(|buffer| buffer.source.clone());
         for buffer in buffers {
             pool.insert(buffer);
         }
@@ -45754,7 +45952,7 @@ mod tests {
     /// — which is exactly how the bug reached a release.
     #[test]
     fn a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with() {
-        let path = PathBuf::from(r"D:\notes\todo.txt");
+        let path = preview::PreviewSource::file(r"D:\notes\todo.txt");
         let mut edited = buffer_saying(r"D:\notes\todo.txt", "todo.txt", "milk\nbread\n");
         edited.dirty = true;
         let revision_before = edited.revision;
@@ -45782,8 +45980,8 @@ mod tests {
             .get(PreviewSurface::Seat(landed))
             .expect("the view arrived under the id the pane now answers to");
         assert_eq!(
-            pane.buffer.as_deref(),
-            Some(path.as_path()),
+            pane.buffer.as_ref(),
+            Some(&path),
             "the pane still knows which file it was on"
         );
         assert_eq!(pane.scroll, [0.0, 96.0], "and how far down it was in it");
@@ -45867,8 +46065,8 @@ mod tests {
     /// copy walks over the target's unsaved work — the `y` assertions go red.
     #[test]
     fn merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins() {
-        let notes = PathBuf::from(r"D:\notes\notes.md");
-        let plan = PathBuf::from(r"D:\notes\plan.md");
+        let notes = preview::PreviewSource::file(r"D:\notes\notes.md");
+        let plan = preview::PreviewSource::file(r"D:\notes\plan.md");
 
         let mut arriving_notes = buffer_saying(r"D:\notes\notes.md", "notes.md", "ARRIVING EDIT");
         arriving_notes.dirty = true;
@@ -45920,7 +46118,7 @@ mod tests {
                 .and_then(|pane| pane.buffer.clone()),
             Some(notes.clone()),
             "the host's own pane was on the loser and now reads the winner — a \
-             surface names its buffer by path, so one buffer per file *is* the \
+             surface names its buffer by source, so one buffer per file *is* the \
              redirect"
         );
     }
@@ -45940,9 +46138,14 @@ mod tests {
 
         // Two clean copies: nothing is at stake, so nothing moves — not even the
         // revision, which would make every pane on it rebuild for no reason.
-        let untouched = target.get(Path::new(r"D:\a.txt")).unwrap().revision;
+        let untouched = target
+            .get(&preview::PreviewSource::file(r"D:\a.txt"))
+            .unwrap()
+            .revision;
         target.merge_buffer(buffer_saying(r"D:\a.txt", "a.txt", "clean there"));
-        let a = target.get(Path::new(r"D:\a.txt")).unwrap();
+        let a = target
+            .get(&preview::PreviewSource::file(r"D:\a.txt"))
+            .unwrap();
         assert_eq!(a.content.as_deref(), Some("clean here"));
         assert_eq!(a.revision, untouched);
 
@@ -45955,7 +46158,7 @@ mod tests {
         target.merge_buffer(there);
         assert_eq!(
             target
-                .get(Path::new(r"D:\b.txt"))
+                .get(&preview::PreviewSource::file(r"D:\b.txt"))
                 .unwrap()
                 .content
                 .as_deref(),
@@ -47558,7 +47761,7 @@ mod tests {
         let open = |seats: &mut seats::Seats, panes: &mut PreviewPanes, path: &str| {
             let seat = seats.add_preview(&metrics).expect("a preview lands");
             let surface = PreviewSurface::Seat(seat);
-            panes.entry(surface).buffer = Some(PathBuf::from(path));
+            panes.entry(surface).buffer = Some(preview::PreviewSource::file(path));
             surface
         };
 
@@ -47570,8 +47773,8 @@ mod tests {
             "un-pinned, the next file reuses the pane — the singleton still holds"
         );
         assert_eq!(
-            panes.get(first).expect("a view").buffer.as_deref(),
-            Some(Path::new("b.md")),
+            panes.get(first).expect("a view").buffer.as_ref(),
+            Some(&preview::PreviewSource::file("b.md")),
             "and replaces what it was showing"
         );
 
@@ -47584,8 +47787,8 @@ mod tests {
         assert_ne!(second, first, "a pinned pane is not the reuse target");
 
         assert_eq!(
-            panes.get(first).expect("a view").buffer.as_deref(),
-            Some(Path::new("b.md")),
+            panes.get(first).expect("a view").buffer.as_ref(),
+            Some(&preview::PreviewSource::file("b.md")),
             "the pinned pane is untouched — that is what the pin buys"
         );
         assert_eq!(
@@ -47600,7 +47803,10 @@ mod tests {
         assert_eq!(panes.get(second).expect("a view").scroll, [0.0, 40.0]);
         assert_eq!(
             panes.showing(),
-            vec![PathBuf::from("b.md"), PathBuf::from("c.rs")],
+            vec![
+                preview::PreviewSource::file("b.md"),
+                preview::PreviewSource::file("c.rs")
+            ],
             "both are on screen, in the order they were first shown"
         );
 
@@ -47608,8 +47814,8 @@ mod tests {
         assert!(panes.remove(second).is_some());
         assert!(panes.get(second).is_none());
         assert_eq!(
-            panes.get(first).expect("a view").buffer.as_deref(),
-            Some(Path::new("b.md"))
+            panes.get(first).expect("a view").buffer.as_ref(),
+            Some(&preview::PreviewSource::file("b.md"))
         );
     }
 
