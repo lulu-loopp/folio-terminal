@@ -91,6 +91,20 @@ pub enum TooltipAnchorId {
     /// A row of the open root menu, whose caption is only the last segment of
     /// the folder it offers (E53) — so the tip is where the whole path is said.
     RootRow(crate::profiles::RootMenuRow),
+    /// One row of a Git page — a heading's teaching sentence, a changed file's
+    /// full path, a commit's author (R16 keeps it out of the row and here).
+    GitRow(bt_layout::SeatId, usize),
+    /// One of the masthead's ahead/behind pills.
+    ///
+    /// Its own id rather than a part of the masthead row, because R5's sentence
+    /// is about *that count*: a tip anchored to the whole heading would say "2
+    /// commits ahead" while the pointer was on the behind pill.
+    GitPill(bt_layout::SeatId, usize),
+    /// One of a Git row's hover verbs. Its own id, and pushed before the row it
+    /// sits in, because the two say different things about the same pixels: the
+    /// row says which file, the button says what pressing it does — and for the
+    /// `×` that difference is *restore* versus *delete*.
+    GitAct(bt_layout::SeatId, usize, crate::git_panel::GitAct),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.

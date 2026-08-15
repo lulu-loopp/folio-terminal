@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "theme": "dark",
   "cursor_style": "bar",
   "tab_layout": "horizontal",
@@ -29,7 +29,8 @@
               "node-45"
             ],
             "sel": "node-45",
-            "width": 240
+            "width": 240,
+            "view": "files"
           },
           {
             "dir": "col",

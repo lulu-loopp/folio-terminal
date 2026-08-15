@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 
 use bt_persist::{
-    DegradationReport, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1,
-    ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
+    DegradationReport, FilesViewV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, PreviewPaneV1,
+    PreviewPoolEntryV1, ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
     SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
     SettingsV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings,
     write_session_atomic, write_settings_atomic,
@@ -153,7 +153,7 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
 /// pass while the reader dropped four fields on the way past.
 #[test]
 fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section() {
-    let (session, report, degradation) = read_session(&fixture_path("session_v6_preview.json"));
+    let (session, report, degradation) = read_session(&fixture_path("session_v7_preview.json"));
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(degradation, DegradationReport::default());
     assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
@@ -227,7 +227,7 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
     // The same fixed-point gate the canonical fixture gets: reading and writing
     // this document must reproduce it byte for byte.
     let reserialized = serde_json::to_vec_pretty(&session).expect("SessionV1 always serializes");
-    let expected = std::fs::read(fixture_path("session_v6_preview.json")).unwrap();
+    let expected = std::fs::read(fixture_path("session_v7_preview.json")).unwrap();
     assert_eq!(
         String::from_utf8(reserialized).unwrap(),
         String::from_utf8(expected).unwrap().trim_end().to_owned(),
@@ -556,9 +556,9 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 4,
+        SETTINGS_SCHEMA_VERSION, 5,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
-         and the default profile the v3→v4 (§1.3)"
+         the default profile the v3→v4, and the Git panel's master switch the v4→v5 (§1.3)"
     );
     assert!(
         defaults.display_formulas,
@@ -568,6 +568,95 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
         defaults.inline_formulas,
         "inline formulas render by default too; the site gate is what keeps that safe"
     );
+    assert!(
+        defaults.git_panel,
+        "the Git page is on by default — a feature that arrives switched off is a \
+         feature nobody finds. Turning it off is what stops the repository being read"
+    );
+}
+
+/// PIN (R1 / the master switch, 2026-08-15) — a v4 settings file migrates to v5
+/// with the Git panel on, and a v6 session gives every `files` leaf the page it
+/// was provably on.
+///
+/// Both halves in one test because they are one ruling arriving in two files, and
+/// because the interesting failure is the same for both: a step that inserted its
+/// field while disturbing a sibling. The fixtures are non-default in their older
+/// fields for exactly that reason (§1.3 rule 1).
+#[test]
+fn the_git_page_migrates_on_and_every_files_column_arrives_on_its_tree() {
+    let (settings, report) = read_settings(&fixture_path("settings_v4_profile_chosen.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(settings.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        settings.git_panel,
+        "a v4 build had no Git page at all, so `off` would freeze an absence \
+         rather than preserve a choice — the feature takes the product's default"
+    );
+    assert_eq!(
+        settings.default_profile, "gitbash",
+        "v4→v5 is structural: every sibling crosses untouched"
+    );
+    assert!(!settings.inline_formulas);
+    assert_eq!(settings.theme_mode, ThemeModeV1::Light);
+
+    // A `files` leaf under a split. The vault's own seed is deliberately *not*
+    // given a page — see `migrate_session_v6_to_v7` — and the assertion below
+    // pins that: a closed tab's column is `{ root }` and nothing more.
+    let (session, report, degradation) =
+        read_session(&fixture_path("session_v6_files_column.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(degradation, DegradationReport::default());
+    assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
+    let LayoutNodeV1::Split(split) = &session.tabs[0].root else {
+        panic!("the fixture's tab is a split");
+    };
+    let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = split.children[0].as_ref() else {
+        panic!("the fixture's first child is a files column");
+    };
+    assert_eq!(
+        column.view,
+        FilesViewV1::Files,
+        "every column written before v7 was written by a build with one page"
+    );
+    assert_eq!(
+        column.open,
+        vec!["crates".to_owned()],
+        "the step adds a key and disturbs nothing beside it"
+    );
+    assert_eq!(column.width, 260);
+    assert_eq!(
+        session.recent[0].seed,
+        RecentSeedV1::Files {
+            root: "D:\\other".to_owned()
+        },
+        "a vault seed is the whole of what a closed tab is rebuilt from, and a \
+         page is not part of it — the column it reopens is born on its tree"
+    );
+
+    // And the page a user actually chose survives a round trip, which is the
+    // whole of what the field is for.
+    let dir = std::env::temp_dir().join(format!("bt-persist-git-view-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
+    let mut chosen = session.clone();
+    let LayoutNodeV1::Split(split) = &mut chosen.tabs[0].root else {
+        unreachable!()
+    };
+    let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = split.children[0].as_mut() else {
+        unreachable!()
+    };
+    column.view = FilesViewV1::Git;
+    write_session_atomic(&path, &chosen).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains("\"view\": \"git\""),
+        "the page is written in the design's own word, lower case: {on_disk}"
+    );
+    let (round_tripped, report, _) = read_session(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// PIN — v3→v4 adds the default profile as **unchosen**, and touches nothing.

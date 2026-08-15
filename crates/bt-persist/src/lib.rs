@@ -40,8 +40,8 @@ pub use atomic::atomic_write;
 pub use debounce::Debouncer;
 pub use error::WriteError;
 pub use layout::{
-    FilesLeafV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, RATIO_PPM_MAX, SplitDirV1, SplitNodeV1,
-    TermLeafV1,
+    FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, RATIO_PPM_MAX, SplitDirV1,
+    SplitNodeV1, TermLeafV1,
 };
 pub use migrate::{
     FallbackReason, MigrationStep, ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,

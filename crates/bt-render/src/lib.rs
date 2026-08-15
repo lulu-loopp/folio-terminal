@@ -95,7 +95,7 @@ pub use theme::{
     WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
     WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
     WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette,
-    current_cursor_style, current_theme, foreground_rgb, set_cursor_style, set_theme,
+    current_cursor_style, current_theme, foreground_rgb, ink_over, set_cursor_style, set_theme,
     theme_revision,
 };
 use theme::{

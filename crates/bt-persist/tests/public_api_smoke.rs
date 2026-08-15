@@ -35,6 +35,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         display_formulas: false,
         inline_formulas: false,
         default_profile: "gitbash".to_owned(),
+        git_panel: false,
     };
     write_settings_atomic(&path, &settings).unwrap();
 
@@ -57,6 +58,10 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     );
     assert!(
         on_disk.contains("\"default_profile\": \"gitbash\""),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"git_panel\": false"),
         "written file must be human-readable JSON: {on_disk}"
     );
 }

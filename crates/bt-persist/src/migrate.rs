@@ -39,6 +39,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (1, migrate_settings_v1_to_v2),
     (2, migrate_settings_v2_to_v3),
     (3, migrate_settings_v3_to_v4),
+    (4, migrate_settings_v4_to_v5),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -88,6 +89,25 @@ fn migrate_settings_v3_to_v4(mut value: Value) -> Value {
     }
     value
 }
+
+/// v4 -> v5: the Git panel's master switch, defaulted **on**.
+///
+/// The second step to take the product's default for a feature shipping new, and
+/// it takes it for `migrate_settings_v2_to_v3`'s reason rather than
+/// `v1_to_v2`'s: a v4 build had no Git page at all, so there is no behaviour to
+/// carry forward and "off" would freeze an absence rather than preserve a status
+/// quo. The one thing worth saying about writing `true` here is what it does *not*
+/// do — the panel still reads nothing until a Git page is actually looked at, so
+/// a migrated user's first session after this step spawns exactly as many `git`
+/// processes as their last one did: none.
+fn migrate_settings_v4_to_v5(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(5));
+        object.insert("git_panel".to_owned(), Value::from(true));
+    }
+    value
+}
+
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
 pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
@@ -96,6 +116,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (3, migrate_session_v3_to_v4),
     (4, migrate_session_v4_to_v5),
     (5, migrate_session_v5_to_v6),
+    (6, migrate_session_v6_to_v7),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -185,6 +206,63 @@ fn migrate_session_v5_to_v6(mut value: Value) -> Value {
         }
     }
     value
+}
+
+/// v6 -> v7: which page each Files column was on (R1).
+///
+/// The second step to walk below the top-level object, and unlike
+/// `v5_to_v6` it walks the tabs' trees **and not `recent`**. That is not an
+/// omission: a vault entry's seed is a [`RecentSeedV1`](crate::RecentSeedV1),
+/// which for a column is `{ root }` and nothing else — the whole of what a closed
+/// tab can be rebuilt from — so there is no column state there to give a page to.
+/// Inserting a key into it would write a field the schema does not have, and the
+/// reader would drop it on the next save.
+///
+/// Every document written before this one was written by a build with a single
+/// page, so `"files"` is not a default being imposed — it is the state those
+/// columns were provably in.
+fn migrate_session_v6_to_v7(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(7));
+        if let Some(tabs) = object.get_mut("tabs").and_then(Value::as_array_mut) {
+            for tab in tabs {
+                if let Some(root) = tab.get_mut("root") {
+                    migrate_files_views_in_tree(root);
+                }
+            }
+        }
+    }
+    value
+}
+
+/// Walks a persisted layout tree, giving every `files` leaf its page.
+///
+/// Structurally recursive over `children` for the reason
+/// [`migrate_profile_ids_in_tree`] gives: a node shape this build does not
+/// recognize is a node whose children it must still not lose.
+fn migrate_files_views_in_tree(node: &mut Value) {
+    if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+        for child in children {
+            migrate_files_views_in_tree(child);
+        }
+    }
+    migrate_files_view_in_leaf(node);
+}
+
+/// The insert itself, on one `files`-shaped object. Gated on `kind` for
+/// [`migrate_profile_id_in_leaf`]'s reason, and it leaves a `view` that is
+/// somehow already there alone: a key this step did not write is a key some other
+/// writer meant.
+fn migrate_files_view_in_leaf(leaf: &mut Value) {
+    let Some(object) = leaf.as_object_mut() else {
+        return;
+    };
+    if object.get("kind").and_then(Value::as_str) != Some("files") {
+        return;
+    }
+    if !object.contains_key("view") {
+        object.insert("view".to_owned(), Value::from("files"));
+    }
 }
 
 /// Walks a persisted layout tree, migrating the `profile_id` of every `term` leaf.

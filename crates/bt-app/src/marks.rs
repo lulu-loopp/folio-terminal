@@ -334,6 +334,62 @@ pub enum ChromeMark {
         /// `.pring circle { stroke-width: 2 }`, in physical pixels.
         stroke_px: u32,
     },
+    /// The branch fork — **struck here, not lifted** (R4/R27, 2026-08-15).
+    ///
+    /// The first mark in this module with no `<symbol>` behind it, and the
+    /// reason is that the mock-up has none either: its Git masthead spends a
+    /// bare `⎇` (U+2387, ALTERNATE KEY SYMBOL) at line 4937, the only glyph in
+    /// the whole design drawn as a character rather than as art. R4 struck that
+    /// down and this is what replaces it. A codepoint is not a drawing: whether
+    /// `⎇` exists at all is a fact about the font the machine happens to have,
+    /// its width is another, and a masthead whose first mark is a hollow box on
+    /// a machine without it is worse than no mark. What is drawn instead is the
+    /// shape every git client draws — a trunk, a branch leaving it, three nodes
+    /// — at the same 16-unit box and the same 1.15 stroke as `#i-file`, so it
+    /// belongs to this sheet rather than merely standing beside it.
+    ///
+    /// One mark and not two: R27 asks the command palette's "Git panel" entry to
+    /// wear a branch fork, and this *is* the branch fork. Striking a second one
+    /// for the palette would be two drawings of one idea, which is the mistake
+    /// this module's own header names.
+    GitBranch,
+    /// `#i-plus`'s other half — the horizontal stroke alone.
+    ///
+    /// The Git page's "unstage" verb, and the mock-up spells it `−` (U+2212 MINUS
+    /// SIGN, deliberately not an ASCII hyphen, line 4927). It is a **mark** here
+    /// and not a character for the reason R12 gives: the three verbs on a change
+    /// row reveal through `.pv-tool`'s three rungs — absent, seven-tenths, whole
+    /// — and an opacity is something a sprite has and a text run does not. Once
+    /// one of the three is a mark all three must be, or the row's buttons would
+    /// fade at different rates.
+    ///
+    /// Cut from `#i-plus`'s own path so the pair are one drawing minus a stroke:
+    /// same ten-unit box, same 1.2 weight, same round cap. A minus struck
+    /// independently would be a different length or a different weight from the
+    /// plus sitting a row above it, which on two buttons that mean opposite
+    /// things is exactly where it would show.
+    Minus,
+    /// The mini graph's merge curve — a branch's history joining this line.
+    ///
+    /// The mock-up's own path (line 4933), in the mock-up's own `0 0 14 27` box,
+    /// which is the whole reason this is a mark rather than arithmetic: the curve
+    /// has to start at the *top right* of a 27-pixel row and land on the edge of
+    /// a dot at its middle, and those two facts are stated once, in the design, as
+    /// four control points. A rounded quad could not draw it and a re-derivation
+    /// in Rust would be a second authority for a shape that already has one.
+    GitMergeCurve,
+    /// Three commits and the two edges between them — a DAG, in miniature.
+    ///
+    /// **Struck now and drawn later.** R27 asks for it beside the fork, and its
+    /// caller is the command palette's "Git graph" entry, which arrives with the
+    /// graph itself in G-4. It is here rather than there for the reason
+    /// [`crate::git`]'s unused readers are: a pair of marks cut in one sitting
+    /// from one geometry is a pair that matches, and a second one cut months
+    /// later against a screenshot is not. The mock-up borrows `#i-app` for this
+    /// entry today, which is a mark about applications and says nothing about a
+    /// repository.
+    #[allow(dead_code)]
+    GitGraph,
 }
 
 impl ChromeMark {
@@ -383,6 +439,10 @@ impl ChromeMark {
             Self::CardCorner { .. } => "card-corner",
             Self::Fill => "fill",
             Self::ProgressRing { .. } => "progress-ring",
+            Self::GitBranch => "i-git-branch",
+            Self::GitGraph => "i-git-graph",
+            Self::Minus => "i-minus",
+            Self::GitMergeCurve => "git-merge-curve",
         }
     }
 
@@ -1127,6 +1187,10 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Save => 23,
         ChromeMark::Eye => 24,
         ChromeMark::Code => 25,
+        ChromeMark::GitBranch => 27,
+        ChromeMark::GitGraph => 28,
+        ChromeMark::Minus => 29,
+        ChromeMark::GitMergeCurve => 30,
         // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
@@ -1140,7 +1204,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 27] = [
+const SYMBOL_VIEW_BOX: [&str; 31] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1182,11 +1246,23 @@ const SYMBOL_VIEW_BOX: [&str; 27] = [
     "0 0 16 16",
     // `#i-dock-right`, the mirrored dock, in its twin's box.
     "0 0 16 16",
+    // `#i-git-branch` and `#i-git-graph` — struck for this product rather than
+    // lifted from the sheet, and cut to the house sixteen so they sit at the
+    // same optical weight as everything above them.
+    "0 0 16 16",
+    "0 0 16 16",
+    // `#i-minus` keeps `#i-plus`'s ten-unit box, because it is that path with
+    // one stroke removed.
+    "0 0 10 10",
+    // The mini graph's merge curve, in `.ggr`'s own box: 14 wide by 27 tall, the
+    // height of one commit row. Not the house sixteen, for `#i-tri`'s reason —
+    // the design quotes this curve's control points in these units.
+    "0 0 14 27",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 27] = [
+const SYMBOL_BODY: [&str; 31] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1329,6 +1405,48 @@ const SYMBOL_BODY: [&str; 27] = [
         r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
         r##"<rect x="9.4" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/>"##,
     ),
+    // `#i-git-branch` — a trunk with three nodes and one branch leaving it.
+    //
+    // Struck for this product (R4): the design had a bare `⎇` here. The
+    // geometry is the one every git client draws, laid on this sheet's own grid
+    // — nodes at radius 1.85 so they read at the 13px the masthead asks for,
+    // and 1.15 stroke, which is `#i-file`'s, because these two are seen a
+    // centimetre apart in the same column.
+    //
+    // The branch is a cubic and not an arc: every curve on this sheet is a
+    // cubic, and one shape rasterized through a different primitive is one
+    // shape that antialiases differently.
+    concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round">"#,
+        r#"<circle cx="4.7" cy="3.5" r="1.85"/>"#,
+        r#"<circle cx="4.7" cy="12.5" r="1.85"/>"#,
+        r#"<circle cx="11.3" cy="3.5" r="1.85"/>"#,
+        r#"<path d="M4.7 5.35v5.3"/>"#,
+        r#"<path d="M11.3 5.35v1.5C11.3 8.8 9.75 10.35 7.8 10.35H4.7"/>"#,
+        r#"</g>"#,
+    ),
+    // `#i-git-graph` — three commits, two edges, two lanes (R27).
+    //
+    // The smallest honest picture of a directed acyclic graph: a trunk running
+    // top to bottom, and one commit off to the side joining it. Two edges,
+    // because two is the fewest that can show a *join* — one edge would be a
+    // line and no graph at all.
+    concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round">"#,
+        r#"<circle cx="4.7" cy="3.3" r="1.8"/>"#,
+        r#"<circle cx="4.7" cy="12.7" r="1.8"/>"#,
+        r#"<circle cx="11.6" cy="8" r="1.8"/>"#,
+        r#"<path d="M4.7 5.1v5.8"/>"#,
+        r#"<path d="M9.8 8H8.2C6.25 8 4.7 6.45 4.7 4.5"/>"#,
+        r#"</g>"#,
+    ),
+    // #i-minus — `#i-plus`'s second subpath, alone.
+    r#"<path d="M0.5 5h9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
+    // The merge curve — mock-up 4933, `.ggr path.side`, verbatim. It enters at
+    // the row's top right and lands on the dot's edge at (7.6, 12.6), which is
+    // just short of the 3.1-radius circle centred at (7, 13.5) — so the line
+    // stops *at* the node rather than under it.
+    r#"<path d="M13 0 C 13 8, 9.5 10.5, 7.6 12.6" fill="none" stroke="currentColor" stroke-width="1.5"/>"#,
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the

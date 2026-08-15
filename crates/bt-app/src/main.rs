@@ -16,6 +16,7 @@ mod file_peek;
 mod files;
 mod float;
 mod git;
+mod git_panel;
 mod input;
 mod marks;
 mod peek_strip;
@@ -3047,6 +3048,17 @@ struct TabState {
     /// two columns on one repository are two entries with two lifetimes, which is
     /// what lets one of them be re-rooted without disturbing the other.
     git_trees: BTreeMap<SeatId, git::GitCache>,
+    /// How far each column's Git page is scrolled, in physical pixels.
+    ///
+    /// Its own map rather than a field on the cache, because it is a fact about
+    /// the *page* and not about the repository: a refresh replaces everything the
+    /// cache holds, and a scroll position that went with it would send the list
+    /// back to the top every time a file was staged.
+    ///
+    /// Written only through [`git_panel::clamp_git_scroll`] — the same one-bound,
+    /// three-writers arrangement `DirCache::scroll_px` has, and for the report
+    /// that ruling came from.
+    git_scroll: BTreeMap<SeatId, f32>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
     ///
     /// **Always a Terminal seat in this build**, which is what lets `sessions`
@@ -3241,22 +3253,6 @@ struct Runtime {
     git_worker: git::GitWorker,
     git_worker_running: bool,
     git_worker_notice_pending: bool,
-    /// Where to write what the git worker answers, when anyone asked for it
-    /// (`BT_GIT_TRACE=<path>`).
-    ///
-    /// **A debug channel, not a feature.** This slice is the data plane: nothing
-    /// on screen consumes a repository yet, so without a door like this one the
-    /// only proof the thread works would be a test that never touches the event
-    /// loop. With it set, every docked Files column drives [`git::GitCache`]'s own
-    /// driver — the same one the Git page will drive in G-2 — and each answer is
-    /// appended as it lands. It goes when the panel arrives to ask for real.
-    ///
-    /// **A file and not stderr**, which is `BT_CHROME_DUMP`'s shape and for the
-    /// same reason: this window cannot be started with its output redirected —
-    /// ConPTY refuses to open a pseudo console for a process whose standard
-    /// handles are pipes — so a trace that only reached stderr could not be read
-    /// back by anything that started the window.
-    git_trace: Option<PathBuf>,
     /// How wide the "no preview" card's button caption is drawn.
     ///
     /// Measured into the runtime where the picture is built, for the reason
@@ -3745,6 +3741,22 @@ struct Runtime {
     /// [`Runtime::measure_files_names`] for why the hit test reads it from here
     /// rather than measuring for itself.
     files_name_widths: BTreeMap<SeatId, f32>,
+    /// The Git page each column drew last frame.
+    ///
+    /// Beside [`Self::files_name_widths`] and for its identical reason: the hit
+    /// test is `&self` by construction and cannot measure a string, and "the row
+    /// you can press is the row you can see" has to be true by one derivation
+    /// rather than by two functions agreeing. It is also what lets a press know
+    /// *which* row it landed on without rebuilding the page under the pointer.
+    git_pages_shown: BTreeMap<SeatId, git_panel::GitPanelContent>,
+    /// How wide each column's `Files | Git` switch is drawn, for the hit test.
+    ///
+    /// The third field of this family, and it exists for the reason the two above
+    /// it do: only the renderer can measure `Files`, the hit test cannot ask it,
+    /// and a switch whose pressable half is not its drawn half is the one defect
+    /// this arrangement forbids by construction. Empty while the master switch is
+    /// off — the same emptiness that keeps the strip off the screen.
+    files_view_widths: BTreeMap<SeatId, [f32; 2]>,
     /// A one-line answer the tree owes the user, shown on the next frame.
     ///
     /// A `String` and not a flag, unlike the two worker notices beside it, for a
@@ -10244,6 +10256,15 @@ fn revive_plan(
                     root: leaf.root.clone(),
                     open: leaf.open.iter().cloned().collect(),
                     sel: leaf.sel.clone(),
+                    // The fourth fact the tree has nowhere to put (R1). It is
+                    // restored whatever the Git panel's setting is: the setting
+                    // decides whether the page is *reachable*, and this records
+                    // which page the user was last on, so switching the panel
+                    // back on brings back what they left rather than a default.
+                    view: match leaf.view {
+                        bt_persist::FilesViewV1::Files => seats::FilesView::Files,
+                        bt_persist::FilesViewV1::Git => seats::FilesView::Git,
+                    },
                 },
             )
         })
@@ -10913,6 +10934,7 @@ fn assemble_tab_state(
         sessions,
         files,
         file_trees: BTreeMap::new(),
+        git_scroll: BTreeMap::new(),
         git_trees: BTreeMap::new(),
         focused_leaf,
         pinned: seed.pinned,
@@ -11428,90 +11450,32 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
     })
 }
 
-/// One repository answer, in one line (`BT_GIT_TRACE`).
+/// **R31's gate**: which columns owe the repository a question this frame.
 ///
-/// A summary rather than the value's own `Debug`, because the value's own
-/// `Debug` is the whole answer: two thousand status entries and fifty commits,
-/// each with two hashes and a subject, is a megabyte of trace per refresh and a
-/// line nobody can read. What a look at the data plane wants to know is that the
-/// shapes came back filled — how many of each, and which branch — which is what
-/// this says.
-fn summarise_git_answer(answer: &git::GitAnswer) -> String {
-    match answer {
-        git::GitAnswer::Repo { dir, outcome } => match outcome {
-            Ok(root) => format!("Repo({}) -> {}", dir.display(), root.display()),
-            Err(fault) => format!("Repo({}) -> {fault:?}", dir.display()),
-        },
-        git::GitAnswer::Status { root, outcome } => match outcome {
-            Ok(status) => format!(
-                "Status({}) -> branch={:?} upstream={:?} ahead={} behind={} staged={} changes={} \
-                 untracked={} dropped={}",
-                root.display(),
-                status.branch,
-                status.upstream,
-                status.ahead,
-                status.behind,
-                status.count(git::GitGroup::Staged),
-                status.count(git::GitGroup::Changes),
-                status.count(git::GitGroup::Untracked),
-                status.dropped,
-            ),
-            Err(fault) => format!("Status({}) -> {fault:?}", root.display()),
-        },
-        git::GitAnswer::Branches { root, outcome } => match outcome {
-            Ok(branches) => format!(
-                "Branches({}) -> {} branches, head={:?}",
-                root.display(),
-                branches.len(),
-                branches.iter().find(|branch| branch.is_head).map(|branch| (
-                    &branch.name,
-                    branch.ahead,
-                    branch.behind,
-                    &branch.committerdate_relative
-                )),
-            ),
-            Err(fault) => format!("Branches({}) -> {fault:?}", root.display()),
-        },
-        git::GitAnswer::Log {
-            root,
-            skip,
-            outcome,
-        } => match outcome {
-            Ok(log) => format!(
-                "Log({}, skip={skip}) -> {} commits, has_more={}, first={:?}",
-                root.display(),
-                log.commits.len(),
-                log.has_more,
-                log.commits.first().map(|commit| (
-                    &commit.short,
-                    &commit.time_relative,
-                    commit.parents.len(),
-                    commit.subject.chars().take(40).collect::<String>()
-                )),
-            ),
-            Err(fault) => format!("Log({}, skip={skip}) -> {fault:?}", root.display()),
-        },
-        git::GitAnswer::Diff {
-            root,
-            path,
-            staged,
-            outcome,
-        } => format!(
-            "Diff({}, {path}, staged={staged}) -> {:?}",
-            root.display(),
-            outcome.as_ref().map(String::len),
-        ),
-        git::GitAnswer::Show {
-            root,
-            hash,
-            path,
-            outcome,
-        } => format!(
-            "Show({}, {hash}, {path}) -> {:?}",
-            root.display(),
-            outcome.as_ref().map(String::len),
-        ),
+/// Two conditions and no others. The master switch must be on, and a column must
+/// actually be *showing* its Git page — not merely have one available, and not
+/// merely be rooted somewhere that happens to be a repository. A column on its
+/// tree costs exactly what it cost before the Git panel existed: no process at
+/// all.
+///
+/// A free function taking the facts rather than a method reading them off
+/// `self`, because "with the panel off, nothing is asked" is the promise the
+/// switch exists *for*, and a promise that can only be checked by starting a
+/// window is a promise nothing checks. A column with no root is dropped here
+/// too — an unrooted column has no folder to probe.
+#[must_use]
+fn columns_wanting_git(
+    panel_on: bool,
+    columns: &[(SeatId, seats::FilesView, String)],
+) -> Vec<(SeatId, String)> {
+    if !panel_on {
+        return Vec::new();
     }
+    columns
+        .iter()
+        .filter(|(_, view, root)| *view == seats::FilesView::Git && !root.trim().is_empty())
+        .map(|(seat, _, root)| (*seat, root.clone()))
+        .collect()
 }
 
 /// Drain every shell this tab holds.
@@ -11772,7 +11736,6 @@ impl Runtime {
             git_worker,
             git_worker_running: true,
             git_worker_notice_pending: false,
-            git_trace: std::env::var_os("BT_GIT_TRACE").map(PathBuf::from),
             preview_button_width: 0.0,
             preview_opened_at: None,
             pending_frames: LatestFrameSlot::default(),
@@ -11878,6 +11841,8 @@ impl Runtime {
             float_hover: None,
             revealed_foot: None,
             files_name_widths: BTreeMap::new(),
+            git_pages_shown: BTreeMap::new(),
+            files_view_widths: BTreeMap::new(),
             files_notice: None,
             files_focus: FilesKeyboardFocus::default(),
             rename: None,
@@ -12806,6 +12771,22 @@ impl Runtime {
         // And the strip along the bottom of each of them, whose caption is cut to
         // the room it has — which only something holding a font can decide.
         self.dress_files_feet(scale, now, &mut files_trees);
+        // The `Files | Git` switch and, for a column standing on the second of
+        // them, the page itself. Both are empty when the master switch is off,
+        // which is how "the page does not exist" reaches the painter: not as a
+        // flag it has to remember to check, but as a column that is not in the
+        // map.
+        let files_views = self.files_views(scale);
+        let git_pages = self.git_pages(scale, &files_views);
+        // Kept for the hit test, which is `&self` by construction and cannot
+        // measure a string — the same reason `files_name_widths` is a field. The
+        // press then lands on the row that was drawn, because it *is* the row
+        // that was drawn.
+        self.git_pages_shown = git_pages.clone();
+        self.files_view_widths = files_views
+            .iter()
+            .map(|(seat, content)| (*seat, content.widths))
+            .collect();
         // **One sentence per preview pane, and each about its own body.**
         //
         // This was one message spread over every `SeatKind::Preview` placement
@@ -12995,6 +12976,8 @@ impl Runtime {
                 files_name_widths: &self.files_name_widths,
                 files_root_open: self.root_menu.seat(),
                 files_trees: &files_trees,
+                files_views: &files_views,
+                git_pages: &git_pages,
                 preview_messages: &preview_messages,
                 preview_feet: &preview_feet,
                 preview_heads: &preview_heads,
@@ -13120,6 +13103,66 @@ impl Runtime {
                     continue;
                 };
                 anchors.push(id, rect, text);
+            }
+        }
+        // The Git page's own tips, from the page that was drawn (R5, and the
+        // three teaching headings the mock-up wrote at 4950-4952). Pushed last of
+        // the pane-level anchors and inside the same `drag.is_none()` guard as
+        // everything above them, because a page under a drag is a page nobody is
+        // pointing at.
+        if self.drag.is_none() {
+            let git_scale = scale;
+            let pages: Vec<(SeatId, git_panel::GitPanelContent)> = self
+                .git_pages_shown
+                .iter()
+                .map(|(seat, page)| (*seat, page.clone()))
+                .collect();
+            for (seat, page) in pages {
+                let Some(rect) = seats::files_pane_rect(&self.seat_layout, seat) else {
+                    continue;
+                };
+                let body = seats::files_pane_geometry(rect, git_scale, true).body;
+                let geometry = git_panel::git_panel_geometry(body, &page, git_scale);
+                for (index, row) in page.rows.iter().enumerate() {
+                    let box_ = geometry.row_rect(index);
+                    // A row scrolled out from under the viewport has no tip:
+                    // the anchor and the picture are the same rectangle or the
+                    // tip arrives beside nothing.
+                    if box_[3] <= body[1] || box_[1] >= body[3] {
+                        continue;
+                    }
+                    if let git_panel::GitRow::Masthead(head) = row {
+                        for (pill, pill_box) in head
+                            .pills
+                            .iter()
+                            .zip(git_panel::pill_boxes(head, box_, git_scale))
+                        {
+                            anchors.push(
+                                tooltip::TooltipAnchorId::GitPill(seat, index),
+                                pill_box,
+                                &pill.tooltip,
+                            );
+                        }
+                        continue;
+                    }
+                    // The buttons first, so they win the pixels they are on:
+                    // first-match-wins is this list's ordering rule, and a row
+                    // registered ahead of the verb inside it would swallow it.
+                    let untracked = matches!(
+                        row,
+                        git_panel::GitRow::Change(change) if change.untracked
+                    );
+                    for (act, act_box) in git_panel::act_boxes(row, box_, git_scale) {
+                        anchors.push(
+                            tooltip::TooltipAnchorId::GitAct(seat, index, act),
+                            act_box,
+                            act.tooltip(untracked),
+                        );
+                    }
+                    if let Some(text) = git_panel::row_tooltip(row) {
+                        anchors.push(tooltip::TooltipAnchorId::GitRow(seat, index), box_, &text);
+                    }
+                }
             }
         }
         // A tip whose subject has left the strip has nothing left to say — and a
@@ -13831,6 +13874,7 @@ impl Runtime {
             sidebar: self.rail.mode,
             display_formulas: self.settings_store.loaded().display_formulas,
             inline_formulas: self.settings_store.loaded().inline_formulas,
+            git_panel: self.settings_store.loaded().git_panel,
             default_profile: self.default_profile(),
             profile_available: std::array::from_fn(|index| {
                 self.profile_programs.is_available(index)
@@ -14575,6 +14619,9 @@ impl Runtime {
                 if let Some(enabled) = settings::inline_formulas_requested(target) {
                     self.apply_inline_formulas(enabled)?;
                 }
+                if let Some(enabled) = settings::git_panel_requested(target) {
+                    self.apply_git_panel(enabled)?;
+                }
                 // Both rail combos go through the one constructor: the layout
                 // choice keeps the sidebar mode standing and the sidebar choice
                 // keeps the layout standing, and Q190's combination rule inside
@@ -14898,6 +14945,42 @@ impl Runtime {
         Ok(true)
     }
 
+    /// Turn the Git page on or off for the whole product (user ruling,
+    /// 2026-08-15).
+    ///
+    /// **Off throws away what was read and stops the reading**, in that order.
+    /// Dropping every column's [`git::GitCache`] is the honest half of the
+    /// promise: a switch that stopped asking but kept a repository's file list in
+    /// memory would still be holding what the user just said they did not want it
+    /// to hold. Nothing is *asked* again either, because the gate that starts a
+    /// question is in `files_tree_walk` and reads this same setting.
+    ///
+    /// **What is not touched is each column's own page** (see
+    /// [`seats::FilesLeafState::view`]). A column that was on Git falls back to
+    /// its tree while the switch is off and returns to Git when it is on again —
+    /// the switch decides reachability, the column remembers the choice, and
+    /// forcing every column back to Files here would silently spend a decision
+    /// the user made about something else.
+    fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.git_panel = enabled;
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        if !enabled {
+            for tab in &mut self.tabs {
+                tab.git_trees.clear();
+            }
+        }
+        // Chrome, for [`Self::set_files_view`]'s reason — and here the strip
+        // itself is arriving or leaving, so the column's body changes height
+        // with it.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
     /// **Everything that follows a change to the *set* of seats in a tab**, in
     /// the one place every verb that changes it now goes through.
     ///
@@ -15170,6 +15253,10 @@ impl Runtime {
             // `Files pane` row is the mouse one. Both are `toggle_files_pane`,
             // so neither can drift into meaning something the other does not.
             shortcuts::Action::FilesPane => self.toggle_files_pane(),
+            // R28. It answers for the column's page and for nothing else, so a
+            // window with no column and a window whose Git panel is switched off
+            // both get the same silence.
+            shortcuts::Action::GitPage => self.toggle_git_page(),
             shortcuts::Action::OpenSettings => self.toggle_settings_panel(),
             // Ruling 9's row, dispatched like every other: the same verb the
             // header's save button and the editor's own `Ctrl+S` reach.
@@ -18922,27 +19009,6 @@ impl Runtime {
         )
     }
 
-    /// Append one line to the git trace, when one was asked for.
-    ///
-    /// Opened and closed per line rather than held open: this is a debug channel
-    /// written a handful of times per repository, and a file handle kept for the
-    /// life of the window would be a resource held for a feature that is not
-    /// there yet. A trace that cannot be written is a trace that is not written —
-    /// there is nothing here worth ending a session over.
-    fn trace_git(&self, line: &str) {
-        use std::io::Write as _;
-        let Some(path) = self.git_trace.as_ref() else {
-            return;
-        };
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "BT_GIT_TRACE {line}");
-        }
-    }
-
     fn disable_git_worker(&mut self) -> bool {
         git::disable_git_worker_state(
             &mut self.git_worker_running,
@@ -18966,11 +19032,6 @@ impl Runtime {
                     let Some(index) = self.tabs.iter().position(|tab| tab.id == host.tab) else {
                         continue;
                     };
-                    self.trace_git(&format!(
-                        "seat={:?} {}",
-                        host.seat,
-                        summarise_git_answer(&response.answer)
-                    ));
                     let tab = &mut self.tabs[index];
                     if !tab.files.contains_key(&host.seat) {
                         continue;
@@ -19205,25 +19266,299 @@ impl Runtime {
         }
         // The Git page's questions ride the same walk, for the same reason the
         // directory ones do: this is the only place that knows which columns are
-        // on screen and where each of them is rooted. Behind the debug channel
-        // until G-2 gives the answers somewhere to be drawn — see `trace_git`.
-        if self.git_trace.is_some() {
-            let rooted: Vec<(SeatId, String)> = views
-                .keys()
-                .map(|seat| {
-                    let root = self.tabs[active]
-                        .files
-                        .get(seat)
-                        .map(|state| state.root.clone())
-                        .unwrap_or_default();
-                    (*seat, root)
-                })
-                .collect();
-            for (seat, root) in rooted {
-                self.ask_git_for_column(seat, &root);
-            }
+        // on screen and where each of them is rooted.
+        //
+        // **The gate is R31's, and it is two conditions and not one.** A
+        // repository is read when the master switch is on *and* a column is
+        // actually showing its Git page — never because a folder happens to be
+        // open, never on a timer, and never for a page nobody switched to. A
+        // column on its tree costs exactly what it cost before this slice: no
+        // process at all.
+        let on_screen: Vec<(SeatId, seats::FilesView, String)> = self.tabs[active]
+            .files
+            .iter()
+            .filter(|(seat, _)| views.contains_key(seat))
+            .map(|(seat, state)| (*seat, state.view, state.root.clone()))
+            .collect();
+        for (seat, root) in columns_wanting_git(self.git_panel_on(), &on_screen) {
+            self.ask_git_for_column(seat, &root);
         }
         views
+    }
+
+    /// Turn a column to one of its two pages.
+    ///
+    /// **Idempotent on purpose**: pressing the half you are already on is a
+    /// press with nothing to do, and answering it with a repaint would make a
+    /// segmented control flicker under a double click. It also does nothing at
+    /// all while the master switch is off — not because this checks it, but
+    /// because nothing can reach here: there is no strip to press and the chord
+    /// asks the same question first.
+    fn set_files_view(&mut self, seat: SeatId, view: seats::FilesView) -> Result<()> {
+        let active = self.active_tab;
+        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+            return Ok(());
+        };
+        if state.view == view {
+            return Ok(());
+        }
+        state.view = view;
+        // The page is durable (R1), so turning it is a change to the session —
+        // and the save is debounced exactly as every other layout change is.
+        self.mark_session_dirty(Instant::now());
+        // **And the picture is chrome**, so it is asked for the way every other
+        // chrome-changing verb in this file asks: `refresh_chrome` rebuilds the
+        // seat layer and `present_chrome_change` puts it on screen.
+        // `publish_frame` is the *content* path — it re-composes what the shells
+        // have printed and never touches the chrome build — so a page turned
+        // through it changed the state and left the old page on screen. Caught on
+        // the real machine, where the chord set the view and drew nothing (the
+        // mouse worked all along, because the press dispatcher refreshes the
+        // chrome on its way out).
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// R28's chord: turn the focused column's page over.
+    ///
+    /// **Which column** is the question this has to answer and the pointer does
+    /// not. It takes the tab's Files columns in tree order and turns the first —
+    /// which is the only column in every layout anyone has built, and in the two
+    /// that have two, the leading one is the one the chord's own verb
+    /// (`Ctrl+Shift+B`) opens. A chord with no column to work does nothing, and
+    /// so does one pressed while the Git panel is off: a chord for a surface that
+    /// is not there is not an error.
+    fn toggle_git_page(&mut self) -> Result<()> {
+        if !self.git_panel_on() {
+            return Ok(());
+        }
+        let Some(seat) = self.seats.files().into_iter().next() else {
+            return Ok(());
+        };
+        let active = self.active_tab;
+        let view = self.tabs[active]
+            .files
+            .get(&seat)
+            .map_or(seats::FilesView::Files, |state| state.view);
+        self.set_files_view(seat, view.toggled())
+    }
+
+    /// One of a Git row's verbs, pressed.
+    ///
+    /// **The gate is here and not in the worker** (R14): a discard is stopped
+    /// *before* a question is built, so the confirmation is a door in front of the
+    /// verb rather than a message about one that has already run.
+    fn press_git_act(&mut self, seat: SeatId, index: usize, act: git_panel::GitAct) -> Result<()> {
+        let Some(page) = self.git_pages_shown.get(&seat) else {
+            return Ok(());
+        };
+        let Some(row) = page.rows.get(index) else {
+            return Ok(());
+        };
+        if act == git_panel::GitAct::LoadMore {
+            return self.load_more_commits(seat);
+        }
+        // Which files this verb is about: one row's, or a whole group's. The
+        // group's list is read off the page that is on screen, which is the same
+        // list the user is looking at — asking the cache again could stage a file
+        // that arrived between the frame and the press.
+        let (paths, untracked) = match row {
+            git_panel::GitRow::Change(change) => (vec![change.path.clone()], change.untracked),
+            git_panel::GitRow::Heading {
+                group: Some(group), ..
+            } => {
+                let group = *group;
+                let paths: Vec<String> = page
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        git_panel::GitRow::Change(change) if change.group == group => {
+                            Some(change.path.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (paths, group == crate::git::GitGroup::Untracked)
+            }
+            _ => return Ok(()),
+        };
+        if paths.is_empty() {
+            return Ok(());
+        }
+        // **No judgement here.** What a verb becomes is
+        // [`git_panel::press_outcome`]'s answer and this only carries it out, so
+        // that "a discard cannot reach git without the gate" is a fact one small
+        // function holds rather than a property of this one.
+        match git_panel::press_outcome(act, untracked) {
+            git_panel::GitPress::Gate => {
+                // One file by construction — R14 puts no group discard on the
+                // page — so the gate can name what it is about.
+                let Some(path) = paths.into_iter().next() else {
+                    return Ok(());
+                };
+                self.raise_dirty_gate(restore::GateRequest::GitDiscard {
+                    seat,
+                    path,
+                    untracked,
+                })?;
+                Ok(())
+            }
+            git_panel::GitPress::Write(verb) => self.write_to_repository(seat, verb, paths),
+            git_panel::GitPress::MoreCommits => self.load_more_commits(seat),
+        }
+    }
+
+    /// Send one write, and dim the rows it is about (R13).
+    fn write_to_repository(
+        &mut self,
+        seat: SeatId,
+        verb: crate::git::GitWriteVerb,
+        paths: Vec<String>,
+    ) -> Result<()> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(cache) = self.tabs[active].git_trees.get_mut(&seat) else {
+            return Ok(());
+        };
+        let Some(question) = cache.begin_write(verb, paths) else {
+            return Ok(());
+        };
+        if !self.git_worker.request(git::GitRequest {
+            host: LeafId { tab: tab_id, seat },
+            question,
+        }) {
+            self.disable_git_worker();
+            return Ok(());
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
+    }
+
+    /// The next fifty commits (R16).
+    ///
+    /// A second press while the first page is still in flight costs one wasted
+    /// subprocess and cannot corrupt the list: the answer carries the `skip` it
+    /// was asked for, and `GitCache::accept` files a later page only when it
+    /// starts exactly where the list currently ends — so the duplicate is
+    /// dropped rather than appended twice.
+    fn load_more_commits(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(cache) = self.tabs[active].git_trees.get(&seat) else {
+            return Ok(());
+        };
+        let Some(question) = cache.more_commits() else {
+            return Ok(());
+        };
+        if !self.git_worker.request(git::GitRequest {
+            host: LeafId { tab: tab_id, seat },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+        Ok(())
+    }
+
+    /// Whether a Files column offers its Git page at all (the master switch).
+    ///
+    /// One reader, called by the paint, the hit test, the wheel and the chord,
+    /// for the reason [`Self::default_profile`] is one reader: a setting consulted
+    /// in four places is four places to consult it differently, and the symptom
+    /// of that here would be a strip you can press but cannot see.
+    fn git_panel_on(&self) -> bool {
+        self.settings_store.loaded().git_panel
+    }
+
+    /// Which page each docked Files column is on, and how wide its switch's two
+    /// words are drawn.
+    ///
+    /// **Empty when the master switch is off**, and that emptiness is the whole
+    /// mechanism: the geometry, the painter and the hit test all key off a
+    /// column's presence here, so there is exactly one place the switch is
+    /// consulted and no way for one of them to miss it.
+    fn files_views(&mut self, scale: f32) -> BTreeMap<SeatId, seats::FilesViewContent> {
+        if !self.git_panel_on() {
+            return BTreeMap::new();
+        }
+        let font = seats::FILES_SEG_FONT_LOGICAL_PX * scale;
+        // Two strings, measured once per frame rather than once per column: they
+        // are the same two words in every column in the window, and the only
+        // thing that could make them differ is the font, which is one font.
+        let widths = [
+            self.renderer.measure_chrome_text("Files", font),
+            self.renderer.measure_chrome_text("Git", font),
+        ];
+        let active = self.active_tab;
+        self.seats
+            .files()
+            .into_iter()
+            .map(|seat| {
+                let view = self.tabs[active]
+                    .files
+                    .get(&seat)
+                    .map_or(seats::FilesView::Files, |state| state.view);
+                (seat, seats::FilesViewContent { view, widths })
+            })
+            .collect()
+    }
+
+    /// The Git page each column showing one draws this frame.
+    ///
+    /// Built from the cache and thrown away, like every other content map here:
+    /// the page holds no state of its own, so a frame is a pure function of what
+    /// the repository last said.
+    fn git_pages(
+        &mut self,
+        scale: f32,
+        views: &BTreeMap<SeatId, seats::FilesViewContent>,
+    ) -> BTreeMap<SeatId, git_panel::GitPanelContent> {
+        let showing: Vec<SeatId> = views
+            .iter()
+            .filter(|(_, content)| content.view == seats::FilesView::Git)
+            .map(|(seat, _)| *seat)
+            .collect();
+        if showing.is_empty() {
+            return BTreeMap::new();
+        }
+        let active = self.active_tab;
+        let mut pages = BTreeMap::new();
+        for seat in showing {
+            // A column that has never had a Git page has no cache yet, and the
+            // page it draws for one frame is "reading" — which is true: the ask
+            // rides the same walk and will have gone out by the time this frame
+            // is on screen.
+            let Some(cache) = self.tabs[active].git_trees.get(&seat).cloned() else {
+                pages.insert(seat, git_panel::GitPanelContent::default());
+                continue;
+            };
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let mut content = git_panel::build(&cache, scale, &mut measure);
+            content.scroll_px = self.tabs[active]
+                .git_scroll
+                .get(&seat)
+                .copied()
+                .unwrap_or(0.0);
+            pages.insert(seat, content);
+        }
+        // R2 乙案 again, one list along: the painter believes the stored scroll,
+        // so a page that got shorter — a group emptied by a `git add` — is
+        // answered here rather than by the layout disagreeing with the number.
+        for (seat, content) in &mut pages {
+            let Some(rect) = seats::files_pane_rect(&self.seat_layout, *seat) else {
+                continue;
+            };
+            let body = seats::files_pane_geometry(rect, scale, true).body;
+            let healed = git_panel::clamp_git_scroll(body, content, content.scroll_px, scale);
+            content.scroll_px = healed;
+            self.tabs[active].git_scroll.insert(*seat, healed);
+        }
+        pages
     }
 
     /// The rows as the hit test sees them: walked, never asked for.
@@ -19255,6 +19590,7 @@ impl Runtime {
         trees: &mut BTreeMap<SeatId, seats::FilesTreeContent>,
     ) {
         let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
+        let segmented = self.git_panel_on();
         let active = self.active_tab;
         for (seat, tree) in trees.iter_mut() {
             let revealed = self.revealed_foot.is_some_and(|(shown, at)| {
@@ -19274,7 +19610,7 @@ impl Runtime {
                 tree.foot_path = String::new();
                 continue;
             };
-            let path_box = seats::files_pane_geometry(rect, scale).foot_path;
+            let path_box = seats::files_pane_geometry(rect, scale, segmented).foot_path;
             let room = path_box[2] - path_box[0];
             let text = if revealed {
                 FOOT_REVEALED_LABEL.to_owned()
@@ -19452,7 +19788,8 @@ impl Runtime {
         match host {
             RowHost::Column(seat) => {
                 let trees = self.files_trees(Instant::now());
-                seats::files_tree_geometry_of(&self.seat_layout, &trees, scale, seat)
+                let segmented = self.git_panel_on();
+                seats::files_tree_geometry_of(&self.seat_layout, &trees, scale, segmented, seat)
             }
             RowHost::Float(id) => {
                 let tools = self.float_head_tools(id);
@@ -20718,6 +21055,11 @@ impl Runtime {
                 self.tabs.get(*index).map(one_tab).unwrap_or_default()
             }
             restore::GateRequest::Shut => self.tabs.iter().flat_map(one_tab).collect(),
+            // A discard names one file, and it is never empty — which matters,
+            // because `raise_dirty_gate` treats an empty list as "there is
+            // nothing to ask about" and lets the verb through. There is always
+            // something to ask about here: that is what makes it a discard.
+            restore::GateRequest::GitDiscard { path, .. } => vec![path.clone()],
         }
     }
 
@@ -20800,6 +21142,23 @@ impl Runtime {
                 self.window_close_requested = true;
                 Ok(())
             }
+            // The one request whose confirmed verb is not a re-run of something
+            // that was interrupted: nothing was in flight, because the gate is in
+            // front of the write rather than behind it. So this is where the
+            // question is actually asked of the repository (R13's pessimism
+            // starts one line later, when the row dims).
+            restore::GateRequest::GitDiscard {
+                seat,
+                path,
+                untracked,
+            } => {
+                let verb = if untracked {
+                    git::GitWriteVerb::DiscardUntracked
+                } else {
+                    git::GitWriteVerb::Discard
+                };
+                self.write_to_repository(seat, verb, vec![path])
+            }
         }
     }
 
@@ -20810,13 +21169,15 @@ impl Runtime {
         if names.is_empty() {
             return None;
         }
-        let message = restore::gate_message(&names);
+        let message = request.message(&names);
+        let title = request.title();
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.renderer.metrics().scale_factor as f32;
         let room = restore::content_width(width, scale);
         let renderer = &mut self.renderer;
         let content = restore::GateContent {
+            title,
             message_lines: restore::wrap(&message, room, |line| {
                 renderer.measure_chrome_text(line, restore::SUB_FONT_LOGICAL_PX * scale)
             }),
@@ -21029,8 +21390,13 @@ impl Runtime {
         else {
             return Ok(());
         };
-        let Some(geometry) = seats::files_tree_geometry_of(&self.seat_layout, &trees, scale, seat)
-        else {
+        let Some(geometry) = seats::files_tree_geometry_of(
+            &self.seat_layout,
+            &trees,
+            scale,
+            self.git_panel_on(),
+            seat,
+        ) else {
             return Ok(());
         };
         let rect = geometry.row_rect(index);
@@ -23248,7 +23614,9 @@ impl Runtime {
         let Some(index) = tree.rows.iter().position(|row| row.key == key) else {
             return;
         };
-        let Some(body) = seats::files_body_rect(&self.seat_layout, seat, scale) else {
+        let Some(body) =
+            seats::files_body_rect(&self.seat_layout, seat, scale, self.git_panel_on())
+        else {
             return;
         };
         let geometry = seats::files_tree_geometry(body, tree.rows.len(), tree.scroll_px, scale);
@@ -23304,6 +23672,40 @@ impl Runtime {
         Ok(())
     }
 
+    /// The same notch, one page along.
+    ///
+    /// Its own function rather than a branch inside the tree's, because the two
+    /// lists have different row heights and different bounds and share only the
+    /// rectangle — and because the bound has to be read from the page that is
+    /// actually drawn, which is `git_pages_shown` and not a recomputation.
+    fn scroll_git_panel(
+        &mut self,
+        seat: SeatId,
+        body: [f32; 4],
+        delta: MouseScrollDelta,
+    ) -> Result<()> {
+        let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(page) = self.git_pages_shown.get(&seat) else {
+            return Ok(());
+        };
+        let active = self.active_tab;
+        let stored = self.tabs[active]
+            .git_scroll
+            .get(&seat)
+            .copied()
+            .unwrap_or(0.0);
+        let scrolled = git_panel::clamp_git_scroll(body, page, stored - travel, scale);
+        if scrolled == stored {
+            return Ok(());
+        }
+        self.tabs[active].git_scroll.insert(seat, scrolled);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Pull every column's stored scroll back inside what its list can still
     /// show, in the cache **and** in the frame's own copy of it.
     ///
@@ -23326,8 +23728,10 @@ impl Runtime {
         trees: &mut BTreeMap<SeatId, seats::FilesTreeContent>,
     ) {
         let active = self.active_tab;
+        let segmented = self.git_panel_on();
         for (seat, tree) in trees.iter_mut() {
-            let Some(body) = seats::files_body_rect(&self.seat_layout, *seat, scale) else {
+            let Some(body) = seats::files_body_rect(&self.seat_layout, *seat, scale, segmented)
+            else {
                 continue;
             };
             let healed = seats::clamp_files_scroll(body, tree.rows.len(), tree.scroll_px, scale);
@@ -25902,15 +26306,47 @@ impl Runtime {
                     )
                 })
         })
+        // **The switch before the page it switches**, and before the tree too:
+        // it stands between the head and the body, and a thirty-pixel strip the
+        // body also claimed would be a control you cannot press.
         .or_else(|| {
-            seats::hit_files_tree(
+            seats::hit_files_seg(
                 &self.seat_layout,
-                &self.files_tree_contents(),
+                &self.files_seg_widths(),
                 scale,
                 position.x,
                 position.y,
             )
         })
+        .or_else(|| {
+            seats::hit_git_panel(
+                &self.seat_layout,
+                &self.git_pages_shown,
+                scale,
+                position.x,
+                position.y,
+            )
+        })
+        .or_else(|| {
+            seats::hit_files_tree(
+                &self.seat_layout,
+                &self.files_tree_contents(),
+                scale,
+                self.git_panel_on(),
+                position.x,
+                position.y,
+            )
+        })
+    }
+
+    /// How wide each column's switch is, for the hit test.
+    ///
+    /// Derived from the same map the paint was handed, so the two halves of "the
+    /// button you can press is the button you can see" are one number. Empty when
+    /// the master switch is off, which is what makes the strip unpressable
+    /// without a second condition anywhere.
+    fn files_seg_widths(&self) -> BTreeMap<SeatId, [f32; 2]> {
+        self.files_view_widths.clone()
     }
 
     fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
@@ -27467,6 +27903,28 @@ impl Runtime {
                 self.files_row_clicks.interrupt();
                 self.reveal_files_root(seat)?;
             }
+            // The switch. A press on the half you are already on does nothing,
+            // which falls out of `set_files_view` rather than being checked here.
+            seats::ChromeTarget::FilesSeg { seat, view } => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.set_files_view(seat, view)?;
+            }
+            // A Git row's body is not a verb in this slice. It becomes one in
+            // G-3, where a press opens that file's diff in the preview seat
+            // (mock-up 7974, `openDiffPreview`); until then the row is the hover
+            // host its buttons live on and nothing more, which is why it takes
+            // the press and does nothing with it rather than letting it fall
+            // through to the pane underneath.
+            seats::ChromeTarget::GitRow { .. } => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+            }
+            seats::ChromeTarget::GitAct { seat, index, act } => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.press_git_act(seat, index, act)?;
+            }
             // The one way out of a file this window cannot show. It breaks a
             // click chain for `.files-foot`'s reason: a chain of clicks on a
             // button is a chain of button presses.
@@ -28449,10 +28907,17 @@ impl Runtime {
             && let Some((seat, body)) = seats::files_body_at(
                 &self.seat_layout,
                 self.renderer.metrics().scale_factor as f32,
+                self.git_panel_on(),
                 position.x,
                 position.y,
             )
         {
+            // `.git-view { overflow-y: auto }` — the second page is a scroller
+            // too, and it is the *same* body: which of the two answers a notch
+            // depends only on which page the column is on.
+            if self.git_pages_shown.contains_key(&seat) {
+                return self.scroll_git_panel(seat, body, delta);
+            }
             return self.scroll_files_tree(seat, body, delta);
         }
         // `.preview-body { overflow: auto }` (mock-up 597) — and the same
@@ -32523,6 +32988,7 @@ mod tests {
             children: [
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                     bt_persist::FilesLeafV1 {
+                        view: bt_persist::FilesViewV1::Files,
                         root: "C:\\repo".to_owned(),
                         open: Vec::new(),
                         sel: None,
@@ -32786,6 +33252,7 @@ mod tests {
     #[test]
     fn a_saved_files_root_comes_back_and_goes_out_again_unchanged() {
         let saved = bt_persist::FilesLeafV1 {
+            view: bt_persist::FilesViewV1::Files,
             root: r"C:\Users\dev\project".to_owned(),
             // Deliberately not sorted the way a `BTreeSet` would emit them, so a
             // reader that merely echoed the input would pass while one that
@@ -32854,6 +33321,7 @@ mod tests {
     fn a_files_column_with_no_root_writes_an_honest_empty_leaf() {
         let (seats, _, _, files, _preview) =
             revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
+                view: bt_persist::FilesViewV1::Files,
                 root: String::new(),
                 open: Vec::new(),
                 sel: None,
@@ -32897,6 +33365,7 @@ mod tests {
         let files = |root: &str, width: u32| {
             Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                 bt_persist::FilesLeafV1 {
+                    view: bt_persist::FilesViewV1::Files,
                     root: root.to_owned(),
                     open: Vec::new(),
                     sel: None,
@@ -42572,6 +43041,7 @@ mod tests {
     fn tab_with_a_files_column(id: u64, root: &str) -> TabState {
         let (seats, _, _, files, _preview) =
             revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
+                view: bt_persist::FilesViewV1::Files,
                 root: root.to_owned(),
                 open: Vec::new(),
                 sel: None,
@@ -45654,6 +46124,7 @@ mod tests {
     fn a_files_only_tab_is_named_on_the_restore_prompt_by_the_folder_it_held() {
         let files = |root: &str| {
             LayoutNodeV1::Leaf(LeafNodeV1::Files(bt_persist::FilesLeafV1 {
+                view: bt_persist::FilesViewV1::Files,
                 root: root.to_owned(),
                 open: Vec::new(),
                 sel: None,
@@ -45980,6 +46451,7 @@ mod tests {
     fn a_restored_expansion_comes_back_as_questions_and_not_as_rows() {
         let (seats, _, _, files, _preview) =
             revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
+                view: bt_persist::FilesViewV1::Files,
                 root: "D:\\work".to_owned(),
                 open: vec!["/src".to_owned()],
                 sel: Some("/src/main.rs".to_owned()),
@@ -48499,6 +48971,50 @@ mod tests {
             settled,
             float::float_height_for_body(seats::files_tree_content_height(2, scale), scale),
             "and by nothing else — two rows are two rows"
+        );
+    }
+
+    // ── R31: what it costs to have a Git page you are not looking at ────────
+
+    /// PIN (R31 / the master switch's third promise) — **with the panel off, not
+    /// one process is started.**
+    ///
+    /// The whole reason the switch exists. A control that only hid the drawing
+    /// would leave the reading in place, which is the half a user turning this
+    /// off is actually asking about — and "no `git` runs" is a promise that can
+    /// only be kept at the one place a question is born.
+    ///
+    /// The second condition is just as load-bearing: a column merely *having* a
+    /// Git page available costs nothing either. A repository is read when
+    /// somebody is looking at it, and at no other time — no timer, no watcher, no
+    /// "the folder happened to be a repository".
+    #[test]
+    fn a_repository_is_read_only_for_a_column_that_is_showing_it() {
+        let column = SeatId(1);
+        let other = SeatId(2);
+        let on_screen = vec![
+            (column, seats::FilesView::Git, r"D:\repo".to_owned()),
+            (other, seats::FilesView::Files, r"D:\elsewhere".to_owned()),
+        ];
+
+        assert_eq!(
+            columns_wanting_git(false, &on_screen),
+            Vec::new(),
+            "the panel is off: nothing is asked, however many Git pages were open"
+        );
+        assert_eq!(
+            columns_wanting_git(true, &on_screen),
+            vec![(column, r"D:\repo".to_owned())],
+            "and with it on, only the column actually showing the page asks — a \
+             column on its tree costs exactly what it cost before this slice"
+        );
+
+        // A column with nowhere to stand asks nothing either: an unrooted column
+        // has no folder to probe, and `rev-parse` in the empty string is a
+        // process spent to be told so.
+        assert_eq!(
+            columns_wanting_git(true, &[(column, seats::FilesView::Git, "   ".to_owned())]),
+            Vec::new()
         );
     }
 }

@@ -118,7 +118,7 @@ pub struct PreviewLeafV1 {
     pub pinned: bool,
 }
 
-/// `files { "kind": "files", "root": ..., "open": [...], "sel": ..., "width": number }`
+/// `files { "kind": "files", "root": ..., "open": [...], "sel": ..., "width": number, "view": "files" | "git" }`
 /// — docs/M2-persistence-schema-v1.md §3.4.
 ///
 /// `open`/`sel` are opaque stable IDs (§3.4: reuses the node-stable-ID
@@ -132,6 +132,36 @@ pub struct FilesLeafV1 {
     /// Logical pixels (matches `DESIGN.md`'s `FILES_W`/`FILES_W_MIN`
     /// constants, both whole pixel counts).
     pub width: u32,
+    /// Which of the column's two pages was showing (R1, ruled 2026-08-15).
+    ///
+    /// **Durable, and that is the ruling.** A Files column is a *place's* view
+    /// and the repository is the same place seen another way (mock-up 1577), so
+    /// which way you were looking at it is the same kind of fact as which folders
+    /// were expanded — a shape of the column, not a piece of its content, and red
+    /// line L1 lets it in on exactly that footing. The alternative the mock-up
+    /// happens to implement is a lazy JavaScript property that dies with the page;
+    /// a user who works in the Git page all morning and finds a file tree every
+    /// time the window reopens is being told the product did not notice.
+    ///
+    /// It is *not* gated on the "Git panel" setting. A column whose page was Git
+    /// while the panel was on, and which comes back while it is off, shows the
+    /// tree — the reader decides that, because it is the reader that knows the
+    /// setting. What is written here stays what the user last chose, so turning
+    /// the panel back on restores the page rather than resetting it.
+    pub view: FilesViewV1,
+}
+
+/// `view: "files" | "git"`.
+///
+/// Spelled like [`SplitDirV1`] and defaulted like it is not: this is the only
+/// field of a leaf whose absence has a right answer. Every document written
+/// before v7 was written by a build with one page, and one page is `Files`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilesViewV1 {
+    #[default]
+    Files,
+    Git,
 }
 
 impl LayoutNodeV1 {

@@ -165,6 +165,52 @@ pub enum GitQuestion {
         hash: String,
         path: String,
     },
+    /// **The one question that changes something** (R14).
+    ///
+    /// Four verbs and one shape, because what the panel does with the answer is
+    /// the same in all four cases: unpend the rows, and ask the repository
+    /// everything again. There is no attempt to predict the new status from the
+    /// verb — a `git add` of a file that changed again between the click and the
+    /// process is a different status than arithmetic would give, and git is the
+    /// only thing that knows which.
+    Write {
+        root: PathBuf,
+        verb: GitWriteVerb,
+        /// Repo-relative, in git's grammar. **Plural**, because a group heading's
+        /// "stage all" is one process over a list and not a list of processes:
+        /// fifty children racing each other for `index.lock` is fifty ways to
+        /// half-succeed.
+        paths: Vec<String>,
+    },
+}
+
+/// The four things this panel will do to a repository (R14 / G12).
+///
+/// **All four are light verbs**, which is the whole of the boundary the mock-up's
+/// own wiring comment draws (line 7928): the panel sees, toggles and throws away;
+/// `commit`, `merge`, `rebase`, `push` and `pull` belong to the terminal standing
+/// beside it. Every one of these is reversible from git's own reflog or index
+/// except the two discards, which is exactly why those two are the ones behind a
+/// confirmation gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitWriteVerb {
+    /// `git add` — works for a modification, a deletion and an untracked file
+    /// alike, which is why staging needs no per-entry branch.
+    Stage,
+    /// `git restore --staged`.
+    Unstage,
+    /// `git restore --worktree` — put a tracked file back the way the index has
+    /// it.
+    Discard,
+    /// `git clean -f` — delete an untracked file.
+    ///
+    /// A separate verb rather than a flag because it is a genuinely different
+    /// act: `restore` rewrites a file that git is tracking and can always
+    /// reconstruct, while this one *removes* a file git has never seen a copy of.
+    /// The word "discard" is right for both — a user who made a file by mistake
+    /// means the same thing by it — but the command, and the size of the promise
+    /// broken if it is wrong, are not the same.
+    DiscardUntracked,
 }
 
 impl GitQuestion {
@@ -223,6 +269,13 @@ impl GitQuestion {
                     path: to,
                 },
             ) => left == right && old == new && from == to,
+            // **Two writes are never one question.** Every read above coalesces
+            // because a newer answer makes an older one worthless; a write has no
+            // answer to make worthless, it has an *effect*, and dropping the
+            // older of two staging requests because a newer one arrived would
+            // silently not stage a file the user asked for. The queue may
+            // reorder work; it may not decline to do it.
+            (Self::Write { .. }, Self::Write { .. }) => false,
             _ => false,
         }
     }
@@ -278,6 +331,23 @@ pub enum GitAnswer {
         hash: String,
         path: String,
         outcome: GitOutcome<String>,
+    },
+    /// A write finished. **The receipt** (R13).
+    ///
+    /// It carries the paths back because the panel dimmed exactly those rows
+    /// while the process ran, and a receipt that could not say which rows it was
+    /// about could only clear them all — including rows a *second* write, still
+    /// running, is about.
+    ///
+    /// `Ok(())` and not `Ok(String)`: a successful `git add` prints nothing, and
+    /// there is nothing to show. What the panel does with a success is ask the
+    /// repository again, because the answer to "what changed" is a status and not
+    /// an inference.
+    Write {
+        root: PathBuf,
+        verb: GitWriteVerb,
+        paths: Vec<String>,
+        outcome: GitOutcome<()>,
     },
 }
 
@@ -912,10 +982,50 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
 }
 
 /// Run one `git`, and never wait for it longer than `timeout`.
-fn run_git(mut command: Command, timeout: Duration) -> GitOutcome<GitRun> {
+fn run_git(command: Command, timeout: Duration) -> GitOutcome<GitRun> {
+    run_git_with_input(command, timeout, Vec::new())
+}
+
+/// The same, with a pathspec list fed down the child's own standard input.
+///
+/// **Why the list goes through a pipe at all.** A write verb's pathspec is a
+/// group's whole contents, which on a generated-file avalanche is thousands of
+/// paths — and a Windows command line is bounded at 32767 characters, so a
+/// `git add -- a b c …` long enough to matter simply fails to start. Git's
+/// `--pathspec-from-file=- --pathspec-file-nul` reads the same list off stdin,
+/// NUL-separated, with no bound and no quoting: the one byte a path cannot
+/// contain is the one separating them, so a path with a space, a quote or a
+/// newline in it needs no escaping and gets none.
+///
+/// The write is on a thread of its own, and the handle is dropped afterwards to
+/// close the pipe, for [`drain`]'s reason turned around: a child reading a
+/// pathspec longer than the pipe's buffer blocks until somebody reads it, and a
+/// parent that had written its list from the polling loop would be blocked in the
+/// write while the child was blocked waiting for the rest of it.
+fn run_git_with_input(
+    mut command: Command,
+    timeout: Duration,
+    input: Vec<u8>,
+) -> GitOutcome<GitRun> {
+    let feeding = !input.is_empty();
+    if feeding {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
         .spawn()
         .map_err(|error| GitFault::GitMissing(format!("git.exe would not start: {error}")))?;
+    if feeding {
+        let mut pipe = child.stdin.take();
+        thread::spawn(move || {
+            if let Some(pipe) = pipe.as_mut() {
+                use std::io::Write as _;
+                let _ = pipe.write_all(&input);
+            }
+            // Dropped here, which is what closes the pipe and tells git the list
+            // has ended. Without it a child waits for a list that is complete.
+            drop(pipe);
+        });
+    }
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;
@@ -988,6 +1098,12 @@ fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
             root: root.clone(),
             hash: hash.clone(),
             path: path.clone(),
+            outcome: Err(fault),
+        },
+        GitQuestion::Write { root, verb, paths } => GitAnswer::Write {
+            root: root.clone(),
+            verb: *verb,
+            paths: paths.clone(),
             outcome: Err(fault),
         },
     }
@@ -1123,6 +1239,67 @@ pub fn answer(
                 Err(fault) => faulted(question, fault),
             }
         }
+        // **The one branch that writes.** Three of the four verbs take their
+        // pathspec down the pipe; `clean` is the exception because it is the one
+        // git subcommand of the four that never learned `--pathspec-from-file`
+        // (checked against git 2.52), and it does not need to: a discard is one
+        // file by construction (R14 puts no group-level discard on the page),
+        // so its pathspec is one argument and always will be.
+        GitQuestion::Write { root, verb, paths } => {
+            let pathspec: Vec<u8> = paths
+                .iter()
+                .flat_map(|path| path.as_bytes().iter().copied().chain(std::iter::once(0u8)))
+                .collect();
+            let from_stdin = [
+                OsStr::new("--pathspec-from-file=-"),
+                OsStr::new("--pathspec-file-nul"),
+            ];
+            let (arguments, input) = match verb {
+                GitWriteVerb::Stage => (
+                    vec![OsStr::new("add"), from_stdin[0], from_stdin[1]],
+                    pathspec,
+                ),
+                GitWriteVerb::Unstage => (
+                    vec![
+                        OsStr::new("restore"),
+                        OsStr::new("--staged"),
+                        from_stdin[0],
+                        from_stdin[1],
+                    ],
+                    pathspec,
+                ),
+                GitWriteVerb::Discard => (
+                    vec![
+                        OsStr::new("restore"),
+                        OsStr::new("--worktree"),
+                        from_stdin[0],
+                        from_stdin[1],
+                    ],
+                    pathspec,
+                ),
+                GitWriteVerb::DiscardUntracked => {
+                    let mut arguments = vec![
+                        OsStr::new("clean"),
+                        OsStr::new("-f"),
+                        OsStr::new("-q"),
+                        OsStr::new("--"),
+                    ];
+                    arguments.extend(paths.iter().map(|path| OsStr::new(path.as_str())));
+                    (arguments, Vec::new())
+                }
+            };
+            let command = git_command(program, root, &arguments);
+            match run_git_with_input(command, timeout, input) {
+                Ok(run) if run.ok => GitAnswer::Write {
+                    root: root.clone(),
+                    verb: *verb,
+                    paths: paths.clone(),
+                    outcome: Ok(()),
+                },
+                Ok(run) => faulted(question, classify_failure(&run.stderr)),
+                Err(fault) => faulted(question, fault),
+            }
+        }
         GitQuestion::Show { root, hash, path } => {
             let command = git_command(
                 program,
@@ -1214,6 +1391,26 @@ pub struct GitCache {
     status: GitSlot<GitStatus>,
     branches: GitSlot<Vec<GitBranch>>,
     log: GitSlot<GitLog>,
+    /// The paths a write is in flight for — **the whole of R13's pessimism**.
+    ///
+    /// A row whose path is in here is drawn dimmed and answers no verb, and it
+    /// leaves only when git's receipt says so. The alternative the mock-up
+    /// implements is to move the row between two arrays on the click and hope;
+    /// what that shows during the eighty milliseconds a `git add` takes is a
+    /// staged file, and what it shows if the index was locked is a staged file
+    /// that is not staged, with no moment at which anything says otherwise.
+    ///
+    /// A set of paths rather than a flag on the panel because two writes can be
+    /// in flight at once — a group's "stage all" while one row's `+` is still
+    /// running — and a flag could only unpend both when the first came back.
+    pending_writes: std::collections::BTreeSet<String>,
+    /// git's own words for the last write that would not go through (W3).
+    ///
+    /// Kept until the next write is *started* rather than until the next one
+    /// finishes, so the sentence outlives the frame it arrived in and can be
+    /// read. It is cleared by a new attempt because that is the moment the user
+    /// has said they know.
+    write_error: Option<String>,
 }
 
 impl GitCache {
@@ -1276,10 +1473,42 @@ impl GitCache {
         &self.branches
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn log(&self) -> &GitSlot<GitLog> {
         &self.log
+    }
+
+    /// Whether a write is in flight for this path (R13).
+    #[must_use]
+    pub fn write_pending(&self, path: &str) -> bool {
+        self.pending_writes.contains(path)
+    }
+
+    /// The last refusal, in git's own words (W3).
+    #[must_use]
+    pub fn write_error(&self) -> Option<&str> {
+        self.write_error.as_deref()
+    }
+
+    /// Build the write, and dim its rows.
+    ///
+    /// Returns `None` — and starts nothing — when there is no repository, when
+    /// the list is empty, or when any of these paths is already being written to.
+    /// The last is the guard that makes a double click on `+` one `git add` and
+    /// not two: the second finds its own path pending and declines, rather than
+    /// racing the first for `index.lock`.
+    #[must_use]
+    pub fn begin_write(&mut self, verb: GitWriteVerb, paths: Vec<String>) -> Option<GitQuestion> {
+        let root = self.repo.ready()?.clone();
+        if paths.is_empty() || paths.iter().any(|path| self.pending_writes.contains(path)) {
+            return None;
+        }
+        // Cleared here and not on the receipt: the banner is answering "did the
+        // thing I just asked for happen", and the moment a new thing is asked
+        // for is the moment the old answer stops being about anything.
+        self.write_error = None;
+        self.pending_writes.extend(paths.iter().cloned());
+        Some(GitQuestion::Write { root, verb, paths })
     }
 
     /// What this cache still needs to ask to be complete.
@@ -1342,7 +1571,12 @@ impl GitCache {
             // already on screen exactly where it is, because it is not being
             // replaced by anything.
             GitQuestion::Log { skip: 0, .. } => self.log = GitSlot::Pending,
-            GitQuestion::Log { .. } | GitQuestion::Diff { .. } | GitQuestion::Show { .. } => {}
+            // A write's own "already asked" bookkeeping is `pending_writes`,
+            // written by `begin_write` at the moment the question is built.
+            GitQuestion::Log { .. }
+            | GitQuestion::Diff { .. }
+            | GitQuestion::Show { .. }
+            | GitQuestion::Write { .. } => {}
         }
     }
 
@@ -1406,12 +1640,52 @@ impl GitCache {
                 }
                 true
             }
+            // **The receipt** (R13). Three things happen and their order is the
+            // point: the rows stop being dimmed, a refusal takes git's own words,
+            // and — only on success — everything is asked again. Re-asking on a
+            // *failure* would be spending three subprocesses to re-learn a status
+            // that by definition did not change.
+            GitAnswer::Write {
+                root,
+                paths,
+                outcome,
+                ..
+            } => {
+                if self.root() != Some(root.as_path()) {
+                    return false;
+                }
+                for path in &paths {
+                    self.pending_writes.remove(path);
+                }
+                match outcome {
+                    Ok(()) => self.refresh(),
+                    Err(fault) => self.write_error = Some(write_refusal(&fault)),
+                }
+                true
+            }
             // Diffs and file histories are documents, not column state: they
             // belong to the preview pool, keyed by their own `PreviewSource`.
             // Nothing here has a slot for them, and inventing one would give the
             // same document two homes.
             GitAnswer::Diff { .. } | GitAnswer::Show { .. } => false,
         }
+    }
+}
+
+/// One line for a write that would not go through.
+///
+/// git's own sentence wherever there is one, and this module's only wording
+/// otherwise — a killed child and a missing executable have no sentence of their
+/// own to pass through, so the two of them are the whole of what is written here.
+/// [`GitFault::NotARepository`] cannot reach this function: a write is only
+/// offered from a page that already found a repository.
+#[must_use]
+fn write_refusal(fault: &GitFault) -> String {
+    match fault {
+        GitFault::Refused(words) => words.clone(),
+        GitFault::GitMissing(words) => words.clone(),
+        GitFault::TimedOut => "git did not answer and was stopped".to_owned(),
+        GitFault::NotARepository => "the repository is no longer there".to_owned(),
     }
 }
 
@@ -2189,6 +2463,7 @@ mod tests {
                 GitAnswer::Log { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Diff { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Show { outcome, .. } => outcome.as_ref().err(),
+                GitAnswer::Write { outcome, .. } => outcome.as_ref().err(),
             };
             assert_eq!(carried, Some(&fault), "{question:?} came back unanswered");
         }

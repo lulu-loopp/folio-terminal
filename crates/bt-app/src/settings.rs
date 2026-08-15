@@ -241,6 +241,20 @@ fn sidebar_label(mode: RailMode) -> &'static str {
 pub enum SettingsGroup {
     Appearance,
     RenderedBlocks,
+    /// The Files column's own switches — today, the one that decides whether the
+    /// column has a second page at all.
+    ///
+    /// **A group the mock-up does not have**, and the first of those. Its four
+    /// headings are `Appearance`, `Terminal`, `Rendered blocks`, `Startup`, and
+    /// none of them is where "does this product read the repository you are
+    /// standing in" belongs: it is not a look, not a shell, not a block. A row
+    /// filed under a heading that does not describe it is a row nobody finds, and
+    /// the whole reason this switch exists is that a user must be able to find it
+    /// and say no.
+    ///
+    /// It sits above `Startup` because `Startup` is documented as last and means
+    /// it.
+    Files,
     /// Last, which is the mock-up's own order: `Appearance` (2355), `Terminal`
     /// (2418), `Rendered blocks` (2433), `Startup` (2464). This build has no
     /// Terminal group, and a group with no rows draws no heading — so the two it
@@ -259,6 +273,7 @@ impl SettingsGroup {
         match self {
             Self::Appearance => "APPEARANCE",
             Self::RenderedBlocks => "RENDERED BLOCKS",
+            Self::Files => "FILES",
             Self::Startup => "STARTUP",
         }
     }
@@ -296,6 +311,17 @@ pub enum SettingsRow {
     /// who wants typeset blocks with every `$` in a log left alone has to be
     /// able to say exactly that.
     InlineFormulas,
+    /// The Git panel's master switch (user ruling, 2026-08-15) — the Files
+    /// group's only row.
+    ///
+    /// **The one row in this dialog whose Off costs nothing and buys silence.**
+    /// Every other switch here changes what the product draws; this one changes
+    /// what it *does*: off, no `git` process is ever started, because the page
+    /// that would ask for one does not exist. That is why it is a switch in the
+    /// settings and not a fold on the panel — a control that only hid the drawing
+    /// would leave the reading in place, which is the half a user turning this off
+    /// is actually asking about.
+    GitPanel,
     /// Mock-up 2464-2474, the Startup group's only row — and the only picker in
     /// this dialog whose items carry a mark (7645-7648).
     ///
@@ -323,6 +349,7 @@ impl SettingsRow {
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2433), beside that group's own Maximum height row.
             Self::Formulas | Self::InlineFormulas => SettingsGroup::RenderedBlocks,
+            Self::GitPanel => SettingsGroup::Files,
             Self::DefaultProfile => SettingsGroup::Startup,
         }
     }
@@ -334,6 +361,7 @@ impl SettingsRow {
             Self::Cursor => "Cursor",
             Self::Formulas => "Display formulas",
             Self::InlineFormulas => "Inline formulas",
+            Self::GitPanel => "Git panel",
             // Mock-up 2360.
             Self::TabLayout => "Tab layout",
             // Mock-up 2374.
@@ -359,6 +387,10 @@ impl SettingsRow {
             // typeset, and a user who reads only this line should not go away
             // expecting one to be.
             Self::InlineFormulas => "Typeset $…$ in command output; off shows the source",
+            // Says what Off *does* rather than what it hides, because what it
+            // does is the reason to reach for it: no page, no chord, and no `git`
+            // process started on your behalf.
+            Self::GitPanel => "A Git page beside the file tree; off reads no repository",
             // Mock-up 2361.
             Self::TabLayout => "Choose where tabs appear in the window",
             // Mock-up 2375.
@@ -377,7 +409,7 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.len(),
             Self::Cursor => CURSOR_OPTIONS.len(),
-            Self::Formulas | Self::InlineFormulas => FORMULA_OPTIONS.len(),
+            Self::Formulas | Self::InlineFormulas | Self::GitPanel => FORMULA_OPTIONS.len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
@@ -400,7 +432,7 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.get(index).copied().map(theme_label),
             Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
-            Self::Formulas | Self::InlineFormulas => {
+            Self::Formulas | Self::InlineFormulas | Self::GitPanel => {
                 FORMULA_OPTIONS.get(index).copied().map(on_off_label)
             }
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
@@ -460,6 +492,9 @@ impl SettingsRow {
             Self::InlineFormulas => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.inline_formulas),
+            Self::GitPanel => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.git_panel),
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
@@ -500,6 +535,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     }
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
+    rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
     rows
 }
@@ -517,6 +553,8 @@ pub struct SettingsValues {
     pub sidebar: RailMode,
     pub display_formulas: bool,
     pub inline_formulas: bool,
+    /// Whether the Files column offers its Git page at all.
+    pub git_panel: bool,
     /// The resolved default profile — an index into `profiles::PROFILES`, never
     /// the stored id.
     ///
@@ -553,6 +591,7 @@ impl SettingsValues {
             sidebar: RailMode::Expanded,
             display_formulas: true,
             inline_formulas: true,
+            git_panel: true,
             default_profile: profiles::FALLBACK_PROFILE,
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
@@ -798,6 +837,15 @@ pub fn inline_formulas_requested(target: SettingsTarget) -> Option<bool> {
         SettingsTarget::Choice(SettingsRow::InlineFormulas, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
+        _ => None,
+    }
+}
+
+/// The Git panel's master switch, as a press on its picker.
+#[must_use]
+pub fn git_panel_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::GitPanel, index) => FORMULA_OPTIONS.get(index).copied(),
         _ => None,
     }
 }
@@ -3425,10 +3473,13 @@ mod tests {
                 vec![
                     SettingsGroup::Appearance,
                     SettingsGroup::RenderedBlocks,
+                    SettingsGroup::Files,
                     SettingsGroup::Startup,
                 ],
                 "{tab_layout:?}: every group is shown, in the mock-up's own order \
-                 (2355, 2433, 2464 — its Terminal group at 2418 has no rows here)"
+                 (2355, 2433, 2464 — its Terminal group at 2418 has no rows here), \
+                 with the Files group the mock-up has no heading for standing \
+                 between the last two"
             );
         }
     }
@@ -3871,6 +3922,7 @@ mod tests {
                 SettingsRow::TabLayout,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile
             ]
         );
@@ -3883,6 +3935,7 @@ mod tests {
                 SettingsRow::Sidebar,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile
             ],
             "Sidebar still lands directly under the row it depends on, the two \

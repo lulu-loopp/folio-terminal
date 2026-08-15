@@ -30,6 +30,12 @@ pub(crate) enum Action {
     DuplicatePaneSplit,
     /// Open this tab's files column, or close the one it already has.
     FilesPane,
+    /// Turn a files column's page over: tree to repository, repository to tree.
+    ///
+    /// A toggle and not two rows, because the switch it works is a segmented pair
+    /// of two — `Files | Git` — and a pair of two is a toggle whichever way you
+    /// come at it.
+    GitPage,
     OpenSettings,
     /// Write the preview seat's buffer back to its file (mock-up 6139-6150).
     ///
@@ -197,6 +203,19 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // friends. A toggle, not an opener, matching both the mock-up's own
     // behaviour and VS Code's `Ctrl+B`.
     Binding::window(Action::FilesPane, Chord::new(CTRL_SHIFT, character("b"))),
+    // **`Ctrl+Shift+G`** (R28, 2026-08-15) — the chord VS Code has spent a
+    // decade teaching, for the surface it taught it on.
+    //
+    // It wears Shift for `Ctrl+Shift+B`'s reason and not merely for its company:
+    // a bare `^G` is readline's "abort the current command", which is the very
+    // key someone reaches for when a shell has them halfway into something they
+    // want out of, and discipline ① does not let this table take it.
+    //
+    // The row it works is the column's page, so it does nothing at all when the
+    // window has no files column and nothing when the Git panel is switched off —
+    // a chord for a surface that is not there is not an error, it is a chord with
+    // nothing to say.
+    Binding::window(Action::GitPage, Chord::new(CTRL_SHIFT, character("g"))),
     Binding::window(Action::OpenSettings, Chord::new(CTRL, character(","))),
     // **The one scoped row** (ruling 9, 2026-08-12). It is the mock-up's chord
     // verbatim — bare `Ctrl+S`, from any focus state *inside the preview*, so a
@@ -323,6 +342,14 @@ mod tests {
         assert_eq!(
             press(character("="), ALT_SHIFT),
             Some(Action::SplitVertical)
+        );
+        // R28: the chord a decade of VS Code taught, wearing Shift so that a
+        // bare `^G` — readline's "abort" — stays with the shell.
+        assert_eq!(press(character("g"), CTRL_SHIFT), Some(Action::GitPage));
+        assert_eq!(
+            press(character("g"), CTRL),
+            None,
+            "Ctrl+G is readline's abort and belongs to the terminal"
         );
         assert_eq!(
             press(character("d"), CTRL_SHIFT),
@@ -456,7 +483,7 @@ mod tests {
         let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
         let ctrl_alt_shift = ctrl_alt.union(ModifiersState::SHIFT);
         for text in [
-            "a", "b", "d", "e", "n", "p", "s", "t", "w", "-", "=", ",", "1", "9",
+            "a", "b", "d", "e", "g", "n", "p", "s", "t", "w", "-", "=", ",", "1", "9",
         ] {
             assert_eq!(press(character(text), ctrl_alt), None, "AltGr+{text}");
             assert_eq!(
@@ -489,7 +516,7 @@ mod tests {
     #[test]
     fn unmodified_typing_is_never_intercepted() {
         for text in [
-            "a", "b", "n", "w", "t", "d", "p", "s", "-", "=", ",", "1", "9",
+            "a", "b", "g", "n", "w", "t", "d", "p", "s", "-", "=", ",", "1", "9",
         ] {
             assert_eq!(press(character(text), ModifiersState::empty()), None);
             assert_eq!(press(character(text), ModifiersState::SHIFT), None);
@@ -529,8 +556,8 @@ mod tests {
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 13 single actions plus GotoTab(1..=9).
-        assert_eq!(BINDINGS.len(), 22);
+        // 14 single actions plus GotoTab(1..=9).
+        assert_eq!(BINDINGS.len(), 23);
 
         // Two rows may share a chord only if no focus state has both in force —
         // which is what a scope is *for*, and also the one way scopes could
@@ -571,6 +598,7 @@ mod tests {
             Action::SplitVertical,
             Action::DuplicatePaneSplit,
             Action::FilesPane,
+            Action::GitPage,
             Action::OpenSettings,
             Action::SavePreview,
         ];

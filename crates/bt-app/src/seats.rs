@@ -1862,6 +1862,31 @@ pub enum ChromeTarget {
     /// them would make the six pixels between them a dead zone in the middle of
     /// a button.
     FilesFoot(SeatId),
+    /// `.fseg button` — one half of the column's `Files | Git` switch.
+    ///
+    /// The *destination* and not "the switch", because a segmented control of two
+    /// is two buttons and pressing the one you are already on must do nothing.
+    /// Carrying the view here is what lets the press be idempotent without the
+    /// handler having to ask what is showing.
+    FilesSeg {
+        seat: SeatId,
+        view: FilesView,
+    },
+    /// One row of the Git page, by index — [`Self::FilesRow`]'s reason exactly.
+    GitRow {
+        seat: SeatId,
+        index: usize,
+    },
+    /// One of a Git row's hover verbs (R14).
+    ///
+    /// Its own target inside the row for [`Self::PaneClose`]'s reason: the row is
+    /// a surface with its own press, and a button that did not answer first would
+    /// be a button that never answered at all.
+    GitAct {
+        seat: SeatId,
+        index: usize,
+        act: crate::git_panel::GitAct,
+    },
     /// `.files-root` — the head's root name, which is a button that opens the
     /// menu of places this column could be pointed at instead (B15/E53).
     ///
@@ -4414,6 +4439,13 @@ static NO_FILES_NAME_WIDTHS: BTreeMap<SeatId, f32> = BTreeMap::new();
 /// being read.
 #[cfg(test)]
 static NO_FILES_TREES: BTreeMap<SeatId, FilesTreeContent> = BTreeMap::new();
+/// A window whose columns have no `Files | Git` switch — the shape every caller
+/// that does not care about the Git page hands down, and the shape a window with
+/// the master switch off has for real.
+#[cfg(test)]
+static NO_FILES_VIEWS: BTreeMap<SeatId, FilesViewContent> = BTreeMap::new();
+#[cfg(test)]
+static NO_GIT_PAGES: BTreeMap<SeatId, crate::git_panel::GitPanelContent> = BTreeMap::new();
 
 /// Every Terminal seat of `seats` running a PowerShell — the map a real tab of
 /// one profile hands in.
@@ -4503,6 +4535,8 @@ pub fn build_chrome_with_preview(
             files_name_widths: &NO_FILES_NAME_WIDTHS,
             files_root_open: None,
             files_trees: &NO_FILES_TREES,
+            files_views: &NO_FILES_VIEWS,
+            git_pages: &NO_GIT_PAGES,
             preview_messages: &preview_messages,
             preview_feet: &[],
             preview_heads: &[],
@@ -4818,6 +4852,21 @@ pub struct ChromeContent<'a> {
     /// could read a directory for itself would be a module that reads a
     /// directory on the event loop.
     pub files_trees: &'a BTreeMap<SeatId, FilesTreeContent>,
+    /// Which page each files column is on, and how wide its switch's two words
+    /// are drawn.
+    ///
+    /// **Empty when the Git panel's master switch is off**, which is the whole of
+    /// how "off" reaches this module: a column with no entry here has no strip
+    /// laid out, no strip drawn and no strip to press. There is no second flag to
+    /// forget, because there is no flag.
+    pub files_views: &'a BTreeMap<SeatId, FilesViewContent>,
+    /// The Git page each column showing one is drawing this frame.
+    ///
+    /// Built above from [`crate::git::GitCache`] and handed down as values, for
+    /// [`Self::files_trees`]'s reason: the rows are content, this module owns
+    /// rectangles, and a module that could read a repository for itself would be
+    /// a module that runs `git` on the event loop.
+    pub git_pages: &'a BTreeMap<SeatId, crate::git_panel::GitPanelContent>,
     /// What each preview pane's body says while it has no body yet — "Loading
     /// …", a decode failure, the invitation an empty pane wears — **by seat**.
     ///
@@ -5043,6 +5092,8 @@ pub fn build_chrome_for_tabs(
         files_name_widths,
         files_root_open,
         files_trees,
+        files_views,
+        git_pages,
         preview_messages,
         preview_feet,
         preview_heads,
@@ -5576,10 +5627,71 @@ pub fn build_chrome_for_tabs(
                 // its body stopped being "the seat less its head" — which is what
                 // `preview_body_viewport` now says too, and what keeps the card
                 // and the notice below off the strip.
+                //
+                // The switch is carved off the body here and nowhere else, from
+                // the one entry a column has in `files_views` — so a column the
+                // master switch has taken the page from has no strip, and the
+                // list simply gets those thirty pixels.
+                let files_view = (placement.kind == SeatKind::Files)
+                    .then(|| files_views.get(&placement.id).copied())
+                    .flatten();
                 let files_pane = matches!(placement.kind, SeatKind::Files | SeatKind::Preview)
-                    .then(|| pane_foot_geometry(head_box, placement.kind, scale));
-                if let (Some(tree), Some(geometry)) = (files_tree, files_pane) {
-                    match whole_tree_notice(&tree.rows) {
+                    .then(|| match files_view {
+                        Some(_) => files_pane_geometry(head_box, scale, true),
+                        None => pane_foot_geometry(head_box, placement.kind, scale),
+                    });
+                if let (Some(content), Some(geometry)) = (files_view, files_pane)
+                    && let Some(strip) = geometry.seg
+                {
+                    push_files_seg(
+                        &files_seg_geometry(strip, content.widths, scale),
+                        content.view,
+                        match pointer.hover {
+                            Some(ChromeTarget::FilesSeg { seat, view }) if seat == placement.id => {
+                                Some(view)
+                            }
+                            _ => None,
+                        },
+                        scale,
+                        &palette,
+                        (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+                    );
+                }
+                // A column on its Git page draws that instead of its tree. The
+                // tree's own state is untouched underneath — scroll, selection,
+                // which folders are open — because the page is a *view* of the
+                // place and not a different place.
+                let git_page = files_view
+                    .filter(|content| content.view == FilesView::Git)
+                    .and_then(|_| git_pages.get(&placement.id));
+                match (git_page, files_tree, files_pane) {
+                    (Some(page), _, Some(geometry)) => crate::git_panel::push_git_panel(
+                        geometry.body,
+                        page,
+                        crate::git_panel::GitHover {
+                            row: match pointer.hover {
+                                Some(ChromeTarget::GitRow { seat, index })
+                                | Some(ChromeTarget::GitAct { seat, index, .. })
+                                    if seat == placement.id =>
+                                {
+                                    Some(index)
+                                }
+                                _ => None,
+                            },
+                            act: match pointer.hover {
+                                Some(ChromeTarget::GitAct { seat, act, .. })
+                                    if seat == placement.id =>
+                                {
+                                    Some(act)
+                                }
+                                _ => None,
+                            },
+                        },
+                        scale,
+                        &palette,
+                        (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+                    ),
+                    (None, Some(tree), Some(geometry)) => match whole_tree_notice(&tree.rows) {
                         Some(message) => files_notice = Some(message.to_owned()),
                         None => push_files_tree(
                             geometry.body,
@@ -5597,7 +5709,8 @@ pub fn build_chrome_for_tabs(
                             &palette,
                             (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
                         ),
-                    }
+                    },
+                    _ => {}
                 }
                 // The foot, drawn whether or not there is anything above it: it is
                 // part of the pane's chassis like the head, not a footer on the
@@ -8805,6 +8918,19 @@ pub struct FilesTreeContent {
     pub foot_revealed: bool,
 }
 
+/// Which page one files column is on, and how wide its switch's words are.
+///
+/// The widths ride beside the page for one reason: the two are read together
+/// everywhere — the strip is laid out from the widths and lit from the page — and
+/// a column present in one map and missing from the other would be a switch with
+/// no active half or an active half with no switch.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FilesViewContent {
+    pub view: FilesView,
+    /// `Files` then `Git`, measured at [`FILES_SEG_FONT_LOGICAL_PX`].
+    pub widths: [f32; 2],
+}
+
 /// Where each row of one files column lands.
 ///
 /// One function answers this for the painter and for the hit test, which is the
@@ -8964,6 +9090,7 @@ fn whole_tree_notice(rows: &[crate::files::TreeRow]) -> Option<&str> {
 pub fn files_body_at(
     layout: &SeatLayout,
     scale: f32,
+    segmented: bool,
     x: f64,
     y: f64,
 ) -> Option<(SeatId, [f32; 4])> {
@@ -8974,7 +9101,7 @@ pub fn files_body_at(
         {
             continue;
         }
-        let Some(body) = files_body_rect(layout, placement.id, scale) else {
+        let Some(body) = files_body_rect(layout, placement.id, scale, segmented) else {
             continue;
         };
         if x >= body[0] && x < body[2] && y >= body[1] && y < body[3] {
@@ -8996,7 +9123,17 @@ pub fn files_body_at(
 /// those four asks it here.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FilesPaneGeometry {
-    /// What the tree gets: under the head's hairline, above the foot's.
+    /// `.fseg` — the `Files | Git` strip, when this column has one.
+    ///
+    /// **Between the head and the body, and it takes its height from the body**
+    /// (mock-up 4824-4839): the head, then the switch, then the page, then the
+    /// foot. `None` when the Git panel's master switch is off, and that `None` is
+    /// the whole of what "the page does not exist" means geometrically — the tree
+    /// gets its thirty pixels back and nothing on screen hints that anything was
+    /// ever there.
+    pub seg: Option<[f32; 4]>,
+    /// What the page gets: under the switch (or the head's hairline), above the
+    /// foot's.
     pub body: [f32; 4],
     /// `border-top: 1px solid var(--border-soft)` — the foot's own first row.
     pub foot_edge: [f32; 4],
@@ -9008,15 +9145,118 @@ pub struct FilesPaneGeometry {
     pub foot_path: [f32; 4],
 }
 
+/// `.fseg { padding: 8px 12px 0 }` plus a button's own `2px 1px 6px` — thirty
+/// logical pixels of strip.
+///
+/// Stated as the total rather than derived from four paddings at every reader,
+/// because the number that matters to the layout is the one the body gives up.
+pub const FILES_SEG_BAR_LOGICAL_PX: f32 = 30.0;
+/// `.fseg { padding-left: 12px; padding-right: 12px }`.
+pub const FILES_SEG_PADDING_X_LOGICAL_PX: f32 = 12.0;
+/// `.fseg { padding-top: 8px }`.
+pub const FILES_SEG_PADDING_TOP_LOGICAL_PX: f32 = 8.0;
+/// `.fseg { gap: 14px }`.
+pub const FILES_SEG_GAP_LOGICAL_PX: f32 = 14.0;
+/// `.fseg button { font-size: 11.5px }` — the pane head's own size, because the
+/// switch is chrome and not content.
+pub const FILES_SEG_FONT_LOGICAL_PX: f32 = 11.5;
+/// `.fseg button { padding: 2px 1px 6px }` — the one horizontal pixel each side,
+/// which is what the underline is drawn across.
+pub const FILES_SEG_BUTTON_PADDING_X_LOGICAL_PX: f32 = 1.0;
+/// `.fseg button.on::after { height: 2px; border-radius: 2px }`.
+///
+/// **A 2px accent underline and not a pill** — the user's own style correction of
+/// 2026-07-18 (mock-up 1581): *the active one earns ink and a 2px accent
+/// underline; chrome stays grey, colour stays a signal. The pill chips read as
+/// foreign furniture.*
+pub const FILES_SEG_UNDERLINE_LOGICAL_PX: f32 = 2.0;
+/// How far the underline sits above the strip's own bottom — `.fseg button`'s
+/// `padding-bottom: 6px` less the underline's own two.
+pub const FILES_SEG_UNDERLINE_INSET_LOGICAL_PX: f32 = 4.0;
+
+/// Where a column's `Files | Git` switch and its two buttons are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilesSegGeometry {
+    /// The whole strip.
+    pub strip: [f32; 4],
+    /// The `Files` button, underline included.
+    pub files: [f32; 4],
+    /// The `Git` button.
+    pub git: [f32; 4],
+}
+
+impl FilesSegGeometry {
+    /// The box one view's button occupies.
+    #[must_use]
+    pub fn button(&self, view: FilesView) -> [f32; 4] {
+        match view {
+            FilesView::Files => self.files,
+            FilesView::Git => self.git,
+        }
+    }
+
+    /// Which button the pointer is on.
+    ///
+    /// The *button* and not the strip: the 14 pixels between them are the design's
+    /// own gap and belong to neither, so a press there does nothing rather than
+    /// picking whichever is nearer.
+    #[must_use]
+    pub fn button_at(&self, x: f32, y: f32) -> Option<FilesView> {
+        [FilesView::Files, FilesView::Git]
+            .into_iter()
+            .find(|view| contains(self.button(*view), x, y))
+    }
+}
+
+/// Lay the switch out inside a strip, given how wide its two words are drawn.
+///
+/// The widths arrive measured, on this module's standing rule: only the thing
+/// holding the font can say how wide `Files` is, and a second measurer is a
+/// second answer.
+#[must_use]
+pub fn files_seg_geometry(strip: [f32; 4], widths: [f32; 2], scale: f32) -> FilesSegGeometry {
+    let pad_x = (FILES_SEG_PADDING_X_LOGICAL_PX * scale).round();
+    let gap = (FILES_SEG_GAP_LOGICAL_PX * scale).round();
+    let pad_top = (FILES_SEG_PADDING_TOP_LOGICAL_PX * scale).round();
+    let button_pad = (FILES_SEG_BUTTON_PADDING_X_LOGICAL_PX * scale).round();
+    let top = (strip[1] + pad_top).min(strip[3]);
+    let left = strip[0] + pad_x;
+    let files_right = left + widths[0] + button_pad * 2.0;
+    let git_left = files_right + gap;
+    let git_right = git_left + widths[1] + button_pad * 2.0;
+    FilesSegGeometry {
+        strip,
+        files: [left, top, files_right.min(strip[2]), strip[3]],
+        git: [
+            git_left.min(strip[2]),
+            top,
+            git_right.min(strip[2]),
+            strip[3],
+        ],
+    }
+}
+
 /// Lay a docked files column's body and foot out inside its border box.
 ///
 /// The foot keeps its whole height and the *body* is what gives way, down to
 /// nothing — the rule `float_geometry` already follows for the same reason: a
 /// column squeezed to a sliver is more use with a path in it than with two rows
-/// of tree and no way to reach the folder.
+/// of tree and no way to reach the folder. The switch gives way second and by the
+/// same law: it is chrome, and chrome outranks a list.
+///
+/// `segmented` is the Git panel's master switch, and it is a parameter rather
+/// than a global read here because this module owns rectangles and not settings —
+/// the same reason every animated value reaches it as a number.
 #[must_use]
-pub fn files_pane_geometry(rect: [f32; 4], scale: f32) -> FilesPaneGeometry {
-    pane_foot_geometry(rect, SeatKind::Files, scale)
+pub fn files_pane_geometry(rect: [f32; 4], scale: f32, segmented: bool) -> FilesPaneGeometry {
+    let mut geometry = pane_foot_geometry(rect, SeatKind::Files, scale);
+    if segmented {
+        let bar = (FILES_SEG_BAR_LOGICAL_PX * scale).round();
+        let bottom = (geometry.body[1] + bar).min(geometry.body[3]);
+        geometry.seg = Some([geometry.body[0], geometry.body[1], geometry.body[2], bottom]);
+        geometry.body[1] = bottom;
+    }
+    geometry
 }
 
 /// The same subtraction for **any** pane that wears a path strip.
@@ -9051,6 +9291,10 @@ pub fn pane_foot_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> FilesPa
         foot[3],
     ];
     FilesPaneGeometry {
+        // The switch is the Files column's alone and is added by
+        // `files_pane_geometry`; a preview pane wears this same foot and has no
+        // second page to switch to.
+        seg: None,
         body,
         foot_edge,
         foot,
@@ -9084,8 +9328,13 @@ pub fn files_pane_rect(layout: &SeatLayout, seat: SeatId) -> Option<[f32; 4]> {
 /// view without a pointer to find the column by, and a fourth copy of
 /// "the seat less its head and its foot" is a fourth chance for one of them to be
 /// off by the hairline.
-pub fn files_body_rect(layout: &SeatLayout, seat: SeatId, scale: f32) -> Option<[f32; 4]> {
-    Some(files_pane_geometry(files_pane_rect(layout, seat)?, scale).body)
+pub fn files_body_rect(
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+    segmented: bool,
+) -> Option<[f32; 4]> {
+    Some(files_pane_geometry(files_pane_rect(layout, seat)?, scale, segmented).body)
 }
 
 /// Which files column's foot the pointer is on — `.files-foot`, whose whole
@@ -9115,6 +9364,159 @@ pub fn hit_files_foot(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option
         }
     }
     None
+}
+
+/// Which half of a column's `Files | Git` switch the pointer is on.
+///
+/// Its own hit test beside [`hit_files_foot`] and for its reason: the switch is
+/// chrome standing between the head and the page, it answers whichever page is
+/// showing, and it has to be asked *before* the page — a strip thirty pixels tall
+/// that the body also claimed would be a switch you cannot press.
+#[must_use]
+pub fn hit_files_seg(
+    layout: &SeatLayout,
+    widths: &BTreeMap<SeatId, [f32; 2]>,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Files {
+            continue;
+        }
+        let Some(rect) = files_pane_rect(layout, placement.id) else {
+            continue;
+        };
+        // A column with no measured widths is a column whose switch is not being
+        // drawn — the master switch is off — so there is nothing here to press.
+        let Some(measured) = widths.get(&placement.id).copied() else {
+            continue;
+        };
+        let Some(strip) = files_pane_geometry(rect, scale, true).seg else {
+            continue;
+        };
+        if let Some(view) = files_seg_geometry(strip, measured, scale).button_at(x, y) {
+            return Some(ChromeTarget::FilesSeg {
+                seat: placement.id,
+                view,
+            });
+        }
+    }
+    None
+}
+
+/// Which row — and which of its verbs — the Git page has under the pointer.
+///
+/// Answered from one derivation with the paint's, which is this module's
+/// standing law for every list it draws. The verb is asked for first, because it
+/// is inside the row.
+#[must_use]
+pub fn hit_git_panel(
+    layout: &SeatLayout,
+    pages: &BTreeMap<SeatId, crate::git_panel::GitPanelContent>,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Files
+            || !matches!(placement.presentation, Presentation::Full)
+        {
+            continue;
+        }
+        let Some(content) = pages.get(&placement.id) else {
+            continue;
+        };
+        let Some(rect) = files_pane_rect(layout, placement.id) else {
+            continue;
+        };
+        let body = files_pane_geometry(rect, scale, true).body;
+        let geometry = crate::git_panel::git_panel_geometry(body, content, scale);
+        let Some(index) = geometry.row_at(x, y) else {
+            continue;
+        };
+        let row = &content.rows[index];
+        if let Some(act) = crate::git_panel::act_at(row, geometry.row_rect(index), scale, x, y) {
+            return Some(ChromeTarget::GitAct {
+                seat: placement.id,
+                index,
+                act,
+            });
+        }
+        return Some(ChromeTarget::GitRow {
+            seat: placement.id,
+            index,
+        });
+    }
+    None
+}
+
+/// Draw one column's `Files | Git` switch.
+///
+/// Three inks and an underline, and every one of them is the design's own
+/// (mock-up 1584-1590): `--ink3` at rest, `--ink2` under the pointer, `--ink` at
+/// 600 for the page you are on, plus two accent pixels across the active button's
+/// whole width — *not* the text's width, which is what makes the pair read as a
+/// segmented control rather than as two links.
+pub fn push_files_seg(
+    geometry: &FilesSegGeometry,
+    view: FilesView,
+    hovered: Option<FilesView>,
+    scale: f32,
+    palette: &bt_render::ChromePalette,
+    out: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let (_quads, labels, sprites) = out;
+    let underline = (FILES_SEG_UNDERLINE_LOGICAL_PX * scale).round().max(1.0);
+    let inset = (FILES_SEG_UNDERLINE_INSET_LOGICAL_PX * scale).round();
+    for (each, text) in [(FilesView::Files, "Files"), (FilesView::Git, "Git")] {
+        let box_ = geometry.button(each);
+        if box_[2] <= box_[0] {
+            continue;
+        }
+        let on = each == view;
+        labels.push(ChromeLabel {
+            text: text.to_owned(),
+            rect: box_,
+            font_size_px: FILES_SEG_FONT_LOGICAL_PX * scale,
+            color: if on {
+                palette.git_head_text
+            } else if hovered == Some(each) {
+                palette.files_row_text
+            } else {
+                palette.git_head_muted
+            },
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: if on {
+                ChromeLabelWeight::SemiBold
+            } else {
+                ChromeLabelWeight::Regular
+            },
+            tabular_numerals: false,
+            clip: Some(box_),
+        });
+        if on {
+            // `border-radius: 2px` on a 2px bar is a stadium, so it is a pill and
+            // not a quad — two logical pixels is exactly the size at which a
+            // square cap is visible as a square cap.
+            let bottom = box_[3] - inset;
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: underline.round().max(1.0) as u32,
+                },
+                [box_[0], bottom - underline, box_[2], bottom],
+                palette.accent,
+            ));
+        }
+    }
 }
 
 /// Which of one preview head's own controls the pointer is on.
@@ -9212,6 +9614,7 @@ pub fn hit_files_tree(
     layout: &SeatLayout,
     trees: &BTreeMap<SeatId, FilesTreeContent>,
     scale: f32,
+    segmented: bool,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
@@ -9220,7 +9623,8 @@ pub fn hit_files_tree(
         if placement.kind != SeatKind::Files {
             continue;
         }
-        let Some(geometry) = files_tree_geometry_of(layout, trees, scale, placement.id) else {
+        let Some(geometry) = files_tree_geometry_of(layout, trees, scale, segmented, placement.id)
+        else {
             continue;
         };
         if let Some(index) = geometry.row_at(x, y) {
@@ -9246,6 +9650,7 @@ pub fn files_tree_geometry_of(
     layout: &SeatLayout,
     trees: &BTreeMap<SeatId, FilesTreeContent>,
     scale: f32,
+    segmented: bool,
     seat: SeatId,
 ) -> Option<FilesTreeGeometry> {
     let placement = layout
@@ -9260,7 +9665,7 @@ pub fn files_tree_geometry_of(
     if whole_tree_notice(&tree.rows).is_some() {
         return None;
     }
-    let body = files_pane_geometry(files_pane_rect(layout, seat)?, scale).body;
+    let body = files_pane_geometry(files_pane_rect(layout, seat)?, scale, segmented).body;
     Some(files_tree_geometry(
         body,
         tree.rows.len(),
@@ -11259,12 +11664,47 @@ type FilesLeafStateFn<'a> = dyn Fn(SeatId) -> FilesLeafState + 'a;
 /// So the split is exactly the red line: the tree says *where the column is and
 /// how wide*, this says *what it is looking at*. `to_persisted` puts the two
 /// halves back together, which is the only place they ever meet.
+/// Which of a Files column's two pages is showing (mock-up 4829-4835).
+///
+/// **A files pane is a *place's* view, and the repository is the same place seen
+/// another way** — the user direction this whole page hangs from (mock-up
+/// 1577-1580). So this is not a fourth kind of seat: the column keeps its
+/// chassis, its width, its drag, its dock and its foot, and only its body
+/// changes. That is why the answer lives on [`FilesLeafState`] beside `root` and
+/// `open`, and not in [`SeatKind`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilesView {
+    #[default]
+    Files,
+    Git,
+}
+
+impl FilesView {
+    /// The other one. A segmented switch of two is a toggle, and the chord that
+    /// works it (R28) is written as one.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Files => Self::Git,
+            Self::Git => Self::Files,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FilesLeafState {
     /// Captured when the pane is opened and never followed afterwards (A7/R-g):
     /// a tree that re-roots itself as you `cd` is the single most startling
     /// thing an independent view can do.
     pub root: String,
+    /// Which page the column is on (R1) — durable, and see
+    /// [`bt_persist::FilesLeafV1::view`] for why.
+    ///
+    /// It is remembered even while the Git panel is switched off, so that turning
+    /// the panel back on restores the page rather than resetting it. What the
+    /// *setting* decides is whether the page can be reached at all; what this
+    /// decides is which one the column was last left on.
+    pub view: FilesView,
     /// The expanded directories, by the stable node id §3.4 stores.
     ///
     /// A `BTreeSet` rather than a `HashSet` for the reason L8 puts on the
@@ -11374,6 +11814,10 @@ fn to_persisted(
                     open: state.open.into_iter().collect(),
                     sel: state.sel,
                     width: seat.fixed_extent.unwrap_or(FILES_W).floor_px().max(0) as u32,
+                    view: match state.view {
+                        FilesView::Files => bt_persist::FilesViewV1::Files,
+                        FilesView::Git => bt_persist::FilesViewV1::Git,
+                    },
                 })
             }
             SeatKind::Preview => LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
@@ -12280,6 +12724,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &heads,
@@ -12345,6 +12791,8 @@ mod tests {
                     files_name_widths: &NO_FILES_NAME_WIDTHS,
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
+                    files_views: &NO_FILES_VIEWS,
+                    git_pages: &NO_GIT_PAGES,
                     preview_messages: messages,
                     preview_feet: &[],
                     preview_heads: &[],
@@ -13304,6 +13752,7 @@ mod tests {
         let files_leaf = |width: u32| {
             Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                 bt_persist::FilesLeafV1 {
+                    view: bt_persist::FilesViewV1::Files,
                     root: String::new(),
                     open: Vec::new(),
                     sel: None,
@@ -13575,8 +14024,9 @@ mod tests {
         // lands nowhere (`SettingsTarget::Panel => {}`), so it would prove the
         // scrim nothing. The dialog is top-anchored and grows with its row list,
         // so this window has to stay ahead of that list — 800px stopped clearing
-        // the divider the moment the second formula row was added.
-        let (width, height) = (1_280u32, 1_200u32);
+        // the divider the moment the second formula row was added, and 1200
+        // stopped the moment the Git panel's switch arrived under it.
+        let (width, height) = (1_280u32, 1_400u32);
         let layout = solved(&seats, viewport_of(width, height, 1_000), &metrics);
         let overlay = crate::settings::layout_for_menu(
             width as f32,
@@ -14027,6 +14477,8 @@ mod tests {
                     files_name_widths: &NO_FILES_NAME_WIDTHS,
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
+                    files_views: &NO_FILES_VIEWS,
+                    git_pages: &NO_GIT_PAGES,
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
@@ -14239,6 +14691,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -14320,6 +14774,8 @@ mod tests {
             },
             ChromeContent {
                 tabs: &[],
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
@@ -14703,7 +15159,7 @@ mod tests {
         content.selected = Some("/a.txt".to_owned());
         content.focus_ring = true;
         let (_, layout, column, _) = files_chrome(content, None);
-        let body = files_body_rect(&layout, column, 1.0).expect("the column has a body");
+        let body = files_body_rect(&layout, column, 1.0, false).expect("the column has a body");
         let geometry = files_tree_geometry(body, 3, 0.0, 1.0);
         assert_eq!(rect, geometry.row_rect(2), "the third row is `/a.txt`");
     }
@@ -14907,7 +15363,7 @@ mod tests {
         let rect = [0.0, 0.0, 260.0, 600.0];
         for scale in [1.0_f32, 1.5, 2.0] {
             let rect = [rect[0], rect[1], rect[2] * scale, rect[3] * scale];
-            let geometry = files_pane_geometry(rect, scale);
+            let geometry = files_pane_geometry(rect, scale, false);
             assert_eq!(
                 geometry.foot[3] - geometry.foot[1],
                 (FILES_FOOT_BAR_LOGICAL_PX * scale).round(),
@@ -14969,10 +15425,10 @@ mod tests {
         let content = footed_tree(r"C:\Users\Weiyi");
         let (_, layout, column, _) = files_chrome(content.clone(), None);
         let rect = files_pane_rect(&layout, column).expect("the column is placed");
-        let geometry = files_pane_geometry(rect, 1.0);
+        let geometry = files_pane_geometry(rect, 1.0, false);
 
         assert_eq!(
-            files_body_rect(&layout, column, 1.0),
+            files_body_rect(&layout, column, 1.0, false),
             Some(geometry.body),
             "the wheel and the keyboard read the shortened body"
         );
@@ -14984,6 +15440,7 @@ mod tests {
             files_body_at(
                 &layout,
                 1.0,
+                false,
                 f64::from((rect[0] + rect[2]) / 2.0),
                 f64::from(rect[3] - 4.0)
             ),
@@ -15000,7 +15457,7 @@ mod tests {
             f64::from((geometry.foot[1] + geometry.foot[3]) / 2.0),
         );
         assert_eq!(
-            hit_files_tree(&layout, &trees, 1.0, inside_foot.0, inside_foot.1),
+            hit_files_tree(&layout, &trees, 1.0, false, inside_foot.0, inside_foot.1),
             None,
             "no row lives under the foot"
         );
@@ -15028,7 +15485,11 @@ mod tests {
         let path = r"C:\Users\Weiyi\Developer\BetterTerminal";
         let (_, layout, column, chrome) = files_chrome(footed_tree(path), None);
         let palette = chrome_palette();
-        let geometry = files_pane_geometry(files_pane_rect(&layout, column).expect("placed"), 1.0);
+        let geometry = files_pane_geometry(
+            files_pane_rect(&layout, column).expect("placed"),
+            1.0,
+            false,
+        );
         assert!(
             chrome.quads.iter().any(|quad| quad.rect == geometry.foot_edge
                 && quad.color == palette.pane_head_edge),
@@ -15077,7 +15538,11 @@ mod tests {
         let (_, layout, column, chrome) =
             files_chrome_hovering(footed_tree(path), Some(ChromeTarget::FilesFoot(seat)));
         assert_eq!(column, seat, "the fixture mints the same id twice");
-        let geometry = files_pane_geometry(files_pane_rect(&layout, column).expect("placed"), 1.0);
+        let geometry = files_pane_geometry(
+            files_pane_rect(&layout, column).expect("placed"),
+            1.0,
+            false,
+        );
         assert!(
             chrome
                 .quads
@@ -15134,7 +15599,11 @@ mod tests {
         };
         let (_, layout, column, chrome) = files_chrome(bare, None);
         let palette = chrome_palette();
-        let geometry = files_pane_geometry(files_pane_rect(&layout, column).expect("placed"), 1.0);
+        let geometry = files_pane_geometry(
+            files_pane_rect(&layout, column).expect("placed"),
+            1.0,
+            false,
+        );
         assert!(
             chrome.quads.iter().any(|quad| quad.rect == geometry.foot_edge
                 && quad.color == palette.pane_head_edge),
@@ -15220,7 +15689,7 @@ mod tests {
                 f64::from((row[1] + row[3]) / 2.0),
             );
             assert_eq!(
-                hit_files_tree(&layout, &trees, 1.0, centre.0, centre.1),
+                hit_files_tree(&layout, &trees, 1.0, false, centre.0, centre.1),
                 Some(ChromeTarget::FilesRow {
                     seat: column,
                     index
@@ -15247,6 +15716,7 @@ mod tests {
                 &layout,
                 &trees,
                 1.0,
+                false,
                 f64::from((rect[0] + rect[2]) / 2.0),
                 f64::from(rect[3] - 2.0),
             ),
@@ -17989,6 +18459,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -18183,6 +18655,8 @@ mod tests {
                     files_name_widths: &NO_FILES_NAME_WIDTHS,
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
+                    files_views: &NO_FILES_VIEWS,
+                    git_pages: &NO_GIT_PAGES,
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
@@ -18286,6 +18760,8 @@ mod tests {
                     files_name_widths: &NO_FILES_NAME_WIDTHS,
                     files_root_open: None,
                     files_trees: &NO_FILES_TREES,
+                    files_views: &NO_FILES_VIEWS,
+                    git_pages: &NO_GIT_PAGES,
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
@@ -18377,6 +18853,7 @@ mod tests {
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                     bt_persist::FilesLeafV1 {
+                        view: bt_persist::FilesViewV1::Files,
                         root: "D:\\".to_owned(),
                         open: Vec::new(),
                         sel: None,
@@ -18494,6 +18971,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -20275,6 +20754,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -20332,6 +20813,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -21119,6 +21602,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -21360,6 +21845,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -21609,6 +22096,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -21763,6 +22252,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -22355,6 +22846,7 @@ mod tests {
             children: [
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                     bt_persist::FilesLeafV1 {
+                        view: bt_persist::FilesViewV1::Files,
                         root: "D:\\".to_owned(),
                         open: Vec::new(),
                         sel: None,
@@ -22392,7 +22884,7 @@ mod tests {
                     "({px}, {py}) is inside the rail and the rail said nothing"
                 );
                 if matches!(
-                    hit_files_tree(&layout, &trees, scale, px, py),
+                    hit_files_tree(&layout, &trees, scale, false, px, py),
                     Some(ChromeTarget::FilesRow { .. })
                 ) {
                     covered_rows += 1;
@@ -23047,6 +23539,8 @@ mod tests {
                 files_name_widths: &NO_FILES_NAME_WIDTHS,
                 files_root_open: None,
                 files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -24011,6 +24505,172 @@ mod tests {
             ],
             "K124's stand-in holds the same pair at full strength"
         );
+    }
+
+    /// PIN (G-2, the master switch) — **off is not "hidden", it is "not there".**
+    ///
+    /// The first of the switch's three promises, and the one the geometry owes:
+    /// with the panel off a column has no strip, and the thirty pixels it would
+    /// have taken go back to the tree. The other two — the chord does nothing,
+    /// and no `git` process is started — are pinned by
+    /// `hit_files_seg_answers_nothing_for_a_column_with_no_switch` below and by
+    /// `main`'s `columns_wanting_git`.
+    #[test]
+    fn the_switch_takes_no_room_at_all_while_the_git_panel_is_off() {
+        let rect = [0.0, 0.0, 240.0, 600.0];
+        let off = files_pane_geometry(rect, 1.0, false);
+        let on = files_pane_geometry(rect, 1.0, true);
+        assert_eq!(off.seg, None, "no strip is laid out");
+        let strip = on.seg.expect("the strip is there when the switch is on");
+        assert_eq!(
+            strip[3] - strip[1],
+            FILES_SEG_BAR_LOGICAL_PX,
+            "and it is the design's own thirty pixels"
+        );
+        assert_eq!(
+            on.body[1] - off.body[1],
+            FILES_SEG_BAR_LOGICAL_PX,
+            "which the list gives up, and gets back"
+        );
+        assert_eq!(
+            (off.foot, off.foot_path),
+            (on.foot, on.foot_path),
+            "the foot is chassis and is unmoved either way"
+        );
+        assert_eq!(
+            strip[1], off.body[1],
+            "the strip starts where the list would have"
+        );
+    }
+
+    /// PIN — the switch's two halves are the words' own boxes, and the gap
+    /// between them belongs to neither.
+    #[test]
+    fn each_half_of_the_switch_is_its_own_word_and_the_gap_is_nobodys() {
+        let strip = [0.0, 0.0, 240.0, FILES_SEG_BAR_LOGICAL_PX];
+        // `Files` drawn 30 wide and `Git` 18 — any two widths would do; what is
+        // pinned is that the second starts a gap after the first ends.
+        let geometry = files_seg_geometry(strip, [30.0, 18.0], 1.0);
+        let pad = FILES_SEG_PADDING_X_LOGICAL_PX;
+        let button_pad = FILES_SEG_BUTTON_PADDING_X_LOGICAL_PX;
+        assert_eq!(geometry.files[0], pad);
+        assert_eq!(geometry.files[2], pad + 30.0 + button_pad * 2.0);
+        assert_eq!(
+            geometry.git[0] - geometry.files[2],
+            FILES_SEG_GAP_LOGICAL_PX,
+            "the design's own fourteen"
+        );
+        let middle = |box_: [f32; 4]| (box_[0] + box_[2]) / 2.0;
+        assert_eq!(
+            geometry.button_at(middle(geometry.files), strip[3] - 2.0),
+            Some(FilesView::Files)
+        );
+        assert_eq!(
+            geometry.button_at(middle(geometry.git), strip[3] - 2.0),
+            Some(FilesView::Git)
+        );
+        let between = (geometry.files[2] + geometry.git[0]) / 2.0;
+        assert_eq!(
+            geometry.button_at(between, strip[3] - 2.0),
+            None,
+            "the gap is the design's and belongs to neither button — a press \
+             there must not pick whichever is nearer"
+        );
+        assert_eq!(
+            geometry.button_at(1.0, strip[3] - 2.0),
+            None,
+            "and neither does the strip's own left inset"
+        );
+    }
+
+    /// PIN (the master switch's second promise) — a column with no switch drawn
+    /// has no switch to press.
+    ///
+    /// The map is the *same* map the paint was handed, so this is not a second
+    /// condition that could be forgotten: it is the absence of an entry.
+    #[test]
+    fn hit_files_seg_answers_nothing_for_a_column_with_no_switch() {
+        let seats = term_beside_files();
+        let column = seats.files().first().copied().expect("a files column");
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1_600, 900, 1_000), &metrics);
+        let rect = files_pane_rect(&layout, column).expect("the column is placed");
+        let strip = files_pane_geometry(rect, 1.0, true)
+            .seg
+            .expect("with the panel on there is a strip");
+        let inside = (
+            f64::from(strip[0] + FILES_SEG_PADDING_X_LOGICAL_PX + 2.0),
+            f64::from(strip[3] - 2.0),
+        );
+
+        let off: BTreeMap<SeatId, [f32; 2]> = BTreeMap::new();
+        assert_eq!(
+            hit_files_seg(&layout, &off, 1.0, inside.0, inside.1),
+            None,
+            "with the panel off the switch is unpressable, because it is not there"
+        );
+
+        let mut on = BTreeMap::new();
+        on.insert(column, [30.0, 18.0]);
+        assert_eq!(
+            hit_files_seg(&layout, &on, 1.0, inside.0, inside.1),
+            Some(ChromeTarget::FilesSeg {
+                seat: column,
+                view: FilesView::Files,
+            }),
+            "and with it on, the half under the pointer answers by name"
+        );
+    }
+
+    /// PIN (R1) — which page a column was on crosses the disk.
+    ///
+    /// The mock-up keeps this in a lazy JavaScript property that dies with the
+    /// page. A user who works on the Git page all morning and finds a file tree
+    /// every time the window reopens is being told the product did not notice.
+    #[test]
+    fn the_page_a_column_was_on_survives_a_round_trip() {
+        let seats = term_beside_files();
+        let column = seats.files().first().copied().expect("a files column");
+        let persisted = seats.to_persisted(
+            &|_| TermLeafV1 {
+                profile_id: "pwsh".to_owned(),
+                cwd: String::new(),
+                manual_name: None,
+            },
+            &|seat| FilesLeafState {
+                root: r"D:\repo".to_owned(),
+                view: if seat == column {
+                    FilesView::Git
+                } else {
+                    FilesView::Files
+                },
+                ..FilesLeafState::default()
+            },
+        );
+        fn leaves(node: &LayoutNodeV1) -> Vec<bt_persist::FilesLeafV1> {
+            match node {
+                LayoutNodeV1::Leaf(LeafNodeV1::Files(leaf)) => vec![leaf.clone()],
+                LayoutNodeV1::Leaf(_) => Vec::new(),
+                LayoutNodeV1::Split(split) => {
+                    split.children.iter().flat_map(|c| leaves(c)).collect()
+                }
+            }
+        }
+        let written = leaves(&persisted);
+        assert_eq!(
+            written.first().map(|leaf| leaf.view),
+            Some(bt_persist::FilesViewV1::Git),
+            "the tree carries the page out to disk"
+        );
+        assert_eq!(
+            written.first().map(|leaf| leaf.root.as_str()),
+            Some(r"D:\repo"),
+            "beside the three facts it already carried"
+        );
+        // And back. The page is read where the root is, by the same code — see
+        // `main`'s `restore_tab`, which is the only reader of both.
+        let restored = Seats::from_persisted(&persisted).expect("the tree holds a terminal");
+        assert_eq!(restored.files().len(), 1, "one column out, one column back");
     }
 }
 

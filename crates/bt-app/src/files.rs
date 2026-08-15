@@ -1038,6 +1038,7 @@ mod tests {
             root: root.to_owned(),
             open: open.iter().map(|key| (*key).to_owned()).collect(),
             sel: sel.map(str::to_owned),
+            view: crate::seats::FilesView::default(),
         }
     }
 

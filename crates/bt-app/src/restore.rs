@@ -964,7 +964,26 @@ pub const GATE_DISCARD_TEXT: &str = "Discard";
 pub const GATE_CANCEL_TEXT: &str = "Cancel";
 /// The button Enter answers, which is the one that changes nothing.
 pub const GATE_FOCUSED_ANSWER: GateAnswer = GateAnswer::Cancel;
+/// The title of the gate that guards unsaved preview edits.
+///
+/// **The gate has more than one question to ask now**, so the title travels with
+/// the request rather than being baked into the drawing (see
+/// [`GateRequest::title`]). This is the sentence for the three the gate was built
+/// for; the fourth — a working-tree discard — asks something different and says
+/// so.
 pub const GATE_TITLE_TEXT: &str = "Discard unsaved changes?";
+/// The title of the gate in front of a working-tree discard (R14).
+///
+/// It says *changes*, not *unsaved changes*, and the difference is the whole
+/// point: the file on disk is saved. What is about to go is the difference
+/// between it and what git has, which no amount of saving would bring back.
+pub const GATE_GIT_DISCARD_TITLE: &str = "Discard changes?";
+/// And the title when the file is untracked, where "discard" means *delete*.
+///
+/// A gate that said "discard changes" over a file git has never seen would be
+/// describing the smaller of two acts. The button still says `Discard`, because
+/// that is the word the page's own verb uses; the question says what it does.
+pub const GATE_GIT_DELETE_TITLE: &str = "Delete this file?";
 
 /// The gate's own sentence — the mock-up's `Discard unsaved changes to a.txt,
 /// b.md?` (3600), split into a title and a list because a `confirm()` string has
@@ -999,6 +1018,66 @@ pub enum GateRequest {
     CloseTab(usize),
     /// Shutting the window (P125).
     Shut,
+    /// Throwing a file's working-tree changes away, or deleting an untracked
+    /// file (R14).
+    ///
+    /// **The fourth question this machine asks, and the first that is not about
+    /// an unsaved buffer.** It is here rather than in a second gate of its own
+    /// because everything a confirmation *is* — a scrim, a modal that owns the
+    /// keyboard, Esc and Enter both answering "change nothing", a destructive
+    /// button that is deliberately not the focused one — is already here and
+    /// correct, and a second copy of it would be a second chance to get the
+    /// default answer the wrong way round. What had to be generalized is only the
+    /// vocabulary: the title now comes from the request.
+    GitDiscard {
+        seat: bt_layout::SeatId,
+        /// Repo-relative, in git's grammar — and the name the gate says out loud.
+        path: String,
+        /// Whether git has ever seen this file, which decides both the sentence
+        /// and the command.
+        untracked: bool,
+    },
+}
+
+impl GateRequest {
+    /// The question this gate is asking.
+    #[must_use]
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => GATE_TITLE_TEXT,
+            Self::GitDiscard {
+                untracked: false, ..
+            } => GATE_GIT_DISCARD_TITLE,
+            Self::GitDiscard {
+                untracked: true, ..
+            } => GATE_GIT_DELETE_TITLE,
+        }
+    }
+
+    /// The sentence under it — **by name, always** (§7.1.3).
+    ///
+    /// `names` is what the caller collected: the dirty buffers for the three
+    /// original requests, and the one path for a discard. A gate that named
+    /// nothing would be asking you to guess what you are about to lose, which is
+    /// the same silence it exists to break.
+    #[must_use]
+    pub fn message(&self, names: &[String]) -> String {
+        match self {
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => gate_message(names),
+            Self::GitDiscard {
+                untracked: false, ..
+            } => format!(
+                "{} goes back to the last staged or committed version. This cannot be undone.",
+                names.join(", ")
+            ),
+            Self::GitDiscard {
+                untracked: true, ..
+            } => format!(
+                "{} is deleted. git has no copy of it, so this cannot be undone.",
+                names.join(", ")
+            ),
+        }
+    }
 }
 
 impl DirtyGate {
@@ -1046,7 +1125,13 @@ pub fn gate_answer(target: GateTarget) -> Option<GateAnswer> {
 /// Everything the gate draws that had to be measured with a real font.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GateContent {
-    /// [`gate_message`], already broken to lines that fit [`content_width`].
+    /// What the gate is asking — [`GateRequest::title`].
+    ///
+    /// Carried rather than read from a constant at the draw, because the gate now
+    /// asks four questions and only three of them are about an unsaved buffer.
+    pub title: &'static str,
+    /// [`GateRequest::message`], already broken to lines that fit
+    /// [`content_width`].
     pub message_lines: Vec<String>,
     pub cancel_text_width: f32,
     pub discard_text_width: f32,
@@ -1058,6 +1143,8 @@ pub struct GateLayout {
     scale: f32,
     frame: [f32; 4],
     title: [f32; 4],
+    /// The words in [`Self::title`]'s box, carried from the request.
+    title_text: &'static str,
     message: Vec<(String, [f32; 4])>,
     cancel: [f32; 4],
     discard: [f32; 4],
@@ -1142,6 +1229,7 @@ pub fn gate_layout(
         scale,
         frame,
         title,
+        title_text: content.title,
         message,
         cancel,
         discard,
@@ -1200,7 +1288,7 @@ pub fn gate_build(
         alpha(palette.menu_border_alpha),
     );
     labels.push(ChromeLabel {
-        text: GATE_TITLE_TEXT.to_owned(),
+        text: layout.title_text.to_owned(),
         rect: layout.title,
         font_size_px: px(TITLE_FONT_LOGICAL_PX),
         color: palette.dialog_title_text,
@@ -1301,6 +1389,7 @@ mod tests {
         );
 
         let content = GateContent {
+            title: GATE_TITLE_TEXT,
             message_lines: vec!["Discard unsaved changes to a.txt?".to_owned()],
             cancel_text_width: 40.0,
             discard_text_width: 48.0,

@@ -1,0 +1,59 @@
+{
+  "schema_version": 6,
+  "theme": "dark",
+  "cursor_style": "bar",
+  "tab_layout": "horizontal",
+  "sidebar_mode": "expanded",
+  "window": {
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1280,
+      "height": 800
+    },
+    "dpi": 96,
+    "maximized": false,
+    "monitor_id": "\\\\.\\DISPLAY1"
+  },
+  "tabs": [
+    {
+      "root": {
+        "dir": "row",
+        "ratio": 300000,
+        "children": [
+          {
+            "kind": "files",
+            "root": "D:\\Developer\\BetterTerminal",
+            "open": [
+              "crates"
+            ],
+            "sel": "crates/bt-app",
+            "width": 260
+          },
+          {
+            "kind": "term",
+            "profile_id": "pwsh",
+            "cwd": "D:\\Developer\\BetterTerminal",
+            "manual_name": null
+          }
+        ]
+      },
+      "pinned": false,
+      "focused_leaf": "leaf-1"
+    }
+  ],
+  "active_tab": 0,
+  "recent": [
+    {
+      "key": "files|D:\\other|",
+      "seed": {
+        "kind": "files",
+        "root": "D:\\other",
+        "open": [],
+        "sel": null,
+        "width": 240
+      },
+      "timestamp": "2026-08-15T09:00:00Z"
+    }
+  ]
+}

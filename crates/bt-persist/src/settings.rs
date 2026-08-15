@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 /// Current `schema_version` for `settings.json`.
 ///
 /// v2 adds `display_formulas`, v3 adds `inline_formulas`, v4 adds
-/// `default_profile`. §2's "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is
-/// satisfied the way §1.3 intends it to be: each field arrives in the same change
-/// that gives it a reader, not ahead of one.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 4;
+/// `default_profile`, v5 adds `git_panel`. §2's "只收录已经在 DESIGN/M2 文档里
+/// 落定的用户可见项" is satisfied the way §1.3 intends it to be: each field
+/// arrives in the same change that gives it a reader, not ahead of one.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 5;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -29,14 +29,15 @@ pub const SETTINGS_SCHEMA_VERSION: u32 = 4;
 /// gone" already goes down instead of through a second one.
 pub const DEFAULT_PROFILE_UNSET: &str = "";
 
-/// `settings.json` v4 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v5 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 4,
+///   "schema_version": 5,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
-///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | ""
+///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
+///   "git_panel": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +79,20 @@ pub struct SettingsV1 {
     /// start. [`DEFAULT_PROFILE_UNSET`] is the same case reached from the other
     /// side.
     pub default_profile: String,
+    /// Whether a Files column offers its second page at all (user ruling,
+    /// 2026-08-15).
+    ///
+    /// **The Git panel's master switch, and it is a switch and not a preference.**
+    /// Off is not "the page is hidden": it is the page not existing — no `Files |
+    /// Git` strip above the tree, no chord that reaches it, and, the reason the
+    /// switch was asked for, **not one process spawned against the repository**.
+    /// A product that reads a git repository whenever a folder is open owes the
+    /// user a way to say no that is actually a no, and a switch that merely hid
+    /// the drawing would not be one.
+    ///
+    /// On by default. The panel is the feature this build shipped; a feature that
+    /// arrives switched off is a feature nobody finds.
+    pub git_panel: bool,
 }
 
 impl Default for SettingsV1 {
@@ -88,6 +103,7 @@ impl Default for SettingsV1 {
             display_formulas: true,
             inline_formulas: true,
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),
+            git_panel: true,
         }
     }
 }

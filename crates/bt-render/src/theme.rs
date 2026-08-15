@@ -50,28 +50,82 @@ pub(crate) fn cursor_rgb() -> [u8; 3] {
 /// a resting pane title, rather than a new number.
 pub(crate) const UNFOCUSED_CURSOR_ALPHA_PERCENT: i32 = 45;
 
-/// `ink` at [`UNFOCUSED_CURSOR_ALPHA_PERCENT`] over `canvas`, composited in sRGB
-/// and rounded half away from zero.
+/// `ink` at `alpha` thousandths over `canvas`, composited in sRGB and rounded
+/// half away from zero.
 ///
-/// The pre-composition is the convention [`ChromePalette`] documents; doing it
-/// here rather than in a comment means the alpha and the bytes cannot drift
-/// apart, and the compiler still hands the pipeline a plain opaque colour.
-const fn cursor_ink_faded_over(canvas: [u8; 3], ink: [u8; 3]) -> [u8; 3] {
+/// **The one compositor.** Every translucent token in the design — `--ink2` at
+/// .65, `--hover` at .055, a status badge's `color-mix(… 15%, transparent)` —
+/// lands on a surface as this arithmetic, and it is here so that a palette entry
+/// can be *derived* rather than transcribed. A hand-computed byte triple is a
+/// number nobody can check without redoing the sum; `ink_over(PANEL_DARK, WHITE,
+/// 380)` is the CSS declaration itself, and the compiler does the sum.
+///
+/// Thousandths and not percent because the design's smallest alpha is `.055` and
+/// the second smallest is `.088`; a percent would round both away before the
+/// composite ever happened.
+///
+/// `const` so the two palette tables stay compile-time constants and the pipeline
+/// is still handed plain opaque colours. It is also called at *draw* time, by the
+/// Git page's status badges — see [`ChromePalette::status_ok`] — because one of
+/// that mix's two operands is chosen per row and so cannot be a constant. The
+/// arithmetic is the same either way, which is the point of there being one.
+#[must_use]
+pub const fn ink_over(canvas: [u8; 3], ink: [u8; 3], alpha: i32) -> [u8; 3] {
     let mut faded = [0u8; 3];
     let mut channel = 0;
     while channel < 3 {
         let base = canvas[channel] as i32;
-        let scaled = (ink[channel] as i32 - base) * UNFOCUSED_CURSOR_ALPHA_PERCENT;
+        let scaled = (ink[channel] as i32 - base) * alpha;
         let step = if scaled >= 0 {
-            (scaled + 50) / 100
+            (scaled + 500) / 1000
         } else {
-            (scaled - 50) / 100
+            (scaled - 500) / 1000
         };
         faded[channel] = (base + step) as u8;
         channel += 1;
     }
     faded
 }
+
+/// `ink` at [`UNFOCUSED_CURSOR_ALPHA_PERCENT`] over `canvas`.
+///
+/// The pre-composition is the convention [`ChromePalette`] documents; doing it
+/// here rather than in a comment means the alpha and the bytes cannot drift
+/// apart, and the compiler still hands the pipeline a plain opaque colour.
+const fn cursor_ink_faded_over(canvas: [u8; 3], ink: [u8; 3]) -> [u8; 3] {
+    ink_over(canvas, ink, UNFOCUSED_CURSOR_ALPHA_PERCENT * 10)
+}
+
+// ── the design's own tokens, for the entries that are derived ───────────────
+//
+// Only the ones [`ink_over`] needs as operands. The rest of this palette
+// transcribes its bytes with the sum written in a comment beside them, which was
+// the only option before there was a compositor to call; these are here because
+// the Git page added fifteen entries at once and fifteen hand-checked sums is
+// fifteen chances to be wrong in a way no test would catch.
+
+/// `--termbg #1B1B1B` on the dark canvas.
+const TERMBG_DARK: [u8; 3] = [0x1b, 0x1b, 0x1b];
+/// `--termbg #FFFFFF` on the light canvas.
+const TERMBG_LIGHT: [u8; 3] = [0xff, 0xff, 0xff];
+/// `--panel #252525` on the dark canvas.
+const PANEL_DARK: [u8; 3] = [0x25, 0x25, 0x25];
+/// `--panel #F7F7F5` on the light canvas.
+const PANEL_LIGHT: [u8; 3] = [0xf7, 0xf7, 0xf5];
+/// The colour every dark ink is a fraction of: `rgba(255,255,255,α)`.
+const DARK_INK_SOURCE: [u8; 3] = [0xff, 0xff, 0xff];
+/// The colour every light ink is a fraction of: `rgba(55,53,47,α)` — and, at
+/// α = 1, `--ink #37352F` itself.
+const LIGHT_INK_SOURCE: [u8; 3] = [0x37, 0x35, 0x2f];
+
+/// `.gsec` under `.grow:hover`, dark: `--hover rgba(255,255,255,.055)`.
+const GIT_ROW_HOVER_DARK: [u8; 3] = ink_over(PANEL_DARK, DARK_INK_SOURCE, 55);
+/// The same on light: `--hover rgba(55,53,47,.055)`.
+const GIT_ROW_HOVER_LIGHT: [u8; 3] = ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 55);
+/// `.gact:hover { background: var(--active) }` over the hovered row, dark.
+const GIT_ACT_PILL_DARK: [u8; 3] = ink_over(GIT_ROW_HOVER_DARK, DARK_INK_SOURCE, 90);
+/// The same on light.
+const GIT_ACT_PILL_LIGHT: [u8; 3] = ink_over(GIT_ROW_HOVER_LIGHT, LIGHT_INK_SOURCE, 90);
 
 /// [`DEFAULT_CURSOR_RGB`] faded over `--termbg #1B1B1B`:
 /// 27 + (212 − 27) × .45 = 110.25 → #6E6E6E.
@@ -422,6 +476,64 @@ pub struct ChromePalette {
     pub float_row_muted_hover: [u8; 3],
     /// The same `--ink3`, standing on [`Self::float_row_selected`].
     pub float_row_muted_selected: [u8; 3],
+
+    // ── the Git page's third ground (mock-up 1591-1650) ──
+    //
+    // The Files column's second view brings a surface neither of the two families
+    // above has: `.gsec { background: var(--panel) }` — "each section is a soft
+    // region card; one fill says *this is a region*" (mock-up 1605-1607). So a
+    // row on the Git page does not stand on `--termbg` like a tree row, nor on
+    // `--win` like a flyout row, but on a card lifted off `--termbg`, and every
+    // translucent ink the page puts on that card is a third pre-mix.
+    //
+    // The masthead and the group headings are the exception and are named apart
+    // below: they sit *outside* the cards, directly on the body, and their inks
+    // are therefore mixed over `--termbg` like the tree's.
+    //
+    // Two of these are numerically fields that already exist —
+    // [`Self::git_head_muted`] is [`Self::files_row_muted`], [`Self::git_section`]
+    // is [`Self::termhost`] — and are named separately on the precedent this
+    // palette has set five times over: two declarations, either of which could be
+    // re-struck without the other.
+    /// `.gsec { background: var(--panel) }` — the card a group's rows stand on.
+    /// Opaque in both themes, so there is nothing to composite.
+    pub git_section: [u8; 3],
+    /// `.grow:hover { background: var(--hover) }` over the card.
+    pub git_row_hover: [u8; 3],
+    /// `.grow bdi { color: var(--ink) }` over the card — a changed file's path,
+    /// and a commit's subject.
+    pub git_row_text: [u8; 3],
+    /// The same `--ink`, standing on [`Self::git_row_hover`].
+    pub git_row_text_hover: [u8; 3],
+    /// `--ink3` over the card: a commit's short hash, its age, and the mini
+    /// graph's line.
+    pub git_row_muted: [u8; 3],
+    /// The same `--ink3`, standing on [`Self::git_row_hover`].
+    pub git_row_muted_hover: [u8; 3],
+    /// `.gact { color: var(--ink2) }` over the card.
+    ///
+    /// Drawn at rest as well as on hover even though the mock-up's button is
+    /// `visibility: hidden` until its row is pointed at — R12 replaced that
+    /// two-step reveal with `.pv-tool`'s three (0 → .7 → 1), and the middle step
+    /// needs an ink to be seven-tenths of.
+    pub git_act_glyph: [u8; 3],
+    /// The same `--ink2`, standing on [`Self::git_row_hover`].
+    pub git_act_glyph_hover: [u8; 3],
+    /// `.gact:hover { background: var(--active) }` — over a row that is itself
+    /// hovered, because a button cannot be under the pointer while its row is not.
+    pub git_act_pill: [u8; 3],
+    /// `.gact:hover { color: var(--ink) }`, standing on [`Self::git_act_pill`].
+    pub git_act_glyph_on_pill: [u8; 3],
+    /// `.git-branch { color: var(--ink) }` over `--termbg` — the branch name,
+    /// the largest text on the page.
+    pub git_head_text: [u8; 3],
+    /// `--ink3` over `--termbg`: the group headings, and the one empty state.
+    pub git_head_muted: [u8; 3],
+    /// `.gud { color: var(--ink2) }` over `--termbg` — the ahead/behind pills.
+    pub git_pill_text: [u8; 3],
+    /// `.gud { border: 1px solid var(--border) }` over `--termbg`.
+    pub git_pill_border: [u8; 3],
+
     /// A divider at rest: one logical pixel of quiet separation.
     pub divider: [u8; 3],
     /// A divider under the pointer: "this edge is a thing you can touch".
@@ -668,23 +780,41 @@ pub struct ChromePalette {
     /// error a shared name hides.
     pub menu_item_hint_text: [u8; 3],
 
-    // ── Status semantics (mock-up lines 28-35) ──
+    // ── Status semantics (mock-up lines 20-46, 74) ──
     //
     // The mock-up declares these in `:root` with a comment that rules them
     // explicitly: "every 'something happened' colour goes through these four,
-    // never a literal". `body.dark` overrides `--accent` and leaves these
-    // alone, so three of the four are one set shared by both canvases and the
-    // fourth is [`Self::accent`]. They are opaque hex in the design, so unlike
-    // most of this palette there is nothing to pre-composite — they land as
-    // written.
+    // never a literal". They are opaque hex in the design, so unlike most of
+    // this palette there is nothing to pre-composite — they land as written.
+    //
+    // **Three of them are one set and two are not** (R29, 2026-08-15). The
+    // comment above them in the design says the four are declared once "so both
+    // themes share them **until a walkthrough proves a theme needs its own**",
+    // and `--ok` is the one the walkthrough caught: `body.dark` overrides it to
+    // `#57ab5a` (mock-up 74) and overrides no other, because `#1a7f37` on
+    // `#1B1B1B` is a green nobody can read. So the set that varies by canvas is
+    // [`Self::accent`] and [`Self::status_ok`], and the set that does not is the
+    // three below them. Naming the split is the whole point — a reader who was
+    // told "the status colours are one table" and then found a per-theme entry
+    // would rightly distrust the rest.
     /// `--err #c50f1f` — a session that finished with a failing exit code, worn
-    /// by the tab's dot and by a progress ring reporting `OSC 9;4` state 2.
+    /// by the tab's dot, by a progress ring reporting `OSC 9;4` state 2, and by
+    /// the Git page's `D` and `U` badges (a file gone, a merge unresolved).
     pub status_err: [u8; 3],
     /// `--warn #d9822b` — the bell, and (once the attention queue lands) an
     /// agent blocked on you.
     pub status_warn: [u8; 3],
     /// `--pause #c19c00` — a progress ring reporting `OSC 9;4` state 4.
     pub status_pause: [u8; 3],
+    /// `--ok` — `#1a7f37` light, `#57ab5a` dark. The Git page's `A` and `C`
+    /// badges, and (in G-4) the merge line curving into the mini graph.
+    ///
+    /// **The one status colour with two values**, for the reason the block
+    /// comment above gives. It arrived with the Git panel because that panel is
+    /// the first surface in the product to stand a green, a blue and a red side
+    /// by side at rest, which is the arrangement that makes an unreadable one
+    /// obvious.
+    pub status_ok: [u8; 3],
 
     // ── The progress ring's track (mock-up line 278) ──
     //
@@ -862,6 +992,23 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     float_row_muted: [0x75, 0x75, 0x75],
     float_row_muted_hover: [0x7c, 0x7c, 0x7c],
     float_row_muted_selected: [0x81, 0x81, 0x81],
+    // The Git page's card, and the six inks that stand on it. Derived rather
+    // than transcribed — see `ink_over`.
+    git_section: PANEL_DARK,
+    git_row_hover: GIT_ROW_HOVER_DARK,
+    git_row_text: ink_over(PANEL_DARK, DARK_INK_SOURCE, 870),
+    git_row_text_hover: ink_over(GIT_ROW_HOVER_DARK, DARK_INK_SOURCE, 870),
+    git_row_muted: ink_over(PANEL_DARK, DARK_INK_SOURCE, 380),
+    git_row_muted_hover: ink_over(GIT_ROW_HOVER_DARK, DARK_INK_SOURCE, 380),
+    git_act_glyph: ink_over(PANEL_DARK, DARK_INK_SOURCE, 550),
+    git_act_glyph_hover: ink_over(GIT_ROW_HOVER_DARK, DARK_INK_SOURCE, 550),
+    git_act_pill: GIT_ACT_PILL_DARK,
+    git_act_glyph_on_pill: ink_over(GIT_ACT_PILL_DARK, DARK_INK_SOURCE, 870),
+    // Outside the cards, on the pane's own body.
+    git_head_text: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 870),
+    git_head_muted: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 380),
+    git_pill_text: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 550),
+    git_pill_border: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 94),
     divider: [0x35, 0x35, 0x35],
     divider_hover: [0x51, 0x51, 0x51],
     divider_active: [0x7a, 0x99, 0xff],
@@ -935,11 +1082,14 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     tab_badge_text_on_hovered_tab: [0xab, 0xab, 0xab],
     // `--ink3` (white .38) over `--menu` #2A2A2A: 42 + 213×.38 = 122.9.
     menu_item_hint_text: [0x7b, 0x7b, 0x7b],
-    // The mock-up's status semantics live in `:root` and `body.dark` overrides
-    // none of them, so the dark canvas wears the same three literals.
+    // Three of the mock-up's status semantics live in `:root` and `body.dark`
+    // overrides none of them, so the dark canvas wears the same three literals.
     status_err: [0xc5, 0x0f, 0x1f],
     status_warn: [0xd9, 0x82, 0x2b],
     status_pause: [0xc1, 0x9c, 0x00],
+    // The fourth is overridden (mock-up 74): `#1a7f37` on `#1B1B1B` is a green
+    // that reads as a smudge.
+    status_ok: [0x57, 0xab, 0x5a],
     // `--border` (white at .094) at `opacity: .7` — .0658 white — over
     // `--termbg` #1B1B1B, `--panel` #252525, and `--hover`-over-`--panel`
     // #313131 respectively.
@@ -1044,6 +1194,25 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     float_row_muted: [0xa5, 0xa4, 0xa1],
     float_row_muted_hover: [0x9f, 0x9e, 0x9b],
     float_row_muted_selected: [0x9b, 0x9a, 0x97],
+    // `--ink` is opaque on this canvas, so the two inks that wear it land as
+    // `#37352F` however many surfaces are under them — `ink_over(…, 1000)` says
+    // so in the same grammar as its neighbours rather than by a bare literal
+    // that would look like a different decision.
+    git_section: PANEL_LIGHT,
+    git_row_hover: GIT_ROW_HOVER_LIGHT,
+    git_row_text: ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 1000),
+    git_row_text_hover: ink_over(GIT_ROW_HOVER_LIGHT, LIGHT_INK_SOURCE, 1000),
+    git_row_muted: ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 450),
+    git_row_muted_hover: ink_over(GIT_ROW_HOVER_LIGHT, LIGHT_INK_SOURCE, 450),
+    git_act_glyph: ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 650),
+    git_act_glyph_hover: ink_over(GIT_ROW_HOVER_LIGHT, LIGHT_INK_SOURCE, 650),
+    git_act_pill: GIT_ACT_PILL_LIGHT,
+    git_act_glyph_on_pill: ink_over(GIT_ACT_PILL_LIGHT, LIGHT_INK_SOURCE, 1000),
+    git_head_text: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 1000),
+    git_head_muted: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 450),
+    git_pill_text: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 650),
+    // `--border` on light is `rgba(0,0,0,.088)` — black, not the ink.
+    git_pill_border: ink_over(TERMBG_LIGHT, [0x00, 0x00, 0x00], 88),
     divider: [0xe9, 0xe9, 0xe9],
     divider_hover: [0xc2, 0xc1, 0xbf],
     divider_active: [0x30, 0x59, 0xd8],
@@ -1120,6 +1289,8 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     status_err: [0xc5, 0x0f, 0x1f],
     status_warn: [0xd9, 0x82, 0x2b],
     status_pause: [0xc1, 0x9c, 0x00],
+    // `:root`'s own `--ok`, which only the dark canvas overrides.
+    status_ok: [0x1a, 0x7f, 0x37],
     // `--border` (black at .088) at `opacity: .7` — .0616 black — over
     // `--termbg` #FFFFFF, `--panel` #F7F7F5, and `--hover`-over-`--panel`
     // #ECECEA respectively.
@@ -2238,11 +2409,21 @@ mod tests {
         );
     }
 
-    /// PIN (T2 tab status): the four "something happened" colours are the
-    /// mock-up's own status semantics, declared once in its `:root` (lines
-    /// 30-35) and never overridden by `body.dark`. Both palettes therefore
-    /// carry the *same* three literals — a theme split here would be an
-    /// invention, not a reading, and this test is what forbids one.
+    /// PIN (T2 tab status, amended by R29 2026-08-15): **three of the "something
+    /// happened" colours are one set and two are not**, and which is which is
+    /// read off the design rather than chosen.
+    ///
+    /// This test used to say the split itself was forbidden — "a theme split here
+    /// would be an invention, not a reading". That was true of the three it was
+    /// written about and was never true of the design's own comment, which
+    /// declares the four in `:root` "so both themes share them **until a
+    /// walkthrough proves a theme needs its own**". `body.dark` proves it for
+    /// exactly one: `--ok` is re-struck at line 74 and nothing else is. So the
+    /// claim the test makes is narrowed to the three that are genuinely shared,
+    /// and the two that vary are pinned as *varying* — which is a stronger
+    /// statement than the old one, not a weaker one, because a future palette
+    /// that quietly folded `--ok` back to one value would now fail here instead
+    /// of passing.
     #[test]
     fn the_status_colours_are_one_set_shared_by_both_canvases() {
         for palette in [DARK_CHROME, LIGHT_CHROME] {
@@ -2250,10 +2431,57 @@ mod tests {
             assert_eq!(palette.status_warn, [0xd9, 0x82, 0x2b], "--warn");
             assert_eq!(palette.status_pause, [0xc1, 0x9c, 0x00], "--pause");
         }
-        // The accent is the fourth claim ("finished, unread") and is the one
-        // that *does* vary by canvas, so the dot's four colours are never a
+        // The accent is the fourth claim ("finished, unread") and is one of the
+        // two that *do* vary by canvas, so the dot's four colours are never a
         // single constant table.
         assert_ne!(DARK_CHROME.accent, LIGHT_CHROME.accent);
+        // And the fifth, which the Git page brought: `:root`'s green, and
+        // `body.dark`'s lighter one over the dark canvas.
+        assert_eq!(LIGHT_CHROME.status_ok, [0x1a, 0x7f, 0x37], "--ok");
+        assert_eq!(DARK_CHROME.status_ok, [0x57, 0xab, 0x5a], "dark --ok");
+    }
+
+    /// PIN (R29): the Git page's card and the inks on it are `--panel` and the
+    /// design's own alphas over it, not a second grey invented for the panel.
+    ///
+    /// Spot-checked at both ends of the ladder rather than field by field: if
+    /// `ink_over` and the tokens are right, every entry between them is right by
+    /// the same arithmetic, and if either is wrong these two are the first to
+    /// say so. The dark card is `#252525`; `--ink` at .87 over it is
+    /// 37 + 218×.87 = 226.7 → `#E3`; `--ink3` at .38 is 37 + 218×.38 = 119.8 →
+    /// `#78`.
+    #[test]
+    fn the_git_card_and_its_inks_are_the_designs_own_tokens() {
+        assert_eq!(DARK_CHROME.git_section, [0x25, 0x25, 0x25]);
+        assert_eq!(LIGHT_CHROME.git_section, [0xf7, 0xf7, 0xf5]);
+        assert_eq!(DARK_CHROME.git_row_text, [0xe3, 0xe3, 0xe3]);
+        assert_eq!(DARK_CHROME.git_row_muted, [0x78, 0x78, 0x78]);
+        // `--ink` is opaque on light, so a path on the card is the design's own
+        // `#37352F` and not a mix of it.
+        assert_eq!(LIGHT_CHROME.git_row_text, [0x37, 0x35, 0x2f]);
+        // A hovered row is lighter than its card on dark and darker on light —
+        // the one thing a mis-signed composite would get backwards.
+        assert!(DARK_CHROME.git_row_hover[0] > DARK_CHROME.git_section[0]);
+        assert!(LIGHT_CHROME.git_row_hover[0] < LIGHT_CHROME.git_section[0]);
+    }
+
+    /// PIN: [`ink_over`] is the sRGB lerp the design's `color-mix` is, rounded
+    /// half away from zero, and it is exact at both ends.
+    ///
+    /// The two endpoints are what make it safe to call at draw time as well as at
+    /// compile time: a badge asked for its ink at 1000 must get the ink itself
+    /// back, and one asked at 0 must get its ground — otherwise the "no mix"
+    /// case would be a colour a browser never showed.
+    #[test]
+    fn a_mix_at_either_end_is_the_colour_it_started_from() {
+        let ground = [0x25, 0x25, 0x25];
+        let ink = [0x57, 0xab, 0x5a];
+        assert_eq!(ink_over(ground, ink, 0), ground);
+        assert_eq!(ink_over(ground, ink, 1000), ink);
+        // 37 + (87−37)×.15 = 44.5 → 45; 37 + (171−37)×.15 = 57.1 → 57.
+        assert_eq!(ink_over(ground, ink, 150), [45, 57, 45]);
+        // Rounds half away from zero in the darkening direction too.
+        assert_eq!(ink_over(ink, ground, 1000), ground);
     }
 
     /// PIN (T2 progress ring): the ring's track is `--border` at `opacity: .7`
