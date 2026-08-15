@@ -6,6 +6,7 @@
 *.png
 !design/assets/*.png
 !design/assets/wordmark-r2/*.png
+!design/assets/file-icons-r2/*.png
 !docs/spikes/artifacts/03-visual/comparison.png
 !docs/spikes/artifacts/multiwindow/*.png
 !docs/spikes/artifacts/webview2/*.png
