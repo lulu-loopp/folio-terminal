@@ -18,6 +18,7 @@ mod float;
 mod git;
 mod git_graph;
 mod git_panel;
+mod highlight;
 mod input;
 mod marks;
 mod peek_strip;
@@ -564,6 +565,18 @@ enum PreviewDocument {
     Text {
         lines: Vec<String>,
         wrap: preview_edit::WrapLayout,
+        /// What each line's spans are, in the seven tokens of [`highlight`]
+        /// (#49). Empty for a language this window has no grammar for and for a
+        /// document over either cap — and empty draws exactly what a preview
+        /// drew before highlighting existed, which is why there is no second
+        /// path for the un-highlighted case.
+        ///
+        /// **Here rather than in the paint**, because this is the width-free
+        /// half of the parse: a wheel notch walks spans that already exist and a
+        /// resize re-flows the rows without asking the grammar anything. It is
+        /// keyed by [`PreviewParseKey`] with the rest of the parse, so the one
+        /// thing that *does* re-run it is an edit — which is exactly right.
+        highlight: highlight::Highlighting,
     },
     Diff(Vec<DiffRow>),
     Table {
@@ -605,6 +618,17 @@ struct MarkdownBlockIntrinsic {
     /// How many rows a block that does not wrap has: a table's rows, a fence's
     /// lines. Zero for the blocks whose row count is a function of the width.
     rows: usize,
+    /// A fence's own syntax highlighting, one entry per line of it (#49). Empty
+    /// for every other kind of block, for a fence with no info string, and for
+    /// one naming a language this window has no grammar for.
+    ///
+    /// **Here for the same reason the width is here.** What a ` ```rust ` fence
+    /// is worth is a fact about the fence, not about the pane it is drawn in:
+    /// re-walking a grammar for every pixel of a window drag is exactly the
+    /// stutter this whole type was created to end (user report, 2026-08-13), and
+    /// putting the highlighting anywhere on the *layout* side would have
+    /// re-created it in a new place.
+    highlight: highlight::Highlighting,
 }
 
 /// Everything measuring one markdown block worked out that **drawing it must
@@ -1394,6 +1418,7 @@ fn build_preview_text_body(
     geometry: &seats::PreviewMonoGeometry,
     lines: &[String],
     wrap: &preview_edit::WrapLayout,
+    highlight: &highlight::Highlighting,
     advance: f32,
     edit: Option<&PreviewEditPaint>,
     palette: &bt_render::ChromePalette,
@@ -1470,19 +1495,27 @@ fn build_preview_text_body(
             // The columns this row draws, cut out of the line by column and
             // not by byte: the surface is a cell grid and a wide character
             // occupies two of its cells.
-            let cut = |first: usize, last: usize| {
-                let start = preview_edit::byte_at_column(text, first);
-                let end = preview_edit::byte_at_column(text, last.max(first));
-                text[start..end].to_owned()
+            //
+            // **And cut again wherever the highlighting changes** (#49). What
+            // used to be one run is now between one and a few, and the caller
+            // never asks which: [`highlight::Highlighting::runs`] answers a
+            // plain document with the single body-ink run this built by hand.
+            let ink = highlight::HighlightInk {
+                palette,
+                body: palette.preview_body_text,
             };
-            let run = |text: String, left: f32| {
-                mono_paragraph(
-                    text,
-                    [left, box_of_row[1], box_of_row[2].max(left), box_of_row[3]],
-                    geometry.font_size,
-                    geometry.line_height,
-                    palette.preview_body_text,
-                )
+            let cut = |first: usize, last: usize| {
+                highlight.runs(line, text, (first, last.max(first)), ink)
+            };
+            let run = |runs: Vec<bt_render::PreviewRun>, left: f32| bt_render::PreviewParagraph {
+                runs,
+                rect: [left, box_of_row[1], box_of_row[2].max(left), box_of_row[3]],
+                font_size_px: geometry.font_size,
+                line_height_px: geometry.line_height,
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
             };
             // **A composition displaces the text it is being typed into.**
             //
@@ -1688,6 +1721,12 @@ struct BlockScrollPaint<'a> {
     scale: f32,
 }
 
+/// What a block with no highlighting carries — every block that is not a fence,
+/// and every fence whose info string named nothing this window has a grammar
+/// for. A `static` so the fence painter can borrow it for the length of its
+/// loop; see [`highlight::Highlighting::plain`].
+static NO_HIGHLIGHTING: highlight::Highlighting = highlight::Highlighting::plain();
+
 /// `.pv-md`'s body: the rendered document.
 ///
 /// **Every row is placed at the height the measuring pass wrote down for it.**
@@ -1698,7 +1737,11 @@ fn build_preview_markdown_body(
     metrics: seats::PreviewMarkdownMetrics,
     scroll: [f32; 2],
     bars: BlockScrollPaint<'_>,
-    document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
+    document: (
+        &[preview::MarkdownBlock],
+        &[MarkdownBlockIntrinsic],
+        &[MarkdownBlockLayout],
+    ),
     palette: &bt_render::ChromePalette,
 ) -> BuiltMarkdown {
     let BlockScrollPaint {
@@ -1707,7 +1750,10 @@ fn build_preview_markdown_body(
         scale,
     } = bars;
     let mut links: Vec<PreviewLinkSite> = Vec::new();
-    let (blocks, layout) = document;
+    // The intrinsics travel with the blocks now, and for one reason: a fence's
+    // syntax highlighting is width-free, so it was measured with the rest of
+    // what a block is worth whatever the pane does (#49).
+    let (blocks, intrinsic, layout) = document;
     // **The page has no horizontal axis; the wide blocks have their own** (user
     // ruling, 2026-08-13, overturning the same day's earlier "the whole page
     // travels").
@@ -1922,19 +1968,35 @@ fn build_preview_markdown_body(
                     color: palette.preview_code_ground,
                 });
                 let mut line_top = fence[1] + metrics.code_border + metrics.code_padding_y;
-                for line in text.lines() {
-                    paragraphs.push(mono_paragraph(
-                        preview::expand_tabs(line),
-                        [
+                // The fence's own ink is what "plain" means in here — `--ink2`
+                // over `--panel`, not the body's `--ink` over `--termbg` — so
+                // an unhighlighted fence and an unhighlighted span of a
+                // highlighted one come out the same colour they always did.
+                let ink = highlight::HighlightInk {
+                    palette,
+                    body: palette.preview_code_text,
+                };
+                let highlight = intrinsic
+                    .get(index)
+                    .map_or(&NO_HIGHLIGHTING, |block| &block.highlight);
+                for (row, line) in text.lines().enumerate() {
+                    let drawn = preview::expand_tabs(line);
+                    let columns = bt_unicode::text_width(&drawn);
+                    paragraphs.push(bt_render::PreviewParagraph {
+                        runs: highlight.runs(row, &drawn, (0, columns), ink),
+                        rect: [
                             fence[0] + metrics.code_border + metrics.code_padding_x,
                             line_top,
                             fence[2],
                             line_top + metrics.line_height,
                         ],
-                        metrics.font_size,
-                        metrics.line_height,
-                        palette.preview_code_text,
-                    ));
+                        font_size_px: metrics.font_size,
+                        line_height_px: metrics.line_height,
+                        wrap: false,
+                        letter_spacing_em: 0.0,
+                        align_right: false,
+                        align_center: false,
+                    });
                     line_top += metrics.line_height;
                 }
                 if let Some(lang) = lang {
@@ -2261,6 +2323,26 @@ fn preview_block_bar_at(
             && at[1] <= bar.grab[3])
             .then_some((index, bar))
     })
+}
+
+/// One fence's syntax highlighting, from its info string alone (#49).
+///
+/// **The info string and nothing else.** A ` ```rust ` fence is highlighted as
+/// Rust; a fence with no info string is not highlighted at all, and neither is
+/// one naming a language whose grammar is not in the box. There is deliberately
+/// no sniffing of the fence's contents: an author who wrote three backticks and
+/// nothing after them wrote a block of *preformatted text*, and guessing a
+/// language for it would colour a directory listing as though it were code.
+///
+/// The lines are expanded first because that is how the fence draws them — the
+/// spans that come back are measured in the columns those expanded lines
+/// occupy, which is what the paint below indexes by.
+fn markdown_fence_highlight(lang: Option<&str>, text: &str) -> highlight::Highlighting {
+    let Some(syntax) = highlight::syntax_for_fence(lang) else {
+        return highlight::Highlighting::default();
+    };
+    let lines: Vec<String> = text.lines().map(preview::expand_tabs).collect();
+    highlight::Highlighting::of(&lines, syntax)
 }
 
 /// How wide a code fence insists on being: its longest line, plus its border
@@ -18513,10 +18595,11 @@ impl Runtime {
             };
             return;
         }
-        let Some((view, content)) = self.preview_buffer_on(surface).map(|buffer| {
+        let Some((view, content, name)) = self.preview_buffer_on(surface).map(|buffer| {
             (
                 buffer.view(md_source),
                 buffer.content.clone().unwrap_or_default(),
+                buffer.name.clone(),
             )
         }) else {
             self.preview_pane_mut(surface).doc = PreviewDocument::Empty;
@@ -18536,7 +18619,23 @@ impl Runtime {
                     Some(columns) => preview_edit::WrapLayout::wrapped(&lines, columns),
                     None => preview_edit::WrapLayout::unwrapped(&lines),
                 };
-                PreviewDocument::Text { lines, wrap }
+                // **#49, and it belongs on this side of the key.** The grammar
+                // is chosen from the file's own name and its first line, and the
+                // walk is a fact about the content — neither has anything to do
+                // with how wide the pane is, so both are paid for here, once,
+                // with the parse. A file whose language is not in the box comes
+                // back plain, which is the same [`highlight::Highlighting`] an
+                // over-cap file comes back as and the same one this document
+                // carried before highlighting existed.
+                let highlight =
+                    highlight::syntax_for_file(&name, lines.first().map(String::as_str))
+                        .map(|syntax| highlight::Highlighting::of(&lines, syntax))
+                        .unwrap_or_default();
+                PreviewDocument::Text {
+                    lines,
+                    wrap,
+                    highlight,
+                }
             }
             preview::PreviewView::Diff => {
                 let metrics = seats::preview_diff_metrics(scale);
@@ -18638,9 +18737,10 @@ impl Runtime {
                         columns,
                         width,
                         rows: rows.len(),
+                        ..MarkdownBlockIntrinsic::default()
                     }
                 }
-                preview::MarkdownBlock::Code { text, .. } => MarkdownBlockIntrinsic {
+                preview::MarkdownBlock::Code { lang, text } => MarkdownBlockIntrinsic {
                     width: markdown_fence_width(text, metrics, |runs| {
                         self.renderer.measure_preview_paragraph_width(
                             runs,
@@ -18649,6 +18749,7 @@ impl Runtime {
                         )
                     }),
                     rows: text.lines().count().max(1),
+                    highlight: markdown_fence_highlight(lang.as_deref(), text),
                     ..MarkdownBlockIntrinsic::default()
                 },
                 _ => MarkdownBlockIntrinsic::default(),
@@ -18929,7 +19030,11 @@ impl Runtime {
         let (rows_height, columns) = self.preview_content_extent(surface, scale);
         let mut sites = Vec::new();
         let mut built = match &self.preview_pane(surface)?.doc {
-            PreviewDocument::Text { lines, wrap } => {
+            PreviewDocument::Text {
+                lines,
+                wrap,
+                highlight,
+            } => {
                 let geometry = self.preview_doc_text_geometry(
                     surface,
                     body,
@@ -18939,7 +19044,15 @@ impl Runtime {
                     advance,
                 );
                 let edit = self.preview_edit_paint(surface, &geometry, wrap, scale);
-                build_preview_text_body(&geometry, lines, wrap, advance, edit.as_ref(), &palette)
+                build_preview_text_body(
+                    &geometry,
+                    lines,
+                    wrap,
+                    highlight,
+                    advance,
+                    edit.as_ref(),
+                    &palette,
+                )
             }
             PreviewDocument::Diff(rows) => build_preview_diff_body(
                 &seats::preview_mono_geometry(
@@ -18965,7 +19078,11 @@ impl Runtime {
                 rows,
                 &palette,
             ),
-            PreviewDocument::Markdown { blocks, layout, .. } => {
+            PreviewDocument::Markdown {
+                blocks,
+                intrinsic,
+                layout,
+            } => {
                 let rendered = build_preview_markdown_body(
                     body,
                     seats::preview_markdown_metrics(scale),
@@ -18975,7 +19092,7 @@ impl Runtime {
                         lit,
                         scale,
                     },
-                    (blocks, layout),
+                    (blocks, intrinsic, layout),
                     &palette,
                 );
                 sites = rendered.links;
@@ -46923,6 +47040,7 @@ mod tests {
             &PreviewDocument::Text {
                 wrap: preview_edit::WrapLayout::unwrapped(&lines),
                 lines: lines.clone(),
+                highlight: highlight::Highlighting::default(),
             },
             text_metrics.line_height * 40.0,
             0,
@@ -46982,6 +47100,7 @@ mod tests {
             &PreviewDocument::Text {
                 wrap: preview_edit::WrapLayout::unwrapped(&lines[..2]),
                 lines: lines[..2].to_vec(),
+                highlight: highlight::Highlighting::default(),
             },
             text_metrics.line_height * 2.0,
             0,
@@ -47603,7 +47722,7 @@ mod tests {
             metrics,
             [0.0, 0.0],
             rested_bars(&[]),
-            (&blocks, &layout),
+            (&blocks, &[], &layout),
             &palette,
         );
         let sites: Vec<_> = rendered
@@ -47734,7 +47853,12 @@ mod tests {
         let fence = region(0);
         let drawn = fence_line(&built);
         assert_eq!(
-            drawn.runs[0].text, line,
+            drawn
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            line,
             "and it is the whole line — the text is never cut to what fits"
         );
         let visible = bt_render::crop_to(drawn.rect, fence.clip)
@@ -48078,6 +48202,7 @@ mod tests {
                         width: columns.iter().sum::<f32>() + metrics.table_border,
                         columns,
                         rows: rows.len(),
+                        ..MarkdownBlockIntrinsic::default()
                     }
                 }
                 preview::MarkdownBlock::Code { text, .. } => MarkdownBlockIntrinsic {
@@ -48371,8 +48496,15 @@ mod tests {
                 advance,
                 [0.0, 0.0],
             );
-            let built =
-                build_preview_text_body(&geometry, &lines, &wrap, advance, Some(&paint), &palette);
+            let built = build_preview_text_body(
+                &geometry,
+                &lines,
+                &wrap,
+                &highlight::Highlighting::default(),
+                advance,
+                Some(&paint),
+                &palette,
+            );
             let row = geometry.line_rect(1);
             let at = |columns: f32| row[0] + advance * columns;
             let run_at = |text: &str| {
@@ -48469,6 +48601,9 @@ mod tests {
         document: (&[preview::MarkdownBlock], &[MarkdownBlockLayout]),
         palette: &bt_render::ChromePalette,
     ) -> bt_render::PreviewBody {
+        // The intrinsics are the fences' highlighting and nothing else here, so
+        // a test about pixels can pass none and get the ink it always got.
+        let document = (document.0, [].as_slice(), document.1);
         build_preview_markdown_body(body, metrics, scroll, bars, document, palette).body
     }
 
@@ -48538,10 +48673,14 @@ mod tests {
         assert_eq!(lang.letter_spacing_em, seats::PREVIEW_MD_LANG_TRACKING_EM);
         assert_eq!(lang.rect[2], border.rect[2] - metrics.lang_inset_right);
         assert!(
-            built
-                .paragraphs
-                .iter()
-                .any(|p| p.runs[0].text == "let x = 1;" && p.runs[0].mono),
+            built.paragraphs.iter().any(|p| {
+                p.runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+                    == "let x = 1;"
+                    && p.runs.iter().all(|run| run.mono)
+            }),
             "the code itself is monospace"
         );
     }
@@ -49042,6 +49181,7 @@ mod tests {
         let document = PreviewDocument::Text {
             lines: lines.clone(),
             wrap: wrap.clone(),
+            highlight: highlight::Highlighting::default(),
         };
         // The file's own width is handed in, exactly as the runtime hands it in:
         // the ruling that a folded body cannot reach it is the function's, not
@@ -49071,11 +49211,22 @@ mod tests {
             advance,
             [0.0, 0.0],
         );
-        let built = build_preview_text_body(&geometry, &lines, &wrap, advance, None, &palette);
+        let built = build_preview_text_body(
+            &geometry,
+            &lines,
+            &wrap,
+            &highlight::Highlighting::default(),
+            advance,
+            None,
+            &palette,
+        );
+        // A row is however many runs its highlighting needs (#49) — one on this
+        // fixture, several on a highlighted one — so a row's *text* is its runs
+        // joined, never its first run.
         let drawn: Vec<String> = built
             .paragraphs
             .iter()
-            .map(|p| p.runs[0].text.clone())
+            .map(|p| p.runs.iter().map(|run| run.text.as_str()).collect())
             .collect();
         assert_eq!(drawn.len(), 5, "five rows drawn, not two lines");
         assert_eq!(
@@ -49222,7 +49373,15 @@ mod tests {
             preedit: None,
         };
         let wrap = preview_edit::WrapLayout::unwrapped(&lines);
-        let built = build_preview_text_body(&geometry, &lines, &wrap, 8.0, Some(&paint), &palette);
+        let built = build_preview_text_body(
+            &geometry,
+            &lines,
+            &wrap,
+            &highlight::Highlighting::default(),
+            8.0,
+            Some(&paint),
+            &palette,
+        );
         assert_eq!(built.quads.len(), 3, "two bands and one caret");
         assert_eq!(built.quads[0].color, palette.preview_selection);
         let row = geometry.line_rect(0);
@@ -49246,7 +49405,15 @@ mod tests {
 
         // With no edit surface there are no quads at all, which is the read-only
         // body slice 2 shipped.
-        let plain = build_preview_text_body(&geometry, &lines, &wrap, 8.0, None, &palette);
+        let plain = build_preview_text_body(
+            &geometry,
+            &lines,
+            &wrap,
+            &highlight::Highlighting::default(),
+            8.0,
+            None,
+            &palette,
+        );
         assert!(plain.quads.is_empty());
     }
 
@@ -52264,6 +52431,329 @@ mod tests {
         assert_eq!(
             columns_wanting_git(true, &[(column, seats::FilesView::Git, "   ".to_owned())]),
             Vec::new()
+        );
+    }
+
+    // ── #49: reading-level syntax highlighting ──────────────────────────────
+
+    /// A rust file's own [`PreviewDocument`], built the way
+    /// [`Runtime::rebuild_preview_document`] builds it, without a window.
+    fn highlighted_text_document(
+        name: &str,
+        body: &str,
+        columns: Option<usize>,
+    ) -> PreviewDocument {
+        let lines = preview_edit::display_lines(body);
+        let wrap = match columns {
+            Some(columns) => preview_edit::WrapLayout::wrapped(&lines, columns),
+            None => preview_edit::WrapLayout::unwrapped(&lines),
+        };
+        let highlight = highlight::syntax_for_file(name, lines.first().map(String::as_str))
+            .map(|syntax| highlight::Highlighting::of(&lines, syntax))
+            .unwrap_or_default();
+        PreviewDocument::Text {
+            lines,
+            wrap,
+            highlight,
+        }
+    }
+
+    /// **A fence is highlighted by its info string, and only by it** (#49).
+    ///
+    /// Both halves in one test because they are one ruling: ` ```rust ` gets the
+    /// palette's keyword and number inks, and a fence with no info string keeps
+    /// the single `--ink2` run it has always been drawn as. The second half is
+    /// the one that would rot silently — a highlighter that sniffed the contents
+    /// would pass every assertion about the first fence and quietly colour a
+    /// directory listing as though it were code.
+    ///
+    /// MUTATION: drop the `syntax_for_fence` guard in `markdown_fence_highlight`
+    /// and fall back to guessing, and the second half goes red.
+    #[test]
+    fn a_fence_is_highlighted_by_its_info_string_and_by_nothing_else() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 600.0, 600.0];
+        let source = "let count = 42; // how many\n";
+        let blocks = [
+            preview::MarkdownBlock::Code {
+                lang: Some("rust".to_owned()),
+                text: source.to_owned(),
+            },
+            preview::MarkdownBlock::Code {
+                lang: None,
+                text: source.to_owned(),
+            },
+        ];
+        let intrinsic: Vec<MarkdownBlockIntrinsic> = blocks
+            .iter()
+            .map(|block| match block {
+                preview::MarkdownBlock::Code { lang, text } => MarkdownBlockIntrinsic {
+                    rows: 1,
+                    highlight: markdown_fence_highlight(lang.as_deref(), text),
+                    ..MarkdownBlockIntrinsic::default()
+                },
+                _ => MarkdownBlockIntrinsic::default(),
+            })
+            .collect();
+        let fence_height =
+            metrics.line_height + (metrics.code_border + metrics.code_padding_y) * 2.0;
+        let layout = [
+            MarkdownBlockLayout::solid(fence_height),
+            MarkdownBlockLayout {
+                top: fence_height + metrics.code_margin,
+                ..MarkdownBlockLayout::solid(fence_height)
+            },
+        ];
+        let rendered = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &intrinsic, &layout),
+            &palette,
+        );
+        // The two fences' lines, in the order they were pushed. The `lang` chip
+        // is a proportional paragraph and rides after them, so the two mono
+        // paragraphs are the first two.
+        let mono: Vec<&bt_render::PreviewParagraph> = rendered
+            .body
+            .paragraphs
+            .iter()
+            .filter(|paragraph| paragraph.runs.iter().all(|run| run.mono))
+            .collect();
+        assert_eq!(mono.len(), 2, "one line drawn per fence");
+
+        let told = &mono[0];
+        assert!(
+            told.runs.len() > 1,
+            "the rust fence is cut into runs: {:?}",
+            told.runs.iter().map(|run| &run.text).collect::<Vec<_>>()
+        );
+        assert!(
+            told.runs.iter().any(|run| run.color == palette.hl_keyword),
+            "`let` wears the keyword ink"
+        );
+        assert!(
+            told.runs.iter().any(|run| run.color == palette.hl_number),
+            "`42` wears the number ink"
+        );
+        assert!(
+            told.runs.iter().any(|run| run.color == palette.hl_comment),
+            "the trailing comment wears the comment ink"
+        );
+        assert!(
+            told.runs
+                .iter()
+                .any(|run| run.color == palette.preview_code_text),
+            "and `count` is left the fence's own ink — the body ink inside a \
+             fence is `--ink2`, not the pane's `--ink`"
+        );
+        assert_eq!(
+            told.runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            source.trim_end_matches('\n'),
+            "the runs put the line back together exactly"
+        );
+
+        let untold = &mono[1];
+        assert_eq!(untold.runs.len(), 1, "an unlabelled fence is one run");
+        assert_eq!(untold.runs[0].color, palette.preview_code_text);
+        assert_eq!(untold.runs[0].text, source.trim_end_matches('\n'));
+    }
+
+    /// **A fold does not lose a colour, and does not lose a character** (#49).
+    ///
+    /// The wrap machinery cuts a line into rows by *column*, and every row used
+    /// to be exactly one run. Now a row is however many runs its own spans need,
+    /// and the property that has to survive is the one the caret and the
+    /// selection depend on: the rows of a line, concatenated, are the line.
+    ///
+    /// MUTATION: clamp `Highlighting::runs`' span walk to the line's start
+    /// instead of to `from`, and the second row repeats the first row's text.
+    #[test]
+    fn a_wrapped_highlighted_line_keeps_every_character_and_its_inks() {
+        let palette = bt_render::chrome_palette();
+        let source = "let message = \"a fairly long string literal\"; // and a note\n";
+        let document = highlighted_text_document("main.rs", source, Some(20));
+        let PreviewDocument::Text {
+            lines,
+            wrap,
+            highlight,
+        } = &document
+        else {
+            panic!("a .rs file is a text document");
+        };
+        assert!(wrap.rows() > 2, "the fixture really does fold");
+        let metrics = seats::preview_text_metrics(1.0);
+        let geometry = seats::preview_mono_geometry(
+            [0.0, 0.0, 400.0, 400.0],
+            metrics,
+            metrics.line_height * wrap.rows() as f32,
+            20,
+            8.0,
+            [0.0, 0.0],
+        );
+        let built = build_preview_text_body(&geometry, lines, wrap, highlight, 8.0, None, &palette);
+        assert_eq!(built.paragraphs.len(), wrap.rows());
+        let refolded: String = built
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(
+            refolded.trim_end(),
+            lines[0].trim_end(),
+            "the rows of a folded line are that line"
+        );
+        let inks: Vec<[u8; 3]> = built
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.runs.iter())
+            .map(|run| run.color)
+            .collect();
+        assert!(
+            inks.contains(&palette.hl_keyword),
+            "`let` survives the fold"
+        );
+        assert!(inks.contains(&palette.hl_string), "the literal does too");
+        assert!(inks.contains(&palette.hl_comment), "and so does the note");
+        assert!(
+            inks.contains(&palette.preview_body_text),
+            "and `message` is still the body's own ink"
+        );
+        assert!(
+            built
+                .paragraphs
+                .iter()
+                .all(|paragraph| paragraph.runs.iter().all(|run| run.mono && !run.bold)),
+            "every run is still the monospace face the surface is set in"
+        );
+    }
+
+    /// **One document, one highlighting, whichever surface is looking** (#49,
+    /// ticket clause 7).
+    ///
+    /// A pane, a torn-off float and the glance card are three rectangles over
+    /// one [`PreviewDocument`]: the spans are on the document, and
+    /// `build_preview_text_body` is the only place a text body's runs are made.
+    /// So the card gets highlighting *because* it shares the document, not
+    /// because a second path was taught to do the same thing — and this is what
+    /// says so, by building the same document into two different rectangles and
+    /// getting the same inks out.
+    ///
+    /// MUTATION: give either caller its own `Highlighting::default()` instead of
+    /// the document's and the two ink lists stop matching.
+    #[test]
+    fn every_surface_over_one_document_gets_that_documents_own_highlighting() {
+        let palette = bt_render::chrome_palette();
+        let document = highlighted_text_document("main.rs", "fn main() { let n = 1; }\n", None);
+        let PreviewDocument::Text {
+            lines,
+            wrap,
+            highlight,
+        } = &document
+        else {
+            panic!("a .rs file is a text document");
+        };
+        assert!(!highlight.is_plain(), "the fixture is highlighted at all");
+        let metrics = seats::preview_text_metrics(1.0);
+        let inks = |body: [f32; 4]| {
+            let geometry = seats::preview_mono_geometry(
+                body,
+                metrics,
+                metrics.line_height * wrap.rows() as f32,
+                40,
+                8.0,
+                [0.0, 0.0],
+            );
+            build_preview_text_body(&geometry, lines, wrap, highlight, 8.0, None, &palette)
+                .paragraphs
+                .iter()
+                .flat_map(|paragraph| paragraph.runs.iter())
+                .map(|run| (run.text.clone(), run.color))
+                .collect::<Vec<_>>()
+        };
+        // A docked pane, and the glance card's own smaller box.
+        let pane = inks([0.0, 0.0, 800.0, 400.0]);
+        let card = inks([120.0, 60.0, 420.0, 200.0]);
+        assert_eq!(pane, card, "the card reads the pane's own spans");
+        assert!(pane.iter().any(|(_, ink)| *ink == palette.hl_keyword));
+    }
+
+    /// **The cap is a document-level decision, and an over-cap file is plain**
+    /// (#49).
+    ///
+    /// Stated at the level a pane sees rather than inside the module, because
+    /// this is where it would go wrong: the fallback has to produce a document a
+    /// pane can still draw, scroll and put a caret in — not a document with no
+    /// paragraphs.
+    #[test]
+    fn a_file_over_the_highlight_cap_still_draws_as_a_plain_body() {
+        let palette = bt_render::chrome_palette();
+        let mut source = String::new();
+        for _ in 0..highlight::HIGHLIGHT_MAX_LINES + 1 {
+            source.push_str("let x = 1;\n");
+        }
+        let document = highlighted_text_document("big.rs", &source, None);
+        let PreviewDocument::Text {
+            lines,
+            wrap,
+            highlight,
+        } = &document
+        else {
+            panic!("a .rs file is a text document");
+        };
+        assert!(highlight.is_plain(), "over the cap, nothing is walked");
+        let metrics = seats::preview_text_metrics(1.0);
+        let geometry = seats::preview_mono_geometry(
+            [0.0, 0.0, 400.0, 200.0],
+            metrics,
+            metrics.line_height * wrap.rows() as f32,
+            20,
+            8.0,
+            [0.0, 0.0],
+        );
+        let built = build_preview_text_body(&geometry, lines, wrap, highlight, 8.0, None, &palette);
+        assert!(!built.paragraphs.is_empty(), "the body is still drawn");
+        assert!(
+            built
+                .paragraphs
+                .iter()
+                .all(|paragraph| paragraph.runs.len() == 1
+                    && paragraph.runs[0].color == palette.preview_body_text),
+            "and drawn exactly as it was before highlighting existed"
+        );
+    }
+
+    /// **The highlighting is on the width-free side of the key** (#49).
+    ///
+    /// A resize changes `body_width_px` and nothing else, and `PreviewParseKey`
+    /// is what a re-parse is gated on — so a drag cannot re-walk a grammar. An
+    /// edit changes the revision, which is in the parse key, so it can and must.
+    /// This is the same argument [`MarkdownBlockIntrinsic`] was created for, made
+    /// again for the thing that was added to it.
+    #[test]
+    fn a_resize_cannot_re_walk_a_grammar_and_an_edit_must() {
+        let mut buffer = text_buffer("main.rs", "fn main() {}\n");
+        let narrow = preview_document_key(&buffer, false, 400.0, 1.0);
+        let wide = preview_document_key(&buffer, false, 1200.0, 1.0);
+        assert_ne!(narrow, wide, "the two widths are two documents");
+        assert_eq!(
+            narrow.parse, wide.parse,
+            "but one parse — which is the half the highlighting hangs off"
+        );
+        buffer.edit_content(|content| {
+            content.insert(0, 'p');
+            true
+        });
+        assert_ne!(
+            preview_document_key(&buffer, false, 400.0, 1.0).parse,
+            narrow.parse,
+            "and an edit re-walks it"
         );
     }
 }
