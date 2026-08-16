@@ -572,6 +572,98 @@ pub fn graph_column_rects(rect: [f32; 4], columns: GraphColumns, scale: f32) -> 
     }
 }
 
+/// Where the lane column ends and the row's own text begins.
+///
+/// **Pulled out of [`push_lanes`] so a hit test can ask it** (v2 ④). The pills a
+/// commit wears are now pressable — a right press on one raises that ref's own
+/// menu — and a hit test that had to run the painter to find out where they are
+/// would be a hit test that allocated a sprite list per pointer move. `push_lanes`
+/// calls this rather than keeping its own copy, so the two cannot part.
+#[must_use]
+pub fn graph_lane_column_right(rect: [f32; 4], lane_width: usize, scale: f32) -> f32 {
+    let pad = (GRAPH_ROW_PADDING_X_LOGICAL_PX * scale).round();
+    let lane_w = (GRAPH_LANE_WIDTH_LOGICAL_PX * scale).round().max(1.0);
+    #[allow(clippy::cast_precision_loss)]
+    let column = lane_w * lane_width.max(1) as f32;
+    rect[0] + pad + column
+}
+
+/// Where a commit row's pills stand, and where its subject starts after them.
+///
+/// One arithmetic, two readers — the painter and the hit test — for
+/// [`graph_column_rects`]'s own reason: two copies of a layout agree until the
+/// day one of them is changed, and the symptom here would be a pill you can see
+/// and cannot press, or press one pill to the left of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphRefPillRun {
+    /// One box per pill **drawn**, in the row's own order. Shorter than the
+    /// row's own list when the description column ran out of room: a pill that
+    /// does not fit is dropped rather than cut, which is this row's rule and the
+    /// panel's.
+    pub boxes: Vec<[f32; 4]>,
+    /// Where the subject begins — after the last pill that fitted, or at the
+    /// start of the description column when none did.
+    pub description_left: f32,
+}
+
+/// Lay one commit row's ref pills out.
+#[must_use]
+pub fn graph_ref_pill_run(
+    commit: &GraphCommitRow,
+    rect: [f32; 4],
+    lane_width: usize,
+    columns: GraphColumns,
+    scale: f32,
+) -> GraphRefPillRun {
+    let gap = (GRAPH_ROW_GAP_LOGICAL_PX * scale).round();
+    let rects = graph_column_rects(rect, columns, scale);
+    let pill_height = (GRAPH_REF_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let pill_pad = (GRAPH_REF_PADDING_X_LOGICAL_PX * scale).round();
+    let pill_top = ((rect[1] + rect[3] - pill_height) / 2.0).round();
+    let tag_mark = (GRAPH_REF_TAG_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let tag_gap = (GRAPH_REF_TAG_GAP_LOGICAL_PX * scale).round();
+    let mut cursor = graph_lane_column_right(rect, lane_width, scale) + gap;
+    let mut boxes = Vec::with_capacity(commit.refs.len());
+    for pill in &commit.refs {
+        // A tag spends its own glyph's width before its name (T7).
+        let lead = if pill.kind == crate::git::GitRefKind::Tag {
+            tag_mark + tag_gap
+        } else {
+            0.0
+        };
+        let width = pill.text_width + lead + pill_pad * 2.0;
+        if cursor + width > rects.description_right {
+            break;
+        }
+        boxes.push([cursor, pill_top, cursor + width, pill_top + pill_height]);
+        cursor += width + gap;
+    }
+    GraphRefPillRun {
+        boxes,
+        description_left: cursor,
+    }
+}
+
+/// Which of a row's pills a point is on, if any.
+///
+/// The index is into [`GraphCommitRow::refs`], so the caller reads the pill's
+/// name and kind straight off the row it already has.
+#[must_use]
+pub fn graph_ref_pill_at(
+    commit: &GraphCommitRow,
+    rect: [f32; 4],
+    lane_width: usize,
+    columns: GraphColumns,
+    scale: f32,
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    graph_ref_pill_run(commit, rect, lane_width, columns, scale)
+        .boxes
+        .iter()
+        .position(|box_| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3])
+}
+
 /// One ref pill (R22) — a local branch, a remote-tracking branch, or a tag
 /// (T7, v2 ③).
 #[derive(Clone, Debug, PartialEq)]
@@ -3918,8 +4010,6 @@ fn push_lanes(
     let lane_w = (GRAPH_LANE_WIDTH_LOGICAL_PX * scale).round().max(1.0);
     let stroke = (GRAPH_STROKE_LOGICAL_PX * scale).round().max(1.0);
     let dot = (GRAPH_DOT_RADIUS_LOGICAL_PX * scale).round().max(1.0) * 2.0;
-    #[allow(clippy::cast_precision_loss)]
-    let column = lane_w * lane_width.max(1) as f32;
     let left = rect[0] + pad;
     let mid = ((rect[1] + rect[3]) / 2.0).round();
     #[allow(clippy::cast_precision_loss)]
@@ -4020,7 +4110,7 @@ fn push_lanes(
         box_,
         ink(lanes.dot),
     ));
-    left + column
+    graph_lane_column_right(rect, lane_width, scale)
 }
 
 /// One commit row: the lanes, the names it wears, and R21's columns.
@@ -4049,8 +4139,7 @@ fn push_commit_row(
 ) {
     let (labels, sprites) = out;
     let scale = ground.scale;
-    let gap = (GRAPH_ROW_GAP_LOGICAL_PX * scale).round();
-    let column_right = push_lanes(
+    push_lanes(
         &commit.lanes,
         rect,
         lane_width,
@@ -4101,24 +4190,16 @@ fn push_commit_row(
         false,
     );
 
-    // The pills, left to right after the graph column.
-    let pill_height = (GRAPH_REF_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    // The pills, left to right after the graph column — laid out by
+    // [`graph_ref_pill_run`], which is also what the hit test asks (v2 ④).
     let pill_pad = (GRAPH_REF_PADDING_X_LOGICAL_PX * scale).round();
     let pill_radius = (GRAPH_REF_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let pill_edge = (GRAPH_REF_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32;
-    let pill_top = ((rect[1] + rect[3] - pill_height) / 2.0).round();
     let tag_mark = (GRAPH_REF_TAG_MARK_LOGICAL_PX * scale).round().max(1.0);
     let tag_gap = (GRAPH_REF_TAG_GAP_LOGICAL_PX * scale).round();
-    let mut cursor = column_right + gap;
-    for pill in &commit.refs {
-        // A tag spends its own glyph's width before its name (T7).
+    let run = graph_ref_pill_run(commit, rect, lane_width, columns, scale);
+    for (pill, box_) in commit.refs.iter().zip(run.boxes.iter().copied()) {
         let tagged = pill.kind == crate::git::GitRefKind::Tag;
-        let lead = if tagged { tag_mark + tag_gap } else { 0.0 };
-        let width = pill.text_width + lead + pill_pad * 2.0;
-        if cursor + width > rects.description_right {
-            break;
-        }
-        let box_ = [cursor, pill_top, cursor + width, pill_top + pill_height];
         let lane = palette.graph_lanes[lane_colour_index(pill.lane)];
         // ── the three shapes (T7, v2 ③) ──
         //
@@ -4200,9 +4281,9 @@ fn push_commit_row(
             tabular_numerals: false,
             clip: Some(crop(box_)),
         });
-        cursor += width + gap;
     }
 
+    let cursor = run.description_left;
     let subject_rect = [
         cursor,
         rect[1],
@@ -6571,6 +6652,103 @@ mod tests {
             ground(true, true),
             Some(palette.git_row_selected),
             "the selection is where the keyboard is, and a search can light many rows"
+        );
+    }
+
+    /// PIN (v2 ④) — **a pill you can see is a pill you can press**, because the
+    /// painter and the hit test read one run.
+    ///
+    /// The pills are laid out left to right after the graph column, each one its
+    /// own name's width plus its padding, with a tag paying for its glyph first;
+    /// one that does not fit is dropped rather than cut. All of that used to live
+    /// inside the painter's loop, where a hit test could only have guessed at it.
+    ///
+    /// MUTATION: give the run a different gap from the painter's and every press
+    /// lands one pill to the left of the one under the pointer — which is a
+    /// context menu about somebody else's branch.
+    #[test]
+    fn a_rows_pills_are_laid_out_once_and_both_the_paint_and_the_press_read_it() {
+        let mut commit = GraphCommitRow {
+            index: 0,
+            hash: "a1b2c3d4".to_owned(),
+            short: "a1b2c3d".to_owned(),
+            subject: "a subject".to_owned(),
+            author: "someone".to_owned(),
+            time: "5m".to_owned(),
+            tooltip: String::new(),
+            refs: Vec::new(),
+            lanes: GraphRow::default(),
+            expanded: false,
+            matched: false,
+        };
+        let pill = |name: &str, kind: crate::git::GitRefKind| GraphRefPill {
+            name: name.to_owned(),
+            text_width: 40.0,
+            head: false,
+            kind,
+            lane: 0,
+        };
+        commit.refs = vec![
+            pill("main", crate::git::GitRefKind::Local),
+            pill("origin/main", crate::git::GitRefKind::Remote),
+            pill("v1.0", crate::git::GitRefKind::Tag),
+        ];
+        let rect = [0.0, 0.0, 900.0, GRAPH_ROW_HEIGHT_LOGICAL_PX];
+        let columns = GraphColumns::default();
+        let run = graph_ref_pill_run(&commit, rect, 2, columns, 1.0);
+        assert_eq!(run.boxes.len(), 3, "a wide row wears all three");
+        assert!(
+            run.boxes[0][0] >= graph_lane_column_right(rect, 2, 1.0),
+            "the first pill starts after the lanes"
+        );
+        for pair in run.boxes.windows(2) {
+            assert!(pair[1][0] > pair[0][2], "and they do not overlap");
+        }
+        assert!(
+            run.boxes[2][2] - run.boxes[2][0] > run.boxes[0][2] - run.boxes[0][0],
+            "a tag is wider than a branch of the same name width, because it carries a glyph"
+        );
+        assert!(
+            run.description_left > run.boxes[2][2],
+            "and the subject starts after the last of them"
+        );
+        // Every pill answers a press in its own middle, and the gaps answer
+        // none — which is what makes the row's own menu reachable between them.
+        for (at, box_) in run.boxes.iter().enumerate() {
+            let (x, y) = ((box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0);
+            assert_eq!(
+                graph_ref_pill_at(&commit, rect, 2, columns, 1.0, x, y),
+                Some(at)
+            );
+        }
+        assert_eq!(
+            graph_ref_pill_at(
+                &commit,
+                rect,
+                2,
+                columns,
+                1.0,
+                run.description_left + 10.0,
+                rect[3] / 2.0,
+            ),
+            None,
+            "the subject is not a pill"
+        );
+
+        // A row too narrow for the third drops it whole, and nothing beyond it
+        // can be pressed either.
+        let narrow = [0.0, 0.0, 240.0, GRAPH_ROW_HEIGHT_LOGICAL_PX];
+        let cramped = graph_ref_pill_run(&commit, narrow, 2, columns, 1.0);
+        assert!(
+            cramped.boxes.len() < 3,
+            "a 240-pixel row cannot hold all three: {cramped:?}"
+        );
+        assert!(
+            cramped
+                .boxes
+                .iter()
+                .all(|box_| box_[2] <= graph_column_rects(narrow, columns, 1.0).description_right),
+            "and what is drawn is drawn whole"
         );
     }
 }

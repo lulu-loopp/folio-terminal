@@ -355,15 +355,33 @@ pub enum GitQuestion {
     },
 }
 
-/// The four things this panel will do to a repository (R14 / G12).
+/// The things this product will do to a repository (R14 / G12 / M10).
 ///
-/// **All four are light verbs**, which is the whole of the boundary the mock-up's
+/// **Every one is a light verb**, which is the whole of the boundary the mock-up's
 /// own wiring comment draws (line 7928): the panel sees, toggles and throws away;
 /// `commit`, `merge`, `rebase`, `push` and `pull` belong to the terminal standing
 /// beside it. Every one of these is reversible from git's own reflog or index
 /// except the two discards, which is exactly why those two are the ones behind a
 /// confirmation gate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// # The six that arrived with the context menus (v2 ④, 2026-08-16)
+///
+/// They are **named** verbs where the first four are *pathspec* verbs, and that
+/// is the only difference in kind: a `git branch -d` takes a ref and a `git add`
+/// takes a list of files. The user ruling that opened this slice draws the line
+/// they all sit inside — *read/navigate verbs and one-command-undoable local
+/// writes only* — so a branch created here is undone by deleting it, a branch
+/// deleted here is `-d` and therefore merged (its commits are still on the branch
+/// that holds them), a rename is renamed back, and a tag is one command in each
+/// direction. Nothing on this list rewrites history, moves `HEAD` over work, or
+/// talks to another machine. [`GIT_NEVER_WORDS`] pins that as a test rather than
+/// as a promise in a comment.
+///
+/// **Not `Copy` since v2 ④**, because half of these carry the name they are
+/// about. The alternative — a `paths: Vec<String>` holding a branch name — is the
+/// lie [`GitQuestion::Checkout`]'s own note refuses to tell, so a verb that is
+/// about a *ref* carries the ref.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitWriteVerb {
     /// `git add` — works for a modification, a deletion and an untracked file
     /// alike, which is why staging needs no per-entry branch.
@@ -382,6 +400,320 @@ pub enum GitWriteVerb {
     /// means the same thing by it — but the command, and the size of the promise
     /// broken if it is wrong, are not the same.
     DiscardUntracked,
+    /// `git branch <name> <at>` — a new name on a commit that is already there.
+    ///
+    /// It moves nothing: the working tree, `HEAD` and every other branch are
+    /// exactly where they were, and the whole of its effect is one more line in
+    /// `refs/heads`. Undone by `Delete branch`, which is on the same menu.
+    CreateBranch { name: String, at: String },
+    /// `git tag <name> <at>` — **lightweight**, and that is the ruling rather
+    /// than a shortcut.
+    ///
+    /// An annotated tag needs a message, and a message needs an editor or a
+    /// second field; a signature needs a key. Both are the heavy end of tagging
+    /// and belong to the terminal beside this pane (G12). What a context menu can
+    /// honestly offer is the one-command, one-command-undoable half.
+    CreateTag { name: String, at: String },
+    /// `git branch -m <from> <to>`.
+    ///
+    /// **Allowed on the branch you are standing on**, which is git's own
+    /// position: `-m` on the current branch renames it and leaves `HEAD` pointing
+    /// at the new name, so nothing is detached and nothing is lost. Refusing it
+    /// would be this window being more frightened than git is.
+    RenameBranch { from: String, to: String },
+    /// `git branch -d <name>` — **merged only, and never `-D`**.
+    ///
+    /// The lower-case `-d` is the whole of why this verb is inside the boundary:
+    /// git refuses it for a branch whose commits are nowhere else, and that
+    /// refusal comes back in git's own words on a card. `-D` is the button that
+    /// says "yes, throw those commits away", and there is no such button here —
+    /// the reader who means it has a terminal.
+    DeleteBranch { name: String },
+    /// `git tag -d <name>`.
+    DeleteTag { name: String },
+    /// `git checkout -b <local> --track <name>` — start a local branch from
+    /// somebody else's (M10).
+    ///
+    /// `name` is the **remote-tracking ref as git spells it** (`origin/main`),
+    /// because that is what the pill says and what `--track` is handed; the local
+    /// name is [`tracking_local_name`]'s reading of it, which is the same reading
+    /// git's own DWIM does. It is a write rather than a [`GitQuestion::Checkout`]
+    /// because it *creates* something — the checkout is the second half of what
+    /// the one command does.
+    ///
+    /// **When a local of that name already exists this verb is never issued**:
+    /// the menu checks first and issues an ordinary checkout instead, because
+    /// `-b` on a name that is taken is a refusal and what the reader meant by
+    /// pressing the row is "put me on that branch".
+    CheckoutTracking { name: String },
+}
+
+/// **The words no command this window builds may contain** (user ruling, v2 ④).
+///
+/// The boundary is a list of verbs and not a feeling: merge, rebase, reset,
+/// cherry-pick, revert, push, pull and fetch rewrite history, move work, or talk
+/// to another machine, and `-D` and `--force` are the two flags that turn a
+/// refusal into a loss. Pinned by a test that enumerates every
+/// [`GitWriteVerb`] and reads its argument vector, so the day somebody adds a
+/// seventh verb the list is checked by the build rather than by a reviewer.
+///
+/// Read by that test and by nothing else, which is exactly what a boundary
+/// written as data looks like: the commands themselves come from
+/// [`write_arguments`], and this is the list they are held against.
+#[allow(dead_code)]
+pub const GIT_NEVER_WORDS: [&str; 10] = [
+    "merge",
+    "rebase",
+    "reset",
+    "cherry-pick",
+    "revert",
+    "push",
+    "pull",
+    "fetch",
+    "-D",
+    "--force",
+];
+
+/// The local branch a remote-tracking ref becomes (`origin/main` → `main`).
+///
+/// **git's own DWIM, written down.** `git checkout --track origin/main` creates
+/// `main`, and it does so by dropping the remote's name from the front — so this
+/// is not a convention this window invented, it is the one it has to agree with
+/// in order to ask "does that local already exist?" before issuing the command.
+/// A ref with no `/` in it is handed back whole rather than emptied, which is the
+/// only honest answer for a name that is not a remote's.
+#[must_use]
+pub fn tracking_local_name(remote: &str) -> &str {
+    remote.split_once('/').map_or(remote, |(_, rest)| rest)
+}
+
+/// **Why a name is not a name** (v2 ④) — one class per sentence the prompt says.
+///
+/// A closed set rather than a `String`, because the hint under the field is a
+/// fixed line of copy and a fault that could carry any text at all is a fault
+/// nobody can pin. The classes are `git check-ref-format --branch`'s own rules,
+/// grouped by what a person can *do* about them: the four the ticket names get a
+/// sentence each because each is a different typo, and everything else git
+/// forbids — a leading or trailing `/`, an empty path component, a name ending in
+/// `.`, `@{`, `@` alone, a control character — is one class, because the answer
+/// to all of them is the same and a menu row is not a manual page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefNameFault {
+    /// Nothing typed yet. **Not an error the reader made** — it is the state the
+    /// field opens in — which is why the prompt only shows it once Enter is
+    /// pressed on an empty field.
+    Empty,
+    /// A space, a tab, or anything else git calls whitespace.
+    Space,
+    /// `..`, which is a range operator in every revision grammar git has.
+    Range,
+    /// One of `~^:?*[\`, each of which means something to a revision parser.
+    Reserved,
+    /// A leading `-`, which every parse-options command would read as a flag.
+    Dash,
+    /// A trailing `.lock`, which is what git calls the file it takes while it
+    /// writes a ref.
+    Lock,
+    /// Everything else `check-ref-format` refuses.
+    Shape,
+}
+
+impl RefNameFault {
+    /// The red line under the field.
+    ///
+    /// **git's rule in the reader's words, not git's.** `check-ref-format`
+    /// answers with an exit status and nothing else, so there is no sentence of
+    /// git's own to quote here the way a refused write quotes one — which is the
+    /// whole reason this validation is local: a name the field can already tell
+    /// is impossible should never cost a subprocess, and a hint that appeared
+    /// eighty milliseconds after the keystroke would be a hint about the letter
+    /// before last.
+    #[must_use]
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Self::Empty => "A name is needed.",
+            Self::Space => "No spaces.",
+            Self::Range => "No `..`.",
+            Self::Reserved => "None of ~ ^ : ? * [ \\",
+            Self::Dash => "Cannot start with `-`.",
+            Self::Lock => "Cannot end with `.lock`.",
+            Self::Shape => "git will not accept this name.",
+        }
+    }
+}
+
+/// Whether git would take this as a branch or tag name — **`git check-ref-format
+/// --branch`'s rules, answered here** (v2 ④).
+///
+/// Local by ruling. The alternative is a subprocess per keystroke, which is a
+/// process pool spent on a question whose whole answer is a dozen character
+/// tests; and the answer has to arrive *with* the keystroke, because what it
+/// draws is a hint under the field the reader is still typing into.
+///
+/// The rules are git's, in `refs.c`'s own order: no whitespace, no `..`, none of
+/// `~^:?*[\`, no leading `-`, no trailing `.lock`, no empty path component
+/// (which covers a leading `/`, a trailing `/` and a `//`), no component that
+/// begins or ends with a `.`, no `@{`, not `@` alone, and no ASCII control
+/// characters or `DEL`.
+#[must_use]
+pub fn ref_name_fault(name: &str) -> Option<RefNameFault> {
+    if name.is_empty() {
+        return Some(RefNameFault::Empty);
+    }
+    if name.starts_with('-') {
+        return Some(RefNameFault::Dash);
+    }
+    if name.chars().any(char::is_whitespace) {
+        return Some(RefNameFault::Space);
+    }
+    if name.contains("..") {
+        return Some(RefNameFault::Range);
+    }
+    if name.contains(['~', '^', ':', '?', '*', '[', '\\']) {
+        return Some(RefNameFault::Reserved);
+    }
+    if name.ends_with(".lock") {
+        return Some(RefNameFault::Lock);
+    }
+    if name.contains("@{") || name == "@" {
+        return Some(RefNameFault::Shape);
+    }
+    if name
+        .chars()
+        .any(|character| character.is_control() || character == '\u{7f}')
+    {
+        return Some(RefNameFault::Shape);
+    }
+    // Component by component, which is how `check-ref-format` reads a name: a
+    // leading `/`, a trailing `/` and a `//` are all one rule — "no empty
+    // component" — and a leading or trailing `.` is the same rule about dots.
+    for component in name.split('/') {
+        if component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with('.')
+            || component.ends_with(".lock")
+        {
+            return Some(RefNameFault::Shape);
+        }
+    }
+    None
+}
+
+/// **The command line one write verb is**, and what goes down its standard input.
+///
+/// Split out of [`answer`] so that the boundary this slice was given can be
+/// *read* rather than promised: a test enumerates every [`GitWriteVerb`], asks
+/// for its arguments, and asserts that none of [`GIT_NEVER_WORDS`] is among them.
+/// A rule that lives only inside a `match` in a function that needs a
+/// subprocess to run is a rule nothing can check.
+///
+/// Three of the four pathspec verbs take their paths down the pipe;
+/// `clean` is the exception because it is the one git subcommand of the four that
+/// never learned `--pathspec-from-file` (checked against git 2.52), and it does
+/// not need to: a discard is one file by construction (R14 puts no group-level
+/// discard on the page), so its pathspec is one argument and always will be.
+///
+/// The named verbs take no pathspec at all and pass nothing down the pipe. Each
+/// puts its name **last**, after every flag, which is where git's own synopsis
+/// puts it — and each name has already been through [`ref_name_fault`], which is
+/// what makes a leading `-` impossible here rather than merely unlikely.
+#[must_use]
+pub fn write_arguments(verb: &GitWriteVerb, paths: &[String]) -> (Vec<String>, Vec<u8>) {
+    let pathspec: Vec<u8> = paths
+        .iter()
+        .flat_map(|path| path.as_bytes().iter().copied().chain(std::iter::once(0u8)))
+        .collect();
+    let from_stdin = || {
+        vec![
+            "--pathspec-from-file=-".to_owned(),
+            "--pathspec-file-nul".to_owned(),
+        ]
+    };
+    let with = |head: &[&str], tail: Vec<String>| {
+        let mut arguments: Vec<String> = head.iter().map(|word| (*word).to_owned()).collect();
+        arguments.extend(tail);
+        arguments
+    };
+    match verb {
+        GitWriteVerb::Stage => (with(&["add"], from_stdin()), pathspec),
+        GitWriteVerb::Unstage => (with(&["restore", "--staged"], from_stdin()), pathspec),
+        GitWriteVerb::Discard => (with(&["restore", "--worktree"], from_stdin()), pathspec),
+        GitWriteVerb::DiscardUntracked => (
+            with(&["clean", "-f", "-q", "--"], paths.to_vec()),
+            Vec::new(),
+        ),
+        GitWriteVerb::CreateBranch { name, at } => (
+            with(&["branch"], vec![name.clone(), at.clone()]),
+            Vec::new(),
+        ),
+        GitWriteVerb::CreateTag { name, at } => {
+            (with(&["tag"], vec![name.clone(), at.clone()]), Vec::new())
+        }
+        GitWriteVerb::RenameBranch { from, to } => (
+            with(&["branch", "-m"], vec![from.clone(), to.clone()]),
+            Vec::new(),
+        ),
+        GitWriteVerb::DeleteBranch { name } => {
+            (with(&["branch", "-d"], vec![name.clone()]), Vec::new())
+        }
+        GitWriteVerb::DeleteTag { name } => (with(&["tag", "-d"], vec![name.clone()]), Vec::new()),
+        // `--track` and not `--track=direct`: the plain flag is what every
+        // version of git since 1.5 understands, and the direct/inherit spelling
+        // is about *which* upstream a branch inherits when it is started from
+        // another local — which this never is.
+        GitWriteVerb::CheckoutTracking { name } => (
+            with(
+                &["checkout", "-b"],
+                vec![
+                    tracking_local_name(name).to_owned(),
+                    "--track".to_owned(),
+                    name.clone(),
+                ],
+            ),
+            Vec::new(),
+        ),
+    }
+}
+
+impl GitWriteVerb {
+    /// The ref this verb is about, when it is about one.
+    ///
+    /// **The pending key for a named verb**, and the reason it is one function
+    /// rather than a `match` at each call site: the guard that stops a second
+    /// press starting a second `git branch -d` and the flag that dims the row are
+    /// the same fact, and two readings of it are two chances to disagree about
+    /// which row is busy.
+    ///
+    /// A rename answers with the name that is *there now* — `from` — because that
+    /// is the row on screen, and the row on screen is what has to stop answering
+    /// presses.
+    #[must_use]
+    pub fn ref_subject(&self) -> Option<&str> {
+        match self {
+            Self::Stage | Self::Unstage | Self::Discard | Self::DiscardUntracked => None,
+            Self::CreateBranch { name, .. }
+            | Self::CreateTag { name, .. }
+            | Self::DeleteBranch { name }
+            | Self::DeleteTag { name }
+            | Self::CheckoutTracking { name } => Some(name),
+            Self::RenameBranch { from, .. } => Some(from),
+        }
+    }
+
+    /// Whether carrying this out changes where `HEAD` is or which refs exist —
+    /// and therefore whether **every** surface on this repository is now drawing
+    /// something that was true a moment ago.
+    ///
+    /// The four pathspec verbs answer `false` not because they change nothing but
+    /// because what they change is the *status*, which is the one thing each
+    /// column re-reads for itself. A ref verb changes the branch list, the pills
+    /// on every row of the history and, for a tracking checkout, the branch you
+    /// are standing on — facts a graph in one pane and a panel in another both
+    /// draw, and the disagreement between them is what this flag prevents.
+    #[must_use]
+    pub fn moves_refs(&self) -> bool {
+        self.ref_subject().is_some()
+    }
 }
 
 impl GitQuestion {
@@ -1796,7 +2128,7 @@ fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
         },
         GitQuestion::Write { root, verb, paths } => GitAnswer::Write {
             root: root.clone(),
-            verb: *verb,
+            verb: verb.clone(),
             paths: paths.clone(),
             outcome: Err(fault),
         },
@@ -2080,60 +2412,17 @@ pub fn answer(
                 Err(fault) => faulted(question, fault),
             }
         }
-        // **The one branch that writes.** Three of the four verbs take their
-        // pathspec down the pipe; `clean` is the exception because it is the one
-        // git subcommand of the four that never learned `--pathspec-from-file`
-        // (checked against git 2.52), and it does not need to: a discard is one
-        // file by construction (R14 puts no group-level discard on the page),
-        // so its pathspec is one argument and always will be.
+        // **The one branch that writes**, and it builds nothing of its own: the
+        // command line is [`write_arguments`]'s, so that what this process is
+        // about to run is the same vector a test with no subprocess can read.
         GitQuestion::Write { root, verb, paths } => {
-            let pathspec: Vec<u8> = paths
-                .iter()
-                .flat_map(|path| path.as_bytes().iter().copied().chain(std::iter::once(0u8)))
-                .collect();
-            let from_stdin = [
-                OsStr::new("--pathspec-from-file=-"),
-                OsStr::new("--pathspec-file-nul"),
-            ];
-            let (arguments, input) = match verb {
-                GitWriteVerb::Stage => (
-                    vec![OsStr::new("add"), from_stdin[0], from_stdin[1]],
-                    pathspec,
-                ),
-                GitWriteVerb::Unstage => (
-                    vec![
-                        OsStr::new("restore"),
-                        OsStr::new("--staged"),
-                        from_stdin[0],
-                        from_stdin[1],
-                    ],
-                    pathspec,
-                ),
-                GitWriteVerb::Discard => (
-                    vec![
-                        OsStr::new("restore"),
-                        OsStr::new("--worktree"),
-                        from_stdin[0],
-                        from_stdin[1],
-                    ],
-                    pathspec,
-                ),
-                GitWriteVerb::DiscardUntracked => {
-                    let mut arguments = vec![
-                        OsStr::new("clean"),
-                        OsStr::new("-f"),
-                        OsStr::new("-q"),
-                        OsStr::new("--"),
-                    ];
-                    arguments.extend(paths.iter().map(|path| OsStr::new(path.as_str())));
-                    (arguments, Vec::new())
-                }
-            };
+            let (words, input) = write_arguments(verb, paths);
+            let arguments: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
             let command = git_command(program, root, &arguments);
             match run_git_with_input(command, timeout, input) {
                 Ok(run) if run.ok => GitAnswer::Write {
                     root: root.clone(),
-                    verb: *verb,
+                    verb: verb.clone(),
                     paths: paths.clone(),
                     outcome: Ok(()),
                 },
@@ -2433,6 +2722,15 @@ pub struct GitCache {
     /// in flight at once — a group's "stage all" while one row's `+` is still
     /// running — and a flag could only unpend both when the first came back.
     pending_writes: std::collections::BTreeSet<String>,
+    /// The **refs** a named write is in flight for (v2 ④) — `pending_writes`'
+    /// twin, and a second set rather than a second kind of key in the first one.
+    ///
+    /// Two sets because they hold two different alphabets. A repo-relative path
+    /// and a branch name are both strings and a repository may perfectly well
+    /// contain a file called `main`; one set would make deleting the branch dim
+    /// the file's row, which is a wrong answer that would only ever show up on
+    /// somebody else's repository.
+    pending_refs: std::collections::BTreeSet<String>,
     /// The ref a checkout is in flight for (R10) — the branch row that is dimmed
     /// while git works, and the guard that makes a second click on it do
     /// nothing rather than start a second `git checkout`.
@@ -2653,21 +2951,57 @@ impl GitCache {
         self.pending_writes.contains(path)
     }
 
+    /// Whether a named write is in flight for this ref (v2 ④) —
+    /// [`Self::write_pending`]'s twin for a branch or a tag.
+    #[must_use]
+    pub fn ref_write_pending(&self, name: &str) -> bool {
+        self.pending_refs.contains(name)
+    }
+
     /// Build the write, and dim its rows.
     ///
     /// Returns `None` — and starts nothing — when there is no repository, when
-    /// the list is empty, or when any of these paths is already being written to.
+    /// the subject is empty, or when that subject is already being written to.
     /// The last is the guard that makes a double click on `+` one `git add` and
     /// not two: the second finds its own path pending and declines, rather than
     /// racing the first for `index.lock`.
+    ///
+    /// **A named verb is guarded the same way against its own ref** (v2 ④), and
+    /// carries no pathspec: `git branch -d main` and `git add` are the same shape
+    /// of promise — one process, one receipt, the row that asked it dimmed until
+    /// the receipt arrives — and the only thing that differs is which alphabet
+    /// the subject is spelled in. A named verb handed paths, or a pathspec verb
+    /// handed none, is a caller that has confused the two and starts nothing.
     #[must_use]
     pub fn begin_write(&mut self, verb: GitWriteVerb, paths: Vec<String>) -> Option<GitQuestion> {
         let root = self.repo.ready()?.clone();
+        if let Some(name) = verb.ref_subject() {
+            if !paths.is_empty() || name.is_empty() || self.pending_refs.contains(name) {
+                return None;
+            }
+            self.pending_refs.insert(name.to_owned());
+            return Some(GitQuestion::Write { root, verb, paths });
+        }
         if paths.is_empty() || paths.iter().any(|path| self.pending_writes.contains(path)) {
             return None;
         }
         self.pending_writes.extend(paths.iter().cloned());
         Some(GitQuestion::Write { root, verb, paths })
+    }
+
+    /// Whether this repository already has a local branch of this name.
+    ///
+    /// Read before a `Checkout as local branch` is issued (M10): `git checkout -b
+    /// <name>` on a name that is taken is a refusal, and what the reader meant by
+    /// pressing that row is "put me on that branch". An unanswered ref list says
+    /// `false`, which sends the press down the creating path and lets git — which
+    /// does know — be the one that refuses it.
+    #[must_use]
+    pub fn has_local_branch(&self, name: &str) -> bool {
+        self.refs.ready().is_some_and(|refs| {
+            refs.iter()
+                .any(|entry| entry.kind == GitRefKind::Local && entry.name == name)
+        })
     }
 
     /// Which ref a checkout is in flight for (R10).
@@ -2966,15 +3300,21 @@ impl GitCache {
             // that asked, and then leaves on its own.
             GitAnswer::Write {
                 root,
+                verb,
                 paths,
                 outcome,
-                ..
             } => {
                 if self.root() != Some(root.as_path()) {
                     return false;
                 }
                 for path in &paths {
                     self.pending_writes.remove(path);
+                }
+                // The named verbs unpend the ref they were about, in the same
+                // breath and by the same rule (v2 ④): the row stops being dimmed
+                // when git's receipt arrives and never before.
+                if let Some(name) = verb.ref_subject() {
+                    self.pending_refs.remove(name);
                 }
                 if outcome.is_ok() {
                     self.refresh();
@@ -5227,5 +5567,433 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         assert!(ask("fresh.txt", false).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── v2 ④: the named write verbs, and the boundary they sit inside ──────
+
+    /// Every verb this window can build, so that a test which enumerates them
+    /// really does enumerate them.
+    ///
+    /// A hand-written list and not a derive, which is the point: adding a
+    /// [`GitWriteVerb`] and forgetting this list makes the count assertion below
+    /// go red, and the count assertion is the tripwire for the boundary pins
+    /// underneath it.
+    fn every_write_verb() -> Vec<GitWriteVerb> {
+        vec![
+            GitWriteVerb::Stage,
+            GitWriteVerb::Unstage,
+            GitWriteVerb::Discard,
+            GitWriteVerb::DiscardUntracked,
+            GitWriteVerb::CreateBranch {
+                name: "feature".to_owned(),
+                at: "a1b2c3d4".to_owned(),
+            },
+            GitWriteVerb::CreateTag {
+                name: "v1.0".to_owned(),
+                at: "a1b2c3d4".to_owned(),
+            },
+            GitWriteVerb::RenameBranch {
+                from: "main".to_owned(),
+                to: "trunk".to_owned(),
+            },
+            GitWriteVerb::DeleteBranch {
+                name: "goner".to_owned(),
+            },
+            GitWriteVerb::DeleteTag {
+                name: "v0.9".to_owned(),
+            },
+            GitWriteVerb::CheckoutTracking {
+                name: "origin/feature".to_owned(),
+            },
+        ]
+    }
+
+    /// PIN (user ruling, v2 ④) — **the boundary is a list of words, and no
+    /// command this window builds contains one of them.**
+    ///
+    /// The ruling that opened this slice is "read/navigate verbs and
+    /// one-command-undoable local writes only"; the way that is kept honest is
+    /// not a promise in a doc comment but this: enumerate every verb, build its
+    /// real argument vector through the real function the worker calls, and read
+    /// every word of it.
+    ///
+    /// MUTATION: add `--force` to any verb's vector — or add a `Reset` verb —
+    /// and this goes red on the exact word.
+    #[test]
+    fn no_command_this_window_builds_carries_a_word_the_ruling_forbids() {
+        let verbs = every_write_verb();
+        assert_eq!(
+            verbs.len(),
+            10,
+            "ten verbs — add one and this list has to grow with it, which is what \
+             makes the pin below cover the new one"
+        );
+        let paths = vec!["src/main.rs".to_owned()];
+        for verb in &verbs {
+            let (words, _) = write_arguments(verb, if verb.moves_refs() { &[] } else { &paths });
+            for word in &words {
+                assert!(
+                    !GIT_NEVER_WORDS.contains(&word.as_str()),
+                    "{verb:?} builds {words:?}, which carries the forbidden word {word}"
+                );
+            }
+            assert!(
+                !words.is_empty(),
+                "{verb:?} has to be some command, not none"
+            );
+        }
+        // And the list itself is the ruling's own list, so that a reviewer who
+        // reads only this test reads the whole boundary.
+        assert_eq!(
+            GIT_NEVER_WORDS,
+            [
+                "merge",
+                "rebase",
+                "reset",
+                "cherry-pick",
+                "revert",
+                "push",
+                "pull",
+                "fetch",
+                "-D",
+                "--force",
+            ]
+        );
+    }
+
+    /// PIN (v2 ④) — **each named verb is the command line git documents**, with
+    /// the name last and no flag between it and the subcommand that takes it.
+    ///
+    /// MUTATION: swap `-d` for `-D` on the branch deletion and both this and the
+    /// pin above go red — one on the vector, one on the word.
+    #[test]
+    fn each_named_verb_is_the_command_line_git_documents() {
+        let words = |verb: &GitWriteVerb| write_arguments(verb, &[]).0;
+        assert_eq!(
+            words(&GitWriteVerb::CreateBranch {
+                name: "feature".to_owned(),
+                at: "a1b2c3d4".to_owned(),
+            }),
+            vec!["branch", "feature", "a1b2c3d4"]
+        );
+        assert_eq!(
+            words(&GitWriteVerb::CreateTag {
+                name: "v1.0".to_owned(),
+                at: "a1b2c3d4".to_owned(),
+            }),
+            vec!["tag", "v1.0", "a1b2c3d4"],
+            "lightweight: no -a, no -m, no -s"
+        );
+        assert_eq!(
+            words(&GitWriteVerb::RenameBranch {
+                from: "main".to_owned(),
+                to: "trunk".to_owned(),
+            }),
+            vec!["branch", "-m", "main", "trunk"]
+        );
+        assert_eq!(
+            words(&GitWriteVerb::DeleteBranch {
+                name: "goner".to_owned(),
+            }),
+            vec!["branch", "-d", "goner"],
+            "merged-only, and there is no other spelling of this on the menu"
+        );
+        assert_eq!(
+            words(&GitWriteVerb::DeleteTag {
+                name: "v0.9".to_owned(),
+            }),
+            vec!["tag", "-d", "v0.9"]
+        );
+        assert_eq!(
+            words(&GitWriteVerb::CheckoutTracking {
+                name: "origin/feature".to_owned(),
+            }),
+            vec!["checkout", "-b", "feature", "--track", "origin/feature"],
+            "the local name is git's own DWIM reading of the remote ref"
+        );
+        // And the four pathspec verbs still send their paths down the pipe,
+        // which is what stops fifty rows from becoming fifty processes.
+        let paths = vec!["a b.txt".to_owned(), "c/d.rs".to_owned()];
+        let (words, input) = write_arguments(&GitWriteVerb::Stage, &paths);
+        assert_eq!(
+            words,
+            vec!["add", "--pathspec-from-file=-", "--pathspec-file-nul"]
+        );
+        assert_eq!(input, b"a b.txt\0c/d.rs\0");
+    }
+
+    /// PIN (v2 ④) — **the local a remote-tracking ref becomes**, which is git's
+    /// own reading and the reason the menu can ask "is that already here?"
+    /// before it issues a `-b`.
+    #[test]
+    fn a_remote_ref_names_the_local_branch_git_would_make_from_it() {
+        assert_eq!(tracking_local_name("origin/main"), "main");
+        assert_eq!(
+            tracking_local_name("upstream/release/2.0"),
+            "release/2.0",
+            "only the remote's own name comes off the front"
+        );
+        assert_eq!(
+            tracking_local_name("main"),
+            "main",
+            "a name with no remote on it is handed back whole, not emptied"
+        );
+    }
+
+    /// PIN (v2 ④) — **`git check-ref-format --branch`'s rules, answered here**,
+    /// one class per line of copy the prompt can show.
+    ///
+    /// The table is the ticket's own list of rejected classes plus the ones git
+    /// adds; every accepted name in it is a name a person actually types.
+    ///
+    /// MUTATION: drop the leading-`-` rule and the `-D` pin two tests up stops
+    /// being enough — a branch called `-D` would be a flag on somebody's command
+    /// line. That is why this rule is checked before any other.
+    #[test]
+    fn a_ref_name_is_refused_for_exactly_the_reasons_git_refuses_one() {
+        for good in [
+            "feature",
+            "feature/login",
+            "release-2.0",
+            "v1.0.0",
+            "a_b",
+            "fix.the.thing",
+            "\u{4e2d}\u{6587}\u{5206}\u{652f}",
+        ] {
+            assert_eq!(ref_name_fault(good), None, "{good} is a name git takes");
+        }
+        for (bad, fault) in [
+            ("", RefNameFault::Empty),
+            ("my branch", RefNameFault::Space),
+            ("my\tbranch", RefNameFault::Space),
+            ("a..b", RefNameFault::Range),
+            ("a~b", RefNameFault::Reserved),
+            ("a^b", RefNameFault::Reserved),
+            ("a:b", RefNameFault::Reserved),
+            ("a?b", RefNameFault::Reserved),
+            ("a*b", RefNameFault::Reserved),
+            ("a[b", RefNameFault::Reserved),
+            ("a\\b", RefNameFault::Reserved),
+            ("-feature", RefNameFault::Dash),
+            ("-D", RefNameFault::Dash),
+            ("feature.lock", RefNameFault::Lock),
+            ("/feature", RefNameFault::Shape),
+            ("feature/", RefNameFault::Shape),
+            ("a//b", RefNameFault::Shape),
+            (".hidden", RefNameFault::Shape),
+            ("trailing.", RefNameFault::Shape),
+            ("a@{0}", RefNameFault::Shape),
+            ("@", RefNameFault::Shape),
+            ("a\u{7f}b", RefNameFault::Shape),
+        ] {
+            assert_eq!(
+                ref_name_fault(bad),
+                Some(fault),
+                "{bad:?} is a name git refuses, for {fault:?}"
+            );
+        }
+        // Every class says something, and no two classes say the same thing —
+        // a hint that could not tell you which rule you broke is a hint that
+        // makes you guess.
+        let sentences: Vec<&str> = [
+            RefNameFault::Empty,
+            RefNameFault::Space,
+            RefNameFault::Range,
+            RefNameFault::Reserved,
+            RefNameFault::Dash,
+            RefNameFault::Lock,
+            RefNameFault::Shape,
+        ]
+        .iter()
+        .map(|fault| fault.sentence())
+        .collect();
+        assert!(sentences.iter().all(|line| !line.is_empty()));
+        let mut unique = sentences.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), sentences.len(), "one sentence per class");
+    }
+
+    /// A cache with a repository under it and nothing asked yet — the shape
+    /// every write test below starts from.
+    fn rooted_cache(root: &Path) -> GitCache {
+        let mut cache = GitCache::default();
+        cache.retarget(root);
+        cache.mark_pending(&GitQuestion::RepoProbe {
+            dir: root.to_owned(),
+        });
+        assert!(cache.accept(GitAnswer::Repo {
+            dir: root.to_owned(),
+            outcome: Ok(root.to_owned()),
+        }));
+        cache
+    }
+
+    /// PIN (v2 ④) — **one press, one process, and the row waits for the
+    /// receipt.**
+    ///
+    /// R13's pessimism, said about a *name* instead of about a path: the second
+    /// press finds its own ref pending and starts nothing, rather than racing
+    /// the first for the ref's lock file. And on success the whole repository is
+    /// asked again — a branch that has just been renamed is a branch every pill
+    /// on every row of the history is now wrong about.
+    ///
+    /// MUTATION: unpend before the answer arrives and the double press starts
+    /// two `git branch -m`; forget the `refresh` and the branch list on screen
+    /// keeps the old name until something else happens to invalidate it.
+    #[test]
+    fn a_named_write_runs_once_and_the_whole_repository_is_read_again_after_it() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = rooted_cache(&root);
+        for question in cache.pending_questions() {
+            cache.mark_pending(&question);
+        }
+        assert!(
+            cache.pending_questions().is_empty(),
+            "everything a page needs is in flight"
+        );
+
+        let verb = GitWriteVerb::RenameBranch {
+            from: "main".to_owned(),
+            to: "trunk".to_owned(),
+        };
+        let question = cache
+            .begin_write(verb.clone(), Vec::new())
+            .expect("a rooted cache takes the write");
+        assert_eq!(
+            question,
+            GitQuestion::Write {
+                root: root.clone(),
+                verb: verb.clone(),
+                paths: Vec::new(),
+            }
+        );
+        assert!(
+            cache.ref_write_pending("main"),
+            "the row on screen is the one that waits — a rename is about the name that is there"
+        );
+        assert!(
+            cache.begin_write(verb.clone(), Vec::new()).is_none(),
+            "a second press starts nothing while the first is in flight"
+        );
+        assert!(
+            !cache.write_pending("main"),
+            "a branch called main and a file called main are two different subjects"
+        );
+
+        assert!(cache.accept(GitAnswer::Write {
+            root: root.clone(),
+            verb: verb.clone(),
+            paths: Vec::new(),
+            outcome: Ok(()),
+        }));
+        assert!(!cache.ref_write_pending("main"), "the receipt unpends it");
+        assert_eq!(
+            cache.pending_questions(),
+            vec![
+                GitQuestion::Status { root: root.clone() },
+                GitQuestion::Refs { root: root.clone() },
+                GitQuestion::Log {
+                    root: root.clone(),
+                    refs: Vec::new(),
+                    skip: 0,
+                    count: GIT_LOG_PAGE,
+                },
+            ],
+            "the status, the refs and the history are all about somewhere that has changed"
+        );
+        assert!(
+            verb.moves_refs(),
+            "and the runtime is told so, which is what makes every other surface on this \
+             repository re-read too"
+        );
+    }
+
+    /// PIN (v2 ④) — **a refusal changes nothing and unpends anyway.**
+    ///
+    /// `git branch -d` on an unmerged branch is the case this whole design is
+    /// pointed at: git says no, in git's own words, and the page it was asked
+    /// from is still true. So the row stops waiting and nothing is re-read.
+    #[test]
+    fn a_refused_named_write_leaves_the_page_exactly_as_it_was() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = rooted_cache(&root);
+        for question in cache.pending_questions() {
+            cache.mark_pending(&question);
+        }
+        let verb = GitWriteVerb::DeleteBranch {
+            name: "goner".to_owned(),
+        };
+        cache
+            .begin_write(verb.clone(), Vec::new())
+            .expect("the write starts");
+        assert!(cache.ref_write_pending("goner"));
+        let refusal =
+            GitFault::Refused("error: the branch 'goner' is not fully merged.".to_owned());
+        assert!(cache.accept(GitAnswer::Write {
+            root,
+            verb,
+            paths: Vec::new(),
+            outcome: Err(refusal.clone()),
+        }));
+        assert!(!cache.ref_write_pending("goner"), "the row stops waiting");
+        assert!(
+            cache.pending_questions().is_empty(),
+            "and nothing is asked again, because nothing changed"
+        );
+        assert_eq!(
+            write_refusal(&refusal),
+            "error: the branch 'goner' is not fully merged.",
+            "git's own sentence, unparaphrased — it is what the card carries"
+        );
+    }
+
+    /// PIN (v2 ④) — a named verb refuses a pathspec and a pathspec verb refuses
+    /// a name, because the two are different alphabets.
+    #[test]
+    fn a_write_that_confuses_a_ref_for_a_path_starts_nothing() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = rooted_cache(&root);
+        assert!(
+            cache
+                .begin_write(
+                    GitWriteVerb::DeleteTag {
+                        name: "v1.0".to_owned(),
+                    },
+                    vec!["src/main.rs".to_owned()],
+                )
+                .is_none(),
+            "a tag deletion handed a file list is a caller that has confused the two"
+        );
+        assert!(
+            cache.begin_write(GitWriteVerb::Stage, Vec::new()).is_none(),
+            "and a `git add` of nothing is not a process worth starting"
+        );
+    }
+
+    /// PIN (M10, v2 ④) — the menu asks the ref list whether the local is
+    /// already there, so that pressing `Checkout as local branch` twice is a
+    /// checkout rather than a refusal.
+    #[test]
+    fn a_cache_says_whether_a_local_branch_of_that_name_is_already_here() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = rooted_cache(&root);
+        assert!(
+            !cache.has_local_branch("main"),
+            "an unanswered ref list says no, and lets git be the one that refuses"
+        );
+        for question in cache.pending_questions() {
+            cache.mark_pending(&question);
+        }
+        assert!(cache.accept(GitAnswer::Refs {
+            root,
+            outcome: Ok(parse_refs(REFS, RECORDED_AT + 300)),
+        }));
+        assert!(cache.has_local_branch("main"));
+        assert!(
+            !cache.has_local_branch("origin/main"),
+            "a remote-tracking ref is not a local branch, whatever it is called"
+        );
+        assert!(!cache.has_local_branch("v1.0"), "and neither is a tag");
     }
 }

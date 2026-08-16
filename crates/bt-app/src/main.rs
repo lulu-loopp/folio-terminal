@@ -2766,6 +2766,128 @@ struct GraphFilterMenuState {
     hover: Option<profiles::GitFilterRow>,
 }
 
+/// **Which cache a repository verb is issued into** (v2 ④).
+///
+/// The two surfaces that show a repository are addressed in two different ways —
+/// a Git panel is a *column*, a commit graph is a *document keyed by root* — and
+/// every verb in the context menus can be raised from either. Carrying which one
+/// asked is what lets one `run` function serve both without re-deriving a host
+/// from where the pointer has since wandered.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GitOrigin {
+    /// The Git page in one docked column.
+    Column(SeatId),
+    /// The commit graph of one repository. It carries the root because that
+    /// *is* its address — [`git::GitHost::Graph`] is keyed by tab and root, and
+    /// no seat owns it.
+    Graph(PathBuf),
+}
+
+/// The prompt a `…` row turned the menu into (v2 ④).
+#[derive(Clone, Debug)]
+struct GitPromptState {
+    kind: profiles::GitPromptKind,
+    /// [`profiles::GitPromptKind::caption`]'s answer, built once when the prompt
+    /// opens: the subject it names (a short hash, a branch's old name) cannot
+    /// change while the prompt is up, so measuring it every frame would be
+    /// re-deriving a constant.
+    caption: String,
+    field: text_field::TextField,
+    /// Whether Enter has been pressed on an empty field.
+    ///
+    /// **The one fault that is not shown as you type.** An empty field is the
+    /// state the prompt opens in, so a red line saying "a name is needed" on the
+    /// very first frame would be the window telling you off for not having typed
+    /// yet. Every other fault is about characters that are actually there and is
+    /// shown the moment they are.
+    asked_empty: bool,
+}
+
+impl GitPromptState {
+    /// Why git would refuse this name, if it would.
+    fn fault(&self) -> Option<git::RefNameFault> {
+        if self.field.text().is_empty() {
+            return self.asked_empty.then_some(git::RefNameFault::Empty);
+        }
+        git::ref_name_fault(self.field.text())
+    }
+}
+
+/// A git row's context menu while it is up (v2 ④).
+///
+/// [`FileMenuState`]'s shape with a repository in it, and self-contained for the
+/// same reason: the row it was raised on can be scrolled away, paged past or
+/// replaced by a re-read while the menu stands, and a menu that re-found its row
+/// would be a menu whose verbs changed under the pointer.
+struct GitMenuState {
+    /// Where it was raised, in physical pixels of the surface.
+    point: [f32; 2],
+    origin: GitOrigin,
+    /// The repository the verbs are about. Carried beside the origin because the
+    /// gate's own requests are keyed by root — a branch is a fact about a
+    /// repository and not about the pane that showed it.
+    root: PathBuf,
+    target: profiles::GitMenuTarget,
+    /// Which row of the graph it was raised on, when it was raised on one.
+    ///
+    /// The one thing here that *is* an index into a list that can move, and it
+    /// is used for exactly one thing that does not matter if it has: putting the
+    /// selected ground on the row a comparison was started from (V8). Everything
+    /// a verb needs is carried by value beside it.
+    graph_row: Option<usize>,
+    hover: Option<profiles::GitMenuRow>,
+    prompt: Option<GitPromptState>,
+}
+
+/// One frame's worth of a git context menu, owned.
+///
+/// See [`Runtime::git_menu_draw`] for why this exists at all: the look the
+/// module wants is a bundle of borrows, and the measure it has to be laid out
+/// with borrows the renderer mutably.
+struct GitMenuDraw {
+    point: [f32; 2],
+    target: profiles::GitMenuTarget,
+    hover: Option<profiles::GitMenuRow>,
+    prompt: Option<GitPromptDraw>,
+}
+
+struct GitPromptDraw {
+    kind: profiles::GitPromptKind,
+    caption: String,
+    /// The whole line as drawn — the typed text with the composition opened at
+    /// the caret.
+    text: String,
+    before_caret: String,
+    preedit: String,
+    fault: Option<git::RefNameFault>,
+}
+
+impl GitMenuDraw {
+    fn look(&self) -> profiles::GitMenuLook<'_> {
+        profiles::GitMenuLook {
+            target: &self.target,
+            hover: self.hover,
+            prompt: self.prompt.as_ref().map(|prompt| profiles::GitPromptLook {
+                kind: prompt.kind,
+                caption: &prompt.caption,
+                text: &prompt.text,
+                before_caret: &prompt.before_caret,
+                preedit: &prompt.preedit,
+                fault: prompt.fault,
+            }),
+        }
+    }
+}
+
+/// A path in git's grammar, joined onto the repository root in the platform's.
+///
+/// git speaks forward slashes on every machine; Explorer's `/select` and the
+/// clipboard both want what a person would type. One function so the two callers
+/// cannot spell the same file two ways.
+fn git_full_path(root: &Path, path: &str) -> PathBuf {
+    root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
 /// A file row's context menu while it is up (K143).
 #[derive(Clone, Debug)]
 struct FileMenuState {
@@ -4098,6 +4220,8 @@ struct Runtime {
     /// The pane head's own menu, and the head it was raised on (user rulings,
     /// 2026-08-15 and 2026-08-16).
     pane_menu: Option<PaneMenuState>,
+    /// The git context menu, and everything it is about (v2 ④).
+    git_menu: Option<GitMenuState>,
     /// **The two `⌄` clocks** (user ruling, 2026-08-16) — one policy, two
     /// buttons, and a single struct so that there is nowhere for them to differ.
     chevrons: ChevronGates,
@@ -5309,6 +5433,14 @@ struct KeyboardOwner {
     /// one owner in this list that *takes text* without being a terminal, which
     /// only the IME's ladder needs to know.
     rename: bool,
+    /// A git context menu that has become a prompt (v2 (4)).
+    ///
+    /// Above `menu_or_dialog` for the same reason `rename` is: it is a popup that
+    /// *takes text*, and the rung below swallows every character key a popup is
+    /// given. It is a separate bit rather than an exception written into that one
+    /// so that the popup rule stays exactly what it says — every popup swallows
+    /// — with this one surface named above it.
+    git_prompt: bool,
     /// A modal or any open popup.
     menu_or_dialog: bool,
     /// A files column holds it (`InputOwner::FilesTree`).
@@ -5352,6 +5484,15 @@ enum ImeOwner {
     /// The commit graph's search field (T4, v2 (3)) — a one-line text field that
     /// takes composed text through the same door typed characters use.
     GraphSearch,
+    /// A git context menu that has become a prompt (v2 (4)) — the one place in
+    /// this window where a text field lives *inside* a popup.
+    ///
+    /// **Above `Modal`, and that is the whole reason this rung exists.** A popup
+    /// swallows every character key, which is exactly right for a popup made of
+    /// verbs and exactly wrong for one you are typing a branch name into: a
+    /// composition arriving while this prompt is up belongs in the field, and the
+    /// rung below would eat it.
+    GitPrompt,
     /// A modal or a popup: no text goes anywhere while one is up.
     Modal,
     /// A files column. Nothing to type into — and, above all, nothing to type
@@ -5369,6 +5510,8 @@ enum ImeOwner {
 fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
     if owner.rename {
         ImeOwner::Rename
+    } else if owner.git_prompt {
+        ImeOwner::GitPrompt
     } else if owner.menu_or_dialog {
         ImeOwner::Modal
     } else if owner.files_tree {
@@ -9391,6 +9534,11 @@ struct OverlayStack {
     /// the opener closes the others), so their order between themselves is
     /// bookkeeping rather than a claim.
     pane_menu: Vec<marks::OverlayLayer>,
+    /// The git context menus (v2 ④), on the same level and by the same
+    /// argument: it is raised over a row and is about that row. It cannot be up
+    /// beside either of the two above it — [`Popup::ALL`] is the rule — so where
+    /// it sits among them is bookkeeping.
+    git_menu: Vec<marks::OverlayLayer>,
     /// The notices (user ruling, 2026-08-16) — **above every menu and below the
     /// tip.**
     ///
@@ -9441,6 +9589,7 @@ impl OverlayStack {
             modal,
             file_menu,
             pane_menu,
+            git_menu,
             toast,
             tooltip,
             file_peek,
@@ -9455,6 +9604,7 @@ impl OverlayStack {
             modal,
             file_menu,
             pane_menu,
+            git_menu,
             toast,
             tooltip,
             file_peek,
@@ -11727,16 +11877,23 @@ enum Popup {
     GraphFilter,
     /// The preview head's filename switcher (P130-P137).
     Preview,
+    /// **The git context menus** (v2 ④) — one variant for six menus, because
+    /// there is one of them: which rows it holds is a fact about the
+    /// [`profiles::GitMenuTarget`] inside it, not about which popup it is. A
+    /// variant per target would put six names on this list that could never be
+    /// open at the same time as each other anyway.
+    GitMenu,
 }
 
 impl Popup {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Profile,
         Self::Root,
         Self::File,
         Self::Pane,
         Self::GraphFilter,
         Self::Preview,
+        Self::GitMenu,
     ];
 
     /// What one opener has to put away: **every other popup, always.**
@@ -13420,6 +13577,7 @@ impl Runtime {
             preview_menu: profiles::PreviewMenu::default(),
             preview_head_measures: BTreeMap::new(),
             file_menu: None,
+            git_menu: None,
             pane_menu: None,
             chevrons: ChevronGates::default(),
             graph_filter_menu: None,
@@ -15871,6 +16029,7 @@ impl Runtime {
         stack.float = self.float_layer(now);
         stack.file_menu = self.file_menu_layer();
         stack.pane_menu = self.pane_menu_layer();
+        stack.git_menu = self.git_menu_layer();
         stack.toast = self.toast_layer();
         stack.tooltip = self.tooltip_layer();
         stack.file_peek = self.file_peek_layer();
@@ -16442,6 +16601,7 @@ impl Runtime {
                 Popup::File => self.file_menu = None,
                 Popup::Pane => self.pane_menu = None,
                 Popup::GraphFilter => self.graph_filter_menu = None,
+                Popup::GitMenu => self.git_menu = None,
                 Popup::Preview => {
                     self.preview_menu.close();
                 }
@@ -19066,9 +19226,16 @@ impl Runtime {
             // `Menu` and `Dialog`, which own the keyboard outright while they are
             // up (§7.1.5, and the mock-up's "an open menu owns the keyboard" at
             // 6188).
+            // The prompt inside a git context menu, which is a popup and would
+            // otherwise be swallowed by the rung under this one.
+            git_prompt: self
+                .git_menu
+                .as_ref()
+                .is_some_and(|menu| menu.prompt.is_some()),
             menu_or_dialog: self.dirty_gate.is_open()
                 || self.settings.is_open()
                 || self.file_menu.is_some()
+                || self.git_menu.is_some()
                 || self.pane_menu.is_some()
                 || self.profile_menu.is_open()
                 || self.root_menu.seat().is_some()
@@ -21450,6 +21617,18 @@ impl Runtime {
                             outcome: Ok(()),
                             ..
                         } => Some(root.clone()),
+                        // **A ref write is the same claim** (v2 ④): a branch
+                        // created, renamed or deleted changes the pills on every
+                        // row of every history of this repository, and a tracking
+                        // checkout moves `HEAD` as well. A panel still drawing
+                        // the old list beside a graph drawing the new one is the
+                        // one disagreement this subsystem exists to prevent.
+                        git::GitAnswer::Write {
+                            root,
+                            verb,
+                            outcome: Ok(()),
+                            ..
+                        } if verb.moves_refs() => Some(root.clone()),
                         _ => None,
                     };
                     // **A verb git refused is a notice** (user ruling,
@@ -22098,26 +22277,7 @@ impl Runtime {
         verb: crate::git::GitWriteVerb,
         paths: Vec<String>,
     ) -> Result<()> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(cache) = self.tabs[active].git_trees.get_mut(&seat) else {
-            return Ok(());
-        };
-        let Some(question) = cache.begin_write(verb, paths) else {
-            return Ok(());
-        };
-        if !self.git_worker.request(git::GitRequest {
-            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
-            question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
-        self.publish_frame(FrameTrigger {
-            occurred_at: Instant::now(),
-            source: FrameSource::Expose,
-        })?;
-        Ok(())
+        self.issue_git_write(&GitOrigin::Column(seat), verb, paths)
     }
 
     /// The next fifty commits (R16).
@@ -24617,6 +24777,11 @@ impl Runtime {
             // nothing to ask about" and lets the verb through. There is always
             // something to ask about here: that is what makes it a discard.
             restore::GateRequest::GitDiscard { path, .. } => vec![path.clone()],
+            // A ref deletion names the ref, for the same reason and with the
+            // same consequence: the list is never empty, so `raise_dirty_gate`
+            // never lets one of these through unasked.
+            restore::GateRequest::GitDeleteBranch { name, .. }
+            | restore::GateRequest::GitDeleteTag { name, .. } => vec![name.clone()],
         }
     }
 
@@ -24716,6 +24881,27 @@ impl Runtime {
                 };
                 self.write_to_repository(seat, verb, vec![path])
             }
+            // **The two ref deletions** (v2 ④), keyed by root rather than by
+            // seat: the surface that asked may have gone while the gate stood,
+            // and either surface on this repository can carry the write — every
+            // cache on it re-reads when the receipt lands
+            // ([`git::GitWriteVerb::moves_refs`]).
+            restore::GateRequest::GitDeleteBranch { root, name } => {
+                let Some(origin) = self.git_origin_for_root(&root) else {
+                    return Ok(());
+                };
+                self.issue_git_write(
+                    &origin,
+                    git::GitWriteVerb::DeleteBranch { name },
+                    Vec::new(),
+                )
+            }
+            restore::GateRequest::GitDeleteTag { root, name } => {
+                let Some(origin) = self.git_origin_for_root(&root) else {
+                    return Ok(());
+                };
+                self.issue_git_write(&origin, git::GitWriteVerb::DeleteTag { name }, Vec::new())
+            }
         }
     }
 
@@ -24728,6 +24914,7 @@ impl Runtime {
         }
         let message = request.message(&names);
         let title = request.title();
+        let discard_text = request.answer_text();
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.renderer.metrics().scale_factor as f32;
@@ -24738,14 +24925,13 @@ impl Runtime {
             message_lines: restore::wrap(&message, room, |line| {
                 renderer.measure_chrome_text(line, restore::SUB_FONT_LOGICAL_PX * scale)
             }),
+            discard_text,
             cancel_text_width: renderer.measure_chrome_text(
                 restore::GATE_CANCEL_TEXT,
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
-            discard_text_width: renderer.measure_chrome_text(
-                restore::GATE_DISCARD_TEXT,
-                restore::BUTTON_FONT_LOGICAL_PX * scale,
-            ),
+            discard_text_width: renderer
+                .measure_chrome_text(discard_text, restore::BUTTON_FONT_LOGICAL_PX * scale),
         };
         Some(restore::gate_layout(&content, width, height, scale))
     }
@@ -25036,6 +25222,876 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    // ── the git context menus (v2 ④) ─────────────────────────────────────────
+
+    /// The menu's own state, copied out of `self` so the renderer can be
+    /// borrowed to measure with.
+    ///
+    /// One clone per frame the menu is up, and the alternative is the borrow
+    /// checker's own problem written into the design: [`profiles::GitMenuLook`]
+    /// holds references into the state, and the measure closure needs the
+    /// renderer mutably. The file menu solves the same thing the same way, one
+    /// field at a time; this one has six, so they travel together.
+    fn git_menu_draw(&self) -> Option<GitMenuDraw> {
+        let menu = self.git_menu.as_ref()?;
+        Some(GitMenuDraw {
+            point: menu.point,
+            target: menu.target.clone(),
+            hover: menu.hover,
+            prompt: menu.prompt.as_ref().map(|prompt| GitPromptDraw {
+                kind: prompt.kind,
+                caption: prompt.caption.clone(),
+                // **The composition opens a space at the caret** and the caret
+                // stands after it — T4's rule, kept here so a name typed with an
+                // IME reads the way a query typed with one does.
+                text: format!(
+                    "{}{}{}",
+                    prompt.field.before_caret(),
+                    prompt.field.preedit(),
+                    &prompt.field.text()[prompt
+                        .field
+                        .before_caret()
+                        .len()
+                        .min(prompt.field.text().len())..]
+                ),
+                before_caret: prompt.field.before_caret().to_owned(),
+                preedit: prompt.field.preedit().to_owned(),
+                fault: prompt.fault(),
+            }),
+        })
+    }
+
+    /// Where the git context menu is, if one is up.
+    ///
+    /// It cannot fold for want of an anchor — the anchor is the point the
+    /// pointer was at — which is [`Runtime::file_menu_layout`]'s ruling and
+    /// doubly load-bearing here: the row this menu is about lives in a list that
+    /// pages, scrolls and is rebuilt by every repository answer.
+    fn git_menu_layout(&mut self) -> Option<profiles::GitMenuLayout> {
+        let draw = self.git_menu_draw()?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        Some(profiles::git_menu_layout(
+            draw.point,
+            (width as f32, height as f32),
+            scale,
+            &draw.look(),
+            &mut measure,
+        ))
+    }
+
+    /// The git menu's own level of the overlay stack.
+    fn git_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some(draw) = self.git_menu_draw() else {
+            return Vec::new();
+        };
+        let Some(layout) = self.git_menu_layout() else {
+            return Vec::new();
+        };
+        profiles::git_menu_build(&layout, &draw.look())
+    }
+
+    fn close_git_menu(&mut self) -> Result<bool> {
+        if self.git_menu.take().is_none() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **What a right press landed on**, resolved to a menu's worth of facts.
+    ///
+    /// `None` for everything that has no repository verb — a heading, the
+    /// masthead, the "load more" row, a detail block, a graph file row — and for
+    /// the working tree's row when there is nothing open to compare it against.
+    /// A `None` here is what makes the press fall through and mean whatever it
+    /// meant before this slice existed.
+    fn git_menu_target_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(GitOrigin, PathBuf, profiles::GitMenuTarget, Option<usize>)> {
+        let active = self.active_tab;
+        match self.chrome_target_at(position)? {
+            // A right press on a hover verb is a right press on the row it sits
+            // in. The pane head's own menu takes the same position for the same
+            // reason: an 18-pixel hole in a row that silently means something
+            // else is exactly the edge a hand finds by accident.
+            seats::ChromeTarget::GitRow { seat, index }
+            | seats::ChromeTarget::GitAct { seat, index, .. } => {
+                let root = self.tabs[active]
+                    .git_trees
+                    .get(&seat)
+                    .and_then(git::GitCache::root)
+                    .map(Path::to_path_buf)?;
+                let row = self.git_pages_shown.get(&seat)?.rows.get(index)?;
+                let target = match row {
+                    git_panel::GitRow::Change(change) => profiles::GitMenuTarget::Change {
+                        path: change.path.clone(),
+                        group: change.group,
+                        untracked: change.untracked,
+                        renamed_from: change.renamed_from.clone(),
+                    },
+                    git_panel::GitRow::Branch(branch) if branch.remote => {
+                        profiles::GitMenuTarget::Remote {
+                            name: branch.name.clone(),
+                        }
+                    }
+                    git_panel::GitRow::Branch(branch) => profiles::GitMenuTarget::LocalBranch {
+                        name: branch.name.clone(),
+                        current: branch.current,
+                    },
+                    // **The panel offers no comparison** (D6 is the graph's).
+                    // Compare mode is a state of the *graph's* view — two rows
+                    // lit, a block between them, a file list under it — and a
+                    // 240-pixel column has none of that furniture. A row that
+                    // entered a mode the surface cannot draw would be a verb
+                    // that appears to do nothing.
+                    git_panel::GitRow::Commit(commit) => profiles::GitMenuTarget::Commit {
+                        hash: commit.hash.clone(),
+                        short: commit.short.clone(),
+                        subject: commit.subject.clone(),
+                        can_compare: false,
+                        compare_ready: false,
+                    },
+                    _ => return None,
+                };
+                Some((GitOrigin::Column(seat), root, target, None))
+            }
+            seats::ChromeTarget::GitGraphRow { seat, index } => {
+                let root = self.tabs[active].git_graph_view.get(&seat)?.root.clone();
+                let expanded = self.tabs[active]
+                    .git_graph_view
+                    .get(&seat)
+                    .and_then(|view| view.expanded.clone());
+                let content = self.git_graphs_shown.get(&seat)?;
+                let row = content.rows.iter().find(|row| row.index() == index)?;
+                let target = match row {
+                    git_graph::GraphViewRow::Commit(commit) => {
+                        // **A pill is more specific than the row it is on.** The
+                        // rectangles come from the same run the painter draws
+                        // from, so a pill you can see is a pill you can press.
+                        let pill = self.graph_row_rect(seat, index).and_then(|rect| {
+                            git_graph::graph_ref_pill_at(
+                                commit,
+                                rect,
+                                content.lane_width,
+                                content.columns,
+                                self.renderer.metrics().scale_factor as f32,
+                                position.x as f32,
+                                position.y as f32,
+                            )
+                            .and_then(|at| commit.refs.get(at))
+                        });
+                        match pill {
+                            Some(pill) => match pill.kind {
+                                git::GitRefKind::Local => profiles::GitMenuTarget::LocalBranch {
+                                    name: pill.name.clone(),
+                                    current: pill.head,
+                                },
+                                git::GitRefKind::Remote => profiles::GitMenuTarget::Remote {
+                                    name: pill.name.clone(),
+                                },
+                                git::GitRefKind::Tag => profiles::GitMenuTarget::Tag {
+                                    name: pill.name.clone(),
+                                },
+                            },
+                            None => profiles::GitMenuTarget::Commit {
+                                hash: commit.hash.clone(),
+                                short: commit.short.clone(),
+                                subject: commit.subject.clone(),
+                                can_compare: true,
+                                // The near end of a comparison is the *open*
+                                // row, and a commit is never the far end of a
+                                // comparison with itself.
+                                compare_ready: expanded
+                                    .as_deref()
+                                    .is_some_and(|open| open != commit.hash),
+                            },
+                        }
+                    }
+                    git_graph::GraphViewRow::Uncommitted(_) => {
+                        profiles::GitMenuTarget::Uncommitted {
+                            // A commit has to be open for there to be anything
+                            // to compare the working tree with — and the working
+                            // tree being open is not that.
+                            compare_ready: expanded
+                                .as_deref()
+                                .is_some_and(|open| open != git_graph::GRAPH_UNCOMMITTED_HASH),
+                        }
+                    }
+                    git_graph::GraphViewRow::File(_) | git_graph::GraphViewRow::Detail(_) => {
+                        return None;
+                    }
+                };
+                Some((GitOrigin::Graph(root.clone()), root, target, Some(index)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Where one row of a graph is drawn, this frame.
+    fn graph_row_rect(&self, seat: SeatId, index: usize) -> Option<[f32; 4]> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let content = self.git_graphs_shown.get(&seat)?;
+        let body = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)?;
+        Some(git_graph::graph_geometry(body, content, scale).row_rect(index))
+    }
+
+    /// Raise the menu the right press asked for, and say whether one came up.
+    ///
+    /// **An empty menu does not open**, which is the working tree row's whole
+    /// ruling: with nothing to compare against there is no verb to offer, and a
+    /// popup that opened in order to show one greyed line would be worse than
+    /// the press doing nothing.
+    fn open_git_menu_at(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((origin, root, target, graph_row)) = self.git_menu_target_at(position) else {
+            return Ok(false);
+        };
+        if profiles::git_menu(&target).rows.is_empty() {
+            return Ok(false);
+        }
+        // E61: the opener closes the others.
+        self.close_popups_except(Popup::GitMenu);
+        self.git_menu = Some(GitMenuState {
+            point: [position.x as f32, position.y as f32],
+            origin,
+            root,
+            target,
+            graph_row,
+            hover: None,
+            prompt: None,
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Turn the menu into a prompt (v2 ④).
+    ///
+    /// The menu is not closed and not replaced: it keeps its anchor, its target
+    /// and its origin, and only what is drawn inside it changes. That is what
+    /// makes Esc able to put the field away and leave the verbs standing.
+    fn open_git_prompt(&mut self, kind: profiles::GitPromptKind) -> Result<()> {
+        let Some(menu) = self.git_menu.as_mut() else {
+            return Ok(());
+        };
+        let subject = match &menu.target {
+            profiles::GitMenuTarget::Commit { short, .. } => short.clone(),
+            profiles::GitMenuTarget::LocalBranch { name, .. }
+            | profiles::GitMenuTarget::Remote { name }
+            | profiles::GitMenuTarget::Tag { name } => name.clone(),
+            profiles::GitMenuTarget::Change { path, .. } => path.clone(),
+            profiles::GitMenuTarget::Uncommitted { .. } => String::new(),
+        };
+        menu.prompt = Some(GitPromptState {
+            kind,
+            caption: kind.caption(&subject),
+            // **A rename opens holding the name it is about**, selected, so that
+            // typing replaces it and Backspace edits it — which is what every
+            // rename field in this window does (J103). The other two open empty,
+            // because there is no name yet to edit.
+            field: match kind {
+                profiles::GitPromptKind::RenameBranch => {
+                    let mut field = text_field::TextField::holding(&subject);
+                    field.select_all();
+                    field
+                }
+                _ => text_field::TextField::default(),
+            },
+            asked_empty: false,
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Carry out what the prompt was asked for, if the name is one git will take.
+    ///
+    /// A name that is not closes nothing and asks nothing: the red line under
+    /// the field turns on and the field keeps the keyboard. **No card** — see
+    /// [`profiles::GitPromptLook::fault`].
+    fn commit_git_prompt(&mut self) -> Result<()> {
+        let Some(menu) = self.git_menu.as_ref() else {
+            return Ok(());
+        };
+        let Some(prompt) = menu.prompt.as_ref() else {
+            return Ok(());
+        };
+        let name = prompt.field.text().to_owned();
+        let kind = prompt.kind;
+        if git::ref_name_fault(&name).is_some() {
+            if let Some(prompt) = self.git_menu.as_mut().and_then(|menu| menu.prompt.as_mut()) {
+                prompt.asked_empty = true;
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
+        let verb = match (kind, &menu.target) {
+            (
+                profiles::GitPromptKind::CreateBranch,
+                profiles::GitMenuTarget::Commit { hash, .. },
+            ) => git::GitWriteVerb::CreateBranch {
+                name,
+                at: hash.clone(),
+            },
+            (profiles::GitPromptKind::CreateTag, profiles::GitMenuTarget::Commit { hash, .. }) => {
+                git::GitWriteVerb::CreateTag {
+                    name,
+                    at: hash.clone(),
+                }
+            }
+            (
+                profiles::GitPromptKind::RenameBranch,
+                profiles::GitMenuTarget::LocalBranch { name: from, .. },
+            ) => git::GitWriteVerb::RenameBranch {
+                from: from.clone(),
+                to: name,
+            },
+            // A prompt kind that does not match its target is a bug that has
+            // already happened somewhere else; it asks the repository nothing.
+            _ => return self.close_git_menu().map(|_| ()),
+        };
+        let origin = menu.origin.clone();
+        self.close_git_menu()?;
+        self.issue_git_write(&origin, verb, Vec::new())
+    }
+
+    /// One row of a git context menu, pressed.
+    ///
+    /// **The menu closes first**, on [`Runtime::run_file_menu_row`]'s order and
+    /// for its reason: several of these verbs raise a gate or a card, and a menu
+    /// still standing over the answer would be a menu covering the thing it
+    /// asked for. The three prompt rows are the exception, and they do not
+    /// close the menu — they *are* the menu, one state further on.
+    fn run_git_menu_row(&mut self, row: profiles::GitMenuRow) -> Result<()> {
+        if let Some(kind) = row.prompt() {
+            return self.open_git_prompt(kind);
+        }
+        let Some(menu) = self.git_menu.take() else {
+            return Ok(());
+        };
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        let GitMenuState {
+            origin,
+            root,
+            target,
+            graph_row,
+            ..
+        } = menu;
+        match (row, &target) {
+            // ── standing somewhere else ──
+            (profiles::GitMenuRow::Checkout, profiles::GitMenuTarget::Commit { hash, .. }) => {
+                self.checkout_at(&origin, hash.clone(), true)
+            }
+            // A tag is a name for a commit, so standing on it is a detached
+            // checkout — exactly as it is for the commit under it. `--detach`
+            // and not a bare name for [`git::GitQuestion::Checkout::detach`]'s
+            // own reason: a tag whose name also spells a branch would otherwise
+            // silently move the branch.
+            (profiles::GitMenuRow::Checkout, profiles::GitMenuTarget::Tag { name }) => {
+                self.checkout_at(&origin, name.clone(), true)
+            }
+            (
+                profiles::GitMenuRow::Checkout,
+                profiles::GitMenuTarget::LocalBranch {
+                    name,
+                    current: false,
+                },
+            ) => self.checkout_at(&origin, name.clone(), false),
+            // **Prefer the local that is already there** (M10). `git checkout -b`
+            // on a name that is taken is a refusal, and what the reader meant by
+            // pressing this row is "put me on that branch".
+            (profiles::GitMenuRow::CheckoutTracking, profiles::GitMenuTarget::Remote { name }) => {
+                let local = git::tracking_local_name(name).to_owned();
+                if self
+                    .git_cache_at(&origin)
+                    .is_some_and(|cache| cache.has_local_branch(&local))
+                {
+                    return self.checkout_at(&origin, local, false);
+                }
+                self.issue_git_write(
+                    &origin,
+                    git::GitWriteVerb::CheckoutTracking { name: name.clone() },
+                    Vec::new(),
+                )
+            }
+            // ── the two deletions, both behind the gate ──
+            (
+                profiles::GitMenuRow::DeleteBranch,
+                profiles::GitMenuTarget::LocalBranch {
+                    name,
+                    current: false,
+                },
+            ) => {
+                self.raise_dirty_gate(restore::GateRequest::GitDeleteBranch {
+                    root,
+                    name: name.clone(),
+                })?;
+                Ok(())
+            }
+            (profiles::GitMenuRow::DeleteTag, profiles::GitMenuTarget::Tag { name }) => {
+                self.raise_dirty_gate(restore::GateRequest::GitDeleteTag {
+                    root,
+                    name: name.clone(),
+                })?;
+                Ok(())
+            }
+            // ── the changed file's own four ──
+            (profiles::GitMenuRow::Stage, profiles::GitMenuTarget::Change { path, .. }) => {
+                self.issue_git_write(&origin, git::GitWriteVerb::Stage, vec![path.clone()])
+            }
+            (profiles::GitMenuRow::Unstage, profiles::GitMenuTarget::Change { path, .. }) => {
+                self.issue_git_write(&origin, git::GitWriteVerb::Unstage, vec![path.clone()])
+            }
+            (
+                profiles::GitMenuRow::Discard,
+                profiles::GitMenuTarget::Change {
+                    path, untracked, ..
+                },
+            ) => {
+                // The same gate the row's own `×` raises, which is the point: one
+                // discard, one question, whichever gesture asked it.
+                let GitOrigin::Column(seat) = origin else {
+                    return Ok(());
+                };
+                self.raise_dirty_gate(restore::GateRequest::GitDiscard {
+                    seat,
+                    path: path.clone(),
+                    untracked: *untracked,
+                })?;
+                Ok(())
+            }
+            (
+                profiles::GitMenuRow::OpenDiff,
+                profiles::GitMenuTarget::Change {
+                    path,
+                    group,
+                    renamed_from,
+                    ..
+                },
+            ) => {
+                let GitOrigin::Column(seat) = origin else {
+                    return Ok(());
+                };
+                self.open_git_document(
+                    seat,
+                    preview::PreviewSource::GitDiff {
+                        root,
+                        path: path.clone(),
+                        staged: *group == git::GitGroup::Staged,
+                    },
+                    git_panel::git_document_name(path),
+                    renamed_from.clone(),
+                )
+            }
+            (
+                profiles::GitMenuRow::RevealInExplorer,
+                profiles::GitMenuTarget::Change { path, .. },
+            ) => {
+                self.reveal_in_explorer(&git_full_path(&root, path));
+                Ok(())
+            }
+            // ── the readings ──
+            (profiles::GitMenuRow::CopyPath, profiles::GitMenuTarget::Change { path, .. }) => {
+                let full = git_full_path(&root, path);
+                let text = full.to_string_lossy().into_owned();
+                self.copy_from_git(&origin, &root, &text, &text)
+            }
+            (
+                profiles::GitMenuRow::CopyHash,
+                profiles::GitMenuTarget::Commit { hash, short, .. },
+            ) => {
+                let (hash, short) = (hash.clone(), short.clone());
+                self.copy_from_git(&origin, &root, &hash, &short)
+            }
+            (
+                profiles::GitMenuRow::CopySubject,
+                profiles::GitMenuTarget::Commit { subject, .. },
+            ) => {
+                let subject = subject.clone();
+                self.copy_from_git(&origin, &root, &subject, &subject)
+            }
+            (
+                profiles::GitMenuRow::CopyName,
+                profiles::GitMenuTarget::LocalBranch { name, .. }
+                | profiles::GitMenuTarget::Remote { name }
+                | profiles::GitMenuTarget::Tag { name },
+            ) => {
+                let name = name.clone();
+                self.copy_from_git(&origin, &root, &name, &name)
+            }
+            // ── the two comparisons (D6) ──
+            (
+                profiles::GitMenuRow::CompareWithSelected,
+                profiles::GitMenuTarget::Commit { hash, .. },
+            ) => {
+                let GitOrigin::Graph(_) = origin else {
+                    return Ok(());
+                };
+                let (Some(seat), hash) = (self.graph_seat_for(&root), hash.clone()) else {
+                    return Ok(());
+                };
+                if self.set_graph_compare(seat, &hash) {
+                    if let Some(index) = graph_row {
+                        self.select_graph_row(seat, index);
+                    }
+                    if self.refresh_chrome() {
+                        self.present_chrome_change()?;
+                    }
+                }
+                Ok(())
+            }
+            (
+                profiles::GitMenuRow::CompareWithSelected,
+                profiles::GitMenuTarget::Uncommitted { .. },
+            ) => {
+                let Some(seat) = self.graph_seat_for(&root) else {
+                    return Ok(());
+                };
+                if self.set_graph_compare(seat, git_graph::GRAPH_UNCOMMITTED_HASH) {
+                    if let Some(index) = graph_row {
+                        self.select_graph_row(seat, index);
+                    }
+                    if self.refresh_chrome() {
+                        self.present_chrome_change()?;
+                    }
+                }
+                Ok(())
+            }
+            (
+                profiles::GitMenuRow::CompareWithWorkingTree,
+                profiles::GitMenuTarget::Commit { hash, .. },
+            ) => {
+                let Some(seat) = self.graph_seat_for(&root) else {
+                    return Ok(());
+                };
+                let hash = hash.clone();
+                self.compare_graph_with_working_tree(seat, &root, &hash)
+            }
+            // Every other pair is a row that is not on this target's menu, which
+            // the hit test cannot produce and the keyboard walk cannot reach.
+            _ => Ok(()),
+        }
+    }
+
+    /// **This commit against what is on disk** (D6, `b: None`).
+    ///
+    /// The open row is the near end of every comparison, so the commit is opened
+    /// first — and only when it is not already open, because opening is a
+    /// *toggle* and a second press on the row you asked about would shut it.
+    /// Then the far end is pointed at the working tree, which is spelled with
+    /// [`git_graph::GRAPH_UNCOMMITTED_HASH`] exactly as a `Ctrl`+click on the
+    /// working tree's own row spells it.
+    fn compare_graph_with_working_tree(
+        &mut self,
+        seat: SeatId,
+        root: &Path,
+        hash: &str,
+    ) -> Result<()> {
+        let active = self.active_tab;
+        let open = self.tabs[active]
+            .git_graph_view
+            .get(&seat)
+            .and_then(|view| view.expanded.clone());
+        if open.as_deref() != Some(hash) {
+            self.expand_graph_commit(seat, root, hash)?;
+        }
+        if let Some(view) = self.tabs[self.active_tab].git_graph_view.get_mut(&seat) {
+            view.compare = Some(git_graph::GRAPH_UNCOMMITTED_HASH.to_owned());
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Which preview seat is showing this repository's graph, if one is.
+    fn graph_seat_for(&self, root: &Path) -> Option<SeatId> {
+        self.tabs[self.active_tab]
+            .git_graph_view
+            .iter()
+            .find(|(seat, view)| view.root == root && self.git_graphs_shown.contains_key(seat))
+            .map(|(seat, _)| *seat)
+    }
+
+    /// The cache one origin reads from.
+    fn git_cache_at(&self, origin: &GitOrigin) -> Option<&git::GitCache> {
+        let active = self.active_tab;
+        match origin {
+            GitOrigin::Column(seat) => self.tabs[active].git_trees.get(seat),
+            GitOrigin::Graph(root) => self.tabs[active]
+                .git_graphs
+                .get(root)
+                .map(|state| &state.cache),
+        }
+    }
+
+    /// Which surface a repository answer for this origin comes back to.
+    fn git_host_at(&self, origin: &GitOrigin) -> git::GitHost {
+        let tab = self.tabs[self.active_tab].id;
+        match origin {
+            GitOrigin::Column(seat) => git::GitHost::Column(LeafId { tab, seat: *seat }),
+            GitOrigin::Graph(root) => git::GitHost::Graph {
+                tab,
+                root: root.clone(),
+            },
+        }
+    }
+
+    /// **Issue a write into whichever cache asked for it** (v2 ④).
+    ///
+    /// [`Self::write_to_repository`]'s general form, and that one now delegates
+    /// here. The generalisation is the whole of what the context menus needed
+    /// from this layer: a `git branch -d` raised from a graph has no column, and
+    /// a `git add` raised from a panel has no root of its own — one function that
+    /// takes the origin answers both without either surface learning about the
+    /// other.
+    fn issue_git_write(
+        &mut self,
+        origin: &GitOrigin,
+        verb: git::GitWriteVerb,
+        paths: Vec<String>,
+    ) -> Result<()> {
+        let active = self.active_tab;
+        let host = self.git_host_at(origin);
+        let question = match origin {
+            GitOrigin::Column(seat) => self.tabs[active]
+                .git_trees
+                .get_mut(seat)
+                .and_then(|cache| cache.begin_write(verb, paths)),
+            GitOrigin::Graph(root) => self.tabs[active]
+                .git_graphs
+                .get_mut(root)
+                .and_then(|state| state.cache.begin_write(verb, paths)),
+        };
+        let Some(question) = question else {
+            return Ok(());
+        };
+        if !self.git_worker.request(git::GitRequest { host, question }) {
+            self.disable_git_worker();
+            return Ok(());
+        }
+        // The rows dim now, so the frame that shows them dimmed is this one.
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
+    }
+
+    /// Stand somewhere else, from whichever surface asked.
+    fn checkout_at(&mut self, origin: &GitOrigin, target: String, detach: bool) -> Result<()> {
+        match origin {
+            GitOrigin::Column(seat) => self.checkout_from_column(*seat, target, detach),
+            GitOrigin::Graph(root) => {
+                let root = root.clone();
+                self.checkout_in_graph(&root, target, detach)
+            }
+        }
+    }
+
+    /// Put one of a repository's own words on the clipboard, and say so.
+    ///
+    /// [`Self::copy_from_graph`]'s general form — the same clipboard door and the
+    /// same green card, anchored over whichever surface asked rather than over a
+    /// preview seat the panel does not have.
+    fn copy_from_git(
+        &mut self,
+        origin: &GitOrigin,
+        root: &Path,
+        text: &str,
+        said: &str,
+    ) -> Result<()> {
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::set_clipboard_text(hwnd, text)
+                .map_err(|error| anyhow!(error))
+                .context("copy a repository's own words to the clipboard")
+        });
+        if !recoverable_clipboard_write(result, "git menu copy") {
+            return Ok(());
+        }
+        let anchor = match origin {
+            GitOrigin::Column(seat) => toast::ToastAnchor::FilesColumn(*seat),
+            GitOrigin::Graph(_) => self.git_toast_anchor(&git::GitHost::Graph {
+                tab: self.tabs[self.active_tab].id,
+                root: root.to_owned(),
+            }),
+        };
+        self.toast(
+            toast::ToastKind::Ok,
+            anchor,
+            None,
+            git_graph::graph_copied(said),
+        )
+    }
+
+    /// Which origin a request keyed by root should be issued into.
+    ///
+    /// The gate's two ref deletions name a repository and not a pane — a branch
+    /// is a fact about the one and not the other — so the surface is looked up
+    /// again when the answer is spent. A graph is preferred because a graph is
+    /// where these menus mostly come from, and either surface's cache re-reads
+    /// the whole repository when the receipt arrives anyway (see
+    /// [`git::GitWriteVerb::moves_refs`]).
+    fn git_origin_for_root(&self, root: &Path) -> Option<GitOrigin> {
+        let active = self.active_tab;
+        if self.tabs[active].git_graphs.contains_key(root) {
+            return Some(GitOrigin::Graph(root.to_owned()));
+        }
+        self.tabs[active]
+            .git_trees
+            .iter()
+            .find(|(_, cache)| cache.root() == Some(root))
+            .map(|(seat, _)| GitOrigin::Column(*seat))
+    }
+
+    /// One key, with a git context menu up.
+    ///
+    /// **Total**, on the file menu's own rule: a menu that can be walked has to
+    /// keep the keys it walks with, and with a menu on screen there is nothing
+    /// behind it to type into. What changes when the menu has become a prompt is
+    /// only *what* the keys mean — there is now something to type into, and it
+    /// takes every key exactly as the graph's search field does.
+    fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+        use text_field::TextMove;
+        let control = self.modifiers.control_key();
+        let shift = self.modifiers.shift_key();
+        if self
+            .git_menu
+            .as_ref()
+            .is_some_and(|menu| menu.prompt.is_some())
+        {
+            match &event.logical_key {
+                // **One press, one layer** — §7.1.5's ladder read inside a single
+                // popup, which is exactly what the pane menu's submenu does. The
+                // field goes and the verbs come back; a second Esc closes the
+                // menu.
+                Key::Named(NamedKey::Escape) => {
+                    if !event.repeat
+                        && let Some(menu) = self.git_menu.as_mut()
+                    {
+                        menu.prompt = None;
+                        if self.refresh_chrome() {
+                            self.present_chrome_change()?;
+                        }
+                    }
+                    return Ok(());
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if !event.repeat {
+                        self.commit_git_prompt()?;
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+            let Some(field) = self
+                .git_menu
+                .as_mut()
+                .and_then(|menu| menu.prompt.as_mut())
+                .map(|prompt| &mut prompt.field)
+            else {
+                return Ok(());
+            };
+            match &event.logical_key {
+                Key::Named(NamedKey::Backspace) => {
+                    field.backspace();
+                }
+                Key::Named(NamedKey::Delete) => {
+                    field.delete();
+                }
+                Key::Named(NamedKey::Home) => field.step(TextMove::Home, shift),
+                Key::Named(NamedKey::End) => field.step(TextMove::End, shift),
+                Key::Named(NamedKey::ArrowLeft) => field.step(
+                    if control {
+                        TextMove::WordLeft
+                    } else {
+                        TextMove::Left
+                    },
+                    shift,
+                ),
+                Key::Named(NamedKey::ArrowRight) => field.step(
+                    if control {
+                        TextMove::WordRight
+                    } else {
+                        TextMove::Right
+                    },
+                    shift,
+                ),
+                Key::Character(text) if control => {
+                    if text.eq_ignore_ascii_case("a") {
+                        field.select_all();
+                    }
+                }
+                Key::Character(text) => field.insert(text),
+                // A modifier on its own, a function key, anything else: the field
+                // owns it and does nothing with it.
+                _ => {}
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                if !event.repeat {
+                    self.close_git_menu()?;
+                }
+            }
+            // Repeats are honoured on the travel keys and nowhere else, for the
+            // file menu's own reason: holding an arrow down is one continuous
+            // "further", and holding Enter is not one continuous "again".
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
+                if let Some(menu) = self.git_menu.as_mut() {
+                    let rows = profiles::git_menu(&menu.target).rows;
+                    menu.hover = profiles::git_menu_step(&rows, &menu.target, menu.hover, forwards);
+                }
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                if !event.repeat
+                    && let Some(row) = self.git_menu.as_ref().and_then(|menu| menu.hover)
+                {
+                    self.run_git_menu_row(row)?;
+                }
+            }
+            // Everything else is swallowed rather than passed down: with a menu
+            // on screen there is nothing to type into.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A composition, with a git prompt holding the keyboard (v2 ④).
+    fn git_prompt_ime(&mut self, event: &Ime) -> Result<()> {
+        let Some(prompt) = self.git_menu.as_mut().and_then(|menu| menu.prompt.as_mut()) else {
+            return Ok(());
+        };
+        match event {
+            Ime::Preedit(text, _) => prompt.field.set_preedit(text),
+            Ime::Commit(text) => prompt.field.insert(text),
+            Ime::Enabled | Ime::Disabled => return Ok(()),
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     // ── the pane head's own menu (user rulings, 2026-08-15, 2026-08-16) ─────
@@ -30689,6 +31745,26 @@ impl Runtime {
                 return Ok(());
             }
         }
+        // And the git context menu, the same three lines again — and with the
+        // same care about a row lit by a key: a keyboard walk must not be undone
+        // by a pointer that merely happens to be resting somewhere else.
+        if let Some(layout) = self.git_menu_layout() {
+            let over = profiles::git_menu_hit(&layout, position.x, position.y);
+            if let Some(row) = over
+                && let Some(menu) = self.git_menu.as_mut()
+                && menu.hover != row
+            {
+                menu.hover = row;
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            if over.is_some() {
+                self.note_tooltip(None)?;
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
+        }
         // And the graph's branch filter, the same three lines a third time.
         if let Some(layout) = self.graph_filter_menu_layout() {
             let over = profiles::git_filter_menu_hit(&layout, position.x, position.y);
@@ -33059,6 +34135,28 @@ impl Runtime {
         {
             return Ok(());
         }
+        // The git context menu, on the file menu's own level and answered by the
+        // same three rules — a row runs it, a press outside puts it away and
+        // then goes on being the press it was, which is how a second right press
+        // moves it from one row to another.
+        if let (Some(layout), Some(position)) = (self.git_menu_layout(), self.pointer_position) {
+            match profiles::git_menu_hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed
+                        && button == MouseButton::Left
+                        && let Some(row) = row
+                    {
+                        self.run_git_menu_row(row)?;
+                    }
+                    return Ok(());
+                }
+                None => {
+                    if state == ElementState::Pressed {
+                        self.close_git_menu()?;
+                    }
+                }
+            }
+        }
         // The file menu, above the float and above the other two popups, for the
         // reason `refresh_overlay` gives: it is drawn over the floating window
         // because it is very often *about a row inside it*, and a press has to
@@ -33194,6 +34292,22 @@ impl Runtime {
             ) = self.chrome_target_at(position)
         {
             self.open_pane_menu(seat, [position.x as f32, position.y as f32])?;
+            return Ok(());
+        }
+        // The right press that raises a repository row's own menu (v2 ④). Below
+        // the two above it because both of those are more specific surfaces
+        // standing over the same panes, and above the chrome router below for
+        // the pane head's reason: that router answers only the left button and
+        // would let this press fall all the way through to the shell.
+        //
+        // A press on a row with no verbs — a heading, a detail block, the
+        // working tree with nothing to compare against — raises nothing and is
+        // *not* consumed, so it goes on meaning what it meant before.
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && let Some(position) = self.pointer_position
+            && self.open_git_menu_at(position)?
+        {
             return Ok(());
         }
         // A peek header press that never travelled stops waiting here, and means
@@ -34404,6 +35518,14 @@ impl Runtime {
             }
             return Ok(());
         }
+        // **A git context menu owns the keyboard on the file menu's own terms**
+        // (v2 ④), and above it because it is the one popup here that can hold a
+        // text field: the branch prompt takes every key, and a rung below the
+        // file menu's would never see them.
+        if self.git_menu.is_some() {
+            self.git_menu_key(event)?;
+            return Ok(());
+        }
         // **The file menu owns the keyboard outright while it is up**, which the
         // two popups below it deliberately do not.
         //
@@ -34848,6 +35970,13 @@ impl Runtime {
                 // commit is an ordinary insert that replaces the selection.
                 ImeOwner::GraphSearch => {
                     self.graph_search_ime(&event)?;
+                    return Ok(());
+                }
+                // The branch prompt inside a git context menu, through the same
+                // two doors: a pre-edit is drawn at its caret and is not in the
+                // text, and a commit is an ordinary insert.
+                ImeOwner::GitPrompt => {
+                    self.git_prompt_ime(&event)?;
                     return Ok(());
                 }
                 ImeOwner::Preview => {
@@ -37874,6 +39003,7 @@ mod tests {
             modal: mark(5),
             file_menu: mark(6),
             pane_menu: mark(7),
+            git_menu: mark(12),
             toast: mark(8),
             tooltip: mark(9),
             file_peek: mark(10),
@@ -37886,9 +39016,9 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 12, 8, 9, 10, 11],
             "bottom to top: pane bars, rail, ground, schematic, float, modal, file menu, \
-             pane menu, notices, tip, glance, ghost"
+             pane menu, git menu, notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -52197,6 +53327,7 @@ mod tests {
             rename: false,
             files_tree: false,
             graph_search: false,
+            git_prompt: false,
             preview: false,
             menu_or_dialog: false,
         }));
@@ -52287,20 +53418,38 @@ mod tests {
                 menu_or_dialog: true,
                 files_tree: true,
                 graph_search: true,
+                git_prompt: true,
                 preview: true,
             }),
             ImeOwner::Rename,
             "and the editor is the topmost of all of them"
         );
+        // v2 (4) — the branch prompt stands **above** the popup rung, and that
+        // is the whole reason it is a rung of its own: a popup swallows every
+        // character key, which is right for a menu of verbs and wrong for a menu
+        // you are typing a branch name into.
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                git_prompt: true,
+                menu_or_dialog: true,
+                files_tree: true,
+                graph_search: true,
+                preview: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::GitPrompt,
+            "the prompt inside a popup takes what is composed into it"
+        );
 
         // **The whole of "zero PTY writes", stated as a property.**
-        for bits in 0..32u8 {
+        for bits in 0..64u8 {
             let owner = KeyboardOwner {
                 rename: bits & 1 != 0,
                 menu_or_dialog: bits & 2 != 0,
                 files_tree: bits & 4 != 0,
                 preview: bits & 8 != 0,
                 graph_search: bits & 16 != 0,
+                git_prompt: bits & 32 != 0,
             };
             assert_eq!(
                 matches!(ime_owner(owner), ImeOwner::Shell),
@@ -55300,16 +56449,20 @@ mod tests {
     /// Six openers used to carry six hand-copied runs of `self.x = None` and no
     /// two of them agreed — the pane menu left the preview switcher up, the root
     /// menu left the file menu up — so what is pinned here is not a set of pairs
-    /// but the *completeness*: for each popup, `others()` is exactly the other
-    /// five, and adding a seventh without listing it breaks this test rather
-    /// than shipping a pair that can be up together.
+    /// but the *completeness*: for each popup, `others()` is exactly the rest of
+    /// the list, and adding one without listing it breaks this test rather than
+    /// shipping a pair that can be up together.
     ///
     /// Red gate: drop one arm of `ALL` and the count assertion goes red; return
     /// a hand-written subset from `others` and the "every other popup" assertion
     /// names the one that got away.
     #[test]
     fn opening_any_popup_closes_every_other_one() {
-        assert_eq!(Popup::ALL.len(), 6, "six popups, and this list is the rule");
+        assert_eq!(
+            Popup::ALL.len(),
+            7,
+            "seven popups, and this list is the rule"
+        );
         for keep in Popup::ALL {
             let closed: Vec<Popup> = keep.others().collect();
             assert_eq!(
@@ -55334,6 +56487,10 @@ mod tests {
         // popup would be a menu a pointer drops on top of an open one.
         assert!(Popup::ALL.contains(&Popup::Profile));
         assert!(Popup::ALL.contains(&Popup::Pane));
+        // And so is the git context menu (v2 (4)) — it is raised by a right
+        // press, which is a gesture no other popup answers, so it is exactly the
+        // one that could otherwise have come up on top of an open menu.
+        assert!(Popup::ALL.contains(&Popup::GitMenu));
     }
 
     /// PIN — **the `Split direction` setting decides every split that has no
@@ -57193,6 +58350,73 @@ mod tests {
             preview_document_key(&buffer, false, 400.0, 1.0).parse,
             narrow.parse,
             "and an edit re-walks it"
+        );
+    }
+
+    /// PIN (v2 ④) — **a ref verb git refused is one card carrying git's own
+    /// sentence**, raised off the answer and nowhere else.
+    ///
+    /// The named verbs ride the same `Write` answer the four pathspec verbs do,
+    /// which is the whole reason nothing new had to be taught to the notice
+    /// path: `git branch -d` on an unmerged branch comes back as a refused
+    /// write, and the window prints what git said rather than paraphrasing a
+    /// program that has already explained itself.
+    ///
+    /// MUTATION: paraphrase the refusal ("could not delete the branch") and this
+    /// goes red on the exact bytes — which is the only way a reader can search
+    /// for the sentence they were shown.
+    #[test]
+    fn a_ref_verb_git_refused_says_gits_own_words_once() {
+        let root = PathBuf::from(r"D:\repo");
+        let refusal = "error: the branch 'goner' is not fully merged.";
+        let refused = git::GitAnswer::Write {
+            root: root.clone(),
+            verb: git::GitWriteVerb::DeleteBranch {
+                name: "goner".to_owned(),
+            },
+            paths: Vec::new(),
+            outcome: Err(git::GitFault::Refused(refusal.to_owned())),
+        };
+        assert_eq!(
+            git_answer_notice(&refused).as_deref(),
+            Some(refusal),
+            "one notice, in git's words"
+        );
+        let went_through = git::GitAnswer::Write {
+            root,
+            verb: git::GitWriteVerb::CreateBranch {
+                name: "feature".to_owned(),
+                at: "a1b2c3d".to_owned(),
+            },
+            paths: Vec::new(),
+            outcome: Ok(()),
+        };
+        assert_eq!(
+            git_answer_notice(&went_through),
+            None,
+            "and a verb that worked says nothing — the page redrawing is the report"
+        );
+    }
+
+    /// PIN (v2 ④) — a repo-relative path becomes the path a person would type,
+    /// which is what the clipboard and Explorer are both handed.
+    ///
+    /// git speaks forward slashes on every machine; `/select` and a pasted path
+    /// want the platform's own separator. One function, so the copy and the
+    /// reveal cannot spell the same file two ways.
+    #[test]
+    fn a_repo_relative_path_is_joined_in_the_grammar_the_platform_reads() {
+        let root = Path::new(r"D:\repo");
+        let full = git_full_path(root, "crates/bt-app/src/main.rs");
+        assert!(full.starts_with(root));
+        assert!(
+            full.ends_with("main.rs"),
+            "the file is still the file: {full:?}"
+        );
+        assert_eq!(
+            full.components().count(),
+            root.components().count() + 4,
+            "and every folder git named is a folder of the path: {full:?}"
         );
     }
 }

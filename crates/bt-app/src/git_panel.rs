@@ -401,7 +401,7 @@ impl GitAct {
 }
 
 /// What a press on one of this page's verbs becomes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitPress {
     /// Ask the repository, now.
     Write(GitWriteVerb),
@@ -1109,10 +1109,21 @@ pub fn build(
                 act: None,
             });
             let waiting = cache.checkout_pending().is_some();
+            // **A named write dims its own row too** (v2 ④). A checkout dims the
+            // whole list because it is about to move the whole repository; a
+            // `git branch -m` is about one name, so only that row waits — which
+            // is exactly the split `pending_writes` and `pending_refs` are two
+            // sets for.
+            let mut row = |branch: &crate::git::GitRefEntry| {
+                GitRow::Branch(branch_row(
+                    branch,
+                    waiting || cache.ref_write_pending(&branch.name),
+                    scale,
+                    measure,
+                ))
+            };
             for branch in locals {
-                content
-                    .rows
-                    .push(GitRow::Branch(branch_row(branch, waiting, scale, measure)));
+                content.rows.push(row(branch));
             }
             // A repository with no remote has no sub-group — a row reading
             // `REMOTES (0)` would be a control offering to open nothing.
@@ -1123,9 +1134,7 @@ pub fn build(
                 });
                 if remotes_open {
                     for branch in remotes {
-                        content
-                            .rows
-                            .push(GitRow::Branch(branch_row(branch, waiting, scale, measure)));
+                        content.rows.push(row(branch));
                     }
                 }
             }

@@ -984,6 +984,23 @@ pub const GATE_GIT_DISCARD_TITLE: &str = "Discard changes?";
 /// describing the smaller of two acts. The button still says `Discard`, because
 /// that is the word the page's own verb uses; the question says what it does.
 pub const GATE_GIT_DELETE_TITLE: &str = "Delete this file?";
+/// The word on the destructive button when the thing going is a **name** rather
+/// than a file's contents (v2 ④).
+///
+/// The button carries the row's own verb, which for the two ref deletions is
+/// `Delete` — a gate headed "Delete branch?" whose only other button said
+/// `Discard` would be two words for one act, and the reader would be entitled to
+/// wonder which of them the button actually does.
+pub const GATE_DELETE_TEXT: &str = "Delete";
+/// The question over a `git branch -d` (v2 ④).
+///
+/// It does not promise the branch will go, and that is deliberate: `-d` is the
+/// merged-only spelling, so git refuses a branch whose commits are nowhere else.
+/// The sentence under it says so in one line, and git's own refusal arrives on a
+/// card if it comes to that.
+pub const GATE_GIT_DELETE_BRANCH_TITLE: &str = "Delete this branch?";
+/// And over a `git tag -d`, which git never refuses.
+pub const GATE_GIT_DELETE_TAG_TITLE: &str = "Delete this tag?";
 
 /// The gate's own sentence — the mock-up's `Discard unsaved changes to a.txt,
 /// b.md?` (3600), split into a title and a list because a `confirm()` string has
@@ -1037,6 +1054,32 @@ pub enum GateRequest {
         /// and the command.
         untracked: bool,
     },
+    /// Deleting a local branch from a context menu (v2 ④) — `git branch -d`.
+    ///
+    /// **`GitDiscard`'s sibling and not its cousin**: it is here for the same
+    /// reason, which is that everything a confirmation *is* already lives in this
+    /// machine and correct, and a second copy would be a second chance to get the
+    /// default answer the wrong way round.
+    ///
+    /// Behind the gate even though `-d` refuses an unmerged branch, because the
+    /// case it does *not* refuse is still a name disappearing off a list at the
+    /// end of a two-item pointer gesture — and "it was on the menu under the
+    /// pointer" is not consent.
+    ///
+    /// Keyed by **root** and not by seat, unlike the discard above. A branch is a
+    /// fact about a repository and the menu that offers this can be raised in a
+    /// graph — which is a document keyed by root and belongs to no column — so a
+    /// request naming a seat would be a request that could not be made from half
+    /// the places that make it.
+    GitDeleteBranch {
+        root: std::path::PathBuf,
+        name: String,
+    },
+    /// Deleting a tag from the graph's own pill (v2 ④) — `git tag -d`.
+    GitDeleteTag {
+        root: std::path::PathBuf,
+        name: String,
+    },
 }
 
 impl GateRequest {
@@ -1051,6 +1094,23 @@ impl GateRequest {
             Self::GitDiscard {
                 untracked: true, ..
             } => GATE_GIT_DELETE_TITLE,
+            Self::GitDeleteBranch { .. } => GATE_GIT_DELETE_BRANCH_TITLE,
+            Self::GitDeleteTag { .. } => GATE_GIT_DELETE_TAG_TITLE,
+        }
+    }
+
+    /// The word on the button that goes through with it.
+    ///
+    /// Carried on the request for [`Self::title`]'s reason: the gate is one
+    /// machine asking several questions now, and the verb the reader pressed to
+    /// get here is part of the question.
+    #[must_use]
+    pub fn answer_text(&self) -> &'static str {
+        match self {
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut | Self::GitDiscard { .. } => {
+                GATE_DISCARD_TEXT
+            }
+            Self::GitDeleteBranch { .. } | Self::GitDeleteTag { .. } => GATE_DELETE_TEXT,
         }
     }
 
@@ -1074,6 +1134,19 @@ impl GateRequest {
                 untracked: true, ..
             } => format!(
                 "{} is deleted. git has no copy of it, so this cannot be undone.",
+                names.join(", ")
+            ),
+            // **Short and honest** (ticket wording, v2 ④). It says what the
+            // command is going to be — `-d` — without saying the word, because
+            // "git will refuse if it is not merged" is what `-d` *means* and is
+            // the one thing a reader needs in order to press the button without
+            // being surprised by what comes back.
+            Self::GitDeleteBranch { .. } => format!(
+                "Delete branch {}? git will refuse if it is not merged.",
+                names.join(", ")
+            ),
+            Self::GitDeleteTag { .. } => format!(
+                "Delete tag {}? The commit it names stays where it is.",
                 names.join(", ")
             ),
         }
@@ -1133,6 +1206,13 @@ pub struct GateContent {
     /// [`GateRequest::message`], already broken to lines that fit
     /// [`content_width`].
     pub message_lines: Vec<String>,
+    /// The word on the destructive button — [`GateRequest::answer_text`].
+    ///
+    /// Beside its width rather than derived from it, because the two travel
+    /// together: what the button says and how wide the box has to be are one
+    /// measurement made once, and a layout that carried only the number would be
+    /// a layout the painter had to guess the word for.
+    pub discard_text: &'static str,
     pub cancel_text_width: f32,
     pub discard_text_width: f32,
 }
@@ -1148,6 +1228,9 @@ pub struct GateLayout {
     message: Vec<(String, [f32; 4])>,
     cancel: [f32; 4],
     discard: [f32; 4],
+    /// The words in [`Self::discard`]'s box, carried for [`Self::title_text`]'s
+    /// reason.
+    discard_text: &'static str,
 }
 
 /// Where every part of the gate lands in a window this size.
@@ -1233,6 +1316,7 @@ pub fn gate_layout(
         message,
         cancel,
         discard,
+        discard_text: content.discard_text,
     }
 }
 
@@ -1328,7 +1412,7 @@ pub fn gate_build(
         &mut quads,
         &mut labels,
         layout.discard,
-        GATE_DISCARD_TEXT,
+        layout.discard_text,
         false,
         hover == Some(GateTarget::Discard),
         scale,
@@ -1391,6 +1475,7 @@ mod tests {
         let content = GateContent {
             title: GATE_TITLE_TEXT,
             message_lines: vec!["Discard unsaved changes to a.txt?".to_owned()],
+            discard_text: GATE_DISCARD_TEXT,
             cancel_text_width: 40.0,
             discard_text_width: 48.0,
         };
@@ -2322,6 +2407,93 @@ in the folders you left them, as new shells — the output is not ours to keep."
             brightened([0xf5, 0x00, 0x80], 1.07),
             [0xff, 0x00, 0x89],
             "and it clamps at white rather than wrapping"
+        );
+    }
+
+    /// PIN (v2 ④) — **the two ref deletions go through this gate**, and the gate
+    /// says what it is about in the words of the thing it is about.
+    ///
+    /// Three facts, and each of them is a way a confirmation goes wrong:
+    /// ① the title names the *kind* of thing, so a reader who reached the dialog
+    ///    by accident can tell a branch from a file at a glance;
+    /// ② the sentence names the thing itself and says what git will do — `-d`
+    ///    refuses an unmerged branch, and a gate that hid that would be
+    ///    promising an outcome it does not control;
+    /// ③ the button carries the row's own verb, because a dialog headed "Delete
+    ///    this branch?" whose only other button says `Discard` is two words for
+    ///    one act.
+    ///
+    /// MUTATION: answer `GATE_DISCARD_TEXT` for either new request and ③ goes
+    /// red; drop the "will refuse" clause and ② does.
+    #[test]
+    fn a_ref_deletion_asks_before_it_happens_and_says_what_git_will_do() {
+        let root = std::path::PathBuf::from(r"D:\repo");
+        let branch = GateRequest::GitDeleteBranch {
+            root: root.clone(),
+            name: "goner".to_owned(),
+        };
+        let tag = GateRequest::GitDeleteTag {
+            root,
+            name: "v0.9".to_owned(),
+        };
+        assert_eq!(branch.title(), GATE_GIT_DELETE_BRANCH_TITLE);
+        assert_eq!(tag.title(), GATE_GIT_DELETE_TAG_TITLE);
+        let names = vec!["goner".to_owned()];
+        let sentence = branch.message(&names);
+        assert!(sentence.contains("goner"), "by name, always: {sentence}");
+        assert!(
+            sentence.contains("not merged"),
+            "and it says what -d does: {sentence}"
+        );
+        assert!(tag.message(&["v0.9".to_owned()]).contains("v0.9"));
+        assert_eq!(branch.answer_text(), GATE_DELETE_TEXT);
+        assert_eq!(tag.answer_text(), GATE_DELETE_TEXT);
+        assert_eq!(
+            GateRequest::Shut.answer_text(),
+            GATE_DISCARD_TEXT,
+            "and the three the gate was built for are unchanged"
+        );
+        assert_eq!(
+            GateRequest::GitDiscard {
+                seat: bt_layout::SeatId(1),
+                path: "a.txt".to_owned(),
+                untracked: false,
+            }
+            .answer_text(),
+            GATE_DISCARD_TEXT
+        );
+        // **Enter still changes nothing**, whichever question is being asked —
+        // the one rule a gate may never get wrong.
+        assert_eq!(GATE_FOCUSED_ANSWER, GateAnswer::Cancel);
+
+        // And the word travels into the layout, so the button that appears is
+        // the button the request asked for.
+        let content = GateContent {
+            title: branch.title(),
+            message_lines: vec![sentence],
+            discard_text: branch.answer_text(),
+            cancel_text_width: 40.0,
+            discard_text_width: 44.0,
+        };
+        let layout = gate_layout(&content, SURFACE.0, SURFACE.1, 1.0);
+        let layer = gate_build(&layout, SURFACE, None)
+            .into_iter()
+            .next()
+            .expect("the gate draws one layer");
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == GATE_DELETE_TEXT),
+            "the button says Delete: {:?}",
+            layer.labels.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        assert!(
+            layer
+                .labels
+                .iter()
+                .all(|label| label.text != GATE_DISCARD_TEXT),
+            "and never Discard beside it"
         );
     }
 }

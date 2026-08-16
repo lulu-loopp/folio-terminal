@@ -2728,6 +2728,822 @@ pub fn file_menu_build(
     }]
 }
 
+// ── the git context menus (v2 ④) ────────────────────────────────────────────
+//
+// **One menu machine, and what it offers is decided by what was pressed.**
+// There are six things in this product a right press can land on that have a
+// repository verb attached — a commit, a local branch, a remote-tracking
+// branch, a tag, a changed file, and the working tree's own row — and they live
+// in two different surfaces (the Git panel's column and the graph document). A
+// menu per surface would be two lists of the same verbs drifting apart; a menu
+// per row type would be six. So there is one [`GitMenuTarget`], one list of
+// [`GitMenuRow`]s, and one function that says which rows a target offers.
+//
+// **The boundary is the ruling, and it is a boundary of verbs.** Read and
+// navigate freely; write only what one command undoes. Nothing here merges,
+// rebases, resets, cherry-picks, reverts, pushes, pulls, fetches, or reaches for
+// `-D` or `--force` — see [`crate::git::GIT_NEVER_WORDS`], which is that
+// sentence written as a test over every command this window can build.
+//
+// **The rule under the rule**: every menu that has both is split by one
+// separator into *what this does to the repository* above and *what this tells
+// you about it* below. A reader who has learned that once has learned it in all
+// six menus, and it is why the separator's position is computed from the list
+// rather than hand-placed per target.
+
+/// What a right press landed on.
+///
+/// Self-contained — every variant carries the words its menu needs — for
+/// [`crate::git_panel::GitRow`]'s own reason: a target that indexed into a list
+/// the runtime also has to hold is a target that can disagree with it about
+/// which row the menu is about, and the gap between raising a menu and pressing
+/// one of its rows is exactly where a repository re-read lands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitMenuTarget {
+    /// A commit row — the graph's, or the panel's own COMMITS list.
+    Commit {
+        /// The whole forty characters: what a `git branch <name> <at>` is given,
+        /// and what goes on the clipboard.
+        hash: String,
+        /// git's abbreviation — what the card says out loud.
+        short: String,
+        subject: String,
+        /// Whether the surface this row is on has D6's compare mode at all.
+        ///
+        /// **The graph has it and the panel does not**, and that is a ruling
+        /// rather than a gap: compare mode is two rows lit, a block between them
+        /// and a file list under it, and a 240-pixel column has none of that
+        /// furniture. Offering the verb there would be offering a mode the
+        /// surface cannot draw.
+        can_compare: bool,
+        /// Whether some *other* row is open to be the near end of a comparison
+        /// (D6). Without one there is nothing for `Compare with selected` to
+        /// compare against, so the row is not offered rather than offered and
+        /// silent.
+        compare_ready: bool,
+    },
+    /// A local branch — a panel BRANCHES row, or a filled pill in the graph.
+    LocalBranch {
+        name: String,
+        /// Whether `HEAD` is on it. It decides two rows' availability and
+        /// nothing else: you cannot check out where you already are, and git
+        /// will not delete the branch you are standing on.
+        current: bool,
+    },
+    /// A remote-tracking branch — a REMOTES row, or a hollow pill.
+    ///
+    /// `name` is git's own spelling with the remote on the front
+    /// (`origin/main`), because that is what `--track` is handed.
+    Remote { name: String },
+    /// A tag pill in the graph.
+    Tag { name: String },
+    /// A changed file, in whichever of the three groups its row stands under.
+    Change {
+        path: String,
+        group: crate::git::GitGroup,
+        /// Whether git has ever seen this file — the difference between a
+        /// discard that restores and one that deletes.
+        untracked: bool,
+        /// Where a rename came from, when this row is one — what the diff
+        /// `Open diff` asks for needs in order to *be* a rename (see
+        /// [`crate::git::GitQuestion::Diff::renamed_from`]).
+        renamed_from: Option<String>,
+    },
+    /// The graph's **Uncommitted Changes** row (V5).
+    ///
+    /// The one target whose menu can be empty, and the emptiness is the ruling:
+    /// with no commit open there is nothing to compare the working tree against,
+    /// and every other verb on this list is about a *name* the working tree does
+    /// not have. A menu with one greyed row in it would be a menu that opened in
+    /// order to say nothing, so the press does nothing instead.
+    Uncommitted { compare_ready: bool },
+}
+
+/// One row of a git context menu.
+///
+/// A single flat list across all six targets rather than an enum per target,
+/// because the runtime's dispatch is one `match` and a row that means the same
+/// thing in two menus should be the same value in both: `Copy name` off a branch
+/// and off a tag put a name on the clipboard and raise the same card, and two
+/// variants for that would be two code paths to keep in step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitMenuRow {
+    /// `git checkout` — a branch by name, a commit or a tag detached.
+    Checkout,
+    /// The prompt that ends in `git branch <name> <hash>`.
+    CreateBranchHere,
+    /// The prompt that ends in `git tag <name> <hash>` — lightweight.
+    CreateTagHere,
+    /// The prompt that ends in `git branch -m <old> <new>`.
+    RenameBranch,
+    /// `git branch -d` — behind the gate, and never `-D`.
+    DeleteBranch,
+    /// `git tag -d` — behind the gate.
+    DeleteTag,
+    /// `git checkout -b <local> --track <remote>` (M10), or a plain checkout
+    /// when the local already exists.
+    CheckoutTracking,
+    /// `git add`.
+    Stage,
+    /// `git restore --staged`.
+    Unstage,
+    /// `git restore --worktree`, or `git clean -f` — behind the gate.
+    Discard,
+    /// Put this file's diff on the preview seat, exactly as pressing the row
+    /// does.
+    OpenDiff,
+    /// Hand the file to Explorer with it selected.
+    RevealInExplorer,
+    CopyPath,
+    CopyHash,
+    CopySubject,
+    CopyName,
+    /// Enter D6's compare mode with this row as the far end.
+    CompareWithSelected,
+    /// D6 with `b: None` — this commit against what is on disk.
+    CompareWithWorkingTree,
+}
+
+pub const GIT_MENU_CHECKOUT_TEXT: &str = "Checkout";
+pub const GIT_MENU_CREATE_BRANCH_TEXT: &str = "Create branch here…";
+pub const GIT_MENU_CREATE_TAG_TEXT: &str = "Add tag here…";
+pub const GIT_MENU_RENAME_BRANCH_TEXT: &str = "Rename…";
+pub const GIT_MENU_DELETE_BRANCH_TEXT: &str = "Delete";
+pub const GIT_MENU_DELETE_TAG_TEXT: &str = "Delete tag";
+pub const GIT_MENU_CHECKOUT_TRACKING_TEXT: &str = "Checkout as local branch";
+pub const GIT_MENU_STAGE_TEXT: &str = "Stage";
+pub const GIT_MENU_UNSTAGE_TEXT: &str = "Unstage";
+pub const GIT_MENU_DISCARD_TEXT: &str = "Discard";
+pub const GIT_MENU_OPEN_DIFF_TEXT: &str = "Open diff";
+pub const GIT_MENU_REVEAL_TEXT: &str = "Reveal in Explorer";
+pub const GIT_MENU_COPY_PATH_TEXT: &str = "Copy path";
+pub const GIT_MENU_COPY_HASH_TEXT: &str = "Copy hash";
+pub const GIT_MENU_COPY_SUBJECT_TEXT: &str = "Copy subject";
+pub const GIT_MENU_COPY_NAME_TEXT: &str = "Copy name";
+pub const GIT_MENU_COMPARE_SELECTED_TEXT: &str = "Compare with selected";
+pub const GIT_MENU_COMPARE_WORKING_TEXT: &str = "Compare with working tree";
+
+impl GitMenuRow {
+    /// What the row says.
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Checkout => GIT_MENU_CHECKOUT_TEXT,
+            Self::CreateBranchHere => GIT_MENU_CREATE_BRANCH_TEXT,
+            Self::CreateTagHere => GIT_MENU_CREATE_TAG_TEXT,
+            Self::RenameBranch => GIT_MENU_RENAME_BRANCH_TEXT,
+            Self::DeleteBranch => GIT_MENU_DELETE_BRANCH_TEXT,
+            Self::DeleteTag => GIT_MENU_DELETE_TAG_TEXT,
+            Self::CheckoutTracking => GIT_MENU_CHECKOUT_TRACKING_TEXT,
+            Self::Stage => GIT_MENU_STAGE_TEXT,
+            Self::Unstage => GIT_MENU_UNSTAGE_TEXT,
+            Self::Discard => GIT_MENU_DISCARD_TEXT,
+            Self::OpenDiff => GIT_MENU_OPEN_DIFF_TEXT,
+            Self::RevealInExplorer => GIT_MENU_REVEAL_TEXT,
+            Self::CopyPath => GIT_MENU_COPY_PATH_TEXT,
+            Self::CopyHash => GIT_MENU_COPY_HASH_TEXT,
+            Self::CopySubject => GIT_MENU_COPY_SUBJECT_TEXT,
+            Self::CopyName => GIT_MENU_COPY_NAME_TEXT,
+            Self::CompareWithSelected => GIT_MENU_COMPARE_SELECTED_TEXT,
+            Self::CompareWithWorkingTree => GIT_MENU_COMPARE_WORKING_TEXT,
+        }
+    }
+
+    /// Whether this row *writes* to the repository, which is what the separator
+    /// divides on.
+    ///
+    /// A property of the row rather than a position in a list, so the rule —
+    /// verbs above the rule, readings below it — is stated once and every menu
+    /// obeys it by construction. `Open diff` and the two compares are readings:
+    /// they put a document on a seat and leave the repository exactly as they
+    /// found it.
+    #[must_use]
+    pub fn writes(self) -> bool {
+        matches!(
+            self,
+            Self::Checkout
+                | Self::CreateBranchHere
+                | Self::CreateTagHere
+                | Self::RenameBranch
+                | Self::DeleteBranch
+                | Self::DeleteTag
+                | Self::CheckoutTracking
+                | Self::Stage
+                | Self::Unstage
+                | Self::Discard
+        )
+    }
+
+    /// Which prompt this row opens, when it opens one.
+    ///
+    /// The three rows whose name ends in `…` and no others, which is the
+    /// platform convention the file menu's `Browse…` already keeps: the ellipsis
+    /// is a promise that pressing this asks you again before anything happens.
+    #[must_use]
+    pub fn prompt(self) -> Option<GitPromptKind> {
+        match self {
+            Self::CreateBranchHere => Some(GitPromptKind::CreateBranch),
+            Self::CreateTagHere => Some(GitPromptKind::CreateTag),
+            Self::RenameBranch => Some(GitPromptKind::RenameBranch),
+            _ => None,
+        }
+    }
+
+    /// The mark in the row's 14-pixel column.
+    ///
+    /// **`Rename…` has none, and that is a choice rather than an oversight.**
+    /// The house's mark set is cut from geometry and has no pencil in it; the
+    /// nearest thing to one would be a mark that means something else, and a
+    /// wrong picture is read faster than a missing one. The row's own name, with
+    /// its ellipsis, already says what it does.
+    #[must_use]
+    fn mark(self) -> Option<ChromeMark> {
+        match self {
+            Self::Checkout | Self::CheckoutTracking => Some(ChromeMark::GitBranch),
+            Self::CreateBranchHere | Self::Stage => Some(ChromeMark::Plus),
+            Self::CreateTagHere => Some(ChromeMark::Tag),
+            Self::RenameBranch => None,
+            Self::DeleteBranch | Self::DeleteTag | Self::Discard => Some(ChromeMark::PaneClose),
+            Self::Unstage => Some(ChromeMark::Minus),
+            Self::OpenDiff => Some(ChromeMark::File),
+            Self::RevealInExplorer => Some(ChromeMark::FolderOpen),
+            Self::CopyPath | Self::CopyHash | Self::CopySubject | Self::CopyName => {
+                Some(ChromeMark::Copy)
+            }
+            // A comparison is two things stood beside each other, which is what
+            // this mark draws.
+            Self::CompareWithSelected | Self::CompareWithWorkingTree => Some(ChromeMark::Split),
+        }
+    }
+}
+
+/// Which of the three named prompts is open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitPromptKind {
+    CreateBranch,
+    CreateTag,
+    RenameBranch,
+}
+
+impl GitPromptKind {
+    /// The line over the field — **what is being named, and where.**
+    ///
+    /// It is here rather than at the call site because it is part of the menu's
+    /// copy, and copy that lived at the call site would be copy that could differ
+    /// between the graph and the panel raising the same prompt.
+    #[must_use]
+    pub fn caption(self, subject: &str) -> String {
+        match self {
+            Self::CreateBranch => format!("New branch at {subject}"),
+            Self::CreateTag => format!("New tag at {subject}"),
+            Self::RenameBranch => format!("Rename {subject}"),
+        }
+    }
+
+    /// What the empty field says it wants.
+    #[must_use]
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::CreateBranch => "Branch name",
+            Self::CreateTag => "Tag name",
+            Self::RenameBranch => "New name",
+        }
+    }
+}
+
+/// The rows one target offers, and where the rule falls.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitMenu {
+    pub rows: Vec<GitMenuRow>,
+    /// The index the separator is drawn **under**, when the menu has both kinds
+    /// of row. Derived from [`GitMenuRow::writes`] rather than written down per
+    /// target, so the rule cannot be broken by adding a row in the wrong place.
+    pub separator_after: Option<usize>,
+}
+
+/// What this target's menu holds.
+///
+/// **Empty means "do not open"**, and exactly one target can answer that way —
+/// see [`GitMenuTarget::Uncommitted`].
+#[must_use]
+pub fn git_menu(target: &GitMenuTarget) -> GitMenu {
+    let rows: Vec<GitMenuRow> = match target {
+        GitMenuTarget::Commit {
+            can_compare,
+            compare_ready,
+            ..
+        } => {
+            let mut rows = vec![
+                GitMenuRow::Checkout,
+                GitMenuRow::CreateBranchHere,
+                GitMenuRow::CreateTagHere,
+                GitMenuRow::CopyHash,
+                GitMenuRow::CopySubject,
+            ];
+            if *can_compare && *compare_ready {
+                rows.push(GitMenuRow::CompareWithSelected);
+            }
+            if *can_compare {
+                rows.push(GitMenuRow::CompareWithWorkingTree);
+            }
+            rows
+        }
+        GitMenuTarget::LocalBranch { .. } => vec![
+            GitMenuRow::Checkout,
+            GitMenuRow::RenameBranch,
+            GitMenuRow::DeleteBranch,
+            GitMenuRow::CopyName,
+        ],
+        // **Two rows and no more** (M10). No fetch, no pull, no
+        // delete-the-remote-branch: each of those talks to another machine or
+        // changes one, and the ruling that opened this slice puts all three
+        // outside it.
+        GitMenuTarget::Remote { .. } => vec![GitMenuRow::CheckoutTracking, GitMenuRow::CopyName],
+        GitMenuTarget::Tag { .. } => vec![
+            GitMenuRow::Checkout,
+            GitMenuRow::DeleteTag,
+            GitMenuRow::CopyName,
+        ],
+        GitMenuTarget::Change { group, .. } => vec![
+            // **Whichever applies**, decided by the group the row stands under
+            // and not by the file's own state: a file that is in both STAGED and
+            // CHANGES has a row in each, and each row means the thing its
+            // heading says.
+            if *group == crate::git::GitGroup::Staged {
+                GitMenuRow::Unstage
+            } else {
+                GitMenuRow::Stage
+            },
+            GitMenuRow::Discard,
+            GitMenuRow::OpenDiff,
+            GitMenuRow::RevealInExplorer,
+            GitMenuRow::CopyPath,
+        ],
+        GitMenuTarget::Uncommitted { compare_ready } => {
+            if *compare_ready {
+                vec![GitMenuRow::CompareWithSelected]
+            } else {
+                Vec::new()
+            }
+        }
+    };
+    // The rule falls where the writes stop. A menu that is all writes or all
+    // readings gets none, which is what makes the remote's two-row menu and the
+    // working tree's one-row menu look like the small things they are.
+    let separator_after = rows
+        .iter()
+        .position(|row| !row.writes())
+        .filter(|at| *at > 0 && *at < rows.len())
+        .map(|at| at - 1);
+    GitMenu {
+        rows,
+        separator_after,
+    }
+}
+
+/// Whether a row can do what it says, on this target.
+///
+/// The two that cannot are both about the branch you are standing on, and both
+/// are drawn rather than hidden: a menu whose rows move depending on where
+/// `HEAD` is would be a menu you cannot learn the shape of. `Checkout` is
+/// pointless there (you are already on it) and `Delete` is impossible (git
+/// refuses to delete a checked-out branch), so both are shown greyed — the same
+/// answer the profile picker gives a shell that is not installed.
+#[must_use]
+pub fn git_menu_row_available(row: GitMenuRow, target: &GitMenuTarget) -> bool {
+    match target {
+        GitMenuTarget::LocalBranch { current: true, .. } => {
+            !matches!(row, GitMenuRow::Checkout | GitMenuRow::DeleteBranch)
+        }
+        _ => true,
+    }
+}
+
+/// The row a keyboard step lands on, **skipping the ones that answer nothing**.
+///
+/// Clamped rather than cyclic, which is [`FileMenuRow::step`]'s ruling and the
+/// tree's: one window should not hold two ideas of what the bottom of a list
+/// does. From nowhere, a step forwards offers the first available row and a step
+/// backwards the last. `None` when nothing in the menu is available at all,
+/// which no target this slice builds can produce but is the honest answer rather
+/// than a panic.
+#[must_use]
+pub fn git_menu_step(
+    rows: &[GitMenuRow],
+    target: &GitMenuTarget,
+    current: Option<GitMenuRow>,
+    forwards: bool,
+) -> Option<GitMenuRow> {
+    let walkable: Vec<GitMenuRow> = rows
+        .iter()
+        .copied()
+        .filter(|row| git_menu_row_available(*row, target))
+        .collect();
+    if walkable.is_empty() {
+        return None;
+    }
+    let Some(at) = current.and_then(|row| walkable.iter().position(|found| *found == row)) else {
+        return Some(if forwards {
+            walkable[0]
+        } else {
+            walkable[walkable.len() - 1]
+        });
+    };
+    let next = if forwards {
+        (at + 1).min(walkable.len() - 1)
+    } else {
+        at.saturating_sub(1)
+    };
+    Some(walkable[next])
+}
+
+/// The prompt as it stands this frame.
+#[derive(Clone, Copy, Debug)]
+pub struct GitPromptLook<'a> {
+    pub kind: GitPromptKind,
+    /// [`GitPromptKind::caption`]'s answer, built by the caller because the
+    /// subject is the caller's.
+    pub caption: &'a str,
+    /// What is in the field, composition included — the whole line as drawn.
+    pub text: &'a str,
+    /// The part before the caret, which is what the caret's own x is measured
+    /// from.
+    pub before_caret: &'a str,
+    /// Drawn *at* the caret and pushing it along (T4's rule, kept here so a
+    /// composition in a prompt behaves as one in the search field does).
+    pub preedit: &'a str,
+    /// The red line under the field, when the name as typed is one git would
+    /// refuse. **Not a card** (ticket ruling): a name being wrong is a fact about
+    /// the field you are typing into, and a toast at the corner of the window
+    /// would be the answer arriving somewhere other than the question.
+    pub fault: Option<crate::git::RefNameFault>,
+}
+
+/// Everything the menu needs to lay itself out and draw.
+#[derive(Clone, Copy, Debug)]
+pub struct GitMenuLook<'a> {
+    pub target: &'a GitMenuTarget,
+    pub hover: Option<GitMenuRow>,
+    /// When this is set the menu **is** the prompt: the rows are gone and the
+    /// field stands in their place.
+    ///
+    /// The ticket's own shape, and the reason it is one popup rather than a
+    /// popup with a dialog on top of it: what you are naming is the thing you
+    /// right-clicked, the menu is already anchored to it, and a second surface
+    /// would put the question somewhere other than where it was asked.
+    pub prompt: Option<GitPromptLook<'a>>,
+}
+
+/// One laid-out row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GitMenuItem {
+    pub row: GitMenuRow,
+    pub rect: [f32; 4],
+    pub available: bool,
+}
+
+/// Where the prompt's three parts stand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GitPromptRects {
+    pub caption: [f32; 4],
+    pub field: [f32; 4],
+    /// `None` when the name as typed is fine — the menu is one line shorter, and
+    /// grows by that line the moment it is not.
+    pub hint: Option<[f32; 4]>,
+    /// Where the caret stands, measured from the text's own left edge.
+    pub caret_x: f32,
+}
+
+/// Every rectangle a git context menu draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitMenuLayout {
+    scale: f32,
+    frame: [f32; 4],
+    items: Vec<GitMenuItem>,
+    separator: Option<[f32; 4]>,
+    prompt: Option<GitPromptRects>,
+}
+
+/// `.root-menu`'s floor, which is this menu's too: every row here is a verb and
+/// a noun, and the widest of them (`Compare with working tree`) is measured
+/// anyway — the floor only stops the two-row menus from looking like tooltips.
+const GIT_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 190.0;
+/// The prompt's own floor. Wider than the rows', because a field you type a name
+/// into that is exactly as wide as the word `Rename…` is a field you cannot see
+/// what you typed in.
+const GIT_PROMPT_MIN_WIDTH_LOGICAL_PX: f32 = 230.0;
+const GIT_PROMPT_FIELD_HEIGHT_LOGICAL_PX: f32 = 26.0;
+const GIT_PROMPT_FIELD_RADIUS_LOGICAL_PX: f32 = 5.0;
+const GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX: f32 = 8.0;
+const GIT_PROMPT_FONT_LOGICAL_PX: f32 = 12.5;
+const GIT_PROMPT_CAPTION_LINE_LOGICAL_PX: f32 = 14.0;
+const GIT_PROMPT_HINT_LINE_LOGICAL_PX: f32 = 14.0;
+const GIT_PROMPT_GAP_LOGICAL_PX: f32 = 5.0;
+/// The window's own one-pixel bar, at the search field's width.
+const GIT_PROMPT_CARET_LOGICAL_PX: f32 = 1.5;
+const GIT_PROMPT_CARET_INSET_LOGICAL_PX: f32 = 5.0;
+
+/// Lay the menu out under the point it was raised at.
+///
+/// **A point, not a widget** — [`file_menu_layout`]'s ruling, and doubly true
+/// here: the row this menu is about can be scrolled away, paged past or replaced
+/// by a repository re-read while the menu is up, and a menu that re-found its
+/// anchor every frame would follow it off the screen. Both axes are clamped into
+/// the window for the same reason that one clamps both: a row at the bottom of a
+/// tall graph is exactly where a menu with eight rows in it would otherwise hang
+/// off the edge.
+#[must_use]
+pub fn git_menu_layout(
+    point: [f32; 2],
+    surface: (f32, f32),
+    scale: f32,
+    look: &GitMenuLook<'_>,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> GitMenuLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let padding = px(MENU_PADDING_LOGICAL_PX);
+    let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    let separator_block = 2.0 * separator_margin + separator_thickness;
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    let caption_line = px(GIT_PROMPT_CAPTION_LINE_LOGICAL_PX).round();
+    let field_height = px(GIT_PROMPT_FIELD_HEIGHT_LOGICAL_PX).round();
+    let prompt_gap = px(GIT_PROMPT_GAP_LOGICAL_PX).round();
+    let hint_line = px(GIT_PROMPT_HINT_LINE_LOGICAL_PX).round();
+
+    let menu = git_menu(look.target);
+    let (content, height) = if let Some(prompt) = &look.prompt {
+        let widest = measure(prompt.caption, px(HINT_FONT_LOGICAL_PX))
+            .max(measure(prompt.text, px(GIT_PROMPT_FONT_LOGICAL_PX)))
+            .max(prompt.fault.map_or(0.0, |fault| {
+                measure(fault.sentence(), px(HINT_FONT_LOGICAL_PX))
+            }))
+            .max(px(GIT_PROMPT_MIN_WIDTH_LOGICAL_PX) - chrome);
+        let height = 2.0f32.mul_add(
+            border + padding,
+            caption_line
+                + prompt_gap
+                + field_height
+                + prompt.fault.map_or(0.0, |_| prompt_gap + hint_line),
+        );
+        (widest, height.round())
+    } else {
+        let row_width = |row: GitMenuRow, measure: &mut dyn FnMut(&str, f32) -> f32| {
+            px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                + px(ITEM_GAP_LOGICAL_PX)
+                + measure(row.text(), px(ITEM_FONT_LOGICAL_PX))
+        };
+        let content = menu
+            .rows
+            .iter()
+            .fold(px(GIT_MENU_MIN_WIDTH_LOGICAL_PX) - chrome, |wide, row| {
+                wide.max(row_width(*row, measure))
+            });
+        #[allow(clippy::cast_precision_loss)]
+        let rows_height = menu.rows.len() as f32 * item_height;
+        let height = 2.0f32.mul_add(
+            border + padding,
+            rows_height + menu.separator_after.map_or(0.0, |_| separator_block),
+        );
+        (content, height.round())
+    };
+    let width = (chrome + content).round();
+
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    let left = point[0].min(surface_width - width - edge).max(edge).round();
+    let top = point[1]
+        .min(surface_height - height - edge)
+        .max(edge)
+        .round();
+    let frame = [left, top, left + width, top + height];
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+
+    if let Some(prompt) = &look.prompt {
+        let caption = [content_left, cursor, content_right, cursor + caption_line];
+        cursor += caption_line + prompt_gap;
+        let field = [content_left, cursor, content_right, cursor + field_height];
+        cursor += field_height;
+        let hint = prompt.fault.map(|_| {
+            cursor += prompt_gap;
+            [content_left, cursor, content_right, cursor + hint_line]
+        });
+        return GitMenuLayout {
+            scale,
+            frame,
+            items: Vec::new(),
+            separator: None,
+            prompt: Some(GitPromptRects {
+                caption,
+                field,
+                hint,
+                // The caret stands after the text the reader has typed up to it
+                // **and after whatever they are composing**, which is where
+                // every field in this window puts it (T4).
+                caret_x: measure(
+                    &format!("{}{}", prompt.before_caret, prompt.preedit),
+                    px(GIT_PROMPT_FONT_LOGICAL_PX),
+                ),
+            }),
+        };
+    }
+
+    let mut items = Vec::with_capacity(menu.rows.len());
+    let mut separator = None;
+    for (at, row) in menu.rows.iter().enumerate() {
+        items.push(GitMenuItem {
+            row: *row,
+            rect: [content_left, cursor, content_right, cursor + item_height],
+            available: git_menu_row_available(*row, look.target),
+        });
+        cursor += item_height;
+        if menu.separator_after == Some(at) {
+            separator = Some([
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ]);
+            cursor += separator_block;
+        }
+    }
+    GitMenuLayout {
+        scale,
+        frame,
+        items,
+        separator,
+        prompt: None,
+    }
+}
+
+/// What a point is over, with the same three answers every other menu gives.
+///
+/// A row that cannot do what it says is **not** offered, which is [`hit`]'s own
+/// rule: the pointer falls through it onto the menu's body, so it neither lights
+/// nor answers a press.
+#[must_use]
+pub fn git_menu_hit(layout: &GitMenuLayout, x: f64, y: f64) -> Option<Option<GitMenuRow>> {
+    let (x, y) = (x as f32, y as f32);
+    for item in &layout.items {
+        if item.available && contains(item.rect, x, y) {
+            return Some(Some(item.row));
+        }
+    }
+    contains(layout.frame, x, y).then_some(None)
+}
+
+/// The menu as one overlay layer.
+#[must_use]
+pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+
+    if let (Some(rects), Some(prompt)) = (layout.prompt, look.prompt) {
+        labels.push(ChromeLabel {
+            text: prompt.caption.to_owned(),
+            rect: rects.caption,
+            font_size_px: px(HINT_FONT_LOGICAL_PX),
+            color: palette.menu_item_hint_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(rects.caption),
+        });
+        // The field's own ground is the row hover's fill — the quietest raised
+        // surface this menu has, and therefore the one that reads as "a box you
+        // type into" without inventing a colour the palette does not hold.
+        quads.extend(rounded_overlay_fill(
+            rects.field,
+            px(GIT_PROMPT_FIELD_RADIUS_LOGICAL_PX),
+            palette.menu_item_hover,
+            1.0,
+        ));
+        let text_left = rects.field[0] + px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
+        let text_right = rects.field[2] - px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
+        let typed = !prompt.text.is_empty();
+        let text_rect = [
+            text_left,
+            rects.field[1],
+            text_right.max(text_left),
+            rects.field[3],
+        ];
+        labels.push(ChromeLabel {
+            text: if typed {
+                prompt.text.to_owned()
+            } else {
+                prompt.kind.placeholder().to_owned()
+            },
+            rect: text_rect,
+            font_size_px: px(GIT_PROMPT_FONT_LOGICAL_PX),
+            // The placeholder is the field saying what it is for; typed text is
+            // the reader's. Two inks, for the search field's own reason — one
+            // ink and an empty field would read as a name nobody can delete.
+            color: if typed {
+                palette.menu_item_text
+            } else {
+                palette.menu_item_hint_text
+            },
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(text_rect),
+        });
+        let caret = px(GIT_PROMPT_CARET_LOGICAL_PX).round().max(1.0);
+        let inset = px(GIT_PROMPT_CARET_INSET_LOGICAL_PX).round();
+        let caret_x = (text_left + rects.caret_x).min(text_rect[2] - caret);
+        quads.push(OverlayQuad {
+            rect: [
+                caret_x,
+                rects.field[1] + inset,
+                caret_x + caret,
+                rects.field[3] - inset,
+            ],
+            color: palette.accent,
+            alpha: 1.0,
+        });
+        if let (Some(hint), Some(fault)) = (rects.hint, prompt.fault) {
+            labels.push(ChromeLabel {
+                text: fault.sentence().to_owned(),
+                rect: hint,
+                font_size_px: px(HINT_FONT_LOGICAL_PX),
+                color: palette.status_err,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: Some(hint),
+            });
+        }
+        return vec![OverlayLayer {
+            quads,
+            labels,
+            sprites,
+            ..Default::default()
+        }];
+    }
+
+    for item in &layout.items {
+        push_row(
+            &Row {
+                rect: item.rect,
+                mark: item.row.mark(),
+                name: item.row.text(),
+                hint: None,
+                hint_ink: None,
+                hovered: look.hover == Some(item.row) && item.available,
+                available: item.available,
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
+    }
+    if let Some(separator) = layout.separator {
+        quads.push(OverlayQuad {
+            rect: separator,
+            color: palette.menu_border,
+            alpha: separator_alpha(palette.menu_border),
+        });
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
 // ── the `⌄` open policy, shared by every chevron in the house ───────────────
 //
 // **User ruling, 2026-08-16.** There are two `⌄` in this window — the tab
@@ -8022,7 +8838,7 @@ mod tests {
             git_filter_menu_layout(anchor, (960.0, 600.0), 1.0, rows.clone(), &mut fake_measure);
         assert_eq!(layout.rows(), rows.as_slice());
         // It hangs from the button's own bottom edge, not from a pointer.
-        assert_eq!(layout.frame()[1], anchor[3]);
+        assert_eq!(layout.frame[1], anchor[3]);
         for (row, rect) in layout.rows().iter().zip(&layout.items) {
             let (x, y) = (
                 f64::from((rect[0] + rect[2]) / 2.0),
@@ -8033,8 +8849,8 @@ mod tests {
         assert_eq!(
             git_filter_menu_hit(
                 &layout,
-                f64::from(layout.frame()[0] + 2.0),
-                f64::from(layout.frame()[1] + 1.0)
+                f64::from(layout.frame[0] + 2.0),
+                f64::from(layout.frame[1] + 1.0)
             ),
             Some(None),
             "the border and padding swallow rather than fall through"
@@ -8042,8 +8858,8 @@ mod tests {
         assert_eq!(
             git_filter_menu_hit(
                 &layout,
-                f64::from(layout.frame()[0]) - 1.0,
-                f64::from(layout.frame()[1]) - 1.0
+                f64::from(layout.frame[0]) - 1.0,
+                f64::from(layout.frame[1]) - 1.0
             ),
             None
         );
@@ -8208,5 +9024,464 @@ mod tests {
             FileMenuRow::step(Some(FileMenuRow::InsertPath), false),
             FileMenuRow::CopyPath
         );
+    }
+
+    // ── v2 ④: the git context menus ────────────────────────────────────────
+
+    fn commit_target(can_compare: bool, compare_ready: bool) -> GitMenuTarget {
+        GitMenuTarget::Commit {
+            hash: "a1b2c3d4e5f6".to_owned(),
+            short: "a1b2c3d".to_owned(),
+            subject: "the row tells its whole story".to_owned(),
+            can_compare,
+            compare_ready,
+        }
+    }
+
+    fn change_target(group: crate::git::GitGroup) -> GitMenuTarget {
+        GitMenuTarget::Change {
+            path: "src/main.rs".to_owned(),
+            group,
+            untracked: group == crate::git::GitGroup::Untracked,
+            renamed_from: None,
+        }
+    }
+
+    /// PIN (v2 ④) — **each target offers the verbs its ruling allows, in order,
+    /// and nothing else.**
+    ///
+    /// This is the whole menu specification as a table. The two things it is
+    /// pointed at are the two ways a context menu goes wrong: a verb that
+    /// appears where it cannot work (a `Rename…` on a tag), and a verb that
+    /// quietly appears where the ruling says it may not (anything at all on a
+    /// remote beyond the two rows M10 allows).
+    ///
+    /// MUTATION: add a `Fetch` row to the remote's list and it goes red on the
+    /// vector; give the panel's commit a compare row and it goes red on the
+    /// `can_compare: false` case.
+    #[test]
+    fn each_git_menu_target_offers_the_verbs_its_ruling_allows() {
+        use GitMenuRow as R;
+        assert_eq!(
+            git_menu(&commit_target(true, true)).rows,
+            vec![
+                R::Checkout,
+                R::CreateBranchHere,
+                R::CreateTagHere,
+                R::CopyHash,
+                R::CopySubject,
+                R::CompareWithSelected,
+                R::CompareWithWorkingTree,
+            ]
+        );
+        assert_eq!(
+            git_menu(&commit_target(true, false)).rows,
+            vec![
+                R::Checkout,
+                R::CreateBranchHere,
+                R::CreateTagHere,
+                R::CopyHash,
+                R::CopySubject,
+                R::CompareWithWorkingTree,
+            ],
+            "with nothing open there is no near end, so the row is not offered at all"
+        );
+        assert_eq!(
+            git_menu(&commit_target(false, true)).rows,
+            vec![
+                R::Checkout,
+                R::CreateBranchHere,
+                R::CreateTagHere,
+                R::CopyHash,
+                R::CopySubject,
+            ],
+            "the panel has no compare mode to enter, so it offers neither comparison"
+        );
+        for current in [false, true] {
+            assert_eq!(
+                git_menu(&GitMenuTarget::LocalBranch {
+                    name: "main".to_owned(),
+                    current,
+                })
+                .rows,
+                vec![R::Checkout, R::RenameBranch, R::DeleteBranch, R::CopyName],
+                "the list does not move when HEAD does — only what is offered changes"
+            );
+        }
+        assert_eq!(
+            git_menu(&GitMenuTarget::Remote {
+                name: "origin/main".to_owned(),
+            })
+            .rows,
+            vec![R::CheckoutTracking, R::CopyName],
+            "M10: no fetch, no pull, no delete-the-remote-branch"
+        );
+        assert_eq!(
+            git_menu(&GitMenuTarget::Tag {
+                name: "v1.0".to_owned(),
+            })
+            .rows,
+            vec![R::Checkout, R::DeleteTag, R::CopyName]
+        );
+        assert_eq!(
+            git_menu(&change_target(crate::git::GitGroup::Staged)).rows,
+            vec![
+                R::Unstage,
+                R::Discard,
+                R::OpenDiff,
+                R::RevealInExplorer,
+                R::CopyPath,
+            ],
+            "a row under STAGED means the index, so the verb it offers is the index's"
+        );
+        for group in [
+            crate::git::GitGroup::Changes,
+            crate::git::GitGroup::Untracked,
+        ] {
+            assert_eq!(
+                git_menu(&change_target(group)).rows[0],
+                R::Stage,
+                "{group:?} is on the other side of the index"
+            );
+        }
+        assert_eq!(
+            git_menu(&GitMenuTarget::Uncommitted {
+                compare_ready: true,
+            })
+            .rows,
+            vec![R::CompareWithSelected]
+        );
+        assert!(
+            git_menu(&GitMenuTarget::Uncommitted {
+                compare_ready: false,
+            })
+            .rows
+            .is_empty(),
+            "with nothing to compare against the working tree's row raises no menu at all"
+        );
+    }
+
+    /// PIN (v2 ④) — **one rule falls between the verbs and the readings**, in
+    /// every menu that has both, and it is derived rather than placed.
+    ///
+    /// MUTATION: put `Copy hash` above `Add tag here…` in the commit's list and
+    /// the separator lands in the middle of the writes, which this catches — the
+    /// order and the rule are one fact.
+    #[test]
+    fn the_git_menus_rule_falls_where_the_writing_stops() {
+        for target in [
+            commit_target(true, true),
+            GitMenuTarget::LocalBranch {
+                name: "main".to_owned(),
+                current: false,
+            },
+            GitMenuTarget::Remote {
+                name: "origin/main".to_owned(),
+            },
+            GitMenuTarget::Tag {
+                name: "v1.0".to_owned(),
+            },
+            change_target(crate::git::GitGroup::Changes),
+        ] {
+            let menu = git_menu(&target);
+            let at = menu
+                .separator_after
+                .unwrap_or_else(|| panic!("{target:?} has both kinds of row"));
+            assert!(
+                menu.rows[..=at].iter().all(|row| row.writes()),
+                "{target:?}: everything above the rule changes the repository"
+            );
+            assert!(
+                menu.rows[at + 1..].iter().all(|row| !row.writes()),
+                "{target:?}: and everything below it only reads"
+            );
+        }
+        assert_eq!(
+            git_menu(&GitMenuTarget::Uncommitted {
+                compare_ready: true,
+            })
+            .separator_after,
+            None,
+            "a menu with one reading in it has nothing to divide"
+        );
+    }
+
+    /// PIN (v2 ④) — **the branch you are standing on offers neither a checkout
+    /// nor a delete**, and both are drawn rather than hidden.
+    ///
+    /// Drawn, because a menu whose rows move depending on where `HEAD` is is a
+    /// menu you cannot learn the shape of. Not offered, because one is pointless
+    /// and the other is a promise git will always break.
+    ///
+    /// MUTATION: return `true` for `DeleteBranch` on the current branch and the
+    /// menu starts offering a row whose only possible outcome is a red card.
+    #[test]
+    fn the_branch_you_are_standing_on_offers_neither_a_checkout_nor_a_delete() {
+        let current = GitMenuTarget::LocalBranch {
+            name: "main".to_owned(),
+            current: true,
+        };
+        let other = GitMenuTarget::LocalBranch {
+            name: "side".to_owned(),
+            current: false,
+        };
+        for row in git_menu(&current).rows {
+            let allowed = !matches!(row, GitMenuRow::Checkout | GitMenuRow::DeleteBranch);
+            assert_eq!(git_menu_row_available(row, &current), allowed, "{row:?}");
+            assert!(
+                git_menu_row_available(row, &other),
+                "{row:?} is available on every other branch"
+            );
+        }
+        // And a keyboard walk steps over the two, rather than landing on a row
+        // that answers nothing.
+        let rows = git_menu(&current).rows;
+        assert_eq!(
+            git_menu_step(&rows, &current, None, true),
+            Some(GitMenuRow::RenameBranch),
+            "the first row a walk can land on is the first one that works"
+        );
+        assert_eq!(
+            git_menu_step(&rows, &current, Some(GitMenuRow::RenameBranch), true),
+            Some(GitMenuRow::CopyName)
+        );
+        assert_eq!(
+            git_menu_step(&rows, &current, Some(GitMenuRow::CopyName), true),
+            Some(GitMenuRow::CopyName),
+            "and the bottom clamps, as every walk in this window does"
+        );
+        assert_eq!(
+            git_menu_step(&rows, &current, None, false),
+            Some(GitMenuRow::CopyName),
+            "from nowhere, a step back offers the last row"
+        );
+        assert_eq!(
+            git_menu_step(&rows, &other, None, true),
+            Some(GitMenuRow::Checkout),
+            "on any other branch the walk starts at the top"
+        );
+    }
+
+    /// PIN (v2 ④) — a press lands on the row it looks like, the body swallows,
+    /// **and a row that cannot do what it says answers nothing at all.**
+    #[test]
+    fn the_git_menu_answers_a_press_on_each_row_that_can_act() {
+        let target = GitMenuTarget::LocalBranch {
+            name: "main".to_owned(),
+            current: true,
+        };
+        let look = GitMenuLook {
+            target: &target,
+            hover: None,
+            prompt: None,
+        };
+        let layout = git_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            &look,
+            &mut fake_measure,
+        );
+        for item in &layout.items {
+            let (x, y) = (
+                f64::from((item.rect[0] + item.rect[2]) / 2.0),
+                f64::from((item.rect[1] + item.rect[3]) / 2.0),
+            );
+            assert_eq!(
+                git_menu_hit(&layout, x, y),
+                Some(if item.available { Some(item.row) } else { None }),
+                "{:?} is {}",
+                item.row,
+                if item.available {
+                    "offered"
+                } else {
+                    "drawn only"
+                }
+            );
+        }
+        assert_eq!(
+            git_menu_hit(&layout, f64::from(layout.frame[0] - 4.0), 200.0),
+            None,
+            "outside is nobody's"
+        );
+        // The rule is body: a press on the hairline commits no verb.
+        let separator = layout
+            .separator
+            .expect("a branch menu has both kinds of row");
+        assert_eq!(
+            git_menu_hit(
+                &layout,
+                f64::from((separator[0] + separator[2]) / 2.0),
+                f64::from((separator[1] + separator[3]) / 2.0),
+            ),
+            Some(None)
+        );
+    }
+
+    /// PIN (v2 ④) — a git menu raised in the corner is pulled whole back inside
+    /// the window, on both axes, and the row that would have fallen off still
+    /// answers.
+    ///
+    /// The file menu's own ruling, and it matters more here: this menu is raised
+    /// on the last row of a graph that fills a pane, which is exactly the corner.
+    #[test]
+    fn a_git_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
+        let surface = (960.0, 600.0);
+        let target = commit_target(true, true);
+        let look = GitMenuLook {
+            target: &target,
+            hover: None,
+            prompt: None,
+        };
+        let layout = git_menu_layout([955.0, 598.0], surface, 1.0, &look, &mut fake_measure);
+        assert!(layout.frame[2] <= surface.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(layout.frame[3] <= surface.1 - MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(layout.frame[0] >= MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(layout.frame[1] >= MENU_EDGE_MARGIN_LOGICAL_PX);
+        let last = *layout.items.last().expect("seven rows");
+        assert_eq!(last.row, GitMenuRow::CompareWithWorkingTree);
+        assert_eq!(
+            git_menu_hit(
+                &layout,
+                f64::from(last.rect[0] + 1.0),
+                f64::from((last.rect[1] + last.rect[3]) / 2.0),
+            ),
+            Some(Some(GitMenuRow::CompareWithWorkingTree))
+        );
+    }
+
+    /// PIN (v2 ④) — **the menu becomes the prompt**: the rows go, a captioned
+    /// field stands in their place, and a name git would refuse grows a red line
+    /// under it rather than a card somewhere else.
+    ///
+    /// MUTATION: keep the rows under the field and the menu answers presses on
+    /// verbs while a name is being typed — which is a popup with two keyboards.
+    #[test]
+    fn a_git_prompt_replaces_the_rows_and_grows_a_line_when_the_name_is_wrong() {
+        let target = commit_target(true, true);
+        let caption = GitPromptKind::CreateBranch.caption("a1b2c3d");
+        assert_eq!(caption, "New branch at a1b2c3d");
+        let clean = GitPromptLook {
+            kind: GitPromptKind::CreateBranch,
+            caption: &caption,
+            text: "feature",
+            before_caret: "feature",
+            preedit: "",
+            fault: None,
+        };
+        let look = GitMenuLook {
+            target: &target,
+            hover: None,
+            prompt: Some(clean),
+        };
+        let layout = git_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            &look,
+            &mut fake_measure,
+        );
+        assert!(
+            layout.items.is_empty(),
+            "the verbs are gone while the field is up"
+        );
+        let rects = layout.prompt.expect("the prompt is laid out");
+        assert!(rects.hint.is_none(), "a name git takes needs no line");
+        assert!(
+            rects.field[1] >= rects.caption[3],
+            "the caption stands over the field"
+        );
+        assert_eq!(
+            git_menu_hit(&layout, 310.0, f64::from(rects.field[1] + 2.0)),
+            Some(None),
+            "every press inside the prompt is the menu's own and commits nothing"
+        );
+
+        let bad = GitPromptLook {
+            fault: Some(crate::git::RefNameFault::Space),
+            text: "my branch",
+            before_caret: "my branch",
+            ..clean
+        };
+        let look = GitMenuLook {
+            target: &target,
+            hover: None,
+            prompt: Some(bad),
+        };
+        let taller = git_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            &look,
+            &mut fake_measure,
+        );
+        let rects = taller.prompt.expect("the prompt is laid out");
+        let hint = rects.hint.expect("a refused name says why");
+        assert!(hint[1] >= rects.field[3], "and it says so under the field");
+        assert!(
+            taller.frame[3] > layout.frame[3],
+            "the menu grows by exactly that line rather than covering the field"
+        );
+        let layer = one_layer(git_menu_build(&taller, &look));
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == crate::git::RefNameFault::Space.sentence()),
+            "and the line is drawn: {:?}",
+            layer.labels.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        assert!(
+            layer.labels.iter().any(|label| label.text == "my branch"),
+            "with what was typed still visible above it"
+        );
+    }
+
+    /// PIN (v2 ④) — the three rows that end in `…` are the three that ask again,
+    /// and no others.
+    ///
+    /// The ellipsis is a promise the platform's convention already makes; this
+    /// keeps the promise and the behaviour one fact.
+    #[test]
+    fn the_rows_that_ask_again_are_exactly_the_rows_whose_names_say_so() {
+        for row in [
+            GitMenuRow::Checkout,
+            GitMenuRow::CreateBranchHere,
+            GitMenuRow::CreateTagHere,
+            GitMenuRow::RenameBranch,
+            GitMenuRow::DeleteBranch,
+            GitMenuRow::DeleteTag,
+            GitMenuRow::CheckoutTracking,
+            GitMenuRow::Stage,
+            GitMenuRow::Unstage,
+            GitMenuRow::Discard,
+            GitMenuRow::OpenDiff,
+            GitMenuRow::RevealInExplorer,
+            GitMenuRow::CopyPath,
+            GitMenuRow::CopyHash,
+            GitMenuRow::CopySubject,
+            GitMenuRow::CopyName,
+            GitMenuRow::CompareWithSelected,
+            GitMenuRow::CompareWithWorkingTree,
+        ] {
+            assert_eq!(
+                row.prompt().is_some(),
+                row.text().ends_with('\u{2026}'),
+                "{row:?} says {:?}",
+                row.text()
+            );
+        }
+        assert_eq!(GitPromptKind::RenameBranch.caption("main"), "Rename main");
+        assert_eq!(
+            GitPromptKind::CreateTag.caption("a1b2c3d"),
+            "New tag at a1b2c3d"
+        );
+        for kind in [
+            GitPromptKind::CreateBranch,
+            GitPromptKind::CreateTag,
+            GitPromptKind::RenameBranch,
+        ] {
+            assert!(!kind.placeholder().is_empty());
+        }
     }
 }
