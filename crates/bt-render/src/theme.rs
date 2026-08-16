@@ -441,6 +441,50 @@ pub struct ChromePalette {
     pub preview_selection: [u8; 3],
     /// A quick edit's caret — the terminal's `--cursor`, for the same reason.
     pub preview_caret: [u8; 3],
+    // ── the highlight family: seven inks a preview may set source in ──────
+    //
+    // **Colour is a token, not a theme** (ticket #49, 2026-08-16). The preview
+    // asks `syntect` what *scope* every span of a source file is in and asks
+    // nothing else of it: syntect ships colour themes and this window uses none
+    // of them, because a library's idea of purple is not a member of this
+    // palette and a second colour authority is how a window stops looking like
+    // one window. What comes back is a scope name; what goes on the glass is
+    // one of the seven below.
+    //
+    // **Seven, and the eighth is the absence of one.** Anything the scope table
+    // does not name — an identifier, an operator syntect did not scope, plain
+    // prose in a fence — is drawn in the body's own ink, so the *default* state
+    // of a highlighted document is the un-highlighted one and the colour is
+    // only ever an addition. That is what "reading level" means here: a
+    // paragraph of code should read as a paragraph, with its keywords and its
+    // strings *findable*, not as a mosaic.
+    //
+    // **Two canvases, one set.** These inks stand on a preview body (`--termbg`)
+    // and inside a markdown fence (`--panel`), and the pin below holds every one
+    // of them to 4.5:1 — the text bar, because every one of them is text — on
+    // both, in both themes. That floor is why none of them *is* `--ink3`: over
+    // `--termbg` `--ink3` is 3.58:1 dark and 2.49:1 light, so the comment and
+    // the punctuation get their own named fields at the quietest ink that
+    // clears the bar rather than a re-use that would have been illegible.
+    // They still share one value with each other, so a later retune of "the
+    // quiet ink" is one number in each theme.
+    /// `keyword`, `storage` — a muted violet.
+    pub hl_keyword: [u8; 3],
+    /// `string`, `constant.character.escape` — a muted green.
+    pub hl_string: [u8; 3],
+    /// `comment` — the quiet ink, cooled a little off neutral so a comment
+    /// inside a fence is a *category* and not just a fainter body.
+    pub hl_comment: [u8; 3],
+    /// `constant.numeric`, `constant.language` — a muted amber.
+    pub hl_number: [u8; 3],
+    /// `entity.name.type`, `support.type`, `support.class` — a muted teal.
+    pub hl_type: [u8; 3],
+    /// `entity.name.function`, `support.function` — [`Self::accent`]'s own hue,
+    /// desaturated so a page of calls does not read as a page of links.
+    pub hl_function: [u8; 3],
+    /// `punctuation` — the same quiet ink [`Self::hl_comment`] wears, named
+    /// apart because braces and comments are two decisions.
+    pub hl_punct_muted: [u8; 3],
     // ── the file tree's rows, mixed over the one ground a files body has ──
     //
     // A files pane's body is `--termbg` and nothing else (B15/U11), so unlike
@@ -1052,6 +1096,22 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     preview_table_head_text: [0xe3, 0xe3, 0xe3],
     preview_selection: DEFAULT_SELECTION_BACKGROUND_RGB,
     preview_caret: DEFAULT_CURSOR_RGB,
+    // The highlight family, walked up from black in each hue until both this
+    // theme's canvases — `--termbg #1B1B1B` and a fence's `--panel #252525` —
+    // clear 4.5:1, and stopped at the first step that does. "As loud as the
+    // floor demands and not a step louder" is the whole rule; the pin below
+    // reads back 5.19/4.62 for the violet and its neighbours are within a
+    // tenth of that.
+    hl_keyword: [0xae, 0x75, 0xd7],
+    hl_string: [0x47, 0x9e, 0x6b],
+    hl_comment: [0x82, 0x8f, 0xa1],
+    hl_number: [0xba, 0x83, 0x36],
+    hl_type: [0x45, 0x98, 0xa8],
+    // The accent's hue, not the accent: `--accent #7A99FF` would clear the bar
+    // (6.42:1 here) but it is this window's word for *a link and a focus ring*,
+    // and a page of function calls painted in it reads as a page of links.
+    hl_function: [0x6e, 0x8a, 0xdd],
+    hl_punct_muted: [0x82, 0x8f, 0xa1],
     // The file tree's three grounds on `--termbg #1B1B1B`:
     //   `--hover`  white .055 → 27 + 228×.055 = 39.5
     //   `--active` white .09  → 27 + 228×.09  = 47.5
@@ -1263,6 +1323,17 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     preview_table_head_text: [0x37, 0x35, 0x2f],
     preview_selection: LIGHT_SELECTION_BACKGROUND_RGB,
     preview_caret: LIGHT_CURSOR_RGB,
+    // The same seven hues, walked *down* from white until `--termbg #FFFFFF`
+    // and a fence's `--panel #F7F7F5` both clear 4.5:1 — the mirror of the dark
+    // block's rule, and the reason these are not the dark values darkened: a
+    // hue that is quiet on ink is loud on paper at the same saturation.
+    hl_keyword: [0x91, 0x53, 0xbe],
+    hl_string: [0x20, 0x7e, 0x47],
+    hl_comment: [0x64, 0x71, 0x84],
+    hl_number: [0xa5, 0x5e, 0x18],
+    hl_type: [0x1b, 0x78, 0x98],
+    hl_function: [0x47, 0x6a, 0xd1],
+    hl_punct_muted: [0x64, 0x71, 0x84],
     // The file tree's three grounds on `--termbg #FFFFFF`. The inks here are
     // rgb(55,53,47), so each channel steps down by {200,202,208}×alpha:
     //   `--hover`  .055 → (244.0, 243.9, 243.6)
@@ -2626,6 +2697,67 @@ mod tests {
                     assert_ne!(lane, second, "lanes {index} and {other} are one colour");
                 }
             }
+        }
+    }
+
+    /// PIN (#49): the seven highlight inks are legible **as text** on both of
+    /// the two grounds a preview sets source on, in both themes.
+    ///
+    /// The floor here is **4.5:1** and not the lanes' 3:1, and the difference is
+    /// the difference between a stroke and a letter: a lane is a drawn object,
+    /// a keyword is something you read. Both grounds are checked because the
+    /// same seven inks serve a source-file body (`--termbg`) and a markdown
+    /// fence (`--panel`), which are two colours in both themes.
+    ///
+    /// The distinctness half matters as much as the floor: seven inks that a
+    /// reader cannot tell apart are one ink spent seven times. Comment and
+    /// punctuation are the one deliberate pair — they *are* one value, named
+    /// twice — so they are exempt from that half and from nothing else.
+    #[test]
+    fn the_seven_highlight_inks_clear_the_text_bar_on_both_preview_grounds() {
+        for (theme, palette, body, fence) in [
+            ("dark", DARK_CHROME, TERMBG_DARK, PANEL_DARK),
+            ("light", LIGHT_CHROME, TERMBG_LIGHT, PANEL_LIGHT),
+        ] {
+            let inks = [
+                ("hl_keyword", palette.hl_keyword),
+                ("hl_string", palette.hl_string),
+                ("hl_comment", palette.hl_comment),
+                ("hl_number", palette.hl_number),
+                ("hl_type", palette.hl_type),
+                ("hl_function", palette.hl_function),
+                ("hl_punct_muted", palette.hl_punct_muted),
+            ];
+            for (name, ink) in inks {
+                assert!(
+                    contrast(ink, body) >= 4.5,
+                    "{theme} {name} {ink:02x?} on the preview body: {:.2}:1",
+                    contrast(ink, body)
+                );
+                assert!(
+                    contrast(ink, fence) >= 4.5,
+                    "{theme} {name} {ink:02x?} inside a fence: {:.2}:1",
+                    contrast(ink, fence)
+                );
+            }
+            // The comment and the punctuation are one value on purpose; every
+            // other pair has to be two.
+            assert_eq!(
+                palette.hl_comment, palette.hl_punct_muted,
+                "{theme}: the quiet ink is one value under two names"
+            );
+            for (index, (name, ink)) in inks.iter().enumerate() {
+                for (other, second) in inks.iter().skip(index + 1) {
+                    if (*name == "hl_comment" && *other == "hl_punct_muted")
+                        || (*name == "hl_punct_muted" && *other == "hl_comment")
+                    {
+                        continue;
+                    }
+                    assert_ne!(ink, second, "{theme}: {name} and {other} are one colour");
+                }
+            }
+            // And none of the seven is the accent: a call is not a link.
+            assert_ne!(palette.hl_function, palette.accent, "{theme}");
         }
     }
 

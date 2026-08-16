@@ -29,6 +29,7 @@ bt-transcript = { path = "../bt-transcript" }
 bt-unicode = { path = "../bt-unicode" }
 bt-viewport = { path = "../bt-viewport" }
 pollster.workspace = true
+syntect.workspace = true
 winit.workspace = true
 
 # Tests only. This crate writes `session.json` through `bt-persist` and never

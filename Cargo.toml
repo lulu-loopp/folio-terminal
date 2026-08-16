@@ -67,6 +67,21 @@ thiserror = "2"
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The preview's syntax highlighter (§7.1.2 note ⑨). `default-features = false`
+# on purpose: syntect's default backend is `onig`, which is a C library and a
+# build-time toolchain this workspace does not have and does not want. The
+# `regex-fancy` backend is pure Rust and the same grammars run on it.
+#
+# `default-syntaxes` is the Sublime grammar dump; there is deliberately **no**
+# `default-themes`, because a colour theme is exactly the thing this window is
+# not allowed to take from a library — every ink on this glass comes out of
+# `ChromePalette`, and what syntect is asked for here is the *scope* of each
+# span and nothing else.
+syntect = { version = "5.3", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
 typst-as-lib = { version = "=0.16.0", features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
 typst-layout = "=0.15.0"
 typst-library = "=0.15.0"
