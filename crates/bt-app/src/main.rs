@@ -14828,12 +14828,20 @@ impl Runtime {
         let scale = self.renderer.metrics().scale_factor as f32;
         let font_px = tooltip::TIP_FONT_LOGICAL_PX * scale;
         // Only the font knows how wide a line is, so the measuring happens here,
-        // beside the renderer, exactly as the badge's and the editor's do.
+        // beside the renderer, exactly as the badge's and the editor's do — first
+        // to break the text at the tip's width bound, then to size the box to
+        // the lines that came out.
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let gap = tooltip::TIP_GAP_LOGICAL_PX * scale;
+        let max_width = (tooltip::TIP_MAX_WIDTH_LOGICAL_PX * scale).min(width as f32 - 2.0 * gap);
+        let text = tooltip::wrap(&text, max_width, |run| {
+            self.renderer.measure_chrome_text(run, font_px)
+        })
+        .join("\n");
         let widths: Vec<f32> = text
             .split('\n')
             .map(|line| self.renderer.measure_chrome_text(line, font_px))
             .collect();
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         let Some(layout) =
             tooltip::layout(&text, host, &widths, (width as f32, height as f32), scale)
         else {
@@ -24301,20 +24309,18 @@ impl Runtime {
             .seats
             .fixed_extent_of(seat)
             .unwrap_or(bt_layout::FILES_W);
-        let anchor = self
-            .seat_layout
-            .rects
-            .iter()
-            .find(|placement| placement.id == seat)
-            .and_then(|placement| placement.device_rect)
-            .map(|device| {
-                [
-                    device.left as f32,
-                    device.top as f32,
-                    device.right as f32,
-                    device.bottom as f32,
-                ]
-            });
+        // **The button's own box, and not the column's** (user report,
+        // 2026-08-16). The window hangs off the control that summoned it, which
+        // is every other float's rule and `pop_out_preview`'s exactly. Anchored
+        // to the whole column instead, `float_placement` was asked to fit the
+        // window above or below a trigger that already spans the viewport from
+        // top to bottom, found no room on either side, and did the only thing
+        // its last resort allows: a window the height of its own strip — the
+        // bare bar at the foot of the window the report shows.
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
+            seats::pane_head_geometry(rect, bt_layout::SeatKind::Files, scale).float
+        });
         // Taking the pane out first, so the window is never both docked and
         // floating at once — the mock-up's own note (3828-3833) records that
         // exact duplication, and the case it could not handle: the last pane of

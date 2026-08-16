@@ -1528,7 +1528,14 @@ pub fn act_boxes(row: &GitRow, rect: [f32; 4], scale: f32) -> Vec<(GitAct, [f32;
     let gap = (GIT_ACT_GAP_LOGICAL_PX * scale).round();
     let middle = ((rect[1] + rect[3] - box_) / 2.0).round();
     let mut placed = Vec::with_capacity(acts.len());
-    let mut edge = rect[2];
+    // **Inside the row's own padding, not flush with its edge** (user report,
+    // 2026-08-16). The verbs are the last flex child of a padded row — `.grow`
+    // is `padding: 5px 7px`, `.glabel` and the masthead `2px` — so their
+    // trailing edge is the padding's, exactly where the row's text already
+    // stops (`push_change` clips the name at `rect[2] - pad - reserved`). Drawn
+    // from `rect[2]` itself the `+` touched the row's rounded corner and its
+    // pill overran the ground it lit.
+    let mut edge = rect[2] - (act_trailing_padding(row) * scale).round();
     for act in acts {
         let left = edge - box_;
         if left < rect[0] {
@@ -1538,6 +1545,16 @@ pub fn act_boxes(row: &GitRow, rect: [f32; 4], scale: f32) -> Vec<(GitAct, [f32;
         edge = left - gap;
     }
     placed
+}
+
+/// The horizontal padding a row kind keeps between its trailing edge and its
+/// last child, in logical pixels — each kind's own, from its own CSS rule.
+fn act_trailing_padding(row: &GitRow) -> f32 {
+    match row {
+        GitRow::Masthead(_) => GIT_HEAD_PADDING_X_LOGICAL_PX,
+        GitRow::Heading { .. } => GIT_LABEL_PADDING_X_LOGICAL_PX,
+        _ => GIT_ROW_PADDING_X_LOGICAL_PX,
+    }
 }
 
 /// Which verb the pointer is on, inside a row.
@@ -3494,7 +3511,15 @@ mod tests {
                 Some(index),
                 "row {index} answers for its own middle"
             );
-            for (act, box_) in act_boxes(row, rect, 1.0) {
+            let boxes = act_boxes(row, rect, 1.0);
+            if let (GitRow::Change(_), Some((_, outermost))) = (row, boxes.first()) {
+                assert_eq!(
+                    rect[2] - outermost[2],
+                    GIT_ROW_PADDING_X_LOGICAL_PX,
+                    "the trailing verb ends exactly at the row's padding"
+                );
+            }
+            for (act, box_) in boxes {
                 let inside = ((box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0);
                 assert_eq!(
                     act_at(row, rect, 1.0, inside.0, inside.1),
@@ -3505,6 +3530,16 @@ mod tests {
                     box_[0] >= rect[0] && box_[2] <= rect[2],
                     "and it is inside the row it belongs to"
                 );
+                // Inside its padding, too (user report, 2026-08-16): a change
+                // row's `+` stops where the row's name would — seven pixels
+                // short of the edge — and never touches the rounded corner.
+                if matches!(row, GitRow::Change(_)) {
+                    assert!(
+                        rect[2] - box_[2] >= GIT_ROW_PADDING_X_LOGICAL_PX,
+                        "the {act:?} box ends {} inside the row, not less than the row's own padding",
+                        rect[2] - box_[2]
+                    );
+                }
             }
         }
         // Nothing answers for a point outside the viewport, which is what stops a

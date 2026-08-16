@@ -54,6 +54,16 @@ pub const TIP_FONT_LOGICAL_PX: f32 = 11.0;
 /// They are the same gap in the mock-up and stay one constant here, because the
 /// day they differ is the day someone has to explain why.
 pub const TIP_GAP_LOGICAL_PX: f32 = 6.0;
+/// The widest a tip may grow before its text wraps (user report, 2026-08-16).
+///
+/// The mock-up's `.tip` has no width bound because nothing in the mock-up's data
+/// ever needed one: a tab's name, a formula tool's verb. A commit row's tip is
+/// its whole subject line, and a subject can be a paragraph — the report shows
+/// one running the full width of a 2.7k-pixel window as a single line. Menus and
+/// float windows in this house are 260–430 wide; a tip that wraps at 360 reads
+/// as a paragraph of about sixty characters, which is the measure prose is set
+/// to everywhere else, and never as a banner.
+pub const TIP_MAX_WIDTH_LOGICAL_PX: f32 = 360.0;
 
 /// Which anchor a tip belongs to.
 ///
@@ -435,10 +445,10 @@ pub struct TooltipLayout {
 /// the gap of the window's. Vertical: below the host by the gap, flipping above
 /// when the bottom would not clear the window's own margin.
 ///
-/// The flip has no second guard for a tip that fits neither above nor below, and
-/// that is the mock-up's arithmetic exactly (8701-8702). Adding one would be
-/// inventing a rule for a case this window cannot reach: every anchor lives in a
-/// title bar 46 logical pixels tall, and the tallest tip is three lines.
+/// The mock-up's arithmetic (8701-8702) has no second guard for a tip that fits
+/// neither above nor below, because no tip of its could be that tall. A wrapped
+/// tip can be (user report, 2026-08-16), so a third case now holds such a tip
+/// inside the window, covering its host if it must.
 #[must_use]
 pub fn place(
     host: [f32; 4],
@@ -465,10 +475,18 @@ pub fn place(
     let left = centred.min(window_width - width - gap).max(gap).round();
 
     let below = host[3] + gap;
-    let top = if below + height > window_height - gap {
-        host[1] - height - gap
-    } else {
+    let above = host[1] - height - gap;
+    let top = if below + height <= window_height - gap {
         below
+    } else if above >= gap {
+        above
+    } else {
+        // Neither side has room — reachable now that a tip can be a paragraph
+        // (a wrapped commit subject over a row near the bottom of a short
+        // window). Below by preference, held inside the window: it may cover
+        // its host, and that is better than the half of it that would otherwise
+        // stand off the screen.
+        below.min(window_height - gap - height).max(gap)
     }
     .round();
 
@@ -486,11 +504,94 @@ pub fn place(
 /// report.
 const CHROME_LINE_HEIGHT: f32 = 1.4;
 
+/// Break a tip's text into the lines it will be drawn as.
+///
+/// `white-space: pre-line`, plus the width bound the mock-up did not have: every
+/// `\n` in the text is a line break, and a line wider than `max_width` is broken
+/// at spaces so no line exceeds it. A single word wider than the bound — a path,
+/// a hash — is broken between characters instead, because a tip that ran off the
+/// window to keep a word whole would be keeping the wrong promise.
+///
+/// `measure` is the font's answer to "how wide is this string", handed in for
+/// the reason `place` takes measured widths: only the renderer knows. It is
+/// asked once per word (and once for the space), never once per candidate line,
+/// so a paragraph-long subject costs the number of words it has and not their
+/// square. The line the caller then measures for `layout` may differ from the
+/// sum by a kerning pair's worth, which is why the bound is checked here on the
+/// sum and the *box* is sized on the measured line — the box always fits its
+/// lines, and the lines never exceed the bound by more than that pair.
+#[must_use]
+pub fn wrap(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
+    let space = measure(" ");
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        let mut line_width = 0.0_f32;
+        for word in paragraph.split(' ') {
+            let width = measure(word);
+            if line.is_empty() {
+                // The first word of a line always goes on it; if it is wider than
+                // the bound on its own it is broken below, character by
+                // character, and its tail becomes the line in hand.
+                (line, line_width) = break_word(word, width, max_width, &mut measure, &mut lines);
+                continue;
+            }
+            if line_width + space + width <= max_width {
+                line.push(' ');
+                line.push_str(word);
+                line_width += space + width;
+            } else {
+                lines.push(std::mem::take(&mut line));
+                (line, line_width) = break_word(word, width, max_width, &mut measure, &mut lines);
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// Put `word` at the start of a fresh line, breaking it between characters if it
+/// is wider than the bound on its own. Whole lines cut off its front are pushed
+/// to `lines`; what remains is returned as the line in hand and its width.
+fn break_word(
+    word: &str,
+    width: f32,
+    max_width: f32,
+    measure: &mut impl FnMut(&str) -> f32,
+    lines: &mut Vec<String>,
+) -> (String, f32) {
+    if width <= max_width || word.chars().count() < 2 {
+        return (word.to_owned(), width);
+    }
+    let mut rest = word;
+    loop {
+        // The longest prefix that fits, and at least one character so the loop
+        // always advances even when a single glyph is wider than the bound.
+        let mut cut = 0;
+        let mut cut_width = 0.0;
+        for (at, ch) in rest.char_indices() {
+            let end = at + ch.len_utf8();
+            let candidate = measure(&rest[..end]);
+            if candidate > max_width && cut > 0 {
+                break;
+            }
+            cut = end;
+            cut_width = candidate;
+        }
+        if cut >= rest.len() {
+            return (rest.to_owned(), cut_width);
+        }
+        lines.push(rest[..cut].to_owned());
+        rest = &rest[cut..];
+    }
+}
+
 /// Lay the tip out: the box, and one row per line.
 ///
-/// The mock-up's `.tip` is `white-space: pre-line` and has no width bound, so a
-/// line never wraps — it shrink-wraps to the longest one. That is why this
-/// splits on `\n` and nothing else, and why no line-breaking lives here.
+/// The mock-up's `.tip` is `white-space: pre-line`: every `\n` is a line. The
+/// width bound is applied before this — [`wrap`] has already broken the text,
+/// and the widths handed in are the wrapped lines' — so this splits on `\n` and
+/// nothing else, and shrink-wraps the box to the longest line.
 #[must_use]
 pub fn layout(
     text: &str,
@@ -630,6 +731,101 @@ mod tests {
             (frame[3] - (anchor[1] - 6.0)).abs() < 0.001,
             "sits above: {frame:?}"
         );
+    }
+
+    // ── the width bound (user report, 2026-08-16) ──────────────────────────
+
+    /// A measure where every character is ten wide, so widths are countable.
+    fn ten_per_char(run: &str) -> f32 {
+        run.chars().count() as f32 * 10.0
+    }
+
+    /// PIN — **a long line wraps at spaces and no line exceeds the bound; the
+    /// text's own newlines are kept.** The commit subject the report shows was
+    /// one line across a whole screen; this is that subject at toy scale.
+    ///
+    /// Mutation: have `wrap` return `text.split('\n')` and the width assertion
+    /// goes red on the first line.
+    #[test]
+    fn a_long_line_wraps_at_spaces_and_a_newline_stays_a_newline() {
+        let text = "the spinner stops taxing the whole house and the ring is held\nWeiyi Shi";
+        let lines = wrap(text, 200.0, ten_per_char);
+        for line in &lines {
+            assert!(
+                ten_per_char(line) <= 200.0,
+                "no line is wider than the bound: {line:?}"
+            );
+            assert!(
+                !line.starts_with(' ') && !line.ends_with(' '),
+                "a break eats the space it broke at: {line:?}"
+            );
+        }
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Weiyi Shi"),
+            "the text's own newline is a line break, and the short second paragraph is its own line"
+        );
+        assert_eq!(
+            lines.join(" ").replace(" Weiyi", "\nWeiyi"),
+            text,
+            "nothing is lost or reordered"
+        );
+        assert!(
+            lines[0].split(' ').count() >= 3,
+            "greedy: as many words as fit go on a line, not one per line: {lines:?}"
+        );
+    }
+
+    /// PIN — a word wider than the bound on its own is broken between characters
+    /// rather than left to run off the window, and a text that already fits is
+    /// returned as it came.
+    #[test]
+    fn a_word_wider_than_the_bound_is_broken_and_a_short_text_is_untouched() {
+        let hash = "0123456789abcdef0123456789abcdef";
+        let lines = wrap(hash, 100.0, ten_per_char);
+        assert_eq!(
+            lines.len(),
+            4,
+            "thirty-two characters at ten wide over a hundred: {lines:?}"
+        );
+        assert!(lines.iter().all(|line| ten_per_char(line) <= 100.0));
+        assert_eq!(
+            lines.concat(),
+            hash,
+            "and every character is still there, in order"
+        );
+
+        assert_eq!(
+            wrap("main · C:/x\npinned", 400.0, ten_per_char),
+            vec!["main · C:/x".to_owned(), "pinned".to_owned()],
+            "a tip that fits is the tip that was written"
+        );
+        assert_eq!(wrap("", 400.0, ten_per_char), vec![String::new()]);
+    }
+
+    /// PIN — a tip that fits neither below nor above its host is held inside the
+    /// window rather than pushed off it, and the ordinary flip is untouched.
+    #[test]
+    fn a_tip_too_tall_for_either_side_stays_inside_the_window() {
+        // Twelve lines is taller than a 300-pixel window has on either side of a
+        // host in its middle, and shorter than the window itself.
+        let widths = vec![50.0; 12];
+        let short = (1000.0, 300.0);
+        let (frame, ..) = place(host(400.0, 140.0, 460.0, 160.0), &widths, short, SCALE).unwrap();
+        assert!(
+            frame[1] >= TIP_GAP_LOGICAL_PX,
+            "top inside the window: {frame:?}"
+        );
+        assert!(
+            frame[3] <= short.1 - TIP_GAP_LOGICAL_PX + 0.5,
+            "and its foot too, even if that means covering the host: {frame:?}"
+        );
+        // A tip that fits below still goes below; one that fits only above still
+        // flips — the third case is reached only when both are refused.
+        let (below, ..) = place(host(400.0, 10.0, 460.0, 40.0), &[50.0], WINDOW, SCALE).unwrap();
+        assert!(below[1] > 40.0);
+        let (above, ..) = place(host(400.0, 660.0, 460.0, 690.0), &[50.0], WINDOW, SCALE).unwrap();
+        assert!(above[3] < 660.0);
     }
 
     /// The box grows with the number of lines, and the padding is spent on both

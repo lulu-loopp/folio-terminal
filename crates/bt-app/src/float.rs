@@ -3578,6 +3578,61 @@ mod tests {
         );
     }
 
+    /// PIN — **an undocked column opens at its size, not as a strip** (user
+    /// report, 2026-08-16).
+    ///
+    /// `Runtime::undock_files_column` used to anchor the new window to the
+    /// column's whole rectangle. A docked column runs from the top of the content
+    /// area to its foot, so `float_placement` — asked to stand the window above
+    /// or below its trigger — had no room on either side and took its last
+    /// resort: a window one strip tall. This drives the placement twice against
+    /// the same column geometry, once anchored the old way and once to the
+    /// `.pane-float` button in the column's own head, which is where the
+    /// runtime now anchors it. The first is the strip the report shows; the
+    /// second is the window that was asked for.
+    ///
+    /// Mutation: anchor the runtime to `full_pane_rect` again and the machine
+    /// reproduces the first half of this test.
+    #[test]
+    fn a_column_undocked_from_its_head_button_opens_at_its_size_and_not_as_a_strip() {
+        const HIDPI: f32 = 2.0;
+        let viewport = [0.0, 88.0, 2740.0, 1660.0];
+        // A docked files column: the viewport's full height, at the left edge.
+        let column = [0.0, 88.0, 528.0, 1660.0];
+        let size = float_opening_size(
+            crate::seats::files_tree_content_height(15, HIDPI),
+            viewport,
+            HIDPI,
+            FloatSizing::files(),
+        );
+        assert!(
+            size[1] > FLOAT_WINDOW_MIN_STRIP_LOGICAL_PX * HIDPI * 4.0,
+            "fifteen rows are a real body, not a strip: {size:?}"
+        );
+
+        let anchored_to_column = float_placement(column, size, viewport, HIDPI);
+        assert_eq!(
+            anchored_to_column[3] - anchored_to_column[1],
+            FLOAT_WINDOW_MIN_STRIP_LOGICAL_PX * HIDPI,
+            "anchored to the whole column there is no room on either side of it, and the last resort is a strip — the bug"
+        );
+
+        let button = crate::seats::pane_head_geometry(column, bt_layout::SeatKind::Files, HIDPI)
+            .float
+            .expect("a files head offers its pop-out button");
+        let anchored_to_button = float_placement(button, size, viewport, HIDPI);
+        let frame = clamp_pinned(anchored_to_button, viewport, HIDPI);
+        assert_eq!(
+            [frame[2] - frame[0], frame[3] - frame[1]],
+            size,
+            "anchored to the button in its head, the window opens at the size its rows asked for"
+        );
+        assert!(
+            frame[1] >= button[3],
+            "and hangs under the button that summoned it: {frame:?} under {button:?}"
+        );
+    }
+
     /// PIN — a preview float is a tenant of this host like any other: it takes a
     /// place in the pinned list, answers to its own id, and does not disturb the
     /// tree that was already floating (P44's "one chassis, many tenants").
