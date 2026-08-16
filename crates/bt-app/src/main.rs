@@ -32,6 +32,7 @@ mod seed;
 mod settings;
 mod shell_integration;
 mod shortcuts;
+mod text_field;
 mod toast;
 mod tooltip;
 mod wsl;
@@ -2701,6 +2702,14 @@ impl RowActivation {
     }
 }
 
+/// The commit graph's branch filter while it is up (T2, v2 ③).
+#[derive(Clone, Debug)]
+struct GraphFilterMenuState {
+    /// The graph seat whose toolbar button opened it.
+    seat: SeatId,
+    hover: Option<profiles::GitFilterRow>,
+}
+
 /// A file row's context menu while it is up (K143).
 #[derive(Clone, Debug)]
 struct FileMenuState {
@@ -3958,6 +3967,16 @@ struct Runtime {
     /// The pane head's context menu, and the head it was raised on (user ruling,
     /// 2026-08-15).
     pane_menu: Option<PaneMenuState>,
+    /// The graph's branch filter menu, and the seat whose toolbar raised it
+    /// (T2, v2 ③).
+    ///
+    /// [`PaneMenuState`]'s shape and for its reason: the menu is about *one*
+    /// graph, and which one must not be re-derived from where the pointer has
+    /// since wandered. It hangs off a button rather than off a point, so no
+    /// coordinate is kept — the button's rectangle is re-found every frame
+    /// (E59/E60), because a re-layout can move it and a menu pinned to where it
+    /// was is a menu floating over nothing.
+    graph_filter_menu: Option<GraphFilterMenuState>,
     /// How wide each files head's name was last *drawn* — see
     /// [`Runtime::measure_files_names`] for why the hit test reads it from here
     /// rather than measuring for itself.
@@ -4447,6 +4466,20 @@ impl TabState {
                 cur: self
                     .preview_showing(seat.id)
                     .map(|path| path.to_string_lossy().into_owned()),
+                // **The graph's filter** (T2/T3, v2 ③) — written only when the
+                // reader has actually touched it, so a pane that has never seen a
+                // graph, and one whose graph is unfiltered, both write exactly
+                // the bytes they used to.
+                graph: self
+                    .git_graph_view
+                    .get(&seat.id)
+                    .map(|view| &view.filter)
+                    .filter(|filter| **filter != git_graph::GraphFilter::default())
+                    .map(|filter| bt_persist::GraphFilterV1 {
+                        branches: filter.branches.clone(),
+                        remotes: filter.remotes,
+                        tags: filter.tags,
+                    }),
             })
             .collect();
         // **No content and no dirty bit** (P151): the pool serializes as the list
@@ -5146,6 +5179,14 @@ struct KeyboardOwner {
     menu_or_dialog: bool,
     /// A files column holds it (`InputOwner::FilesTree`).
     files_tree: bool,
+    /// The commit graph's search field holds it (T4, v2 (3)).
+    ///
+    /// Above `preview` in the ladder rather than folded into it, and that is the
+    /// whole reason it is a rung: the field lives *on* a preview seat, so a
+    /// composition routed by `preview` alone would go to the preview's own edit
+    /// surface — or, on a read-only body, be swallowed — while the reader was
+    /// looking at a caret in the toolbar.
+    graph_search: bool,
     /// A preview holds it — editing, or browsing a read-only body.
     preview: bool,
 }
@@ -5174,6 +5215,9 @@ struct KeyboardOwner {
 enum ImeOwner {
     /// The tab-name editor, which has taken commits since it was written.
     Rename,
+    /// The commit graph's search field (T4, v2 (3)) — a one-line text field that
+    /// takes composed text through the same door typed characters use.
+    GraphSearch,
     /// A modal or a popup: no text goes anywhere while one is up.
     Modal,
     /// A files column. Nothing to type into — and, above all, nothing to type
@@ -5195,6 +5239,8 @@ fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
         ImeOwner::Modal
     } else if owner.files_tree {
         ImeOwner::FilesTree
+    } else if owner.graph_search {
+        ImeOwner::GraphSearch
     } else if owner.preview {
         ImeOwner::Preview
     } else {
@@ -6065,6 +6111,29 @@ struct GraphView {
     seek: Option<git_graph::GraphSeek>,
     /// R18's hysteresis, carried frame to frame.
     lane_hold: git_graph::LaneWidthHold,
+    /// **Which branches this graph is of** (T2/T3, v2 ③).
+    ///
+    /// The one field on this struct that *does* cross the disk, and the
+    /// exception is the rule the rest of it states read backwards: an expansion,
+    /// a scroll and a comparison are glances at a history that may have moved
+    /// on, and a filter is a *question about the repository* — "show me these
+    /// branches" is as true tomorrow as it was today, whatever has been
+    /// committed in between. It rides in the tab's preview section
+    /// ([`bt_persist::PreviewPaneV1::graph`]), beside the pane it belongs to.
+    filter: git_graph::GraphFilter,
+    /// What is typed in the search field (T4).
+    search: text_field::TextField,
+    /// The query git was actually asked about — which is not what is in the
+    /// field once the reader types past a result they have not re-run.
+    ///
+    /// `None` before anything has been asked. The cache is keyed on this, so a
+    /// result that arrives after another query was started is recognised as
+    /// being about the wrong text and dropped.
+    search_asked: Option<String>,
+    /// Which of the matches `Enter` has stepped to.
+    search_at: Option<usize>,
+    /// Whether the field holds the keyboard.
+    search_focused: bool,
 }
 
 /// Which of the graph's six verbs a physical key is, if any (V14).
@@ -10674,6 +10743,8 @@ fn revive_plan(
                     // Nothing to restore: an expansion is a glance and does not
                     // cross the disk — see [`seats::FilesLeafState::git_expanded`].
                     git_expanded: None,
+                    // The fifth fact, and durable like `view` above it (T9).
+                    git_remotes_open: leaf.remotes_open,
                 },
             )
         })
@@ -10699,6 +10770,14 @@ struct PreviewRestore {
     cur: BTreeMap<SeatId, PathBuf>,
     /// The tab's pool, oldest first — path and the name it was listed under.
     pool: Vec<(PathBuf, String)>,
+    /// The branch filter each preview seat's graph was of (T2/T3, v2 (3)).
+    ///
+    /// Restored even though the *document* is not: `session.json` has no
+    /// vocabulary for a git-backed buffer, so a graph is not reopened by a
+    /// restore — but the pane is named either way, and a reader who opens the
+    /// graph again there should find the filter they left rather than a page of
+    /// every branch.
+    filters: BTreeMap<SeatId, git_graph::GraphFilter>,
 }
 
 impl PreviewRestore {
@@ -10730,7 +10809,26 @@ impl PreviewRestore {
             .iter()
             .map(|entry| (PathBuf::from(&entry.path), entry.name.clone()))
             .collect();
-        Self { cur, pool }
+        let filters = saved
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let index = pane.leaf.strip_prefix("leaf-")?.parse::<usize>().ok()?;
+                let seat = order.get(index)?;
+                let graph = pane.graph.as_ref()?;
+                (seat.kind == bt_layout::SeatKind::Preview).then(|| {
+                    (
+                        seat.id,
+                        git_graph::GraphFilter {
+                            branches: graph.branches.clone(),
+                            remotes: graph.remotes,
+                            tags: graph.tags,
+                        },
+                    )
+                })
+            })
+            .collect();
+        Self { cur, pool, filters }
     }
 
     /// The one thing a Recent entry can rebuild: the files, with the pool left
@@ -10739,6 +10837,9 @@ impl PreviewRestore {
         Self {
             cur,
             pool: Vec::new(),
+            // Recent is a launcher: it restores the places you were, and a
+            // filter is not a place.
+            filters: BTreeMap::new(),
         }
     }
 }
@@ -11282,6 +11383,23 @@ fn create_tab_state(
         }
         preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(source);
     }
+    // **The filter comes back even though the graph does not** (T2/T3, v2 (3)) —
+    // see [`PreviewRestore::filters`]. The view is seeded with a root of its own
+    // making, which the first frame that actually opens a graph replaces; what
+    // survives the replacement is nothing, so the root is written here as the
+    // one the pane will be re-pointed at only when it has one. Until then the
+    // entry holds a filter and an empty root, which is exactly what an unopened
+    // graph seat's view has always been.
+    let mut graph_views: BTreeMap<SeatId, GraphView> = BTreeMap::new();
+    for (seat, filter) in &preview.filters {
+        graph_views.insert(
+            *seat,
+            GraphView {
+                filter: filter.clone(),
+                ..GraphView::default()
+            },
+        );
+    }
     Ok((
         assemble_tab_state(
             id,
@@ -11289,6 +11407,7 @@ fn create_tab_state(
             files,
             preview_pool,
             preview_panes,
+            graph_views,
             terminal_seat_id,
             seed,
             seats,
@@ -11328,6 +11447,10 @@ fn assemble_tab_state(
     files: BTreeMap<SeatId, seats::FilesLeafState>,
     preview_pool: preview::PreviewPool,
     preview_panes: PreviewPanes,
+    // What each graph seat was filtered to (T2/T3, v2 (3)) — the one thing on a
+    // `GraphView` that crosses the disk, and therefore the one thing a tab can be
+    // born already holding.
+    git_graph_view: BTreeMap<SeatId, GraphView>,
     focused_leaf: SeatId,
     seed: TabSeed,
     seats: seats::Seats,
@@ -11345,7 +11468,7 @@ fn assemble_tab_state(
         file_trees: BTreeMap::new(),
         git_scroll: BTreeMap::new(),
         git_graphs: BTreeMap::new(),
-        git_graph_view: BTreeMap::new(),
+        git_graph_view,
         git_trees: BTreeMap::new(),
         focused_leaf,
         pinned: seed.pinned,
@@ -11489,6 +11612,9 @@ fn pane_into_new_tab(
         // and the law it calls is already the one above.
         preview::PreviewPool::default(),
         PreviewPanes::default(),
+        // And the same argument a third time: a tab with no preview leaf has no
+        // graph seat to have filtered.
+        BTreeMap::new(),
         key,
         TabSeed {
             // The profile is not stated here any more, and its absence is the
@@ -12428,6 +12554,7 @@ impl Runtime {
             preview_head_measures: BTreeMap::new(),
             file_menu: None,
             pane_menu: None,
+            graph_filter_menu: None,
             float: float::FloatHost::default(),
             float_drag: None,
             float_head_press: None,
@@ -13772,6 +13899,28 @@ impl Runtime {
                 }
             }
         }
+        // The commit graph's toolbar (T1). Only the toolbar: the rows below it
+        // carry a tooltip of their own and have never registered one, because a
+        // list whose every row explains itself is a list that flickers.
+        let graph_seats: Vec<SeatId> = self.git_graphs_shown.keys().copied().collect();
+        for seat in graph_seats {
+            let Some(rects) = self.graph_toolbar_rects(seat) else {
+                continue;
+            };
+            for (rect, tool) in [
+                (rects.search_clear, git_graph::GraphTool::SearchClear),
+                (rects.search, git_graph::GraphTool::Search),
+                (Some(rects.filter), git_graph::GraphTool::Filter),
+                (Some(rects.refresh), git_graph::GraphTool::Refresh),
+            ] {
+                let Some(rect) = rect else { continue };
+                anchors.push(
+                    tooltip::TooltipAnchorId::GitGraphTool(seat, tool),
+                    rect,
+                    tool.tooltip(),
+                );
+            }
+        }
         // A tip whose subject has left the strip has nothing left to say — and a
         // tip still counting down toward a subject that left has nothing to
         // arrive at. Retiring both here, against the list that was just built, is
@@ -14786,6 +14935,22 @@ impl Runtime {
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
+        } else if self.graph_filter_menu.is_some()
+            && let Some(layout) = self.graph_filter_menu_layout()
+        {
+            // The fifth arm of the same chain, and in it for E61's reason: one
+            // popup is up at a time, and a chain cannot draw two however the
+            // flags are set.
+            let seat = self.graph_filter_menu.as_ref().map(|menu| menu.seat);
+            let hover = self
+                .graph_filter_menu
+                .as_ref()
+                .and_then(|m| m.hover.clone());
+            let filter = seat
+                .and_then(|seat| self.tabs[self.active_tab].git_graph_view.get(&seat))
+                .map(|view| view.filter.clone())
+                .unwrap_or_default();
+            profiles::git_filter_menu_build(&layout, &filter, hover.as_ref())
         } else if let Some(seat) = self.preview_menu.seat()
             && let Some(layout) = self.preview_menu_layout()
         {
@@ -15337,6 +15502,7 @@ impl Runtime {
         self.root_menu.close();
         self.file_menu = None;
         self.pane_menu = None;
+        self.graph_filter_menu = None;
         self.profile_menu.toggle();
         self.start_chevron_turn();
         if self.refresh_chrome() {
@@ -17904,8 +18070,15 @@ impl Runtime {
                 || self.pane_menu.is_some()
                 || self.profile_menu.is_open()
                 || self.root_menu.seat().is_some()
-                || self.preview_menu.seat().is_some(),
+                || self.preview_menu.seat().is_some()
+                || self.graph_filter_menu.is_some(),
             files_tree: self.files_keyboard_seat().is_some(),
+            // The graph's search field, when it is the focused preview's and it
+            // holds the keyboard.
+            graph_search: matches!(
+                self.preview_keyboard_surface(),
+                Some(PreviewSurface::Seat(seat)) if self.graph_search_focused(seat)
+            ),
             // `PreviewEdit` — and the preview's read-only browsing, which is the
             // same owner wearing its other state: the arrows scroll the document,
             // so they are not the shell's either.
@@ -18028,6 +18201,16 @@ impl Runtime {
         // focused preview does. The one key that must not be eaten here is the
         // one this page has no use for, and saying so is the graph's own answer
         // rather than a condition written twice.
+        // **The search field is asked first, and only while it holds the
+        // keyboard** (T4). It takes *every* key it is given — a field that let an
+        // unrecognised character fall through to the list under it would be a
+        // field you could type `j` into and watch the graph scroll.
+        if let PreviewSurface::Seat(seat) = surface
+            && self.graph_search_focused(seat)
+            && self.graph_search_key(seat, event)?
+        {
+            return Ok(true);
+        }
         if let PreviewSurface::Seat(seat) = surface
             && self.git_graphs_shown.contains_key(&seat)
             && let Some(key) = graph_key_of(&event.logical_key, self.modifiers)
@@ -20479,6 +20662,23 @@ impl Runtime {
         else {
             return Ok(());
         };
+        // **The REMOTES sub-group's own press** (T9), asked before the documents
+        // because it is not one: it opens and shuts what is under it, and the
+        // answer lives on the column's durable state rather than in a preview.
+        if self
+            .git_pages_shown
+            .get(&seat)
+            .and_then(|page| page.rows.get(index))
+            .is_some_and(git_panel::row_toggles_remotes)
+        {
+            let state = self.tabs[active].files.entry(seat).or_default();
+            state.git_remotes_open = !state.git_remotes_open;
+            self.mark_session_dirty(Instant::now());
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         let Some(open) = self
             .git_pages_shown
             .get(&seat)
@@ -20956,15 +21156,40 @@ impl Runtime {
                 view.selected,
                 view.lane_hold,
             );
+            let filter = view.filter.clone();
+            let typed = view.search.text().to_owned();
+            let before_caret = view.search.before_caret().to_owned();
+            let preedit = view.search.preedit().to_owned();
+            let search_focused = view.search_focused;
+            let search_at = view.search_at;
+            let asked = view.search_asked.clone();
             let Some(state) = self.tabs[active].git_graphs.get(&root) else {
                 continue;
             };
             let state = state.clone();
+            // What git said about the query that was actually *asked*, which is
+            // not necessarily what is in the field: a reader typing on past a
+            // result keeps seeing the result they pressed Enter for until they
+            // press it again, which is what every search field does.
+            let matches = asked
+                .as_deref()
+                .and_then(|query| state.cache.search(query))
+                .and_then(git::GitSlot::ready)
+                .map(Vec::as_slice);
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             let mut content = git_graph::build(
                 &state,
                 git_graph::GraphLook {
+                    filter: &filter,
+                    search: git_graph::GraphSearchLook {
+                        text: &typed,
+                        before_caret: &before_caret,
+                        preedit: &preedit,
+                        focused: search_focused,
+                        matches,
+                        at: search_at,
+                    },
                     expanded: expanded.as_deref(),
                     compare: compare.as_deref(),
                     selected,
@@ -21599,9 +21824,23 @@ impl Runtime {
                 .files
                 .get(&seat)
                 .and_then(|state| state.git_expanded.clone());
+            // And so is whether the REMOTES sub-group is unfolded (T9) — the
+            // same kind of fact, off the same leaf, and durable like `view`.
+            let remotes_open = self.tabs[active]
+                .files
+                .get(&seat)
+                .is_some_and(|state| state.git_remotes_open);
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
-            let mut content = git_panel::build(&cache, expanded.as_deref(), scale, &mut measure);
+            let mut content = git_panel::build(
+                &cache,
+                git_panel::GitPanelLook {
+                    expanded: expanded.as_deref(),
+                    remotes_open,
+                },
+                scale,
+                &mut measure,
+            );
             content.scroll_px = self.tabs[active]
                 .git_scroll
                 .get(&seat)
@@ -23055,6 +23294,7 @@ impl Runtime {
         // press from travelling.
         self.profile_menu.close();
         self.pane_menu = None;
+        self.graph_filter_menu = None;
         self.root_menu.toggle(seat);
         // Pressing the head is also how you say "type here", and the column is
         // somewhere you can type — so the button lends the keyboard exactly as
@@ -23322,6 +23562,7 @@ impl Runtime {
         self.root_menu.close();
         self.close_file_menu()?;
         self.close_pane_menu()?;
+        self.graph_filter_menu = None;
         self.preview_menu.toggle(seat);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -23426,6 +23667,7 @@ impl Runtime {
         self.profile_menu.close();
         self.root_menu.close();
         self.pane_menu = None;
+        self.graph_filter_menu = None;
         self.file_menu = Some(FileMenuState {
             point,
             activation,
@@ -23616,6 +23858,459 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    // ── the commit graph's toolbar (T1/T2/T3/T4/T5, v2 ③) ──────────────────
+
+    /// Where the graph toolbar's controls are, for one seat.
+    ///
+    /// Re-derived from the frame the seat last drew rather than remembered,
+    /// which is the same `&self`-hit-test discipline `git_pages_shown` exists
+    /// for: the rectangle a control can be pressed in has to be the rectangle it
+    /// was drawn in, by one derivation and not by two that agree today.
+    fn graph_toolbar_rects(&self, seat: SeatId) -> Option<git_graph::GraphToolbarRects> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let content = self.git_graphs_shown.get(&seat)?;
+        let body = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)?;
+        let geometry = git_graph::graph_geometry(body, content, scale);
+        let toolbar = content.toolbar.as_ref()?;
+        Some(git_graph::graph_toolbar_rects(
+            geometry.head?,
+            toolbar,
+            scale,
+        ))
+    }
+
+    /// One of the toolbar's four controls, pressed.
+    fn press_graph_tool(&mut self, seat: SeatId, tool: git_graph::GraphTool) -> Result<()> {
+        match tool {
+            git_graph::GraphTool::Filter => self.toggle_graph_filter_menu(seat)?,
+            git_graph::GraphTool::Search => self.focus_graph_search(seat)?,
+            git_graph::GraphTool::SearchClear => self.clear_graph_search(seat)?,
+            git_graph::GraphTool::Refresh => self.refresh_graph(seat)?,
+        }
+        Ok(())
+    }
+
+    /// Where the filter menu hangs, or nothing when it is not up.
+    fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {
+        let seat = self.graph_filter_menu.as_ref()?.seat;
+        let anchor = self.graph_toolbar_rects(seat)?.filter;
+        let rows = profiles::git_filter_rows(&self.graph_filter_branches(seat));
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        Some(profiles::git_filter_menu_layout(
+            anchor,
+            (width as f32, height as f32),
+            scale,
+            rows,
+            &mut measure,
+        ))
+    }
+
+    /// Every local branch of the repository this seat's graph is of.
+    ///
+    /// Off the graph's own cache, so the menu lists what the *graph* was told
+    /// rather than what some column beside it happens to know: two surfaces
+    /// looking at one repository can be at two different points in their reading,
+    /// and a menu that borrowed the other one's answer would offer a branch this
+    /// graph cannot walk.
+    fn graph_filter_branches(&self, seat: SeatId) -> Vec<String> {
+        let active = self.active_tab;
+        let Some(root) = self.tabs[active]
+            .git_graph_view
+            .get(&seat)
+            .map(|view| view.root.clone())
+        else {
+            return Vec::new();
+        };
+        self.tabs[active]
+            .git_graphs
+            .get(&root)
+            .and_then(|state| state.cache.refs().ready())
+            .map(|refs| {
+                git::local_branches(refs)
+                    .map(|entry| entry.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether this seat's search field holds the keyboard (T4).
+    fn graph_search_focused(&self, seat: SeatId) -> bool {
+        self.tabs[self.active_tab]
+            .git_graph_view
+            .get(&seat)
+            .is_some_and(|view| view.search_focused)
+    }
+
+    /// One key, with the search field holding the keyboard (T4).
+    ///
+    /// **Total**, on [`preview_edit::command`]'s own rule: once a text field has
+    /// the focus every key is the field's, and a key that fell through would land
+    /// in the list underneath as a travel command. What "the field's" means for a
+    /// key it has no use for is *nothing*, said by returning `true` — which is
+    /// the answer the files column and the read-only preview both already give.
+    fn graph_search_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+        use text_field::TextMove;
+        let control = self.modifiers.control_key();
+        let shift = self.modifiers.shift_key();
+        let active = self.active_tab;
+        enum Then {
+            /// Nothing but a repaint.
+            Draw,
+            /// Ask git about what is in the field now.
+            Ask,
+            /// Walk to the next match, or the previous one.
+            Step(bool),
+            /// Give the keyboard back to the graph and forget the search.
+            Clear,
+        }
+        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+            return Ok(false);
+        };
+        let then = match &event.logical_key {
+            Key::Named(NamedKey::Escape) => Then::Clear,
+            // **Enter is two verbs and the field decides which** (T4): the first
+            // press runs the search, and every press after it walks the matches.
+            // Told apart by whether git has been asked about *this* text, which
+            // is the only honest reading — a reader who edits the query and
+            // presses Enter means "search again", and one who does not means
+            // "next".
+            Key::Named(NamedKey::Enter) => {
+                if view.search_asked.as_deref() == Some(view.search.text()) {
+                    Then::Step(!shift)
+                } else {
+                    Then::Ask
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                view.search.backspace();
+                Then::Draw
+            }
+            Key::Named(NamedKey::Delete) => {
+                view.search.delete();
+                Then::Draw
+            }
+            Key::Named(NamedKey::Home) => {
+                view.search.step(TextMove::Home, shift);
+                Then::Draw
+            }
+            Key::Named(NamedKey::End) => {
+                view.search.step(TextMove::End, shift);
+                Then::Draw
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                view.search.step(
+                    if control {
+                        TextMove::WordLeft
+                    } else {
+                        TextMove::Left
+                    },
+                    shift,
+                );
+                Then::Draw
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                view.search.step(
+                    if control {
+                        TextMove::WordRight
+                    } else {
+                        TextMove::Right
+                    },
+                    shift,
+                );
+                Then::Draw
+            }
+            Key::Character(text) if control => {
+                if text.eq_ignore_ascii_case("a") {
+                    view.search.select_all();
+                }
+                Then::Draw
+            }
+            Key::Character(text) => {
+                view.search.insert(text);
+                Then::Draw
+            }
+            // A modifier on its own, a function key, anything else: the field
+            // owns it and does nothing with it.
+            _ => Then::Draw,
+        };
+        match then {
+            Then::Draw => {}
+            Then::Ask => self.ask_graph_search(seat)?,
+            Then::Step(forwards) => self.step_graph_search(seat, forwards)?,
+            Then::Clear => {
+                self.clear_graph_search(seat)?;
+                return Ok(true);
+            }
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// A composition, with the search field holding the keyboard (T4).
+    fn graph_search_ime(&mut self, event: &Ime) -> Result<()> {
+        let active = self.active_tab;
+        let Some(PreviewSurface::Seat(seat)) = self.preview_keyboard_surface() else {
+            return Ok(());
+        };
+        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+            return Ok(());
+        };
+        match event {
+            Ime::Preedit(text, _) => view.search.set_preedit(text),
+            Ime::Commit(text) => view.search.insert(text),
+            Ime::Enabled | Ime::Disabled => return Ok(()),
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Put what is in the field to git (T4).
+    fn ask_graph_search(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+            return Ok(());
+        };
+        let query = view.search.text().to_owned();
+        let root = view.root.clone();
+        // An empty field is not a search. Pressing Enter in one forgets the last
+        // one rather than asking git about the empty string, which every commit
+        // matches.
+        if view.search.is_empty() {
+            view.search_asked = None;
+            view.search_at = None;
+            if let Some(state) = self.tabs[active].git_graphs.get_mut(&root) {
+                state.cache.clear_search();
+            }
+            return Ok(());
+        }
+        view.search_asked = Some(query.clone());
+        view.search_at = None;
+        let Some(state) = self.tabs[active].git_graphs.get_mut(&root) else {
+            return Ok(());
+        };
+        let Some(question) = state.cache.begin_search(&query) else {
+            return Ok(());
+        };
+        if !self.git_worker.request(git::GitRequest {
+            host: git::GitHost::Graph { tab: tab_id, root },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+        Ok(())
+    }
+
+    /// Walk to the next match, or the previous one, and reveal it (T4).
+    ///
+    /// **Reuses the parent-seek** (D2) for a match that is not in the loaded
+    /// pages: `git rev-list --all` sees the whole history and the graph has read
+    /// fifty commits of it, so a match nine hundred rows down is a hash the page
+    /// does not contain — which is exactly the case the seek was written for.
+    fn step_graph_search(&mut self, seat: SeatId, forwards: bool) -> Result<()> {
+        let active = self.active_tab;
+        let Some(view) = self.tabs[active].git_graph_view.get(&seat) else {
+            return Ok(());
+        };
+        let root = view.root.clone();
+        let Some(query) = view.search_asked.clone() else {
+            return Ok(());
+        };
+        let Some(matches) = self.tabs[active]
+            .git_graphs
+            .get(&root)
+            .and_then(|state| state.cache.search(&query))
+            .and_then(git::GitSlot::ready)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if matches.is_empty() {
+            return Ok(());
+        }
+        // The ring is [`git_graph::search_step`]'s — see there for why stepping
+        // off the end starts again rather than stopping.
+        let Some(at) = git_graph::search_step(
+            self.tabs[active]
+                .git_graph_view
+                .get(&seat)
+                .and_then(|view| view.search_at),
+            matches.len(),
+            forwards,
+        ) else {
+            return Ok(());
+        };
+        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+            view.search_at = Some(at);
+            view.seek = Some(git_graph::GraphSeek {
+                hash: matches[at].clone(),
+                pages: 0,
+            });
+        }
+        self.step_graph_seeks()?;
+        Ok(())
+    }
+
+    /// **E61: the opener closes the others**, stated here as it is at every other
+    /// opener in this window.
+    fn toggle_graph_filter_menu(&mut self, seat: SeatId) -> Result<()> {
+        let already = self
+            .graph_filter_menu
+            .as_ref()
+            .is_some_and(|menu| menu.seat == seat);
+        self.profile_menu.close();
+        self.root_menu.close();
+        self.preview_menu.close();
+        self.file_menu = None;
+        self.pane_menu = None;
+        self.graph_filter_menu = (!already).then_some(GraphFilterMenuState { seat, hover: None });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    fn close_graph_filter_menu(&mut self) -> Result<bool> {
+        if self.graph_filter_menu.take().is_none() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Do what one row of the filter menu says.
+    ///
+    /// **The menu stays up**, which is the one place this popup parts company
+    /// with its four neighbours — and it parts company because it is a different
+    /// kind of thing. Those four are lists of *verbs*: you pick one and it
+    /// happens, so the menu has done its job. This is a list of *settings*, and
+    /// picking two branches means picking one and then the other; a menu that
+    /// shut on the first would make the second gesture a second opening.
+    fn run_graph_filter_row(&mut self, row: &profiles::GitFilterRow) -> Result<()> {
+        let Some(seat) = self.graph_filter_menu.as_ref().map(|menu| menu.seat) else {
+            return Ok(());
+        };
+        let active = self.active_tab;
+        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+            return Ok(());
+        };
+        match row {
+            profiles::GitFilterRow::All => view.filter.branches.clear(),
+            profiles::GitFilterRow::Branch(name) => view.filter.toggle_branch(name),
+            profiles::GitFilterRow::Remotes => view.filter.remotes = !view.filter.remotes,
+            profiles::GitFilterRow::Tags => view.filter.tags = !view.filter.tags,
+        }
+        let (root, refs) = (view.root.clone(), view.filter.log_refs());
+        // **A filter change is a different history**, so the walk is thrown away
+        // and asked again — see `GitCache::set_log_refs`. A branch that was not
+        // walked has no commits on hand to reveal, so there is nothing here that
+        // could have been done by filtering what is already loaded.
+        if let Some(state) = self.tabs[active].git_graphs.get_mut(&root)
+            && state.cache.set_log_refs(refs)
+        {
+            state.invalidate();
+            self.ask_git_for_graphs();
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The search field takes the keyboard (T4).
+    fn focus_graph_search(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.active_tab;
+        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+            view.search_focused = true;
+        }
+        // A press in the field is a press on a control, so it closes the popups
+        // for E61's reason exactly as every other opener does.
+        self.graph_filter_menu = None;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The `×`, or `Esc` in the field: forget the search and give the keyboard
+    /// back to the graph (T4).
+    fn clear_graph_search(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.active_tab;
+        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+            return Ok(());
+        };
+        view.search.clear();
+        view.search_asked = None;
+        view.search_at = None;
+        view.search_focused = false;
+        let root = view.root.clone();
+        if let Some(state) = self.tabs[active].git_graphs.get_mut(&root) {
+            state.cache.clear_search();
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Read the repository again** (T5).
+    ///
+    /// Three questions and exactly three: the refs, the status and the first page
+    /// of the log. It is allowed past R31's read boundary because it is an
+    /// explicit gesture — the whole of that rule is that a repository is not read
+    /// because time passed, and this is a reader asking.
+    ///
+    /// The picture is invalidated with them: a history that has been rewritten
+    /// under the lane walker is not a history it can resume, and a refresh is
+    /// exactly the moment that may have happened.
+    fn refresh_graph(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.active_tab;
+        let Some(root) = self.tabs[active]
+            .git_graph_view
+            .get(&seat)
+            .map(|view| view.root.clone())
+        else {
+            return Ok(());
+        };
+        let tab_id = self.tabs[active].id;
+        let Some(state) = self.tabs[active].git_graphs.get_mut(&root) else {
+            return Ok(());
+        };
+        // **The page stays up while it is re-read** (T5) — see
+        // `GitCache::begin_reread` for why this is not `refresh`. What *is*
+        // thrown away is the lane state: a history rewritten under it is not a
+        // history it can resume, and a re-read is exactly the moment that may
+        // have happened. It is rebuilt from the answer, in `sync`, before
+        // anything is drawn from it.
+        let questions = state.cache.begin_reread();
+        state.invalidate();
+        for question in questions {
+            if !self.git_worker.request(git::GitRequest {
+                host: git::GitHost::Graph {
+                    tab: tab_id,
+                    root: root.clone(),
+                },
+                question,
+            }) {
+                self.disable_git_worker();
+                break;
+            }
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// Do what one row of the pane menu says, and put the menu away.
@@ -28246,6 +28941,24 @@ impl Runtime {
                 return Ok(());
             }
         }
+        // And the graph's branch filter, the same three lines a third time.
+        if let Some(layout) = self.graph_filter_menu_layout() {
+            let over = profiles::git_filter_menu_hit(&layout, position.x, position.y);
+            if let Some(row) = over.clone()
+                && let Some(menu) = self.graph_filter_menu.as_mut()
+                && menu.hover != row
+            {
+                menu.hover = row;
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            if over.is_some() {
+                self.note_tooltip(None)?;
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
+        }
         // And the pane head's menu on the same level, by the same three lines.
         // The two are never up together, so this is the file menu's block asked
         // about the other one rather than a second policy.
@@ -30357,6 +31070,14 @@ impl Runtime {
                 self.files_row_clicks.interrupt();
                 self.press_graph_row(seat, index, Instant::now())?;
             }
+            // The toolbar's four controls (T1). A click chain is broken for
+            // `.files-foot`'s reason: a chain of clicks on a button is a chain of
+            // button presses and never the beginning of a gesture elsewhere.
+            seats::ChromeTarget::GitGraphTool { seat, tool } => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.press_graph_tool(seat, tool)?;
+            }
             // A part of the open row's detail block (v2 ②). It breaks a click
             // chain for `.files-foot`'s reason — a chain of clicks on a button is
             // a chain of button presses — and it never reaches `press_graph_row`,
@@ -30598,6 +31319,30 @@ impl Runtime {
                 None => {
                     if state == ElementState::Pressed {
                         self.close_pane_menu()?;
+                    }
+                }
+            }
+        }
+        // The graph's branch filter, by the same three rules, with one change:
+        // a row does *not* put it away. It is a list of settings and picking two
+        // branches means picking one and then the other — see
+        // `run_graph_filter_row`.
+        if let (Some(layout), Some(position)) =
+            (self.graph_filter_menu_layout(), self.pointer_position)
+        {
+            match profiles::git_filter_menu_hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed
+                        && button == MouseButton::Left
+                        && let Some(row) = row
+                    {
+                        self.run_graph_filter_row(&row)?;
+                    }
+                    return Ok(());
+                }
+                None => {
+                    if state == ElementState::Pressed {
+                        self.close_graph_filter_menu()?;
                     }
                 }
             }
@@ -32180,6 +32925,13 @@ impl Runtime {
                 // gains, it is what it stops: without it a composition made over
                 // a file tree lands in whatever shell is behind the tree.
                 ImeOwner::FilesTree => return Ok(()),
+                // The search field, through the same two doors the editor uses:
+                // a pre-edit is drawn at its caret and is not in the text, and a
+                // commit is an ordinary insert that replaces the selection.
+                ImeOwner::GraphSearch => {
+                    self.graph_search_ime(&event)?;
+                    return Ok(());
+                }
                 ImeOwner::Preview => {
                     self.preview_ime(event)?;
                     return Ok(());
@@ -35264,7 +36016,7 @@ mod tests {
                 root: root.clone(),
                 outcome: Err(refused("fatal: detected dubious ownership")),
             },
-            git::GitAnswer::Branches {
+            git::GitAnswer::Refs {
                 root: root.clone(),
                 outcome: Err(git::GitFault::TimedOut),
             },
@@ -36029,6 +36781,7 @@ mod tests {
                         open: Vec::new(),
                         sel: None,
                         width: 240,
+                        remotes_open: false,
                     },
                 ))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
@@ -36300,6 +37053,7 @@ mod tests {
             // width that survived by being re-derived rather than carried would
             // be indistinguishable from one that survived properly.
             width: 197,
+            remotes_open: false,
         };
         let (seats, _, _, files, _preview) = revive_plan(&saved_files_and_terminal(saved.clone()));
 
@@ -36362,6 +37116,7 @@ mod tests {
                 open: Vec::new(),
                 sel: None,
                 width: 240,
+                remotes_open: false,
             }));
         let [column] = seats.files()[..] else {
             panic!("one files leaf");
@@ -36406,6 +37161,7 @@ mod tests {
                     open: Vec::new(),
                     sel: None,
                     width,
+                    remotes_open: false,
                 },
             )))
         };
@@ -36496,16 +37252,19 @@ mod tests {
                 bt_persist::PreviewPaneV1 {
                     leaf: token(landing),
                     cur: None,
+                    graph: None,
                 },
                 bt_persist::PreviewPaneV1 {
                     leaf: token(pinned),
                     cur: Some(readme.to_string_lossy().into_owned()),
+                    graph: None,
                 },
                 // A row naming the terminal: a hand edit, or a tree a newer
                 // build shaped differently. It costs that row and nothing else.
                 bt_persist::PreviewPaneV1 {
                     leaf: token(seats.terminal()),
                     cur: Some(r"C:\repo\stray.md".to_owned()),
+                    graph: None,
                 },
             ],
             pool: vec![
@@ -36563,6 +37322,7 @@ mod tests {
             BTreeMap::new(),
             pool,
             panes,
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,
@@ -36662,6 +37422,7 @@ mod tests {
             BTreeMap::new(),
             pool,
             panes,
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,
@@ -36679,6 +37440,101 @@ mod tests {
             serde_json::to_string(&written).expect("the section serializes"),
             r#"{"panes":[{"leaf":"leaf-1","cur":"D:\\notes\\README.md"}],"pool":[{"path":"D:\\notes\\README.md","name":"README.md"},{"path":"D:\\notes\\todo.txt","name":"todo.txt"}]}"#,
             "byte for byte the shape a session written before PreviewSource had"
+        );
+    }
+
+    /// T2/T3 (v2 ③) — the graph's branch filter goes to disk beside the pane it
+    /// belongs to, comes back on the pane it was written for, and is **absent**
+    /// from a session nobody filtered.
+    ///
+    /// Three claims, and each is a way this could have been wrong: an unfiltered
+    /// graph must add no bytes at all (a `"graph":{"branches":[],...}` on every
+    /// pane would be a schema change every existing document paid for); a
+    /// filtered one must survive the round trip whole; and a document written
+    /// *before* this field must read as a graph with both checkboxes still
+    /// ticked, because the resting state of "Show tags" is on and a serde
+    /// default would have made it off.
+    #[test]
+    fn a_graphs_branch_filter_crosses_the_disk_and_an_unfiltered_one_writes_nothing() {
+        let build_tab = |filter: Option<git_graph::GraphFilter>| {
+            let mut seats = seats::Seats::lone_terminal();
+            let seat = seats
+                .add_preview(&cross_metrics())
+                .expect("a preview lands");
+            let focused = seats.terminal();
+            let (layout, overflow) = cross_solve(&seats);
+            let mut views = BTreeMap::new();
+            if let Some(filter) = filter {
+                views.insert(
+                    seat,
+                    GraphView {
+                        filter,
+                        ..GraphView::default()
+                    },
+                );
+            }
+            (
+                assemble_tab_state(
+                    TabId(1),
+                    BTreeMap::from([(focused, leaf_saying("SHELL"))]),
+                    BTreeMap::new(),
+                    preview::PreviewPool::default(),
+                    PreviewPanes::default(),
+                    views,
+                    focused,
+                    TabSeed::default(),
+                    seats,
+                    layout,
+                    overflow,
+                ),
+                seat,
+            )
+        };
+
+        // ① An unfiltered graph writes exactly the bytes it always did.
+        let (plain, _) = build_tab(Some(git_graph::GraphFilter::default()));
+        let written = plain.preview_content().expect("this tab has a preview");
+        assert_eq!(
+            serde_json::to_string(&written).expect("the section serializes"),
+            r#"{"panes":[{"leaf":"leaf-1","cur":null}],"pool":[]}"#,
+            "an unfiltered graph is not a fact worth a field"
+        );
+
+        // ② A filtered one survives the round trip whole.
+        let filter = git_graph::GraphFilter {
+            branches: vec!["main".to_owned(), "side".to_owned()],
+            remotes: false,
+            tags: true,
+        };
+        let (filtered, seat) = build_tab(Some(filter.clone()));
+        let written = filtered.preview_content().expect("this tab has a preview");
+        let json = serde_json::to_string(&written).expect("the section serializes");
+        assert!(
+            json.contains(r#""graph":{"branches":["main","side"],"remotes":false,"tags":true}"#),
+            "the filter is written in the reader's vocabulary, not git's: {json}"
+        );
+        let read: bt_persist::TabPreviewV1 = serde_json::from_str(&json).expect("and reads back");
+        let restored = PreviewRestore::from_persisted(&filtered.seats, Some(&read));
+        assert_eq!(restored.filters.get(&seat), Some(&filter));
+
+        // ③ A document written before the field reads as an unfiltered graph
+        // with **both** checkboxes still ticked.
+        let old: bt_persist::TabPreviewV1 =
+            serde_json::from_str(r#"{"panes":[{"leaf":"leaf-1","cur":null}],"pool":[]}"#)
+                .expect("a session written before v2 (3) still reads");
+        assert!(
+            PreviewRestore::from_persisted(&filtered.seats, Some(&old))
+                .filters
+                .is_empty(),
+            "no filter written is no filter restored, which is `All branches`"
+        );
+        // And the same, one level down: a `graph` object that names only the
+        // branches leaves the two flags at the state their checkboxes rest in.
+        let partial: bt_persist::GraphFilterV1 =
+            serde_json::from_str(r#"{"branches":["main"]}"#).expect("an older shape reads");
+        assert!(
+            partial.remotes && partial.tags,
+            "a serde default of `false` here would clear two checkboxes nobody unticked"
         );
     }
 
@@ -36915,6 +37771,7 @@ mod tests {
             BTreeMap::new(),
             preview::PreviewPool::default(),
             PreviewPanes::default(),
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,
@@ -46834,6 +47691,7 @@ mod tests {
                 open: Vec::new(),
                 sel: None,
                 width: 240,
+                remotes_open: false,
             }));
         let terminals = seats.terminals();
         let focused = terminals[0];
@@ -46848,6 +47706,7 @@ mod tests {
             files,
             preview::PreviewPool::default(),
             PreviewPanes::default(),
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,
@@ -48760,6 +49619,7 @@ mod tests {
         assert!(keyboard_owner_is_a_shell(KeyboardOwner {
             rename: false,
             files_tree: false,
+            graph_search: false,
             preview: false,
             menu_or_dialog: false,
         }));
@@ -48833,11 +49693,23 @@ mod tests {
             ImeOwner::FilesTree,
             "the tree's rung stands above the preview's, as it does for keys"
         );
+        // T4 (v2 (3)) — the graph's search field stands between them: it lives on
+        // a preview seat, so a composition routed by `preview` alone would land
+        // in that seat's own edit surface while the caret was in the toolbar.
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                graph_search: true,
+                preview: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::GraphSearch,
+        );
         assert_eq!(
             ime_owner(KeyboardOwner {
                 rename: true,
                 menu_or_dialog: true,
                 files_tree: true,
+                graph_search: true,
                 preview: true,
             }),
             ImeOwner::Rename,
@@ -48845,12 +49717,13 @@ mod tests {
         );
 
         // **The whole of "zero PTY writes", stated as a property.**
-        for bits in 0..16u8 {
+        for bits in 0..32u8 {
             let owner = KeyboardOwner {
                 rename: bits & 1 != 0,
                 menu_or_dialog: bits & 2 != 0,
                 files_tree: bits & 4 != 0,
                 preview: bits & 8 != 0,
+                graph_search: bits & 16 != 0,
             };
             assert_eq!(
                 matches!(ime_owner(owner), ImeOwner::Shell),
@@ -49967,6 +50840,7 @@ mod tests {
                 open: Vec::new(),
                 sel: None,
                 width: 240,
+                remotes_open: false,
             }))
         };
         assert_eq!(
@@ -50294,6 +51168,7 @@ mod tests {
                 open: vec!["/src".to_owned()],
                 sel: Some("/src/main.rs".to_owned()),
                 width: 240,
+                remotes_open: false,
             }));
         let terminals = seats.terminals();
         let focused = terminals[0];
@@ -50308,6 +51183,7 @@ mod tests {
             files,
             preview::PreviewPool::default(),
             PreviewPanes::default(),
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,
@@ -50509,6 +51385,7 @@ mod tests {
             BTreeMap::new(),
             pool,
             panes,
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,
@@ -51037,6 +51914,7 @@ mod tests {
             BTreeMap::new(),
             preview::PreviewPool::default(),
             PreviewPanes::default(),
+            BTreeMap::new(),
             focused,
             TabSeed::default(),
             seats,

@@ -278,6 +278,16 @@ pub const GIT_BRANCHES_HEADING: &str = "BRANCHES";
 pub const GIT_BRANCHES_TOOLTIP: &str =
     "Local branches, current one first — click one to check it out";
 
+/// The sub-group under BRANCHES (T9, v2 ③).
+pub const GIT_REMOTES_HEADING: &str = "REMOTES";
+/// The disclosure triangle in front of it — the files tree's own ten pixels.
+pub const GIT_REMOTES_MARK_LOGICAL_PX: f32 = 10.0;
+/// And the gap between it and the word.
+pub const GIT_REMOTES_MARK_GAP_LOGICAL_PX: f32 = 4.0;
+/// What the row says when it is shut, and when it is open.
+pub const GIT_REMOTES_TOOLTIP_SHUT: &str = "Branches on remotes — click to show them";
+pub const GIT_REMOTES_TOOLTIP_OPEN: &str = "Branches on remotes — click to fold them away";
+
 pub const GIT_COMMITS_HEADING: &str = "COMMITS";
 /// Mock-up 4952, cut to what this slice draws: the merge curve is here, the
 /// lanes are G-4's.
@@ -532,6 +542,20 @@ pub struct GitHead {
     /// `↑ 2` and `↓ 1`, each already measured. Empty when there is no upstream
     /// or nothing to say about it: **zero draws no pill** (mock-up 4938).
     pub pills: Vec<GitPill>,
+    /// **Something about this repository is still being read** (T5, v2 ③).
+    ///
+    /// The branch goes `git_head_muted` while any of the three questions is in
+    /// flight and comes back to the text ink when they land — which is the whole
+    /// of what the graph's refresh button shows for itself. A spinner would be a
+    /// second thing on the strip claiming attention for a reading that usually
+    /// finishes inside a frame; a name that has gone quiet says "this is what I
+    /// last knew" without asking anybody to watch it.
+    ///
+    /// A field on the head rather than an argument to the painter because the
+    /// panel draws this same head and must not be made to answer a question it
+    /// does not have: it is `false` there, always, and the painter reads one
+    /// value from one place.
+    pub muted: bool,
 }
 
 /// One `.gud`.
@@ -590,6 +614,15 @@ pub struct GitBranchRow {
     /// Whether `HEAD` is on it — the one that leads the list (R9) and wears the
     /// filled dot (G35).
     pub current: bool,
+    /// Whether it is somebody else's — a `refs/remotes/…` row under the REMOTES
+    /// sub-group (T9, v2 ③).
+    ///
+    /// Drawn in `git_row_muted` and answering no press **in this slice**: a
+    /// press on `origin/main` means "make me a local branch tracking that", which
+    /// is a *write* with its own refusals and its own naming rules, and it is
+    /// v2 ④'s (M10). A row that checked out a remote-tracking ref the way a local
+    /// row does would put the reader on a detached HEAD without a word about it.
+    pub remote: bool,
     /// A checkout is in flight, for this branch or another one (R10).
     ///
     /// **The whole list dims and not only the row pressed**, which is the
@@ -714,8 +747,27 @@ pub enum GitRow {
         act: Option<GitAct>,
     },
     Change(GitChangeRow),
-    /// One local branch (§D / R9).
+    /// One branch — local (§D / R9), or remote-tracking under the sub-group
+    /// [`Self::Remotes`] opens (T9, v2 ③).
     Branch(GitBranchRow),
+    /// **REMOTES (N)** — the folded sub-group under BRANCHES (T9, v2 ③).
+    ///
+    /// Its own row and not a [`Self::Heading`] with a flag, because the two are
+    /// different things: a heading is a word over a list and answers no press of
+    /// its own, and this is a *control* — pressing it opens and shuts what is
+    /// under it. Giving `Heading` an `open` field would have made every one of
+    /// the four headings on this page pressable-looking to any reader of the
+    /// type, which is exactly the kind of "one variant, two meanings" the row
+    /// enum was flattened to avoid.
+    ///
+    /// **Under BRANCHES rather than beside it**, and folded by default: a column
+    /// 240 pixels wide showing a fetched repository would otherwise open on a
+    /// page whose first screenful is other people's branches. What the reader
+    /// came for is the branch they are on.
+    Remotes {
+        count: usize,
+        open: bool,
+    },
     Commit(GitCommitRow),
     /// A file under the one expanded commit (R15).
     CommitFile(GitCommitFileRow),
@@ -752,7 +804,10 @@ impl GitRow {
                 + GIT_HEAD_PADDING_BOTTOM_LOGICAL_PX)
                 * scale)
                 .round(),
-            Self::Heading { .. } => ((GIT_LABEL_PADDING_TOP_LOGICAL_PX
+            // The REMOTES row is a heading's height because it *is* a heading
+            // with a press on it — a sub-group's word standing over its own
+            // list, in the same `.glabel` grammar as the four above it.
+            Self::Heading { .. } | Self::Remotes { .. } => ((GIT_LABEL_PADDING_TOP_LOGICAL_PX
                 + GIT_LABEL_LINE_LOGICAL_PX
                 + GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX)
                 * scale)
@@ -857,16 +912,37 @@ pub fn row_document(row: &GitRow, root: &Path) -> Option<GitRowOpen> {
         // there is nowhere for it to take you. A row already waiting on a
         // checkout answers nothing either, which is the same guard `+` has
         // against being pressed twice.
-        GitRow::Branch(branch) if branch.current || branch.pending => None,
+        //
+        // A **remote** row answers nothing either, and see [`GitBranchRow::remote`]
+        // for why that is the ruling and not a gap: checking out `origin/main`
+        // is not what pressing it should mean.
+        GitRow::Branch(branch) if branch.current || branch.pending || branch.remote => None,
         GitRow::Branch(branch) => Some(GitRowOpen::Checkout {
             target: branch.name.clone(),
             detach: false,
         }),
         // A masthead, a heading, the "load more" row and a notice are not
         // documents. The first three answer their own presses through
-        // [`GitAct`]; the last answers none.
-        GitRow::Masthead(_) | GitRow::Heading { .. } | GitRow::LoadMore | GitRow::Notice(_) => None,
+        // [`GitAct`]; the last answers none. The REMOTES row is a control and
+        // answers its own press — see [`row_toggles_remotes`].
+        GitRow::Masthead(_)
+        | GitRow::Heading { .. }
+        | GitRow::Remotes { .. }
+        | GitRow::LoadMore
+        | GitRow::Notice(_) => None,
     }
+}
+
+/// Whether a press on this row opens or shuts the REMOTES sub-group (T9).
+///
+/// Beside [`row_document`] rather than folded into it for the reason that
+/// function's own doc gives: what a press *means* is a fact about the page, and
+/// a sub-group toggle is not a document — putting it into `GitRowOpen` would
+/// have added a variant that opens nothing to an enum whose whole name is what
+/// opens.
+#[must_use]
+pub fn row_toggles_remotes(row: &GitRow) -> bool {
+    matches!(row, GitRow::Remotes { .. })
 }
 
 /// **The accordion** (R15): one commit open, or none.
@@ -913,23 +989,51 @@ pub struct GitPanelContent {
 /// second answer.
 pub type Measure<'a> = dyn FnMut(&str, f32) -> f32 + 'a;
 
+/// **What one column is doing**, as against what its repository said.
+///
+/// Two fields that always travel together and always came from the same place —
+/// the column's own [`crate::seats::FilesLeafState`] — gathered into one value
+/// for [`crate::git_graph::GraphLook`]'s reason: `build` would otherwise take an
+/// `Option<&str>` and a bare `bool` in a row, and a bare `bool` in a signature is
+/// a flag whose meaning lives only in the caller's memory.
+///
+/// `expanded` is the one commit whose files are showing (R15). It is here rather
+/// than off the cache because it is a *view* state — which commit this column is
+/// looking into — and the cache is what the repository said. The cache holds the
+/// answer; whether it is on screen is the column's.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GitPanelLook<'a> {
+    pub expanded: Option<&'a str>,
+    /// Whether the REMOTES sub-group is unfolded (T9, v2 ③).
+    ///
+    /// **Durable, like `view` beside it** — see
+    /// [`bt_persist::FilesLeafV1::remotes_open`]. A reader who works against a
+    /// fork all morning and finds the remotes folded again every time the window
+    /// reopens is being told the product did not notice; and unlike the one open
+    /// commit next to it, "I want to see the remotes" is a fact about the
+    /// *column* rather than a glance at a history that may have moved on.
+    pub remotes_open: bool,
+}
+
 /// Turn what a column knows into what it draws.
 ///
 /// **The whole derivation, in one place.** The painter, the hit test and the
 /// wheel all read the rows this returns, so a row that is drawn is a row that can
 /// be pressed and a row that can be pressed is a row that is there.
 ///
-/// `expanded` is the one commit whose files are showing (R15). It arrives as a
-/// parameter rather than off the cache because it is a *view* state — which
-/// commit this column is looking into — and the cache is what the repository
-/// said. The cache holds the answer; whether it is on screen is the column's.
+/// [`GitPanelLook`] is what the *column* is doing, as against what the
+/// repository said — see that type.
 #[must_use]
 pub fn build(
     cache: &GitCache,
-    expanded: Option<&str>,
+    look: GitPanelLook<'_>,
     scale: f32,
     measure: &mut Measure<'_>,
 ) -> GitPanelContent {
+    let GitPanelLook {
+        expanded,
+        remotes_open,
+    } = look;
     let mut content = GitPanelContent::default();
 
     // The repository probe answers first and answers for everything: until it
@@ -975,25 +1079,55 @@ pub fn build(
 
     // **Branches first** (G25's group order, R9's contents): the list of places
     // this repository can stand, with the one it is standing on at the top. The
-    // sort is `parse_branches`' own — current first, then git's order — and it
-    // is done there rather than here because "the current one leads" is a fact
-    // about the answer and not about the drawing of it.
-    match cache.branches() {
-        GitSlot::Ready(branches) if !branches.is_empty() => {
+    // sort is `parse_refs`' own — current first, then newest — and it is done
+    // there rather than here because "the current one leads" is a fact about the
+    // answer and not about the drawing of it.
+    //
+    // **Locals, then a folded REMOTES sub-group** (T9, v2 ③). Tags are
+    // deliberately absent: v2 keeps this column compact, and a tag is a name
+    // this page offers no verb for. They are drawn where they mean something,
+    // which is on the commit they stand on, in the graph.
+    match cache.refs() {
+        GitSlot::Ready(refs)
+            if refs
+                .iter()
+                .any(|entry| entry.kind == crate::git::GitRefKind::Local) =>
+        {
+            let locals: Vec<&crate::git::GitRefEntry> = crate::git::local_branches(refs).collect();
+            let remotes: Vec<&crate::git::GitRefEntry> =
+                crate::git::remote_branches(refs).collect();
             content.rows.push(GitRow::Heading {
                 group: None,
                 label: GIT_BRANCHES_HEADING,
                 tooltip: GIT_BRANCHES_TOOLTIP,
-                count: branches.len(),
+                // **The locals and not the whole answer.** The number over a
+                // heading is how many rows are under it, and the remotes are
+                // under a heading of their own that carries its own count.
+                count: locals.len(),
                 // No group verb: "stage all" over a list of branches is not a
                 // sentence, and a checkout of all of them is not a thing.
                 act: None,
             });
             let waiting = cache.checkout_pending().is_some();
-            for branch in branches {
+            for branch in locals {
                 content
                     .rows
                     .push(GitRow::Branch(branch_row(branch, waiting, scale, measure)));
+            }
+            // A repository with no remote has no sub-group — a row reading
+            // `REMOTES (0)` would be a control offering to open nothing.
+            if !remotes.is_empty() {
+                content.rows.push(GitRow::Remotes {
+                    count: remotes.len(),
+                    open: remotes_open,
+                });
+                if remotes_open {
+                    for branch in remotes {
+                        content
+                            .rows
+                            .push(GitRow::Branch(branch_row(branch, waiting, scale, measure)));
+                    }
+                }
             }
         }
         GitSlot::Failed(fault) => {
@@ -1131,9 +1265,9 @@ fn commit_file_row(file: &GitCommitFile, hash: &str) -> GitRow {
     })
 }
 
-/// One branch row (the inventory's section D).
+/// One branch row (the inventory's section D), local or remote (T9).
 fn branch_row(
-    branch: &crate::git::GitBranch,
+    branch: &crate::git::GitRefEntry,
     waiting: bool,
     scale: f32,
     measure: &mut Measure<'_>,
@@ -1158,12 +1292,17 @@ fn branch_row(
         name_width: measure(&branch.name, font),
         time_width: measure(&branch.committerdate_relative, time_font),
         // The mock-up's own two sentences (G36), and the second one is the only
-        // place this page names the verb a branch row carries.
-        tooltip: if branch.is_head {
-            format!("{} - the branch you are on", branch.name)
-        } else {
-            format!("Check out {}", branch.name)
+        // place this page names the verb a branch row carries. A remote row
+        // carries no verb (T9), so it says what it *is* instead of promising a
+        // checkout it will not do.
+        tooltip: match (branch.kind, branch.is_head) {
+            (crate::git::GitRefKind::Remote, _) => {
+                format!("{} - a branch on a remote", branch.name)
+            }
+            (_, true) => format!("{} - the branch you are on", branch.name),
+            (_, false) => format!("Check out {}", branch.name),
         },
+        remote: branch.kind == crate::git::GitRefKind::Remote,
         name: branch.name.clone(),
         current: branch.is_head,
         pending: waiting,
@@ -1199,6 +1338,7 @@ fn masthead(
             branch_width: measure(GIT_READING, font),
             named: false,
             pills: Vec::new(),
+            muted: false,
         };
     };
     // Three states and three sentences (R7). A detached head has no branch to
@@ -1228,6 +1368,8 @@ fn masthead(
         branch,
         named,
         pills,
+        // The panel never says this — see the field.
+        muted: false,
     }
 }
 
@@ -1637,6 +1779,14 @@ pub fn row_tooltip(row: &GitRow) -> Option<String> {
         GitRow::Commit(commit) => Some(commit.tooltip.clone()),
         GitRow::CommitFile(file) => Some(file.tooltip.clone()),
         GitRow::LoadMore => Some(GitAct::LoadMore.tooltip(false).to_owned()),
+        GitRow::Remotes { open, .. } => Some(
+            if *open {
+                GIT_REMOTES_TOOLTIP_OPEN
+            } else {
+                GIT_REMOTES_TOOLTIP_SHUT
+            }
+            .to_owned(),
+        ),
         GitRow::Notice(_) => None,
     }
 }
@@ -1729,6 +1879,20 @@ pub fn push_git_panel(
             GitRow::Heading { label, count, .. } => {
                 push_heading(label, *count, rect, scale, palette, labels, &crop);
                 push_acts(row, rect, hover, hovered, scale, palette, sprites, &crop);
+            }
+            // The sub-group's own word, with a disclosure triangle in front of
+            // it: the same glyph at the same angle a directory row turns, so
+            // "this opens" is said the one way this window says it (T9).
+            GitRow::Remotes { count, open } => {
+                push_remotes_heading(
+                    *count,
+                    *open,
+                    rect,
+                    scale,
+                    palette,
+                    (labels, sprites),
+                    &crop,
+                );
             }
             GitRow::Change(change) => {
                 push_row_ground(rect, hovered, scale, palette, sprites, &crop);
@@ -1892,7 +2056,7 @@ pub fn push_git_masthead(
         text: head.branch.clone(),
         rect: name_rect,
         font_size_px: font,
-        color: if head.named {
+        color: if head.named && !head.muted {
             palette.git_head_text
         } else {
             // "detached HEAD" is a state and not a name, so it is said quietly —
@@ -2073,7 +2237,14 @@ fn push_branch(
         font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
         // `.gbr bdi { color: --ink2 }`, and `--ink` at 500 for the current one
         // (G34): the branch you are on is the fact, the rest are offers.
-        color: if branch.current {
+        //
+        // **A remote row is quieter than both** (T9): `git_row_muted` is this
+        // page's ink for *furniture* — a hash, an age — and a name that carries
+        // no verb in this slice is exactly that. It does not brighten under the
+        // pointer either, because there is nothing there to reach for.
+        color: if branch.remote {
+            palette.git_row_muted
+        } else if branch.current {
             palette.git_row_text
         } else if hovered {
             palette.git_act_glyph_hover
@@ -2114,6 +2285,57 @@ fn push_heading(
     ];
     labels.push(ChromeLabel {
         text: format!("{label} ({count})"),
+        rect: text_rect,
+        font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
+        color: palette.git_head_muted,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: GIT_LABEL_TRACKING_EM,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: Some(crop(text_rect)),
+    });
+}
+
+/// The REMOTES sub-group's own row (T9): a disclosure triangle and a heading.
+///
+/// The triangle is the files tree's own glyph at the two ends of its turn
+/// ([`crate::marks::tree_disclosure`]), because "this opens" has exactly one
+/// drawing in this window and a second one would be a second idiom for one idea.
+/// It does not animate here and that is not a shortcut: a files row's triangle
+/// turns because the row's children slide in under it, and this list has no
+/// motion of its own to be in step with.
+#[allow(clippy::too_many_arguments)]
+fn push_remotes_heading(
+    count: usize,
+    open: bool,
+    rect: [f32; 4],
+    scale: f32,
+    palette: &ChromePalette,
+    out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
+    crop: &dyn Fn([f32; 4]) -> [f32; 4],
+) {
+    let (labels, sprites) = out;
+    let line = (GIT_LABEL_LINE_LOGICAL_PX * scale).round();
+    let bottom_pad = (GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX * scale).round();
+    let mark = (GIT_REMOTES_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let gap = (GIT_REMOTES_MARK_GAP_LOGICAL_PX * scale).round();
+    let baseline_top = rect[3] - bottom_pad - line;
+    let mark_top = (baseline_top + (line - mark) / 2.0).round();
+    let mark_rect = [rect[0], mark_top, rect[0] + mark, mark_top + mark];
+    sprites.push(ChromeSprite::new(
+        crate::marks::tree_disclosure(if open { 1.0 } else { 0.0 }),
+        crop(mark_rect),
+        palette.git_head_muted,
+    ));
+    let text_rect = [
+        mark_rect[2] + gap,
+        baseline_top,
+        rect[2],
+        rect[3] - bottom_pad,
+    ];
+    labels.push(ChromeLabel {
+        text: format!("{GIT_REMOTES_HEADING} ({count})"),
         rect: text_rect,
         font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
         color: palette.git_head_muted,
@@ -2887,13 +3109,47 @@ mod tests {
     }
 
     fn rows_of(cache: &GitCache) -> GitPanelContent {
-        build(cache, None, 1.0, &mut ruler)
+        build(cache, GitPanelLook::default(), 1.0, &mut ruler)
     }
 
-    /// The branches git would have answered with, in git's own order.
-    fn branch(name: &str, is_head: bool, ahead: usize, behind: usize) -> crate::git::GitBranch {
-        crate::git::GitBranch {
+    /// The page with one commit open.
+    fn look(expanded: &str) -> GitPanelLook<'_> {
+        GitPanelLook {
+            expanded: Some(expanded),
+            remotes_open: false,
+        }
+    }
+
+    /// The same page with the REMOTES sub-group unfolded (T9).
+    fn rows_with_remotes_open(cache: &GitCache) -> GitPanelContent {
+        build(
+            cache,
+            GitPanelLook {
+                expanded: None,
+                remotes_open: true,
+            },
+            1.0,
+            &mut ruler,
+        )
+    }
+
+    /// One ref git would have answered with.
+    fn branch(name: &str, is_head: bool, ahead: usize, behind: usize) -> crate::git::GitRefEntry {
+        reference(crate::git::GitRefKind::Local, name, is_head, ahead, behind)
+    }
+
+    fn reference(
+        kind: crate::git::GitRefKind,
+        name: &str,
+        is_head: bool,
+        ahead: usize,
+        behind: usize,
+    ) -> crate::git::GitRefEntry {
+        crate::git::GitRefEntry {
+            kind,
             name: name.to_owned(),
+            object: "a1".to_owned(),
+            upstream: None,
             is_head,
             ahead,
             behind,
@@ -2902,10 +3158,10 @@ mod tests {
         }
     }
 
-    fn with_branches(mut cache: GitCache, branches: Vec<crate::git::GitBranch>) -> GitCache {
-        assert!(cache.accept(GitAnswer::Branches {
+    fn with_branches(mut cache: GitCache, refs: Vec<crate::git::GitRefEntry>) -> GitCache {
+        assert!(cache.accept(GitAnswer::Refs {
             root: PathBuf::from(ROOT),
-            outcome: Ok(branches),
+            outcome: Ok(refs),
         }));
         cache
     }
@@ -2926,16 +3182,17 @@ mod tests {
     /// The order is not a nicety: a repository with sixty branches shows the
     /// first handful without scrolling, and the one fact a reader always needs
     /// from this list is where they are. It is also **not** sorted here — the
-    /// sort is `parse_branches`', so this holds the whole pipeline rather than a
+    /// sort is `parse_refs`', so this holds the whole pipeline rather than a
     /// re-sort the page could quietly stop doing.
     #[test]
     fn the_branch_list_puts_the_current_branch_first() {
         let cache = with_branches(
             answered(b"", vec![commit("aaaaaaa", "one", 1)], false),
-            crate::git::parse_branches(
-                b"feat/latex\0\0\0\nmain\0*\0\0\nspike/x\0\0\0\n",
-                1_760_000_000,
-            ),
+            vec![
+                branch("main", true, 0, 0),
+                branch("feat/latex", false, 0, 0),
+                branch("spike/x", false, 0, 0),
+            ],
         );
         let content = rows_of(&cache);
         let rows = branch_rows(&content);
@@ -2972,7 +3229,7 @@ mod tests {
     fn a_branch_row_checks_out_and_the_current_one_does_nothing() {
         let cache = with_branches(
             answered(b"", Vec::new(), false),
-            crate::git::parse_branches(b"main\0*\0\0\nside\0\0\0\n", 1_760_000_000),
+            vec![branch("main", true, 0, 0), branch("side", false, 0, 0)],
         );
         let content = rows_of(&cache);
         let rows: Vec<&GitRow> = content
@@ -2991,6 +3248,104 @@ mod tests {
                 target: "side".to_owned(),
                 detach: false,
             })
+        );
+    }
+
+    /// T9 (v2 ③) — the remotes stand in a sub-group of their own, folded, under
+    /// the locals; and no tag reaches this column at all.
+    #[test]
+    fn the_remotes_are_a_folded_sub_group_under_the_branches_and_tags_are_not_here() {
+        let cache = with_branches(
+            answered(b"", Vec::new(), false),
+            vec![
+                branch("main", true, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/main", false, 0, 0),
+                reference(crate::git::GitRefKind::Remote, "origin/side", false, 0, 0),
+                reference(crate::git::GitRefKind::Tag, "v1.0", false, 0, 0),
+            ],
+        );
+        let shut = rows_of(&cache);
+        assert_eq!(
+            branch_rows(&shut)
+                .iter()
+                .map(|row| row.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["main".to_owned()],
+            "folded, the column lists the locals and nothing else"
+        );
+        let sub = shut
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                GitRow::Remotes { count, open } => Some((*count, *open)),
+                _ => None,
+            })
+            .expect("a repository with remotes gets the sub-group row");
+        assert_eq!(sub, (2, false), "it counts them and starts shut");
+        // And the heading above it counts the locals, not the whole answer.
+        assert_eq!(
+            shut.rows.iter().find_map(|row| match row {
+                GitRow::Heading { label, count, .. } if *label == GIT_BRANCHES_HEADING =>
+                    Some(*count),
+                _ => None,
+            }),
+            Some(1)
+        );
+
+        let open = rows_with_remotes_open(&cache);
+        assert_eq!(
+            branch_rows(&open)
+                .iter()
+                .map(|row| (row.name.clone(), row.remote))
+                .collect::<Vec<_>>(),
+            vec![
+                ("main".to_owned(), false),
+                ("origin/main".to_owned(), true),
+                ("origin/side".to_owned(), true),
+            ],
+            "unfolded, the remotes follow the locals and each says it is one"
+        );
+        // The sub-group row is what a press toggles, and a remote row is not a
+        // checkout: that verb is v2 (4)'s.
+        let sub_row = open
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::Remotes { .. }))
+            .expect("the row is still there when it is open");
+        assert!(row_toggles_remotes(sub_row));
+        assert_eq!(row_document(sub_row, Path::new(ROOT)), None);
+        let remote_row = open
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::Branch(branch) if branch.remote))
+            .expect("a remote row is drawn");
+        assert!(!row_toggles_remotes(remote_row));
+        assert_eq!(
+            row_document(remote_row, Path::new(ROOT)),
+            None,
+            "pressing `origin/main` must not check out a detached HEAD"
+        );
+        // No tag anywhere on the page: v2 keeps this column compact, and a tag
+        // is drawn where it means something, which is on a commit in the graph.
+        assert!(
+            !branch_rows(&open).iter().any(|row| row.name == "v1.0"),
+            "a tag is not a branch row"
+        );
+    }
+
+    /// T9 — a repository with no remote gets no sub-group row at all.
+    #[test]
+    fn a_repository_with_no_remote_offers_nothing_to_unfold() {
+        let cache = with_branches(
+            answered(b"", Vec::new(), false),
+            vec![branch("main", true, 0, 0)],
+        );
+        assert!(
+            !rows_of(&cache)
+                .rows
+                .iter()
+                .any(|row| matches!(row, GitRow::Remotes { .. })),
+            "`REMOTES (0)` is a control offering to open nothing"
         );
     }
 
@@ -3196,7 +3551,7 @@ mod tests {
             vec![commit("aaaaaaa", "first", 1)],
             false,
         );
-        assert!(cache.accept(GitAnswer::Branches {
+        assert!(cache.accept(GitAnswer::Refs {
             root: PathBuf::from(ROOT),
             outcome: Err(GitFault::Refused(words.to_owned())),
         }));
@@ -3851,7 +4206,7 @@ mod tests {
                 stat: None,
             }]),
         }));
-        let content = build(&cache, Some(&open), 1.0, &mut ruler);
+        let content = build(&cache, look(&open), 1.0, &mut ruler);
         let files: Vec<&GitCommitFileRow> = content
             .rows
             .iter()
@@ -3907,7 +4262,7 @@ mod tests {
                 stat: None,
             }]),
         }));
-        let content = build(&cache, Some(&hash), 1.0, &mut ruler);
+        let content = build(&cache, look(&hash), 1.0, &mut ruler);
         let row = content
             .rows
             .iter()
@@ -3993,7 +4348,7 @@ mod tests {
                 stat: None,
             }]),
         }));
-        let page = build(&cache, Some(&hash), 1.0, &mut ruler);
+        let page = build(&cache, look(&hash), 1.0, &mut ruler);
         let row = page
             .rows
             .iter()
@@ -4097,10 +4452,12 @@ mod tests {
             crate::git::GitRef {
                 name: "main".to_owned(),
                 head: true,
+                kind: crate::git::GitRefKind::Local,
             },
             crate::git::GitRef {
                 name: "spike".to_owned(),
                 head: false,
+                kind: crate::git::GitRefKind::Local,
             },
         ];
         let content = rows_of(&answered(b"## main\0", vec![carried], false));
@@ -4131,6 +4488,7 @@ mod tests {
         carried.refs = vec![crate::git::GitRef {
             name: "a-branch-name-far-longer-than-two-hundred-and-forty-pixels".to_owned(),
             head: false,
+            kind: crate::git::GitRefKind::Local,
         }];
         let content = rows_of(&answered(b"## main\0", vec![carried], false));
         let glass = painted(&content, 600.0);

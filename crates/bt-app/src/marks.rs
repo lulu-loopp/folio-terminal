@@ -401,6 +401,32 @@ pub enum ChromeMark {
     /// plus sitting a row above it, which on two buttons that mean opposite
     /// things is exactly where it would show.
     Minus,
+    /// **A tag** — the label somebody nailed on a commit (T7, v2 ③).
+    ///
+    /// Struck for this product: the mock-up's sheet has no tag, because the page
+    /// it was drawn for had no tags on it. The silhouette is the one every tool
+    /// in this space uses — a rectangle with one corner drawn out to a point,
+    /// and a punched hole where the string goes — and it is drawn from geometry
+    /// rather than reached for in a font, which is this module's whole law: a
+    /// glyph is a fact about whichever typeface happened to be installed, and a
+    /// mark has to hold its silhouette on both grounds at ten pixels.
+    ///
+    /// The house sixteen, at `#i-file`'s own 1.15 stroke, so it sits at the same
+    /// optical weight as the marks it stands beside.
+    Tag,
+    /// **Read the repository again** (T5, v2 ③) — the graph toolbar's refresh.
+    ///
+    /// A circular arrow with a gap at the top and a solid head, which is the one
+    /// drawing this idea has anywhere. Struck rather than found: this sheet had
+    /// nothing circular-and-arrowed in it — [`Self::ProgressRing`] is an arc
+    /// *without* a head and means "something is running", which is very nearly
+    /// the opposite claim, and giving it a head would have made one drawing say
+    /// both.
+    ///
+    /// The head is filled while the arc is stroked, and that is deliberate: an
+    /// arrowhead outlined at this size is three hairlines meeting, which reads as
+    /// a smudge rather than as a direction.
+    Refresh,
     /// The mini graph's merge curve — a branch's history joining this line.
     ///
     /// The mock-up's own path (line 4933), in the mock-up's own `0 0 14 27` box,
@@ -512,6 +538,8 @@ impl ChromeMark {
             Self::GitBranch => "i-git-branch",
             Self::GitGraph => "i-git-graph",
             Self::Minus => "i-minus",
+            Self::Tag => "i-tag",
+            Self::Refresh => "i-refresh",
             Self::GitMergeCurve => "git-merge-curve",
             // One id for four mirrorings and every span, exactly as the chevron
             // has one id for every angle: `mark_key` adds the rest.
@@ -1302,6 +1330,8 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::GitBranch => 27,
         ChromeMark::GitGraph => 28,
         ChromeMark::Minus => 29,
+        ChromeMark::Tag => 34,
+        ChromeMark::Refresh => 35,
         ChromeMark::GitMergeCurve => 30,
         ChromeMark::Split => 31,
         ChromeMark::SplitRight => 32,
@@ -1320,7 +1350,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 34] = [
+const SYMBOL_VIEW_BOX: [&str; 36] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1381,11 +1411,16 @@ const SYMBOL_VIEW_BOX: [&str; 34] = [
     // drawing turned, and a turn is only legible if nothing else changed.
     "0 0 16 16",
     "0 0 16 16",
+    // `#i-tag` and `#i-refresh`, struck for v2 (3) and cut to the house sixteen
+    // for the reason the two git marks above them are: a mark that shares a row
+    // with `#i-file` has to be cut in the same units to sit at the same weight.
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 34] = [
+const SYMBOL_BODY: [&str; 36] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1593,6 +1628,25 @@ const SYMBOL_BODY: [&str; 34] = [
     concat!(
         r#"<rect x="1.5" y="2.5" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
         r#"<rect x="1.5" y="8.6" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+    ),
+    // `#i-tag` — the label with a punched hole (T7). The outline runs from the
+    // top-left corner along the top, out to the point at the right, back along
+    // the bottom and home; the hole is filled rather than stroked because a
+    // one-unit ring at this size closes up into a dot anyway, and a dot is what
+    // it is meant to read as.
+    concat!(
+        r#"<path d="M2.9 2.2h4.9c.27 0 .53.11.72.3l5.28 5.28c.4.4.4 1.04 0 1.44l-4.26 4.26c-.4.4-1.04.4-1.44 0L2.5 7.88c-.19-.19-.3-.45-.3-.72V2.9c0-.39.31-.7.7-.7z" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/>"#,
+        r#"<circle cx="5.1" cy="5.1" r="1" fill="currentColor"/>"#,
+    ),
+    // `#i-refresh` — a circle with a bite out of the top and a head on the end
+    // (T5). The arc is written from the gap's far side *clockwise* the long way
+    // round, so it arrives at twelve o'clock travelling to the right, which is
+    // where the head points: the direction of travel and the direction of the
+    // head are one fact, and an arc written the other way would have needed the
+    // head turned round by hand.
+    concat!(
+        r#"<path d="M12.33 5.5a5 5 0 1 1-4.33-2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+        r#"<path d="M8 1.3 11 3 8 4.7z" fill="currentColor"/>"#,
     ),
 ];
 
@@ -2965,6 +3019,61 @@ mod tests {
     /// hole, which is what a fill adds and a stroke cannot.
     fn opaque_pixels(icon: &ChromeIcon) -> usize {
         icon.rgba.chunks_exact(4).filter(|p| p[3] == 255).count()
+    }
+
+    /// T5/T7 (v2 ③) — the two marks this slice struck draw, fill their boxes,
+    /// and are two different silhouettes.
+    ///
+    /// **Both drawn from geometry**, which is the ruling this test is here to
+    /// hold: a tag and a refresh arrow are available as font glyphs, and one
+    /// reached for in a font is a fact about whichever typeface happened to be
+    /// installed. If either of these ever stopped being a path in this sheet,
+    /// `svg_document` would have nothing to rasterize and the ink mass would go
+    /// to zero.
+    ///
+    /// The tag is asserted **hollow with a hole**: an outline and a punched dot
+    /// is what says "label", and a solid lozenge is what a careless fill would
+    /// leave — so the mark has to cover a good part of its box's edge and very
+    /// little of its middle.
+    #[test]
+    fn the_tag_and_the_refresh_are_struck_from_geometry_and_are_not_one_drawing() {
+        let ink = [0x7a, 0x99, 0xff];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[
+            sprite(ChromeMark::Tag, 32.0, 32.0, ink),
+            sprite(ChromeMark::Refresh, 32.0, 32.0, ink),
+        ]);
+        let (tag, refresh) = (&icons[0], &icons[1]);
+        assert!(ink_mass(tag) > 0, "the tag drew something");
+        assert!(ink_mass(refresh) > 0, "and so did the refresh");
+        assert_ne!(
+            tag.rgba, refresh.rgba,
+            "two marks, and not one drawing under two names"
+        );
+        // Each fills most of its own box: a glyph cowering in a corner is a
+        // path whose viewBox does not match the units it was written in.
+        for (name, icon) in [("tag", tag), ("refresh", refresh)] {
+            let (width, height) = ink_span(icon);
+            assert!(
+                width >= 24 && height >= 24,
+                "{name} covers {width}x{height} of a 32px box"
+            );
+        }
+        // The tag is an outline: its own centre is empty, because the label's
+        // body is not filled in.
+        assert_eq!(
+            alpha_at(tag, 16, 20),
+            0,
+            "a solid lozenge is what a careless fill would leave"
+        );
+        // And the refresh has its bite: the gap in the ring is up and to the
+        // right of centre, between twelve and one o'clock, which is where the
+        // arrowhead is not.
+        assert_eq!(
+            alpha_at(refresh, 26, 8),
+            0,
+            "the arc is open where the head does not reach"
+        );
     }
 
     /// PIN — ONE pin at ONE angle: 45°, head upper-right, needle lower-left

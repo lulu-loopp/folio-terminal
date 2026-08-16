@@ -1892,6 +1892,16 @@ pub enum ChromeTarget {
         seat: SeatId,
         index: usize,
     },
+    /// One of the graph toolbar's four controls (T1, v2 ③).
+    ///
+    /// Its own target and not a row, because the toolbar is a *fixed strip* —
+    /// it stands outside [`crate::git_graph::GraphGeometry::viewport`], so no
+    /// row arithmetic reaches it and a press on it could never be answered by
+    /// the list's own hit test.
+    GitGraphTool {
+        seat: SeatId,
+        tool: crate::git_graph::GraphTool,
+    },
     /// One pressable part of a graph's detail block (v2 ②) — a parent hash, a
     /// copy verb, the compare block's `\u{d7}`.
     ///
@@ -5762,6 +5772,14 @@ pub fn build_chrome_for_tabs(
                         geometry.body,
                         graph,
                         crate::git_graph::GraphHover {
+                            tool: match pointer.hover {
+                                Some(ChromeTarget::GitGraphTool { seat, tool })
+                                    if seat == placement.id =>
+                                {
+                                    Some(tool)
+                                }
+                                _ => None,
+                            },
                             row: match pointer.hover {
                                 Some(ChromeTarget::GitGraphRow { seat, index })
                                 | Some(ChromeTarget::GitGraphDetail { seat, index, .. })
@@ -9610,6 +9628,37 @@ pub fn hit_git_graph(
             continue;
         };
         let geometry = crate::git_graph::graph_geometry(body, content, scale);
+        // **The toolbar answers first** (T1), because it is not in the list: it
+        // is a fixed strip above the rows' own box, so a press on it is not a
+        // press the row arithmetic could ever have claimed — and asking it after
+        // the rows would be asking a question whose answer is already known.
+        if let (Some(strip), Some(toolbar)) = (geometry.head, content.toolbar.as_ref()) {
+            let rects = crate::git_graph::graph_toolbar_rects(strip, toolbar, scale);
+            // Innermost first: the `\u{d7}` lives inside the field it clears, so
+            // a field that answered first would be a button nothing can reach.
+            for (rect, tool) in [
+                (
+                    rects.search_clear,
+                    Some(crate::git_graph::GraphTool::SearchClear),
+                ),
+                (rects.search, Some(crate::git_graph::GraphTool::Search)),
+                (
+                    Some(rects.filter),
+                    Some(crate::git_graph::GraphTool::Filter),
+                ),
+                (
+                    Some(rects.refresh),
+                    Some(crate::git_graph::GraphTool::Refresh),
+                ),
+            ] {
+                let (Some(rect), Some(tool)) = (rect, tool) else {
+                    continue;
+                };
+                if x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3] {
+                    return Some(ChromeTarget::GitGraphTool { seat: *seat, tool });
+                }
+            }
+        }
         let Some(index) = geometry.row_at(x, y, content.total_rows) else {
             continue;
         };
@@ -11976,6 +12025,19 @@ pub struct FilesLeafState {
     ///
     /// A single `Option` and not a set: see [`crate::git_panel::toggled_expansion`].
     pub git_expanded: Option<String>,
+    /// **Whether the REMOTES sub-group under BRANCHES is unfolded** (T9, v2 ③).
+    ///
+    /// It sits here with `view` and *not* with `git_expanded` above it, and the
+    /// difference is the one R1 already drew: an expansion is a glance at one
+    /// commit, and this is a shape of the column — "I work with remotes in this
+    /// place" — which is the same kind of durable fact as which page the column
+    /// is on and which folders are open. So it crosses the disk
+    /// ([`bt_persist::FilesLeafV1::remotes_open`]).
+    ///
+    /// `false` by default, which is the folded state: a fetched repository has
+    /// more remote branches than local ones, and a column 240 pixels wide that
+    /// opened on other people's work would be answering a question nobody asked.
+    pub git_remotes_open: bool,
 }
 
 impl Seats {
@@ -12078,6 +12140,8 @@ fn to_persisted(
                         FilesView::Files => bt_persist::FilesViewV1::Files,
                         FilesView::Git => bt_persist::FilesViewV1::Git,
                     },
+                    // The fifth fact the tree has nowhere to put (T9, v2 ③).
+                    remotes_open: state.git_remotes_open,
                 })
             }
             SeatKind::Preview => LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
@@ -14019,6 +14083,7 @@ mod tests {
                     open: Vec::new(),
                     sel: None,
                     width,
+                    remotes_open: false,
                 },
             )))
         };
@@ -19246,6 +19311,7 @@ mod tests {
                         open: Vec::new(),
                         sel: None,
                         width: 240,
+                        remotes_open: false,
                     },
                 ))),
             ],
@@ -23500,6 +23566,7 @@ mod tests {
                         open: Vec::new(),
                         sel: None,
                         width: 240,
+                        remotes_open: false,
                     },
                 ))),
                 term_leaf(),

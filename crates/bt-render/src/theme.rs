@@ -590,6 +590,20 @@ pub struct ChromePalette {
     /// without the other. The three inks that stand on it are
     /// `files_row_{text,muted}_selected`, already premixed over this very value.
     pub git_row_selected: [u8; 3],
+    /// **A row the search matched** (T4, 2026-08-16).
+    ///
+    /// [`Self::git_row_selected`] at half its distance from the body, and the
+    /// halving is the ruling. A match is not a selection: the reader's cursor is
+    /// on exactly one row and the search may have lit seventeen, so if a matched
+    /// row wore the same grey the page would be claiming seventeen cursors. It
+    /// has to be *visibly quieter* than the selection standing on top of it, and
+    /// it has to survive being drawn under one.
+    ///
+    /// Derived rather than struck, so it cannot come adrift from the two grounds
+    /// it stands between: it is the exact midpoint of the pane body and the
+    /// selected row, which is what "half alpha" means once the compositing is
+    /// done at build time rather than by the GPU.
+    pub git_row_match: [u8; 3],
     /// `.grow bdi { color: var(--ink) }` over the card — a changed file's path,
     /// and a commit's subject.
     pub git_row_text: [u8; 3],
@@ -1152,6 +1166,8 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // The graph's selected row stands on `--termbg` with the tree's, not on the
     // card — see the field.
     git_row_selected: [0x30, 0x30, 0x30],
+    // Half way from the pane body to that — see the field.
+    git_row_match: ink_over(TERMBG_DARK, [0x30, 0x30, 0x30], 500),
     git_row_text: ink_over(PANEL_DARK, DARK_INK_SOURCE, 870),
     git_row_text_hover: ink_over(GIT_ROW_HOVER_DARK, DARK_INK_SOURCE, 870),
     git_row_muted: ink_over(PANEL_DARK, DARK_INK_SOURCE, 380),
@@ -1371,6 +1387,7 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     git_section: PANEL_LIGHT,
     git_row_hover: GIT_ROW_HOVER_LIGHT,
     git_row_selected: [0xed, 0xed, 0xec],
+    git_row_match: ink_over(TERMBG_LIGHT, [0xed, 0xed, 0xec], 500),
     git_row_text: ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 1000),
     git_row_text_hover: ink_over(GIT_ROW_HOVER_LIGHT, LIGHT_INK_SOURCE, 1000),
     git_row_muted: ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 450),
@@ -2810,6 +2827,46 @@ mod tests {
             assert!(
                 ratio >= 4.5,
                 "{name}: a subject on the selected row reads at {ratio:.2}:1"
+            );
+            // **The search's own ground stands between the two** (T4,
+            // 2026-08-16). Three claims, and each one is a way the token could
+            // be wrong: it has to be a step off the body, so a match is visible
+            // at all; it has to be *short* of the selection, so seventeen
+            // matches do not read as seventeen cursors; and the subject on it
+            // has to stay as readable as it was on the body it came off.
+            //
+            // The third is written as a *ratio* and not as a floor, and that is
+            // deliberate. A matched row wears the row's ordinary rest ink —
+            // `files_row_text`, not the premixed selected one — which clears
+            // 4.18:1 over the light body and has always done so; a 4.5 floor
+            // here would be this ticket inventing a bar the product has never
+            // met anywhere, failing on this one row and nowhere else. What this
+            // ground may not do is *cost* that ink anything a reader would
+            // notice, and a seventh is the whole of the room it is given.
+            let body = if name == "dark" {
+                TERMBG_DARK
+            } else {
+                TERMBG_LIGHT
+            };
+            let distance = |ground: [u8; 3]| i32::from(ground[0]) - i32::from(body[0]);
+            assert_ne!(
+                palette.git_row_match, palette.git_row_selected,
+                "{name}: a matched row wearing the selected grey claims a cursor it has not got"
+            );
+            assert!(
+                distance(palette.git_row_match).abs() > 0,
+                "{name}: a matched row that is the pane's own ground is not marked at all"
+            );
+            assert!(
+                distance(palette.git_row_match).abs() < distance(palette.git_row_selected).abs(),
+                "{name}: a match must be quieter than the selection standing on it"
+            );
+            let matched = contrast(palette.files_row_text, palette.git_row_match);
+            let plain = contrast(palette.files_row_text, body);
+            assert!(
+                matched >= plain * 0.85,
+                "{name}: a matched row costs the subject too much — {matched:.2}:1 \
+                 against {plain:.2}:1 on the body it came off"
             );
             // The muted columns beside it are held to nothing here on purpose:
             // `--ink3` is the design's *quiet* ink and clears 2.4:1 over this

@@ -194,10 +194,12 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
             PreviewPaneV1 {
                 leaf: "leaf-1".to_owned(),
                 cur: Some(r"C:\Users\dev\project\README.md".to_owned()),
+                graph: None,
             },
             PreviewPaneV1 {
                 leaf: "leaf-2".to_owned(),
                 cur: None,
+                graph: None,
             },
         ],
         "each preview leaf is named by the same positional token `focused_leaf` uses, \
@@ -308,6 +310,7 @@ fn the_content_section_round_trips_through_the_public_session_api() {
                 panes: vec![PreviewPaneV1 {
                     leaf: "leaf-0".to_owned(),
                     cur: None,
+                    graph: None,
                 }],
                 pool: vec![PreviewPoolEntryV1 {
                     path: r"C:\work\notes.md".to_owned(),

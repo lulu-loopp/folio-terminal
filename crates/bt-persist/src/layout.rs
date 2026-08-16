@@ -149,6 +149,18 @@ pub struct FilesLeafV1 {
     /// setting. What is written here stays what the user last chose, so turning
     /// the panel back on restores the page rather than resetting it.
     pub view: FilesViewV1,
+    /// Whether the Git page's **REMOTES** sub-group is unfolded (T9, v2 ③).
+    ///
+    /// Durable on [`Self::view`]'s own footing and for its own reason: this is a
+    /// shape of the column rather than a piece of its content, so red line L1
+    /// lets it in, and a reader who works against a fork and finds the remotes
+    /// folded away at every restart is being told the product did not notice.
+    ///
+    /// Defaulted and skipped when false, so every document written before this
+    /// field still reads and every column that has never opened the sub-group
+    /// still writes exactly the bytes it used to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remotes_open: bool,
 }
 
 /// `view: "files" | "git"`.

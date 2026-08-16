@@ -238,6 +238,63 @@ pub struct PreviewPaneV1 {
     /// and a reader that inferred it from a missing row could not tell it from
     /// a pane the writer forgot.
     pub cur: Option<String>,
+    /// **Which branches this pane's commit graph was of** (T2/T3, v2 ③).
+    ///
+    /// Here rather than on the preview *leaf* for [`TabV1::preview`]'s own
+    /// reason: red line L1 keeps the layout tree to geometry, and a filter is not
+    /// geometry — it is what the pane was looking at, which is content and
+    /// therefore belongs in this section beside `cur`.
+    ///
+    /// **Durable, unlike everything else a graph seat holds.** A scroll, an
+    /// expansion and a comparison are glances at a history that may have moved
+    /// on; "show me these branches" is a question about the repository, and it is
+    /// as true after a restart as it was before. It survives even though the
+    /// *document* does not — `session.json` has no vocabulary for a git-backed
+    /// buffer, so a graph is not reopened by a restore — because the pane is
+    /// named either way, and a reader who opens the graph again in that pane
+    /// finds the filter they left rather than a page of every branch.
+    ///
+    /// Additive and absent when nothing was filtered, so every document written
+    /// before this field still reads and every pane that never touched the filter
+    /// still writes exactly the bytes it used to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<GraphFilterV1>,
+}
+
+/// `pane.graph` — see [`PreviewPaneV1::graph`].
+///
+/// The three fields the filter menu sets, in its own vocabulary rather than
+/// git's: `branches` is a list of local branch **names** and not the rev
+/// arguments they are turned into, because the arguments are a fact about how
+/// this build spells a question to git and the names are a fact about what the
+/// reader chose. A file carrying `--branches --tags HEAD` would be a session
+/// remembering an implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphFilterV1 {
+    /// The branches picked by hand. **Empty is "all branches"**, which is what
+    /// an unfiltered graph shows — see the runtime type for why that is the only
+    /// honest reading of an empty list here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
+    /// Whether remote-tracking names were shown. Defaulted **true**, because the
+    /// resting state of a checkbox reading "Show remote branches" is ticked and a
+    /// document written before this field describes a graph that was showing
+    /// them.
+    #[serde(default = "yes")]
+    pub remotes: bool,
+    /// Whether tags were, on the same footing.
+    #[serde(default = "yes")]
+    pub tags: bool,
+}
+
+/// `true`, as a function serde can name.
+///
+/// A `#[serde(default)]` on a `bool` gives `false`, and both of the flags above
+/// rest at `true` — so the derive would read every document written before them
+/// as a graph with its two checkboxes cleared, which is not the graph anybody
+/// was looking at.
+const fn yes() -> bool {
+    true
 }
 
 /// One buffer in a tab's shared preview pool.

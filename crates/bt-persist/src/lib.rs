@@ -48,9 +48,10 @@ pub use migrate::{
 };
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
-    DegradationReport, PreviewPaneV1, PreviewPoolEntryV1, RecentEntryV1, RecentSeedV1,
-    SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
-    SessionThemeV1, SessionV1, TabPreviewV1, TabV1, WindowBoundsV1, WindowStateV1,
+    DegradationReport, GraphFilterV1, PreviewPaneV1, PreviewPoolEntryV1, RecentEntryV1,
+    RecentSeedV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
+    SessionTabLayoutV1, SessionThemeV1, SessionV1, TabPreviewV1, TabV1, WindowBoundsV1,
+    WindowStateV1,
 };
 pub use settings::{DEFAULT_PROFILE_UNSET, SETTINGS_SCHEMA_VERSION, SettingsV1, ThemeModeV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};

@@ -81,6 +81,16 @@ pub const GIT_STATUS_CAP: usize = crate::files::DIR_ENTRY_CAP;
 /// How many commits one page of history is (R16).
 pub const GIT_LOG_PAGE: usize = 50;
 
+/// How many commits one search will name (T4, v2 ③).
+///
+/// **A cap and not a promise of completeness**, on [`GIT_STATUS_CAP`]'s own
+/// reasoning read into a different list: a one-letter query against a hundred
+/// thousand commits matches most of them, and a reader stepping through matches
+/// with `Enter` will never reach the thousandth. What the cap costs is a count
+/// that says `1000` when the truth is more; what it buys is that the field
+/// stays answerable in a kernel tree.
+pub const GIT_SEARCH_CAP: usize = 1000;
+
 /// How long one `git` invocation may take before it is killed.
 ///
 /// Not a performance budget — a deadlock guard. A legitimate `status` on a cold
@@ -186,14 +196,47 @@ pub enum GitQuestion {
     RepoProbe { dir: PathBuf },
     /// "What has changed?" — the changed-file list and the branch head in one.
     Status { root: PathBuf },
-    /// "What local branches are there?"
-    Branches { root: PathBuf },
+    /// "What names are there — here, over there, and nailed on?" (T6, v2 ③).
+    ///
+    /// One `for-each-ref` over all three trees, replacing the `Branches`
+    /// question that walked `refs/heads` alone. The panel still draws the locals
+    /// and nothing else; what the other two are for is the graph's pills and its
+    /// filter menu, and asking for them separately would be two more subprocesses
+    /// for a file git reads once.
+    Refs { root: PathBuf },
     /// "One page of history, please" (R16).
     Log {
         root: PathBuf,
+        /// Which roads to walk — git's own rev arguments, in the position it
+        /// puts them (T2/T3, v2 ③).
+        ///
+        /// **Empty is not `--all`, it is `HEAD`**, which is what `git log` with
+        /// no revision means and what this question meant for its whole first
+        /// life. The graph's "All branches" now passes `--all` (or the narrower
+        /// spellings the filter's two checkboxes ask for) *explicitly*, so what
+        /// is walked is always something a caller said rather than a default two
+        /// readers could disagree about.
+        ///
+        /// Not part of the question's identity ([`Self::same_target`]): a page
+        /// of history is identified by which page it is, and a filter changed
+        /// under a page in flight is exactly the case where newest must win.
+        refs: Vec<String>,
         skip: usize,
         count: usize,
     },
+    /// "Which commits match this?" (T4, v2 ③) — the graph's search field.
+    ///
+    /// **The one question in this module that is more than one process, and the
+    /// reason is that git has no OR.** `git log --grep=Q --author=Q` *ands* the
+    /// two: it answers commits whose message matches **and** whose author
+    /// matches, which is essentially none of them, and `--all-match` only makes
+    /// that stricter. What a search field means by "Q" is "anything about this
+    /// commit says Q" — so the two are asked separately and unioned here, and a
+    /// third process asks git to resolve `Q` as a revision outright so that
+    /// pasting a hash lands on the commit rather than searching for its text.
+    ///
+    /// See [`answer`]'s arm for the three command lines.
+    Search { root: PathBuf, query: String },
     /// "How does this file differ?" — `staged` is the whole of the `--cached`
     /// mapping (R25). Asked when a changed-file row opens a diff.
     Diff {
@@ -360,7 +403,11 @@ impl GitQuestion {
         match (self, other) {
             (Self::RepoProbe { dir: left }, Self::RepoProbe { dir: right }) => left == right,
             (Self::Status { root: left }, Self::Status { root: right }) => left == right,
-            (Self::Branches { root: left }, Self::Branches { root: right }) => left == right,
+            (Self::Refs { root: left }, Self::Refs { root: right }) => left == right,
+            // **Every search is the same target**, whichever text it is about:
+            // there is one search field, so a result for a query the reader has
+            // already typed past is worthless the moment the next one is asked.
+            (Self::Search { root: left, .. }, Self::Search { root: right, .. }) => left == right,
             (
                 Self::Log {
                     root: left,
@@ -479,9 +526,21 @@ pub enum GitAnswer {
         root: PathBuf,
         outcome: GitOutcome<GitStatus>,
     },
-    Branches {
+    Refs {
         root: PathBuf,
-        outcome: GitOutcome<Vec<GitBranch>>,
+        outcome: GitOutcome<Vec<GitRefEntry>>,
+    },
+    /// The hashes one search matched, newest first (T4).
+    ///
+    /// The query travels back with them for the reason every other answer
+    /// carries its own subject: a result that arrived after the reader typed
+    /// another letter is a result about a question nobody is asking any more,
+    /// and one that could not say which query it was about could only be filed
+    /// by faith.
+    Search {
+        root: PathBuf,
+        query: String,
+        outcome: GitOutcome<Vec<String>>,
     },
     Log {
         root: PathBuf,
@@ -793,23 +852,6 @@ impl GitStatus {
     }
 }
 
-/// One local branch.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GitBranch {
-    pub name: String,
-    /// Whether `HEAD` is on it — the one that leads the list (R9) and wears the
-    /// accent ring (R22).
-    pub is_head: bool,
-    /// Against its own upstream, when it has one.
-    pub ahead: usize,
-    pub behind: usize,
-    /// The fact: when it was last committed to, in seconds since the epoch.
-    pub committer_unix: i64,
-    /// The sentence: that fact through [`relative_time`], so a branch row and a
-    /// commit row say ages the same way.
-    pub committerdate_relative: String,
-}
-
 /// One commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitCommit {
@@ -867,26 +909,98 @@ pub struct GitCommit {
     /// input the lane algorithm has** (G-4), which is why it is carried from the
     /// first slice rather than added when the graph is drawn.
     pub parents: Vec<String>,
-    /// The local branches standing on this commit (R22), in git's own order.
+    /// Every name standing on this commit (R22), each saying which *kind* of
+    /// name it is.
     ///
-    /// Local only, and that is the ruling rather than the easy half: a remote
-    /// tracking ref and a tag are *different kinds of claim* about a commit —
-    /// one is where another machine last said it was, the other is a name
-    /// somebody nailed on — and giving all three the one pill this slice draws
-    /// would say they were the same kind. They are booked for v2 with a pill of
-    /// their own, which is why the parse throws them away here rather than
-    /// flattening them in.
+    /// **All three kinds since v2 ③ (2026-08-16).** The first slice kept locals
+    /// only and said why: a remote tracking ref and a tag are different kinds of
+    /// claim about a commit — one is where another machine last said it was, the
+    /// other is a name somebody nailed on — and giving all three the one pill it
+    /// drew would have said they were the same kind. The answer was never to
+    /// throw two of them away for good; it was to wait until there were three
+    /// pills. There are, so the parse keeps all three and carries the kind that
+    /// decides which pill each gets.
+    ///
+    /// In [`GitRefKind`]'s own order rather than git's, because the order a row
+    /// wears its names in is a fact about the row: `HEAD`'s local leads, the
+    /// other locals follow it, then the remotes, then the tags.
     pub refs: Vec<GitRef>,
+}
+
+/// Which of the three kinds of name a ref is.
+///
+/// **Stated and never inferred from the text.** A branch genuinely called
+/// `origin/main` exists, and so does a tag called `main`; the only place the
+/// kind is unambiguous is git's own full ref name, which is why every parse in
+/// this module reads `refs/heads/…`, `refs/remotes/…` and `refs/tags/…` rather
+/// than counting slashes in a short one.
+///
+/// The `Ord` is the drawing order (v2 ③) and not alphabetical: locals, then
+/// remotes, then tags. A derived order over the variants in the order they are
+/// written is the same order twice, which is what makes the pill sort and the
+/// panel sort agree without either of them naming the other.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GitRefKind {
+    /// `refs/heads/…` — a branch in this repository.
+    Local,
+    /// `refs/remotes/…` — where another machine last said one of its branches
+    /// was. Its short name keeps the remote on the front (`origin/main`),
+    /// because the remote is half of what the name says.
+    Remote,
+    /// `refs/tags/…` — a name somebody nailed on.
+    Tag,
 }
 
 /// One name worn on a commit row (R22).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRef {
-    /// The branch's short name — `main`, never `refs/heads/main`.
+    /// The ref's short name — `main`, `origin/main`, `v1.0`; never
+    /// `refs/heads/main`.
     pub name: String,
     /// Whether `HEAD` is this ref. The pill wears the accent ring for it, and
     /// there is at most one on the whole page.
     pub head: bool,
+    /// Which of the three pills it gets (v2 ③).
+    pub kind: GitRefKind,
+}
+
+/// One row of `git for-each-ref` — a branch here, a branch over there, or a tag
+/// (T6/T7, v2 ③).
+///
+/// **One type for all three and one question that answers them**, which is the
+/// whole of T6: the panel's branch list, the graph's filter menu and the day a
+/// tag needs a row are three readers of one `for-each-ref`, and three questions
+/// would be three subprocesses spent on one file of refs. What tells the three
+/// apart is [`Self::kind`], and what makes that safe is that it is read off
+/// git's full ref name rather than guessed at.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRefEntry {
+    pub kind: GitRefKind,
+    /// The short name, in the grammar [`GitRef::name`] uses.
+    pub name: String,
+    /// What it points at — `%(objectname)`.
+    ///
+    /// **The tag object for an annotated tag, and not the commit under it.**
+    /// That is git's own answer to `%(objectname)` and it is kept as given: the
+    /// dereferencing spelling (`%(*objectname)`) is empty for every ref that is
+    /// not an annotated tag, so a format that used it would need git's `%(if)`
+    /// to fall back — a second grammar in the format string to answer a question
+    /// nothing on this page asks. What draws a tag on a *row* is the log's own
+    /// decoration, which git has already resolved to the commit.
+    pub object: String,
+    /// The upstream this ref tracks, short (`origin/main`), when it has one.
+    pub upstream: Option<String>,
+    /// Against that upstream — `%(upstream:track)`, through the one parse the
+    /// status head also uses.
+    pub ahead: usize,
+    pub behind: usize,
+    /// Whether `HEAD` is on it — `%(HEAD)`, which git writes as `*`.
+    pub is_head: bool,
+    /// When it was last committed to, in seconds since the epoch.
+    pub committer_unix: i64,
+    /// That fact through [`relative_time`], so a ref row and a commit row say
+    /// ages the same way.
+    pub committerdate_relative: String,
 }
 
 /// One page of history (R16).
@@ -1095,38 +1209,106 @@ fn parse_track(track: &str) -> (usize, usize) {
     (ahead, behind)
 }
 
-/// `git for-each-ref refs/heads`, decoded.
+/// `git for-each-ref refs/heads refs/remotes refs/tags`, decoded (T6, v2 ③).
 ///
-/// **The current branch is moved to the front here**, on the worker, rather than
-/// left for the list to sort: R9 puts it first, and the sort belongs beside the
-/// parse for the reason [`crate::files`] gives for sorting a directory on its own
-/// thread — the answer should arrive in the shape the panel draws. A stable sort
-/// on one boolean is what keeps the rest in git's own alphabetical order instead
-/// of shuffling them for having been compared.
+/// **The sort is ours and git's `--sort` is not asked for.** `for-each-ref`
+/// takes a `--sort` and it would answer *one* of the two orders this list wants
+/// — the order is "the branch you are on, then the other locals newest first,
+/// then the remotes, then the tags", which is a sort on a key git has no name
+/// for. A `--sort=-committerdate` would put a stale local under a fresh tag, and
+/// a `--sort=refname` would lose the recency the branch list is read for. So the
+/// refs arrive in whatever order git likes and are ordered here, once, beside
+/// the parse — the same reason [`crate::files`] sorts a directory on its own
+/// thread: the answer should arrive in the shape its readers draw.
+///
+/// Within each of the three groups the sort is **stable**, so remotes and tags
+/// keep git's own alphabetical order rather than being shuffled for having been
+/// compared.
+///
+/// **`refs/remotes/<remote>/HEAD` is dropped.** It is a symbolic ref naming
+/// which branch that remote considers its default — a *pointer to* a row this
+/// list already has, and drawn as a row of its own it would be `origin/HEAD`
+/// sitting beside `origin/main` claiming to be a second branch.
 #[must_use]
-pub fn parse_branches(bytes: &[u8], now_unix: i64) -> Vec<GitBranch> {
+pub fn parse_refs(bytes: &[u8], now_unix: i64) -> Vec<GitRefEntry> {
     let text = String::from_utf8_lossy(bytes);
-    let mut branches: Vec<GitBranch> = text
+    let mut refs: Vec<GitRefEntry> = text
         .lines()
         .filter_map(|line| {
             let mut fields = line.split('\0');
-            let name = fields.next().filter(|name| !name.is_empty())?;
+            let (kind, name) = split_ref_name(fields.next().unwrap_or_default())?;
+            if kind == GitRefKind::Remote && (name == "HEAD" || name.ends_with("/HEAD")) {
+                return None;
+            }
+            let object = fields.next().unwrap_or_default().to_owned();
+            let upstream = fields
+                .next()
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned);
+            let (ahead, behind) = parse_track(fields.next().unwrap_or_default());
             let is_head = fields.next() == Some("*");
             let (committer_unix, offset) =
                 parse_iso_strict(fields.next().unwrap_or_default()).unwrap_or((0, 0));
-            let (ahead, behind) = parse_track(fields.next().unwrap_or_default());
-            Some(GitBranch {
-                name: name.to_owned(),
-                is_head,
+            Some(GitRefEntry {
+                kind,
+                name,
+                object,
+                upstream,
                 ahead,
                 behind,
+                is_head,
                 committer_unix,
                 committerdate_relative: relative_time(committer_unix, offset, now_unix),
             })
         })
         .collect();
-    branches.sort_by_key(|branch| !branch.is_head);
-    branches
+    refs.sort_by_key(|entry| {
+        (
+            entry.kind,
+            // Only the locals are ordered among themselves: the branch you are
+            // on leads (R9), and the rest are newest first, which is the order a
+            // branch list is actually read in. Negated rather than reversed so
+            // the whole key stays one ascending tuple.
+            match entry.kind {
+                GitRefKind::Local => (!entry.is_head, -entry.committer_unix),
+                GitRefKind::Remote | GitRefKind::Tag => (false, 0),
+            },
+        )
+    });
+    refs
+}
+
+/// A full ref name split into what kind it is and what it is called.
+///
+/// The one place this module turns `refs/…` into a kind, so the log's decoration
+/// and `for-each-ref`'s rows cannot come to two different readings of the same
+/// name. Anything outside the three trees — `refs/stash`, `refs/notes/…`, a
+/// namespace some tool invented — is not a name this product draws, and is
+/// dropped rather than guessed at.
+fn split_ref_name(refname: &str) -> Option<(GitRefKind, String)> {
+    for (prefix, kind) in [
+        ("refs/heads/", GitRefKind::Local),
+        ("refs/remotes/", GitRefKind::Remote),
+        ("refs/tags/", GitRefKind::Tag),
+    ] {
+        if let Some(name) = refname.strip_prefix(prefix)
+            && !name.is_empty()
+        {
+            return Some((kind, name.to_owned()));
+        }
+    }
+    None
+}
+
+/// The local branches of a refs answer, in the order they arrived — what the
+/// panel's BRANCHES group and the filter menu's checkboxes both list.
+pub fn local_branches(refs: &[GitRefEntry]) -> impl Iterator<Item = &GitRefEntry> {
+    refs.iter().filter(|entry| entry.kind == GitRefKind::Local)
+}
+
+/// The remote-tracking branches of a refs answer (T9's REMOTES sub-group).
+pub fn remote_branches(refs: &[GitRefEntry]) -> impl Iterator<Item = &GitRefEntry> {
+    refs.iter().filter(|entry| entry.kind == GitRefKind::Remote)
 }
 
 /// `git show --raw --numstat -z --format=` (and `git diff` in the same clothes),
@@ -1307,32 +1489,37 @@ pub fn parse_log(bytes: &[u8], now_unix: i64, skip: usize, wanted: usize) -> Git
 /// `"HEAD -> "`. A detached head is the bare word `HEAD`, which is a ref
 /// standing on this commit with no branch behind it — a pill, because "you are
 /// here" is exactly what the graph is for.
+///
+/// **All three kinds since v2 ③, and the order is the drawing order.** The pills
+/// of a row read `HEAD`'s local, the other locals, the remotes, the tags — see
+/// [`GitCommit::refs`]. Sorted here rather than at the paint because it is one
+/// order for every reader of the field, and a second sort in the painter would
+/// be a second place for it to be written differently.
 #[must_use]
 fn parse_decoration(text: &str) -> Vec<GitRef> {
-    const LOCAL: &str = "refs/heads/";
     const HEAD_ARROW: &str = "HEAD -> ";
-    text.split(", ")
+    let mut refs: Vec<GitRef> = text
+        .split(", ")
         .filter_map(|item| {
             let item = item.trim();
             if item == "HEAD" {
                 return Some(GitRef {
                     name: "HEAD".to_owned(),
                     head: true,
+                    kind: GitRefKind::Local,
                 });
             }
-            let (head, name) = match item.strip_prefix(HEAD_ARROW) {
+            let (head, refname) = match item.strip_prefix(HEAD_ARROW) {
                 Some(rest) => (true, rest),
                 None => (false, item),
             };
-            // Remotes and tags are booked for v2 with pills of their own, and a
-            // ref this parse does not recognise is not a ref this row can draw.
-            let name = name.strip_prefix(LOCAL)?;
-            (!name.is_empty()).then(|| GitRef {
-                name: name.to_owned(),
-                head,
-            })
+            // A ref outside the three trees is not a ref this row can draw.
+            let (kind, name) = split_ref_name(refname)?;
+            Some(GitRef { name, head, kind })
         })
-        .collect()
+        .collect();
+    refs.sort_by_key(|reference| (reference.kind, !reference.head));
+    refs
 }
 
 /// `2026-08-15T10:18:07-04:00` → the instant and the offset it was written in.
@@ -1557,8 +1744,13 @@ fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
             root: root.clone(),
             outcome: Err(fault),
         },
-        GitQuestion::Branches { root } => GitAnswer::Branches {
+        GitQuestion::Refs { root } => GitAnswer::Refs {
             root: root.clone(),
+            outcome: Err(fault),
+        },
+        GitQuestion::Search { root, query } => GitAnswer::Search {
+            root: root.clone(),
+            query: query.clone(),
             outcome: Err(fault),
         },
         GitQuestion::Log { root, skip, .. } => GitAnswer::Log {
@@ -1679,28 +1871,121 @@ pub fn answer(
                 Err(fault) => faulted(question, fault),
             }
         }
-        GitQuestion::Branches { root } => {
+        GitQuestion::Refs { root } => {
             let command = git_command(
                 program,
                 root,
                 &[
                     OsStr::new("for-each-ref"),
+                    // **The full ref name, not `%(refname:short)`.** The short
+                    // spelling is what `%D` gives without `--decorate=full`, and
+                    // it is unreadable for the same reason: `origin/main` is a
+                    // remote-tracking ref in almost every repository and a local
+                    // branch in the one where somebody made it, and nothing but
+                    // the full name can tell those two apart. `split_ref_name`
+                    // cuts the short name back off, which is the same cut git
+                    // would have made and is now made where the kind is kept.
+                    //
+                    // **No `--sort`**: see [`parse_refs`] for why the order this
+                    // list wants is not one git has a name for.
                     OsStr::new(
-                        "--format=%(refname:short)%00%(HEAD)%00%(committerdate:iso-strict)%00%(upstream:track)",
+                        "--format=%(refname)%00%(objectname)%00%(upstream:short)%00%(upstream:track)%00%(HEAD)%00%(committerdate:iso-strict)",
                     ),
                     OsStr::new("refs/heads"),
+                    OsStr::new("refs/remotes"),
+                    OsStr::new("refs/tags"),
                 ],
             );
             match run_git(command, timeout) {
-                Ok(run) if run.ok => GitAnswer::Branches {
+                Ok(run) if run.ok => GitAnswer::Refs {
                     root: root.clone(),
-                    outcome: Ok(parse_branches(&run.stdout, now_unix)),
+                    outcome: Ok(parse_refs(&run.stdout, now_unix)),
                 },
                 Ok(run) => faulted(question, classify_failure(&run.stderr)),
                 Err(fault) => faulted(question, fault),
             }
         }
-        GitQuestion::Log { root, skip, count } => {
+        GitQuestion::Search { root, query } => {
+            // Three processes, and [`GitQuestion::Search`] says why: git ANDs
+            // `--grep` with `--author`, and a search field means OR.
+            //
+            // `rev-list` and not `log`: what is wanted is a list of hashes and
+            // nothing else, and `rev-list` is `log`'s own plumbing for exactly
+            // that — no format string to get wrong and no decoration to parse.
+            let mut hits: Vec<String> = Vec::new();
+            let mut push = |text: &str| {
+                for line in text.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() && !hits.iter().any(|held| held == line) {
+                        hits.push(line.to_owned());
+                    }
+                }
+            };
+            // The direct jump first, so a pasted hash lands on its commit rather
+            // than under whatever its text happens to match. `^{commit}` is
+            // git's own way of saying "and it had better be a commit": without
+            // it a branch name, a tag, or the word `HEAD` would all resolve, and
+            // resolving `main` to its tip is a *jump* and not a search — which
+            // is exactly what a reader typing a ref name wants.
+            let revision = format!("{query}^{{commit}}");
+            let verify = git_command(
+                program,
+                root,
+                &[
+                    OsStr::new("rev-parse"),
+                    OsStr::new("--verify"),
+                    OsStr::new("--quiet"),
+                    OsStr::new(&revision),
+                ],
+            );
+            // A query that resolves to nothing exits non-zero and says nothing,
+            // which is the ordinary case and not a failure: `--quiet` is asked
+            // for precisely so that "no such revision" is silence.
+            if let Ok(run) = run_git(verify, timeout)
+                && run.ok
+            {
+                push(&String::from_utf8_lossy(&run.stdout));
+            }
+            let cap = format!("--max-count={GIT_SEARCH_CAP}");
+            let mut sweep = |flag: &str| -> Option<GitFault> {
+                let matcher = format!("{flag}{query}");
+                let command = git_command(
+                    program,
+                    root,
+                    &[
+                        OsStr::new("rev-list"),
+                        OsStr::new("--all"),
+                        OsStr::new("-i"),
+                        OsStr::new(&matcher),
+                        OsStr::new(&cap),
+                    ],
+                );
+                match run_git(command, timeout) {
+                    Ok(run) if run.ok => {
+                        push(&String::from_utf8_lossy(&run.stdout));
+                        None
+                    }
+                    Ok(run) => Some(classify_failure(&run.stderr)),
+                    Err(fault) => Some(fault),
+                }
+            };
+            // The message first and the author second, so the order the matches
+            // are stepped through leads with what a search field is usually for.
+            if let Some(fault) = sweep("--grep=").or_else(|| sweep("--author=")) {
+                return faulted(question, fault);
+            }
+            GitAnswer::Search {
+                root: root.clone(),
+                query: query.clone(),
+                outcome: Ok(hits),
+            }
+        }
+        GitQuestion::Log {
+            root,
+            refs,
+            skip,
+            count,
+        } => {
             // One more than the page, which is how `has_more` is known.
             let limit = format!("--max-count={}", count.saturating_add(1));
             let skipped = format!("--skip={skip}");
@@ -1742,6 +2027,19 @@ pub fn answer(
                     OsStr::new(&skipped),
                 ],
             );
+            // The revisions git walks, in the position git puts them — last,
+            // after every option (T2/T3). They are pushed rather than folded
+            // into the array above because how many there are is the filter's
+            // answer and not this arm's: "All branches" is one word, three
+            // branches picked by hand are three.
+            //
+            // **No `--`.** Everything here is a rev argument or a rev pseudo-
+            // argument (`--all`, `--branches`, `--tags`), and the separator
+            // would tell git the words after it are *paths* — which is the one
+            // reading that would turn a branch called `main` into a file called
+            // `main` that does not exist.
+            let mut command = command;
+            command.args(refs);
             match run_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Log {
                     root: root.clone(),
@@ -2068,8 +2366,39 @@ pub struct GitCache {
     dir: Option<PathBuf>,
     repo: GitSlot<PathBuf>,
     status: GitSlot<GitStatus>,
-    branches: GitSlot<Vec<GitBranch>>,
+    refs: GitSlot<Vec<GitRefEntry>>,
     log: GitSlot<GitLog>,
+    /// Which roads the history is being walked down (T2/T3, v2 ③) — the graph
+    /// filter's answer, in git's own rev grammar.
+    ///
+    /// **On the cache and not on the view**, because it is part of the question
+    /// and the question is this module's. Every page of one history has to be
+    /// asked with the same revisions — a "load more" that walked a different set
+    /// than the page above it would append commits from a branch the page it
+    /// extends does not contain — and `pending_questions` and `more_commits` are
+    /// the two places those pages are built. Leaving the revisions in the seat's
+    /// view state would mean handing them to both, which is two chances to hand
+    /// them one that has just changed.
+    ///
+    /// Empty is `HEAD`, which is what it meant before there was a filter: see
+    /// [`GitQuestion::Log::refs`].
+    log_refs: Vec<String>,
+    /// How many answers a re-read is still owed (T5, v2 ③) — see
+    /// [`Self::begin_reread`].
+    ///
+    /// A count and not a flag, because the three questions come back separately
+    /// and the head must stay quiet until the *last* of them does. Nothing about
+    /// it is Pending: the answers already in the slots are still what the page is
+    /// drawn from, which is the whole point of the verb.
+    rereading: u8,
+    /// The one search, keyed on the text it is about (T4).
+    ///
+    /// [`Self::commit_files`]'s shape and held for its reason: there is one
+    /// search field on the page, so a map keyed by query would be a cache of
+    /// answers to questions nobody is asking. The query lives beside the slot so
+    /// that a result arriving after another letter was typed can be recognised
+    /// as being about the wrong text and dropped.
+    search: Option<(String, GitSlot<Vec<String>>)>,
     /// The one expanded commit's file list, and which commit it is about (R15).
     ///
     /// **One, because the page has one.** The accordion opens a single commit,
@@ -2176,8 +2505,57 @@ impl GitCache {
     #[allow(dead_code)]
     pub fn refresh(&mut self) {
         self.status = GitSlot::Idle;
-        self.branches = GitSlot::Idle;
+        self.refs = GitSlot::Idle;
         self.log = GitSlot::Idle;
+        self.rereading = 0;
+    }
+
+    /// **Read it all again, without taking the page down** (T5, v2 ③).
+    ///
+    /// [`Self::refresh`]'s twin, and the difference between them is the whole
+    /// reason there are two. That one *forgets*: it is what a write owes, because
+    /// after a `git add` what is on screen is no longer true and the honest thing
+    /// to show while the truth is being fetched is that it is being fetched. This
+    /// one *re-asks*: it is what the toolbar's button owes, and what is on screen
+    /// when a reader presses it is still perfectly true — it may simply have got
+    /// older. Blanking a whole history to a `Reading the repository…` for the
+    /// length of three subprocesses, in answer to a press that meant "check", is
+    /// the page punishing the reader for asking.
+    ///
+    /// So the answers stay in their slots and the *count of answers still owed*
+    /// goes up. Nothing is Pending, so [`Self::pending_questions`] keeps
+    /// answering "nothing to ask" and cannot flood; the count is what
+    /// [`Self::rereading`] reports, and it is the whole of what makes the head go
+    /// quiet.
+    pub fn begin_reread(&mut self) -> Vec<GitQuestion> {
+        let Some(root) = self.repo.ready().cloned() else {
+            return Vec::new();
+        };
+        let questions = vec![
+            GitQuestion::Status { root: root.clone() },
+            GitQuestion::Refs { root: root.clone() },
+            GitQuestion::Log {
+                root,
+                refs: self.log_refs.clone(),
+                skip: 0,
+                count: GIT_LOG_PAGE,
+            },
+        ];
+        // Set rather than added to: a second press while the first is still out
+        // is the same press, and it is owed the same three answers.
+        self.rereading = u8::try_from(questions.len()).unwrap_or(u8::MAX);
+        questions
+    }
+
+    /// Whether a re-read is still out (T5) — what draws the head quietly.
+    #[must_use]
+    pub fn rereading(&self) -> bool {
+        self.rereading > 0
+    }
+
+    /// One of a re-read's three answers has landed.
+    fn reread_answered(&mut self) {
+        self.rereading = self.rereading.saturating_sub(1);
     }
 
     #[must_use]
@@ -2203,8 +2581,65 @@ impl GitCache {
 
     #[allow(dead_code)]
     #[must_use]
-    pub fn branches(&self) -> &GitSlot<Vec<GitBranch>> {
-        &self.branches
+    pub fn refs(&self) -> &GitSlot<Vec<GitRefEntry>> {
+        &self.refs
+    }
+
+    /// Which revisions the history is being walked down (T2/T3).
+    ///
+    /// Read by the tests that pin `set_log_refs`' contract; the window itself
+    /// only ever *writes* it, because what the filter is is the seat's own state
+    /// and this is where the question is built from.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn log_refs(&self) -> &[String] {
+        &self.log_refs
+    }
+
+    /// Walk a different set of roads, and say whether anything changed.
+    ///
+    /// **Throws the history away when it does.** A filter is not a view of the
+    /// commits already loaded — a branch that was excluded was never walked, so
+    /// there is nothing on hand to reveal — which makes this the third and last
+    /// of R31's invalidation moments and the only one a *reader's* gesture
+    /// reaches directly.
+    pub fn set_log_refs(&mut self, refs: Vec<String>) -> bool {
+        if self.log_refs == refs {
+            return false;
+        }
+        self.log_refs = refs;
+        self.log = GitSlot::Idle;
+        true
+    }
+
+    /// The one search's answer, when it is about this text (T4).
+    #[must_use]
+    pub fn search(&self, query: &str) -> Option<&GitSlot<Vec<String>>> {
+        self.search
+            .as_ref()
+            .filter(|(asked, _)| asked == query)
+            .map(|(_, slot)| slot)
+    }
+
+    /// Ask git which commits match, and hand back the question to send.
+    ///
+    /// Asked at the moment of the press rather than derived by
+    /// [`Self::pending_questions`], for [`Self::begin_commit_files`]'s reason: a
+    /// search is something a *gesture* wants, and a question the paint could
+    /// re-derive is a question the paint would re-ask on every frame the field
+    /// was empty of results.
+    pub fn begin_search(&mut self, query: &str) -> Option<GitQuestion> {
+        let root = self.repo.ready()?.clone();
+        self.search = Some((query.to_owned(), GitSlot::Pending));
+        Some(GitQuestion::Search {
+            root,
+            query: query.to_owned(),
+        })
+    }
+
+    /// Forget the search — what `Esc` in the field leaves behind.
+    pub fn clear_search(&mut self) {
+        self.search = None;
     }
 
     #[must_use]
@@ -2290,13 +2725,19 @@ impl GitCache {
         if matches!(self.status, GitSlot::Idle) {
             questions.push(GitQuestion::Status { root: root.clone() });
         }
-        // The graph has no branch list on it, so it does not ask for one (R31).
-        if self.role == GitRole::Page && matches!(self.branches, GitSlot::Idle) {
-            questions.push(GitQuestion::Branches { root: root.clone() });
+        // **Both roles ask for the refs since v2 ③.** The note that used to
+        // stand here said the graph had no branch list on it and would be
+        // spending a `for-each-ref` on an answer nothing drew. It has one now —
+        // the filter menu lists every local branch by name — so the reading is
+        // no longer unread, and R31's rule is that a question is owed when
+        // something draws its answer, not that the graph is cheap by habit.
+        if matches!(self.refs, GitSlot::Idle) {
+            questions.push(GitQuestion::Refs { root: root.clone() });
         }
         if matches!(self.log, GitSlot::Idle) {
             questions.push(GitQuestion::Log {
                 root: root.clone(),
+                refs: self.log_refs.clone(),
                 skip: 0,
                 count: GIT_LOG_PAGE,
             });
@@ -2384,6 +2825,9 @@ impl GitCache {
         let log = self.log.ready()?;
         log.has_more.then(|| GitQuestion::Log {
             root: root.clone(),
+            // The same roads the page above it was walked down — see
+            // [`Self::log_refs`].
+            refs: self.log_refs.clone(),
             skip: log.skip + log.commits.len(),
             count: GIT_LOG_PAGE,
         })
@@ -2394,7 +2838,7 @@ impl GitCache {
         match question {
             GitQuestion::RepoProbe { .. } => self.repo = GitSlot::Pending,
             GitQuestion::Status { .. } => self.status = GitSlot::Pending,
-            GitQuestion::Branches { .. } => self.branches = GitSlot::Pending,
+            GitQuestion::Refs { .. } => self.refs = GitSlot::Pending,
             // Only the first page owns the slot: a "load more" leaves the page
             // already on screen exactly where it is, because it is not being
             // replaced by anything.
@@ -2407,7 +2851,10 @@ impl GitCache {
             // written by `begin_checkout` at the moment the question is built.
             // A comparison's own "already asked" bookkeeping is written by
             // `begin_compare_files`, at the moment the question is built.
-            GitQuestion::Log { .. }
+            // A search's own "already asked" bookkeeping is written by
+            // `begin_search`, at the moment the question is built.
+            GitQuestion::Search { .. }
+            | GitQuestion::Log { .. }
             | GitQuestion::Diff { .. }
             | GitQuestion::Show { .. }
             | GitQuestion::DiffRange { .. }
@@ -2438,13 +2885,36 @@ impl GitCache {
                     return false;
                 }
                 self.status = GitSlot::take(outcome);
+                self.reread_answered();
                 true
             }
-            GitAnswer::Branches { root, outcome } => {
+            GitAnswer::Refs { root, outcome } => {
                 if self.root() != Some(root.as_path()) {
                     return false;
                 }
-                self.branches = GitSlot::take(outcome);
+                self.refs = GitSlot::take(outcome);
+                self.reread_answered();
+                true
+            }
+            GitAnswer::Search {
+                root,
+                query,
+                outcome,
+            } => {
+                if self.root() != Some(root.as_path()) {
+                    return false;
+                }
+                // An answer about text the reader has already typed past is
+                // dropped rather than filed — the same cancellation-by-subject
+                // every other arm here performs, with the query standing where a
+                // root or a hash stands.
+                let Some((asked, slot)) = self.search.as_mut() else {
+                    return false;
+                };
+                if *asked != query {
+                    return false;
+                }
+                *slot = GitSlot::take(outcome);
                 true
             }
             GitAnswer::Log {
@@ -2456,7 +2926,10 @@ impl GitCache {
                     return false;
                 }
                 match (skip, outcome) {
-                    (0, outcome) => self.log = GitSlot::take(outcome),
+                    (0, outcome) => {
+                        self.log = GitSlot::take(outcome);
+                        self.reread_answered();
+                    }
                     // A later page extends the list rather than replacing it, and
                     // only if it starts where the list currently ends: a page that
                     // does not is an answer to a question about a history that has
@@ -2782,10 +3255,20 @@ mod tests {
     /// A branch two commits ahead of its upstream, and nothing changed.
     const STATUS_AHEAD_Z: &[u8] = b"## main...origin/main [ahead 2]\x00";
 
-    /// `for-each-ref` with this module's format: one branch diverged from its
-    /// upstream, one tracking nothing, `HEAD` on the third, and git's own
-    /// alphabetical order — which is *not* the order the list is drawn in.
-    const BRANCHES: &[u8] = b"diverge\x00 \x002026-08-15T10:24:37-04:00\x00[ahead 1, behind 1]\ngoner\x00 \x002026-08-15T10:17:57-04:00\x00\nmain\x00*\x002026-08-15T10:18:24-04:00\x00[ahead 4]\nother\x00 \x002026-08-15T10:17:57-04:00\x00\n";
+    /// `for-each-ref` with this module's format (v2 ③): four local branches —
+    /// one diverged from its upstream, one tracking nothing, `HEAD` on the third
+    /// — a remote's `HEAD` pointer and one real remote branch, and a tag.
+    ///
+    /// In git's own order, which is alphabetical inside each tree and the trees
+    /// in the order the command line names them — and which is *not* the order
+    /// the list is drawn in.
+    const REFS: &[u8] = b"refs/heads/diverge\x00a1\x00origin/diverge\x00[ahead 1, behind 1]\x00 \x002026-08-15T10:24:37-04:00\n\
+refs/heads/goner\x00a2\x00\x00\x00 \x002026-08-15T10:17:57-04:00\n\
+refs/heads/main\x00a3\x00origin/main\x00[ahead 4]\x00*\x002026-08-15T10:18:24-04:00\n\
+refs/heads/other\x00a4\x00\x00\x00 \x002026-08-15T10:17:57-04:00\n\
+refs/remotes/origin/HEAD\x00a3\x00\x00\x00 \x002026-08-15T10:18:24-04:00\n\
+refs/remotes/origin/main\x00a3\x00\x00\x00 \x002026-08-15T10:18:24-04:00\n\
+refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
 
     /// `log --parents --topo-order -z` with this module's format: a merge commit
     /// with **two** parents, then two ordinary commits.
@@ -3156,14 +3639,22 @@ mod tests {
         assert_eq!(merge.committer_unix, 1_786_803_504);
         assert_eq!(merge.committer_offset, -4 * 3600);
         assert_eq!(merge.time_relative, "now");
-        // R22 — the pills, local only: the remote tracking ref beside `main` in
-        // the recording is dropped rather than drawn as a second branch.
+        // R22 — the pills, all three kinds since v2 ③: the remote tracking ref
+        // beside `main` in the recording gets a pill of its own, after the local.
         assert_eq!(
             merge.refs,
-            vec![GitRef {
-                name: "main".to_owned(),
-                head: true,
-            }]
+            vec![
+                GitRef {
+                    name: "main".to_owned(),
+                    head: true,
+                    kind: GitRefKind::Local,
+                },
+                GitRef {
+                    name: "origin/main".to_owned(),
+                    head: false,
+                    kind: GitRefKind::Remote,
+                },
+            ]
         );
         assert_eq!(page.commits[2].refs, Vec::new(), "an undecorated commit");
 
@@ -3303,6 +3794,7 @@ mod tests {
             host: GitHost::Column(seat(1)),
             question: GitQuestion::Log {
                 root: PathBuf::from(r"D:\repo"),
+                refs: Vec::new(),
                 skip,
                 count,
             },
@@ -3449,11 +3941,16 @@ mod tests {
             GitQuestion::Status {
                 root: PathBuf::from(r"D:\repo"),
             },
-            GitQuestion::Branches {
+            GitQuestion::Refs {
                 root: PathBuf::from(r"D:\repo"),
+            },
+            GitQuestion::Search {
+                root: PathBuf::from(r"D:\repo"),
+                query: "fix".to_owned(),
             },
             GitQuestion::Log {
                 root: PathBuf::from(r"D:\repo"),
+                refs: Vec::new(),
                 skip: 0,
                 count: GIT_LOG_PAGE,
             },
@@ -3490,7 +3987,8 @@ mod tests {
             let carried = match &answer {
                 GitAnswer::Repo { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Status { outcome, .. } => outcome.as_ref().err(),
-                GitAnswer::Branches { outcome, .. } => outcome.as_ref().err(),
+                GitAnswer::Refs { outcome, .. } => outcome.as_ref().err(),
+                GitAnswer::Search { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Log { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Diff { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Show { outcome, .. } => outcome.as_ref().err(),
@@ -3533,31 +4031,81 @@ mod tests {
         );
     }
 
-    // ── The branch list ────────────────────────────────────────────────────
+    // ── The ref list ───────────────────────────────────────────────────────
 
     /// PIN — the branch `HEAD` is on leads the list (R9), and each branch carries
     /// its own distance from its own upstream.
     #[test]
     fn the_current_branch_leads_and_each_branch_counts_its_own_upstream() {
-        let branches = parse_branches(BRANCHES, RECORDED_AT + 300);
+        let refs = parse_refs(REFS, RECORDED_AT + 300);
+        let branches: Vec<&GitRefEntry> = local_branches(&refs).collect();
         let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(
             names,
             vec!["main", "diverge", "goner", "other"],
-            "the current branch first, the rest in git's own order"
+            "the current branch first, then the rest newest first"
         );
         assert!(branches[0].is_head);
         assert!(branches[1..].iter().all(|branch| !branch.is_head));
         assert_eq!((branches[0].ahead, branches[0].behind), (4, 0));
+        assert_eq!(branches[0].upstream.as_deref(), Some("origin/main"));
         assert_eq!((branches[1].ahead, branches[1].behind), (1, 1));
         assert_eq!(
             (branches[2].ahead, branches[2].behind),
             (0, 0),
             "a branch tracking nothing is not behind anything"
         );
+        assert_eq!(
+            branches[2].upstream, None,
+            "and it names no upstream either, rather than an empty one"
+        );
         assert_eq!(branches[0].committer_unix, 1_786_803_504);
         assert_eq!(branches[0].committerdate_relative, "5m");
         assert_eq!(branches[1].committerdate_relative, "now");
+    }
+
+    /// T6 (v2 ③) — one `for-each-ref` answers all three kinds, each saying which
+    /// it is, in the order they are drawn.
+    #[test]
+    fn one_question_answers_locals_remotes_and_tags_in_that_order() {
+        let refs = parse_refs(REFS, RECORDED_AT + 300);
+        let seen: Vec<(GitRefKind, &str)> = refs
+            .iter()
+            .map(|entry| (entry.kind, entry.name.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (GitRefKind::Local, "main"),
+                (GitRefKind::Local, "diverge"),
+                (GitRefKind::Local, "goner"),
+                (GitRefKind::Local, "other"),
+                (GitRefKind::Remote, "origin/main"),
+                (GitRefKind::Tag, "v1.0"),
+            ],
+            "locals current-first and newest-first, then the remotes, then the tags"
+        );
+        assert_eq!(
+            remote_branches(&refs)
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["origin/main"],
+            "`origin/HEAD` is a pointer at a row this list already has, not a row"
+        );
+        assert_eq!(refs[0].object, "a3", "each ref says what it points at");
+    }
+
+    /// T6 — a ref outside the three trees is not a ref this product draws.
+    #[test]
+    fn a_ref_that_is_neither_branch_nor_tag_is_left_out() {
+        let refs = parse_refs(
+            b"refs/stash\x00a1\x00\x00\x00 \x002026-08-15T10:18:24-04:00\n\
+refs/notes/commits\x00a2\x00\x00\x00 \x002026-08-15T10:18:24-04:00\n\
+refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
+            RECORDED_AT,
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "main");
     }
 
     // ── What a column knows ────────────────────────────────────────────────
@@ -3597,9 +4145,10 @@ mod tests {
             cache.pending_questions(),
             vec![
                 GitQuestion::Status { root: root.clone() },
-                GitQuestion::Branches { root: root.clone() },
+                GitQuestion::Refs { root: root.clone() },
                 GitQuestion::Log {
                     root: root.clone(),
+                    refs: Vec::new(),
                     skip: 0,
                     count: GIT_LOG_PAGE,
                 },
@@ -3661,9 +4210,12 @@ mod tests {
     fn a_refused_checkout_keeps_gits_words_and_leaves_the_branch_alone() {
         let root = PathBuf::from(r"D:\repo");
         let mut cache = GitCache::at_root(root.clone(), GitRole::Page);
-        assert!(cache.accept(GitAnswer::Branches {
+        assert!(cache.accept(GitAnswer::Refs {
             root: root.clone(),
-            outcome: Ok(parse_branches(b"main\0*\0\0\nside\0\0\0\n", RECORDED_AT)),
+            outcome: Ok(parse_refs(
+                b"refs/heads/main\0a1\0\0\0*\0\nrefs/heads/side\0a2\0\0\0 \0\n",
+                RECORDED_AT
+            )),
         }));
         assert!(cache.accept(GitAnswer::Status {
             root: root.clone(),
@@ -3711,7 +4263,7 @@ mod tests {
         assert_eq!(cache.checkout_pending(), None, "the row stops waiting");
         // The list is untouched: the refusal changed nothing, so nothing is
         // re-asked and `main` is still the branch.
-        let branches = cache.branches().ready().expect("still answered");
+        let branches = cache.refs().ready().expect("still answered");
         assert_eq!(branches[0].name, "main");
         assert!(branches[0].is_head);
         assert!(
@@ -3746,60 +4298,55 @@ mod tests {
                 detach: true,
             })
         );
-        // And a graph never asks for a branch list it does not draw (R31).
+        // And a graph asks for the refs too since v2 ③ — its filter menu lists
+        // every local branch by name, so the answer is no longer unread (T6).
         assert!(
-            !cache
+            cache
                 .pending_questions()
                 .iter()
-                .any(|question| matches!(question, GitQuestion::Branches { .. })),
-            "the graph asked for branches"
+                .any(|question| matches!(question, GitQuestion::Refs { .. })),
+            "the graph never asked for the refs its filter menu is made of"
         );
     }
 
     /// R22 — the pills a commit wears are the local branches and nothing else.
     #[test]
-    fn a_decoration_keeps_local_branches_and_marks_the_head() {
+    fn a_decoration_keeps_every_kind_of_name_and_puts_them_in_drawing_order() {
         assert_eq!(parse_decoration(""), Vec::new());
+        let named = |name: &str, head: bool, kind: GitRefKind| GitRef {
+            name: name.to_owned(),
+            head,
+            kind,
+        };
         assert_eq!(
             parse_decoration(
-                "HEAD -> refs/heads/main, refs/remotes/origin/main, refs/tags/v1.0, refs/heads/side"
+                "refs/tags/v1.0, refs/remotes/origin/main, HEAD -> refs/heads/main, refs/heads/side"
             ),
             vec![
-                GitRef {
-                    name: "main".to_owned(),
-                    head: true,
-                },
-                GitRef {
-                    name: "side".to_owned(),
-                    head: false,
-                },
+                named("main", true, GitRefKind::Local),
+                named("side", false, GitRefKind::Local),
+                named("origin/main", false, GitRefKind::Remote),
+                named("v1.0", false, GitRefKind::Tag),
             ],
-            "remotes and tags are v2's, and are dropped rather than flattened in"
+            "HEAD's local leads, then the other locals, then the remotes, then the tags"
         );
         // A detached head is a place you are standing with no branch behind it,
         // and the graph is exactly the surface that should say so.
         assert_eq!(
             parse_decoration("HEAD, refs/heads/main"),
             vec![
-                GitRef {
-                    name: "HEAD".to_owned(),
-                    head: true,
-                },
-                GitRef {
-                    name: "main".to_owned(),
-                    head: false,
-                },
+                named("HEAD", true, GitRefKind::Local),
+                named("main", false, GitRefKind::Local),
             ]
         );
         // A branch genuinely called `origin/main` is a local branch, and the
         // full spelling is the only thing that can tell it from the remote one.
         assert_eq!(
             parse_decoration("refs/heads/origin/main"),
-            vec![GitRef {
-                name: "origin/main".to_owned(),
-                head: false,
-            }]
+            vec![named("origin/main", false, GitRefKind::Local)]
         );
+        // A ref outside the three trees still is not a pill.
+        assert_eq!(parse_decoration("refs/stash"), Vec::new());
     }
 
     /// PIN — "Load more" extends the list rather than replacing it, and a page
@@ -3842,6 +4389,7 @@ mod tests {
             cache.more_commits(),
             Some(GitQuestion::Log {
                 root: root.clone(),
+                refs: Vec::new(),
                 skip: 2,
                 count: GIT_LOG_PAGE,
             })
@@ -3901,19 +4449,19 @@ mod tests {
             root: root.clone(),
             outcome: Ok(parse_status(STATUS_Z)),
         });
-        cache.accept(GitAnswer::Branches {
+        cache.accept(GitAnswer::Refs {
             root: root.clone(),
-            outcome: Ok(parse_branches(BRANCHES, RECORDED_AT)),
+            outcome: Ok(parse_refs(REFS, RECORDED_AT)),
         });
         assert!(cache.status().ready().is_some());
         assert_eq!(
-            cache.branches().ready().map(Vec::len),
-            Some(4),
-            "the four branches of the recording are filed under the root that was asked"
+            cache.refs().ready().map(Vec::len),
+            Some(6),
+            "the six refs of the recording are filed under the root that was asked"
         );
         cache.refresh();
         assert!(
-            cache.branches().ready().is_none(),
+            cache.refs().ready().is_none(),
             "a refresh asks again rather than keeping an answer it has decided is stale"
         );
         assert_eq!(
@@ -3922,6 +4470,210 @@ mod tests {
             "the root survives a refresh"
         );
         assert_eq!(cache.pending_questions().len(), 3);
+    }
+
+    /// T5 (v2 ③) — the toolbar's refresh re-asks **exactly** the three questions
+    /// a page is made of, asks each once, and **leaves the page standing** while
+    /// it waits.
+    ///
+    /// Three claims, and each is a way this could have been wrong. The *count*:
+    /// a refresh that asked twice would spend two subprocesses per press, and one
+    /// that asked a fourth would be reading something the button did not promise.
+    /// The *page*: `refresh` — the verb a write owes — takes the history down to
+    /// `Reading the repository…`, which is honest after a `git add` and is the
+    /// page punishing the reader after a press that only meant "check". The
+    /// *head*: it goes quiet while the three are out and comes back when the last
+    /// of them lands, which is the whole of the feedback this button gets.
+    #[test]
+    fn a_reread_asks_the_three_page_questions_once_and_leaves_the_page_up() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Graph);
+        for question in cache.pending_questions() {
+            cache.mark_pending(&question);
+        }
+        cache.accept(GitAnswer::Status {
+            root: root.clone(),
+            outcome: Ok(parse_status(STATUS_Z)),
+        });
+        cache.accept(GitAnswer::Refs {
+            root: root.clone(),
+            outcome: Ok(parse_refs(REFS, RECORDED_AT)),
+        });
+        cache.accept(GitAnswer::Log {
+            root: root.clone(),
+            skip: 0,
+            outcome: Ok(parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE)),
+        });
+        assert!(cache.pending_questions().is_empty());
+        assert!(!cache.rereading(), "nothing is owed yet");
+
+        let asked = cache.begin_reread();
+        assert_eq!(
+            asked,
+            vec![
+                GitQuestion::Status { root: root.clone() },
+                GitQuestion::Refs { root: root.clone() },
+                GitQuestion::Log {
+                    root: root.clone(),
+                    refs: Vec::new(),
+                    skip: 0,
+                    count: GIT_LOG_PAGE,
+                },
+            ],
+            "the status, the refs and the first page — and nothing else"
+        );
+        assert!(
+            cache.rereading(),
+            "and the head goes quiet while they are out"
+        );
+        assert!(
+            cache.log().ready().is_some() && cache.refs().ready().is_some(),
+            "the page a reader is looking at is still there"
+        );
+        assert!(
+            cache.pending_questions().is_empty(),
+            "and each of them once: nothing is owed by the driver on top of these"
+        );
+        // A second press while the first is still out is the same press.
+        assert_eq!(cache.begin_reread().len(), 3);
+
+        cache.accept(GitAnswer::Status {
+            root: root.clone(),
+            outcome: Ok(parse_status(STATUS_Z)),
+        });
+        cache.accept(GitAnswer::Refs {
+            root: root.clone(),
+            outcome: Ok(parse_refs(REFS, RECORDED_AT)),
+        });
+        assert!(
+            cache.rereading(),
+            "two of three back is still a page being read"
+        );
+        cache.accept(GitAnswer::Log {
+            root,
+            skip: 0,
+            outcome: Ok(parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE)),
+        });
+        assert!(!cache.rereading(), "and the last one hands the ink back");
+    }
+
+    /// T2/T3 — changing the filter throws the history away and re-asks it with
+    /// the revisions the filter names.
+    ///
+    /// **Thrown away and not filtered in place**: a branch that was not walked
+    /// has no commits on hand, so there is nothing already loaded that could have
+    /// answered this. The `Load more` question carries the same revisions, or the
+    /// second page would be of a different history from the first.
+    #[test]
+    fn a_new_filter_re_asks_the_history_with_the_revisions_it_names() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Graph);
+        let commit = |subject: &str| GitCommit {
+            hash: subject.to_owned(),
+            short: subject.to_owned(),
+            subject: subject.to_owned(),
+            author_name: "T".to_owned(),
+            author_email: "t@example.com".to_owned(),
+            committer_name: "T".to_owned(),
+            committer_email: "t@example.com".to_owned(),
+            body: String::new(),
+            committer_unix: RECORDED_AT,
+            committer_offset: 0,
+            time_relative: "now".to_owned(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+        };
+        for question in cache.pending_questions() {
+            cache.mark_pending(&question);
+        }
+        cache.accept(GitAnswer::Log {
+            root: root.clone(),
+            skip: 0,
+            outcome: Ok(GitLog {
+                skip: 0,
+                commits: vec![commit("one"), commit("two")],
+                has_more: true,
+            }),
+        });
+        assert_eq!(cache.log_refs(), Vec::<String>::new());
+
+        assert!(cache.set_log_refs(vec!["main".to_owned(), "side".to_owned()]));
+        assert!(
+            cache.log().ready().is_none(),
+            "a filter change is a different history, not a view of this one"
+        );
+        assert!(cache.pending_questions().contains(&GitQuestion::Log {
+            root: root.clone(),
+            refs: vec!["main".to_owned(), "side".to_owned()],
+            skip: 0,
+            count: GIT_LOG_PAGE,
+        }));
+        assert!(
+            !cache.set_log_refs(vec!["main".to_owned(), "side".to_owned()]),
+            "the same filter changes nothing and re-asks nothing"
+        );
+
+        // And the page after it walks the same roads.
+        for question in cache.pending_questions() {
+            cache.mark_pending(&question);
+        }
+        cache.accept(GitAnswer::Log {
+            root: root.clone(),
+            skip: 0,
+            outcome: Ok(GitLog {
+                skip: 0,
+                commits: vec![commit("one")],
+                has_more: true,
+            }),
+        });
+        assert_eq!(
+            cache.more_commits(),
+            Some(GitQuestion::Log {
+                root,
+                refs: vec!["main".to_owned(), "side".to_owned()],
+                skip: 1,
+                count: GIT_LOG_PAGE,
+            })
+        );
+    }
+
+    /// T4 — a search's answer is filed only while it is about the text that is
+    /// still being asked.
+    #[test]
+    fn a_search_result_for_a_query_already_typed_past_is_dropped() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Graph);
+        assert_eq!(cache.search("fix"), None, "nothing has been asked");
+        assert_eq!(
+            cache.begin_search("fix"),
+            Some(GitQuestion::Search {
+                root: root.clone(),
+                query: "fix".to_owned(),
+            })
+        );
+        assert!(matches!(cache.search("fix"), Some(GitSlot::Pending)));
+        // The reader types on before the first answer lands.
+        cache.begin_search("fixup");
+        assert!(
+            !cache.accept(GitAnswer::Search {
+                root: root.clone(),
+                query: "fix".to_owned(),
+                outcome: Ok(vec!["a".to_owned()]),
+            }),
+            "an answer about text nobody is asking about any more is not filed"
+        );
+        assert!(cache.accept(GitAnswer::Search {
+            root,
+            query: "fixup".to_owned(),
+            outcome: Ok(vec!["b".to_owned()]),
+        }));
+        assert_eq!(
+            cache.search("fixup").and_then(GitSlot::ready),
+            Some(&vec!["b".to_owned()])
+        );
+        assert_eq!(cache.search("fix"), None, "and only under its own key");
+        cache.clear_search();
+        assert_eq!(cache.search("fixup"), None);
     }
 
     #[test]
@@ -3964,11 +4716,11 @@ mod tests {
             "HEAD is on a branch or it is detached, and it says which"
         );
 
-        let GitAnswer::Branches { outcome, .. } = ask(GitQuestion::Branches { root: root.clone() })
-        else {
-            panic!("a branches question is answered with branches");
+        let GitAnswer::Refs { outcome, .. } = ask(GitQuestion::Refs { root: root.clone() }) else {
+            panic!("a refs question is answered with refs");
         };
-        let branches = outcome.expect("this workspace's branches read");
+        let refs = outcome.expect("this workspace's refs read");
+        let branches: Vec<&GitRefEntry> = local_branches(&refs).collect();
         assert!(
             !branches.is_empty(),
             "a repository with commits has a branch"
@@ -3977,9 +4729,14 @@ mod tests {
             branches.iter().filter(|branch| branch.is_head).count() <= 1,
             "HEAD is on at most one local branch"
         );
+        assert!(
+            refs.iter().all(|entry| !entry.name.starts_with("refs/")),
+            "every name arrived short, whichever tree it came out of"
+        );
 
         let GitAnswer::Log { outcome, .. } = ask(GitQuestion::Log {
-            root,
+            root: root.clone(),
+            refs: Vec::new(),
             skip: 0,
             count: GIT_LOG_PAGE,
         }) else {
@@ -3998,6 +4755,74 @@ mod tests {
             page.commits.iter().any(|commit| commit.parents.len() > 1)
                 || page.commits.iter().all(|commit| !commit.parents.is_empty()),
             "every commit but the root has a parent"
+        );
+    }
+
+    /// T4 (v2 ③) — a search is an **OR** of the message and the author, plus a
+    /// direct hit on anything git can resolve as a revision.
+    ///
+    /// Put to the real `git.exe` and the real repository these lines are in,
+    /// because the whole of this question is *what three command lines do*: git
+    /// ANDs `--grep` with `--author`, so the union has to be built here, and the
+    /// only way to find out that it was is to run the commands.
+    ///
+    /// It asserts nothing about how many commits match — that is a fact about
+    /// whoever has been working here — only the three properties the union has
+    /// to have: an author-only query answers, a message-only query answers, and a
+    /// hash resolves to itself and leads the list.
+    #[test]
+    fn a_search_ors_the_message_against_the_author_and_a_hash_lands_outright() {
+        let git = real_git();
+        let root = this_repository();
+        let ask = |question| answer(&git, &question, GIT_COMMAND_TIMEOUT, now_unix());
+        let search = |query: &str| {
+            let GitAnswer::Search { outcome, .. } = ask(GitQuestion::Search {
+                root: root.clone(),
+                query: query.to_owned(),
+            }) else {
+                panic!("a search question is answered with a search");
+            };
+            outcome.expect("this workspace's history is searchable")
+        };
+        // The author of every commit in this repository, off the first page.
+        let GitAnswer::Log { outcome, .. } = ask(GitQuestion::Log {
+            root: root.clone(),
+            refs: Vec::new(),
+            skip: 0,
+            count: 1,
+        }) else {
+            panic!("a log question is answered with a log");
+        };
+        let page = outcome.expect("this workspace's history reads");
+        let head = page.commits.first().expect("a repository with commits");
+
+        // The author's name matches no commit *message* in this repository's
+        // subjects — and it does not have to: what this asserts is that the
+        // author half of the union runs at all, which a `--grep`-only search
+        // could not answer.
+        let by_author = search(&head.author_name);
+        assert!(
+            by_author.contains(&head.hash),
+            "a query that is only ever an author still finds their commits"
+        );
+
+        // A full hash resolves outright and leads the list, because the direct
+        // jump is asked first: pasting a hash is a *jump* and not a search.
+        let by_hash = search(&head.hash);
+        assert_eq!(
+            by_hash.first(),
+            Some(&head.hash),
+            "a revision this repository knows lands on itself, first"
+        );
+        // And so does the abbreviation git itself printed, which is the form a
+        // reader actually copies off a row.
+        let by_short = search(&head.short);
+        assert_eq!(by_short.first(), Some(&head.hash));
+
+        // Nothing matches nothing, and that is an answer rather than a failure.
+        assert!(
+            search("zzq-no-such-text-anywhere-in-this-history-zzq").is_empty(),
+            "a query nothing says is an empty list, not a refusal"
         );
     }
 

@@ -298,6 +298,13 @@ pub const GRAPH_REF_EDGE_LOGICAL_PX: f32 = 1.0;
 /// 10%)` (G84) — premixed here as this product premixes every `color-mix`.
 pub const GRAPH_REF_EDGE_ALPHA: i32 = 450;
 pub const GRAPH_REF_GROUND_ALPHA: i32 = 100;
+/// The tag glyph a tag pill carries in front of its name (T7, v2 ③).
+///
+/// Nine against the pill's sixteen: a mark inside a pill has to leave the pill
+/// looking like a pill, and a glyph filling it edge to edge reads as a button.
+pub const GRAPH_REF_TAG_MARK_LOGICAL_PX: f32 = 9.0;
+/// And the gap between it and the name.
+pub const GRAPH_REF_TAG_GAP_LOGICAL_PX: f32 = 4.0;
 /// `.ggf { padding-left:56px }` (G87) — the expanded commit's files, indented
 /// past the graph column.
 pub const GRAPH_FILE_INDENT_LOGICAL_PX: f32 = 56.0;
@@ -565,13 +572,23 @@ pub fn graph_column_rects(rect: [f32; 4], columns: GraphColumns, scale: f32) -> 
     }
 }
 
-/// One ref pill (R22).
+/// One ref pill (R22) — a local branch, a remote-tracking branch, or a tag
+/// (T7, v2 ③).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphRefPill {
     pub name: String,
     pub text_width: f32,
     /// Whether `HEAD` is this ref — the one that wears the accent ring.
     pub head: bool,
+    /// Which of the three shapes it is drawn as.
+    ///
+    /// **Three shapes and not three colours**, which is the whole of T7: the
+    /// pill's colour is already spoken for — it is the lane's, and the lane
+    /// means "which road this commit is on" — so a kind said in colour would be
+    /// two facts fighting over one channel. Said in *shape*, the three read at a
+    /// glance and on a monochrome screen: a local is filled, a remote is hollow,
+    /// a tag carries a tag.
+    pub kind: crate::git::GitRefKind,
     /// Which lane's colour it borrows: the commit's own (G85 carries the lane
     /// on the ref, and the commit's lane is the honest source for it).
     pub lane: usize,
@@ -621,6 +638,13 @@ pub struct GraphCommitRow {
     /// painter never indexes a second collection.
     pub lanes: GraphRow,
     pub expanded: bool,
+    /// **The search matched this commit** (T4) — what wears `git_row_match`.
+    ///
+    /// On the row and not looked up by the painter, for the reason every other
+    /// field here is on the row: the painter holding a second collection it has
+    /// to agree with about an index is the shape this codebase has been bitten
+    /// by twice.
+    pub matched: bool,
 }
 
 /// The working tree's own row (V5).
@@ -806,6 +830,18 @@ impl GraphViewRow {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphContent {
     pub head: Option<GraphHead>,
+    /// The toolbar's own measured words (T1), beside the head it now contains.
+    ///
+    /// **One strip and one head**, which is the fold this slice performs: the
+    /// graph used to carry a masthead of its own above a column header, and the
+    /// toolbar would have been a third band over the same rows. Three bands for
+    /// one document is a page whose first forty pixels say nothing, so the
+    /// masthead moved *into* the toolbar and what is left is two: the strip, and
+    /// the header under it.
+    ///
+    /// `None` exactly when [`Self::head`] is — the strip is the head's own, and
+    /// a page with no repository to name has no toolbar to hang on it either.
+    pub toolbar: Option<GraphToolbar>,
     /// **Only the rows the window can show**, plus [`GRAPH_WINDOW_BUFFER_ROWS`]
     /// on each side. This is R23: a repository with ten thousand commits builds
     /// two dozen rows a frame, because a row that cannot be seen costs a
@@ -1015,12 +1051,20 @@ pub fn toggled_expansion(current: Option<&str>, hash: &str) -> Option<String> {
 /// rects because it holds a page; this one is asked about a repository.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GraphGeometry {
-    /// The rows' own box — the body less the head.
+    /// The rows' own box — the body less the toolbar.
     ///
     /// It was once "less any banner" too; the strip is gone with the toast ruling
     /// (2026-08-16), so a graph's rows stand in the same rectangle whether or not
     /// a checkout was just refused.
     pub viewport: [f32; 4],
+    /// **The toolbar's strip** (T1) — the band the repository, the branch and
+    /// the three tools stand in.
+    ///
+    /// Still spelled `head`, and still the same rectangle it was: v2 ③ folded
+    /// the masthead into it rather than adding a band above it, so the number
+    /// this field carries is unchanged and every arithmetic below it — the
+    /// header, the viewport, the window, the clamp — is untouched. What is new
+    /// is what stands *in* it, which [`graph_toolbar_rects`] answers.
     pub head: Option<[f32; 4]>,
     /// The column header's own strip (V2), between the masthead and the rows.
     ///
@@ -1226,14 +1270,400 @@ pub struct LaneWidthHold {
     pub until: usize,
 }
 
+// ── the toolbar (T1) ───────────────────────────────────────────────────────
+
+/// The repository's own name, at the head of the toolbar (T1).
+///
+/// 12.5 px at 500, a step under the branch beside it: the branch is the fact a
+/// reader is scanning for and the repository is where they already know they
+/// are, so the two are a heading and its kicker rather than two headings.
+pub const GRAPH_REPO_FONT_LOGICAL_PX: f32 = 12.5;
+/// The gap between the repository's name and the branch's mark.
+pub const GRAPH_REPO_GAP_LOGICAL_PX: f32 = 10.0;
+/// How tall the toolbar's controls are.
+///
+/// 22 rather than the 24 a button on a strip usually gets: the strip is 36 tall
+/// and a 24-pixel control in it leaves six pixels above and below, which reads
+/// as a control filling a bar rather than sitting in one.
+pub const GRAPH_TOOL_HEIGHT_LOGICAL_PX: f32 = 22.0;
+/// The gap between two of them.
+pub const GRAPH_TOOL_GAP_LOGICAL_PX: f32 = 6.0;
+/// Their own left/right padding.
+pub const GRAPH_TOOL_PADDING_X_LOGICAL_PX: f32 = 8.0;
+/// The corner every one of them is cut with.
+pub const GRAPH_TOOL_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// A tool's label.
+pub const GRAPH_TOOL_FONT_LOGICAL_PX: f32 = 11.5;
+/// The chevron on the filter button, and the `×` in the search field.
+pub const GRAPH_TOOL_MARK_LOGICAL_PX: f32 = 10.0;
+/// The refresh mark inside its own square button.
+pub const GRAPH_REFRESH_MARK_LOGICAL_PX: f32 = 13.0;
+/// How wide the search field is when there is room for it.
+pub const GRAPH_SEARCH_WIDTH_LOGICAL_PX: f32 = 180.0;
+/// What it says when nothing has been typed.
+pub const GRAPH_SEARCH_PLACEHOLDER: &str = "Search commits";
+/// The word between the two numbers of `3 of 17`.
+pub const GRAPH_SEARCH_OF: &str = " of ";
+/// What the count says when git matched nothing.
+pub const GRAPH_SEARCH_NONE: &str = "no matches";
+/// The caret in the search field — the window's own one-pixel bar.
+pub const GRAPH_SEARCH_CARET_LOGICAL_PX: f32 = 1.5;
+/// How far it stops short of the field's own edges.
+pub const GRAPH_SEARCH_CARET_INSET_LOGICAL_PX: f32 = 4.0;
+/// The narrowest the head is allowed to be squeezed to before a tool leaves.
+///
+/// About sixteen characters at 12.5 px — enough for a repository name and the
+/// first of a branch. Below it the head stops being a sentence and becomes an
+/// ellipsis, which is the point at which the tools beside it are costing more
+/// than they are worth.
+pub const GRAPH_TOOLBAR_HEAD_MIN_LOGICAL_PX: f32 = 140.0;
+
+/// Which of the toolbar's four controls a press is on (T1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphTool {
+    /// The branch filter button — opens the menu (T2).
+    Filter,
+    /// The search field's own box: pressing it takes the keyboard (T4).
+    Search,
+    /// The `×` at its right end.
+    SearchClear,
+    /// Read the repository again (T5).
+    Refresh,
+}
+
+impl GraphTool {
+    /// What each says when the pointer rests on it.
+    #[must_use]
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            Self::Filter => "Which branches this graph is of",
+            Self::Search => "Search commits by message, author or hash",
+            Self::SearchClear => "Clear the search",
+            Self::Refresh => "Read the repository again",
+        }
+    }
+}
+
+/// Where the toolbar's parts stand inside its strip.
+///
+/// **`None` is a control this width does not draw**, exactly as
+/// [`GraphColumnRects`] says a column is collapsed — and for the same reason:
+/// one function decides, the painter and the hit test read, and a control with
+/// nowhere to stand cannot be pressed because it is not there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphToolbarRects {
+    /// The repository name and the branch, on the left.
+    pub head: [f32; 4],
+    /// The whole filter button. Present at every width — what shortens is its
+    /// label, not the button.
+    pub filter: [f32; 4],
+    /// Whether the filter is down to its chevron alone.
+    pub filter_short: bool,
+    pub search: Option<[f32; 4]>,
+    /// The `×` inside the field, when there is text to clear.
+    pub search_clear: Option<[f32; 4]>,
+    pub refresh: [f32; 4],
+}
+
+/// Lay the toolbar out inside its strip (T1).
+///
+/// **Right to left, and the order things leave is the ruling.** The refresh is
+/// pinned to the trailing edge and never leaves: it is the one control on the
+/// strip whose absence cannot be worked around, because a reader who cannot
+/// re-read the repository has no way to find out that it moved. The search goes
+/// first, because it is a *destination* — a narrow seat can be widened, and the
+/// field will be there when it is. The filter's label goes second and its
+/// chevron stays, because the button still has to be findable in order to say
+/// what the graph is currently of.
+///
+/// One function for the paint and for the hit test, on [`graph_column_rects`]'s
+/// own rule.
+#[must_use]
+pub fn graph_toolbar_rects(
+    strip: [f32; 4],
+    toolbar: &GraphToolbar,
+    scale: f32,
+) -> GraphToolbarRects {
+    let gap = (GRAPH_TOOL_GAP_LOGICAL_PX * scale).round();
+    let pad = (GRAPH_TOOL_PADDING_X_LOGICAL_PX * scale).round();
+    let mark = (GRAPH_TOOL_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let height = (GRAPH_TOOL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let top = ((strip[1] + strip[3] - height) / 2.0).round();
+    let bottom = top + height;
+    let box_of = |right: f32, width: f32| [right - width, top, right, bottom];
+
+    let refresh = box_of(strip[2], height);
+    let search_width = (GRAPH_SEARCH_WIDTH_LOGICAL_PX * scale).round();
+    let filter_full = pad * 2.0 + toolbar.filter_width + gap + mark;
+    let filter_short = pad * 2.0 + mark;
+    let head_min = (GRAPH_TOOLBAR_HEAD_MIN_LOGICAL_PX * scale).round();
+
+    // The three arrangements, widest first; the first that leaves the head its
+    // minimum is the one drawn.
+    let right = refresh[0] - gap;
+    let (with_search, short) = if right - (search_width + gap + filter_full) - strip[0] >= head_min
+    {
+        (true, false)
+    } else if right - filter_full - strip[0] >= head_min {
+        (false, false)
+    } else {
+        (false, true)
+    };
+    let filter_width = if short { filter_short } else { filter_full };
+    let (search, filter) = if with_search {
+        let search = box_of(right, search_width);
+        (Some(search), box_of(search[0] - gap, filter_width))
+    } else {
+        (None, box_of(right, filter_width))
+    };
+    // The `×` sits inside the field's own right padding, so the text it clears
+    // stops before it rather than running under it.
+    let search_clear = search.filter(|_| toolbar.search_clearable).map(|field| {
+        let right = field[2] - pad;
+        let middle = ((field[1] + field[3]) / 2.0).round();
+        [
+            right - mark,
+            (middle - mark / 2.0).round(),
+            right,
+            (middle - mark / 2.0).round() + mark,
+        ]
+    });
+    GraphToolbarRects {
+        head: [
+            strip[0],
+            strip[1],
+            (filter[0] - gap).max(strip[0]),
+            strip[3],
+        ],
+        filter,
+        filter_short: short,
+        search,
+        search_clear,
+        refresh,
+    }
+}
+
+/// What the toolbar draws, measured (T1).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphToolbar {
+    /// The repository's own folder name — the root's last component.
+    pub repo: String,
+    pub repo_width: f32,
+    /// `All branches`, or `3 branches`.
+    pub filter: String,
+    pub filter_width: f32,
+    /// What is typed in the search field, or the placeholder when nothing is.
+    pub search: String,
+    pub search_width: f32,
+    /// Whether [`Self::search`] is the reader's text rather than the
+    /// placeholder — which decides its ink and whether there is a `×`.
+    pub search_typed: bool,
+    /// Whether the `×` is drawn at all.
+    pub search_clearable: bool,
+    /// `3 of 17`, or `no matches`, or nothing at all before a search is run.
+    pub search_count: String,
+    pub search_count_width: f32,
+    /// Whether the field holds the keyboard — what draws the caret and the
+    /// accent edge.
+    pub search_focused: bool,
+    /// Where the caret is, in pixels from the text's own left edge.
+    pub caret_x: f32,
+    /// **A question is in flight** (T5): the branch goes quiet until it lands.
+    pub busy: bool,
+}
+
+// ── the toolbar's filter (T2/T3) ───────────────────────────────────────────
+
+/// **Which history this graph is of** — the branch filter's whole state.
+///
+/// Three fields and two different jobs, which is the distinction the filter menu
+/// draws on screen with a divider: [`Self::branches`] decides **which roads git
+/// walks**, and the two flags decide **which names are drawn on the commits it
+/// found**. A reader who unticks "Show tags" is saying "stop putting `v1.0` on
+/// my rows", not "pretend that commit is somewhere else" — so the flags filter
+/// pills always, and they narrow the walk only when the walk was `--all` to
+/// begin with (see [`Self::log_refs`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFilter {
+    /// The local branches picked by hand, in the order the menu lists them.
+    ///
+    /// **Empty is "All branches"** and not "no branches", which is the one place
+    /// this type could have been written to mean the opposite of what it says.
+    /// The alternative — an `Option<Vec<String>>` with `None` for all — spells
+    /// the same two states with a third, `Some(vec![])`, that has no reading at
+    /// all: a graph of nothing is not a thing the menu can produce, because
+    /// unticking the last branch is how a reader says "all of them again".
+    pub branches: Vec<String>,
+    /// Whether remote-tracking names are drawn, and walked.
+    pub remotes: bool,
+    /// Whether tags are.
+    pub tags: bool,
+}
+
+/// "All branches" — the filter's own resting word, and the menu's first row.
+pub const GRAPH_FILTER_ALL: &str = "All branches";
+/// What the button says when branches have been picked: `N branches`.
+pub const GRAPH_FILTER_MANY: &str = " branches";
+/// And what it says for exactly one, because `1 branches` is not English.
+pub const GRAPH_FILTER_ONE: &str = " branch";
+
+/// The resting filter, as a value a borrow can point at.
+///
+/// A `static` and not a `const`, because [`GraphLook`] holds a *reference* to a
+/// filter and a `const` has no address to take: `&SOME_CONST` in a signature's
+/// default would be a fresh temporary each time, which for a type this cheap
+/// would work and would still be a lie about where the value lives.
+pub static GRAPH_FILTER_EVERYTHING: GraphFilter = GraphFilter {
+    branches: Vec::new(),
+    remotes: true,
+    tags: true,
+};
+
+/// **Every road walked, every name drawn** — and written by hand rather than
+/// derived.
+///
+/// A derived `Default` gives `false` for the two flags, and the resting state of
+/// a checkbox that says "Show tags" is *ticked*. There must not be two answers
+/// to "what does a graph nobody has filtered show", so the derive is refused and
+/// this is the one.
+impl Default for GraphFilter {
+    fn default() -> Self {
+        GRAPH_FILTER_EVERYTHING.clone()
+    }
+}
+
+impl GraphFilter {
+    /// Whether a pill of this kind is drawn at all.
+    ///
+    /// Locals always: a local branch is a name in *this* repository, and the two
+    /// checkboxes are about the two kinds of name that are not.
+    #[must_use]
+    pub fn draws(&self, kind: crate::git::GitRefKind) -> bool {
+        match kind {
+            crate::git::GitRefKind::Local => true,
+            crate::git::GitRefKind::Remote => self.remotes,
+            crate::git::GitRefKind::Tag => self.tags,
+        }
+    }
+
+    /// Whether the walk is the whole repository (the menu's radio row).
+    #[must_use]
+    pub fn all_branches(&self) -> bool {
+        self.branches.is_empty()
+    }
+
+    /// Tick or untick one branch, and answer the filter that leaves.
+    ///
+    /// Unticking the last one lands back on "All branches", which is the only
+    /// honest reading: a graph with no revisions to walk is an empty page, and
+    /// nobody reaches for a filter in order to see nothing.
+    pub fn toggle_branch(&mut self, name: &str) {
+        match self.branches.iter().position(|held| held == name) {
+            Some(at) => {
+                self.branches.remove(at);
+            }
+            None => self.branches.push(name.to_owned()),
+        }
+    }
+
+    /// What the toolbar's button says.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self.branches.len() {
+            0 => GRAPH_FILTER_ALL.to_owned(),
+            1 => format!("1{GRAPH_FILTER_ONE}"),
+            count => format!("{count}{GRAPH_FILTER_MANY}"),
+        }
+    }
+
+    /// **The revisions `git log` is given** — the whole of T3's semantics.
+    ///
+    /// Three readings, in the order they are decided:
+    ///
+    /// 1. **Branches picked by hand** are passed verbatim and nothing else is.
+    ///    They are local branch names, so the two flags have nothing to add: a
+    ///    walk of `main side` visits whatever those two reach, and whether the
+    ///    commits it finds *wear* a remote's name is a question about pills.
+    /// 2. **All branches, with both kinds shown**, is `--all` — git's own word
+    ///    for every ref there is, `HEAD` included, which is the one spelling
+    ///    that is right in a detached head too.
+    /// 3. **All branches with something hidden** is spelled out instead:
+    ///    `--branches`, plus `--tags` when tags are shown, plus `--remotes` when
+    ///    remotes are. **Hidden means not walked**, and that is the honest
+    ///    reading rather than the cheap one: a reader who has turned remotes off
+    ///    and still sees a commit that exists only on `origin/feature` is being
+    ///    shown a branch they said they did not want, with nothing on the row to
+    ///    say where it came from. `HEAD` is added because `--branches` does not
+    ///    include it, and a detached head would otherwise walk a history the
+    ///    reader is not standing in.
+    #[must_use]
+    pub fn log_refs(&self) -> Vec<String> {
+        if !self.branches.is_empty() {
+            return self.branches.clone();
+        }
+        if self.remotes && self.tags {
+            return vec!["--all".to_owned()];
+        }
+        let mut refs = vec!["--branches".to_owned()];
+        if self.remotes {
+            refs.push("--remotes".to_owned());
+        }
+        if self.tags {
+            refs.push("--tags".to_owned());
+        }
+        refs.push("HEAD".to_owned());
+        refs
+    }
+}
+
+/// What the search field holds and what git said about it (T4).
+///
+/// A borrow of the seat's own state rather than a copy for
+/// [`GraphLook::filter`]'s reason, and gathered into one value rather than three
+/// parameters because the three are one answer to one question — *what is being
+/// searched for, what matched, and which match are we on*.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphSearchLook<'a> {
+    /// What is in the field right now.
+    pub text: &'a str,
+    /// The part of it before the caret — what the caret's own x is measured
+    /// from. A slice of the same string rather than a byte index, because the
+    /// thing that has to answer is a text measurer and what it takes is text.
+    pub before_caret: &'a str,
+    /// **What the IME is composing**, which is not part of [`Self::text`].
+    ///
+    /// Drawn *at* the caret and pushing the caret along, which is the whole of
+    /// what a composition looks like: the letters open a space in the line and
+    /// the caret stands after them. A field that painted it over the text
+    /// instead would show the composition and the rest of the word sharing
+    /// cells neither can be read in — the bug the terminal's own preedit path
+    /// was already fixed for (2026-08-13).
+    pub preedit: &'a str,
+    /// Whether the field holds the keyboard.
+    pub focused: bool,
+    /// The hashes git matched, newest first, or `None` when nothing has been
+    /// asked. Empty is a real answer and means "no commit says that".
+    pub matches: Option<&'a [String]>,
+    /// Which of them the reader has stepped to, when they have stepped at all.
+    pub at: Option<usize>,
+}
+
 /// **What one seat is looking at**, as against what its repository said.
 ///
 /// Three fields that always travel together and always came from the same place
 /// — the seat's own [`crate::GraphView`] — gathered into one value since v2 ②,
 /// where a fourth argument of the same type would have made `build` take three
 /// `Option<&str>`s in a row and let any two of them be swapped silently.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphLook<'a> {
+    /// Which names this seat is showing and which roads it walked (T2/T3).
+    ///
+    /// A borrow and not a copy because it holds a list of branch names, and a
+    /// `Vec` cloned once per frame per graph is a list of `String`s allocated
+    /// sixty times a second to answer a question that does not change.
+    pub filter: &'a GraphFilter,
+    /// What is typed in the search field and what git said about it (T4).
+    pub search: GraphSearchLook<'a>,
     /// The one row turned over (R15's accordion), or
     /// [`GRAPH_UNCOMMITTED_HASH`] for the working tree's (V5).
     pub expanded: Option<&'a str>,
@@ -1243,6 +1673,22 @@ pub struct GraphLook<'a> {
     pub compare: Option<&'a str>,
     /// The row wearing the selected ground (V8).
     pub selected: Option<usize>,
+}
+
+/// A seat that has been filtered by nobody and searched for nothing.
+///
+/// By hand, because [`Self::filter`] is a borrow and a derive has nothing to
+/// borrow from — see [`GRAPH_FILTER_EVERYTHING`], which is what it points at.
+impl Default for GraphLook<'_> {
+    fn default() -> Self {
+        Self {
+            filter: &GRAPH_FILTER_EVERYTHING,
+            search: GraphSearchLook::default(),
+            expanded: None,
+            compare: None,
+            selected: None,
+        }
+    }
 }
 
 /// Turn what a graph document knows into what it draws.
@@ -1265,7 +1711,18 @@ pub fn build(
         expanded,
         compare,
         selected,
+        ..
     } = look;
+    // **Anything at all in flight makes the head quiet** (T5). Written as "is
+    // any of the three still coming" rather than as a flag the refresh button
+    // sets, because the same three questions are re-asked by a checkout, by a
+    // filter change and by the first frame of a graph — and a reader watching a
+    // head that only went quiet when *they* pressed refresh would be being told
+    // the other three had already finished.
+    let busy = state.cache.rereading()
+        || matches!(state.cache.log(), crate::git::GitSlot::Pending)
+        || matches!(state.cache.refs(), crate::git::GitSlot::Pending)
+        || matches!(state.cache.status(), crate::git::GitSlot::Pending);
     let mut content = GraphContent {
         scroll_px,
         selected,
@@ -1292,8 +1749,12 @@ pub fn build(
         }
     };
 
-    // The head is the panel's own sentence about the same repository (R20).
-    content.head = Some(crate::git_panel::head_of(cache, scale, measure));
+    // The head is the panel's own sentence about the same repository (R20),
+    // standing in the toolbar's own strip since v2 ③ (T1).
+    let mut head = crate::git_panel::head_of(cache, scale, measure);
+    head.muted = busy;
+    content.head = Some(head);
+    content.toolbar = Some(toolbar_of(state, look, busy, scale, measure));
 
     if log.commits.is_empty() {
         content.empty = Some(crate::git_panel::GIT_NO_COMMITS.to_owned());
@@ -1548,20 +2009,47 @@ pub fn build(
                     } else {
                         String::new()
                     },
-                    refs: commit
-                        .refs
-                        .iter()
-                        .map(|reference| GraphRefPill {
-                            text_width: measure(&reference.name, ref_font),
-                            name: reference.name.clone(),
-                            head: reference.head,
-                            lane: dot,
-                        })
-                        .collect(),
+                    // **The filter decides which pills are drawn, not which
+                    // roads were walked** (T2/T3): a commit reached through
+                    // `main` may still carry `origin/main` and `v1.0`, and a
+                    // reader who has turned those two off is saying "do not
+                    // show me those names", not "pretend that commit is
+                    // elsewhere". The pills are filtered here and the walk is
+                    // filtered in the question; the two are different knobs on
+                    // purpose.
+                    refs: {
+                        let mut pills: Vec<GraphRefPill> = commit
+                            .refs
+                            .iter()
+                            .filter(|reference| look.filter.draws(reference.kind))
+                            .map(|reference| GraphRefPill {
+                                text_width: measure(&reference.name, ref_font),
+                                name: reference.name.clone(),
+                                head: reference.head,
+                                kind: reference.kind,
+                                lane: dot,
+                            })
+                            .collect();
+                        // **The drawing order is insisted on here** and not only
+                        // offered by the parse (T7). `parse_decoration` already
+                        // sorts, and this is the same sort a second time on
+                        // purpose: the order a row wears its names in is a fact
+                        // about the *picture*, so the picture is where it has to
+                        // be true — a second source of decorated commits (a
+                        // fixture, a future question) must not be able to draw a
+                        // tag in front of the branch you are standing on. It is
+                        // a stable sort over at most a handful of names.
+                        pills.sort_by_key(|pill| (pill.kind, !pill.head));
+                        pills
+                    },
                     hash: commit.hash.clone(),
                     short: commit.short.clone(),
                     subject: commit.subject.clone(),
                     time: commit.time_relative.clone(),
+                    matched: look
+                        .search
+                        .matches
+                        .is_some_and(|hits| hits.contains(&commit.hash)),
                     lanes: lane_row,
                     expanded: expanded == Some(commit.hash.as_str()),
                 }));
@@ -1598,6 +2086,118 @@ pub fn build(
         }
     }
     content
+}
+
+/// The toolbar's words, measured (T1).
+///
+/// Beside `build` rather than inside it because it is a whole band of the page
+/// and `build` is already the longest function in this module — and because what
+/// the strip says is a fact about the *seat* (its repository, its filter, its
+/// search) rather than about the window of rows `build` is otherwise deciding.
+fn toolbar_of(
+    state: &GraphState,
+    look: GraphLook<'_>,
+    busy: bool,
+    scale: f32,
+    measure: &mut Measure<'_>,
+) -> GraphToolbar {
+    let repo_font = GRAPH_REPO_FONT_LOGICAL_PX * scale;
+    let tool_font = GRAPH_TOOL_FONT_LOGICAL_PX * scale;
+    // The repository's own folder name. The *root's* last component and not the
+    // column's: a graph opened on `crates/bt-app` is a graph of the repository
+    // above it, and naming the folder somebody happened to be standing in would
+    // be the head disagreeing with every row under it.
+    let repo = state
+        .cache
+        .root()
+        .and_then(std::path::Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let filter = look.filter.label();
+    let typed = look.search.text;
+    // The composition opens a space at the caret: what is drawn is the text with
+    // the pre-edit spliced in where the next character would go.
+    let shown = format!(
+        "{}{}{}",
+        look.search.before_caret,
+        look.search.preedit,
+        &typed[look.search.before_caret.len().min(typed.len())..]
+    );
+    let search = if shown.is_empty() {
+        GRAPH_SEARCH_PLACEHOLDER.to_owned()
+    } else {
+        shown.clone()
+    };
+    let count = search_count(look.search);
+    GraphToolbar {
+        repo_width: measure(&repo, repo_font),
+        repo,
+        filter_width: measure(&filter, tool_font),
+        filter,
+        search_width: measure(&search, tool_font),
+        search,
+        search_typed: !shown.is_empty(),
+        // The `\u{d7}` clears what has been *committed*: a composition is not
+        // yet text, and offering to clear it would be offering to delete
+        // something the IME has not handed over.
+        search_clearable: !typed.is_empty(),
+        search_count_width: measure(&count, tool_font),
+        search_count: count,
+        search_focused: look.search.focused,
+        // The caret stands after the text the reader has typed up to the caret
+        // **and after whatever is being composed there**, which is the one
+        // measurement the field cannot make for itself: only the thing holding
+        // the font can say how wide a prefix is.
+        caret_x: measure(
+            &format!("{}{}", look.search.before_caret, look.search.preedit),
+            tool_font,
+        ),
+        busy,
+    }
+}
+
+/// Which match `Enter` (or `Shift+Enter`) steps to (T4).
+///
+/// **A ring**, which is what a search field's Enter does everywhere: stepping
+/// off the end means "start again" and not "stop". The first press lands on the
+/// first match going forwards and on the last going back, which is the
+/// convention every menu walk in this window already keeps.
+///
+/// Here rather than in the window for [`graph_key`]'s reason: what `Enter` does
+/// at the end of a list is a property of the list, and it has to be assertable
+/// without a keyboard.
+#[must_use]
+pub fn search_step(at: Option<usize>, matches: usize, forwards: bool) -> Option<usize> {
+    if matches == 0 {
+        return None;
+    }
+    Some(match (at, forwards) {
+        (Some(at), true) => (at + 1) % matches,
+        (Some(at), false) => (at + matches - 1) % matches,
+        (None, true) => 0,
+        (None, false) => matches - 1,
+    })
+}
+
+/// `3 of 17`, `no matches`, or nothing (T4).
+///
+/// Nothing before a search has been run, which is not the same as `0 of 0`: a
+/// field nobody has pressed Enter in has not failed to match anything.
+#[must_use]
+fn search_count(search: GraphSearchLook<'_>) -> String {
+    let Some(matches) = search.matches else {
+        return String::new();
+    };
+    if matches.is_empty() {
+        return GRAPH_SEARCH_NONE.to_owned();
+    }
+    let total = matches.len();
+    match search.at {
+        Some(at) => format!("{}{GRAPH_SEARCH_OF}{total}", at + 1),
+        // Matches found but not stepped into yet: the total on its own, because
+        // `0 of 17` would name a match that is not there.
+        None => total.to_string(),
+    }
 }
 
 /// What the one open row unfolded into, before it is turned into rows.
@@ -2431,6 +3031,8 @@ fn step_over_detail(content: &GraphContent, row: usize, downwards: bool) -> usiz
 /// What the pointer is on.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphHover {
+    /// Which of the toolbar's controls the pointer is on (T1).
+    pub tool: Option<GraphTool>,
     pub row: Option<usize>,
     /// Which part of the detail block the pointer is on, when it is on one —
     /// what lights a hover verb's pill (R12's top rung).
@@ -2460,10 +3062,21 @@ pub fn push_graph(
 ) {
     let (quads, labels, sprites) = out;
     let geometry = graph_geometry(body, content, scale);
-    let _ = quads;
 
-    if let (Some(rect), Some(head)) = (geometry.head, content.head.as_ref()) {
-        crate::git_panel::push_git_masthead(head, rect, scale, palette, (labels, sprites), &|r| r);
+    if let (Some(rect), Some(head), Some(toolbar)) = (
+        geometry.head,
+        content.head.as_ref(),
+        content.toolbar.as_ref(),
+    ) {
+        push_toolbar(
+            rect,
+            head,
+            toolbar,
+            hover.tool,
+            scale,
+            palette,
+            (quads, labels, sprites),
+        );
     }
 
     if let Some(sentence) = content.empty.as_ref() {
@@ -2533,6 +3146,7 @@ pub fn push_graph(
         let ground = RowGround {
             selected,
             hovered,
+            matched: matches!(row, GraphViewRow::Commit(commit) if commit.matched),
             scale,
         };
         match row {
@@ -2602,6 +3216,8 @@ pub fn push_graph(
 struct RowGround {
     selected: bool,
     hovered: bool,
+    /// The search matched this row (T4).
+    matched: bool,
     scale: f32,
 }
 
@@ -2629,15 +3245,263 @@ impl RowGround {
     }
 
     /// What the row itself is filled with, for the badges to composite over.
+    ///
+    /// **The match is the bottom rung** (T4): a matched row that is also selected
+    /// wears the selection, because the selection is where the keyboard is and a
+    /// search can light seventeen rows at once. A matched row under the pointer
+    /// wears the hover for the same reason one rung up — the pointer is a second
+    /// "you are here", and a ground that ignored it would make the search feel
+    /// like it had taken the page over.
     fn fill(self, palette: &ChromePalette) -> Option<[u8; 3]> {
         if self.selected {
             Some(palette.git_row_selected)
         } else if self.hovered {
             Some(palette.files_row_hover)
+        } else if self.matched {
+            Some(palette.git_row_match)
         } else {
             None
         }
     }
+}
+
+/// The toolbar (T1): the repository, the branch, and the three tools.
+///
+/// **The strip has no ground of its own.** It stands on the seat's body exactly
+/// as the masthead it replaced did, and a fill under it would cut the document's
+/// own head off from the rows it is about. What separates it from the list is
+/// the header strip under it and the fact that the only filled things on it are
+/// the tools themselves.
+#[allow(clippy::too_many_arguments)]
+fn push_toolbar(
+    rect: [f32; 4],
+    head: &GraphHead,
+    toolbar: &GraphToolbar,
+    hover: Option<GraphTool>,
+    scale: f32,
+    palette: &ChromePalette,
+    out: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let (quads, labels, sprites) = out;
+    let rects = graph_toolbar_rects(rect, toolbar, scale);
+    let gap = (GRAPH_REPO_GAP_LOGICAL_PX * scale).round();
+    let radius = (GRAPH_TOOL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let pad = (GRAPH_TOOL_PADDING_X_LOGICAL_PX * scale).round();
+    let mark = (GRAPH_TOOL_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let tool_gap = (GRAPH_TOOL_GAP_LOGICAL_PX * scale).round();
+    let font = GRAPH_TOOL_FONT_LOGICAL_PX * scale;
+    let clip = |box_: [f32; 4]| -> [f32; 4] {
+        [
+            box_[0].max(rect[0]),
+            box_[1].max(rect[1]),
+            box_[2].min(rect[2]),
+            box_[3].min(rect[3]),
+        ]
+    };
+
+    // ── the head: the repository, then the branch ──
+    //
+    // The repository's name leads because it is the *outer* fact: which
+    // repository, then where in it you are standing. It is drawn a step quieter
+    // than the branch beside it for the same reason, so the pair reads as one
+    // sentence rather than as two titles competing.
+    let repo_rect = [
+        rects.head[0],
+        rects.head[1],
+        (rects.head[0] + toolbar.repo_width).min(rects.head[2]),
+        rects.head[3],
+    ];
+    if !toolbar.repo.is_empty() {
+        labels.push(ChromeLabel {
+            text: toolbar.repo.clone(),
+            rect: repo_rect,
+            font_size_px: GRAPH_REPO_FONT_LOGICAL_PX * scale,
+            color: palette.git_head_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Medium,
+            tabular_numerals: false,
+            clip: Some(clip(repo_rect)),
+        });
+    }
+    let branch_left = if toolbar.repo.is_empty() {
+        rects.head[0]
+    } else {
+        repo_rect[2] + gap
+    };
+    let branch_rect = [
+        branch_left,
+        rects.head[1],
+        rects.head[2].max(branch_left),
+        rects.head[3],
+    ];
+    crate::git_panel::push_git_masthead(
+        head,
+        branch_rect,
+        scale,
+        palette,
+        (labels, sprites),
+        &clip,
+    );
+
+    // ── the tools ──
+    // `.pv-tool`'s own ladder, one surface along: a tool at rest carries its
+    // edge and nothing else, and the pointer fills it. A tool that is *on* — the
+    // search field with the keyboard in it — is filled whether or not anything is
+    // pointing at it, because that is a state and not a hover.
+    let edge_px = (GRAPH_REF_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let tool_ground =
+        |sprites: &mut Vec<ChromeSprite>, box_: [f32; 4], tool: GraphTool, lit: bool| {
+            if hover == Some(tool) || lit {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill { radius_px: radius },
+                    clip(box_),
+                    palette.git_act_pill,
+                ));
+            }
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPillRing {
+                    radius_px: radius,
+                    stroke_px: edge_px,
+                },
+                clip(box_),
+                if lit {
+                    palette.accent
+                } else {
+                    palette.git_pill_border
+                },
+            ));
+        };
+
+    tool_ground(sprites, rects.filter, GraphTool::Filter, false);
+    let chevron_left = rects.filter[2] - pad - mark;
+    if !rects.filter_short {
+        let label_rect = [
+            rects.filter[0] + pad,
+            rects.filter[1],
+            (chevron_left - tool_gap).max(rects.filter[0] + pad),
+            rects.filter[3],
+        ];
+        labels.push(ChromeLabel {
+            text: toolbar.filter.clone(),
+            rect: label_rect,
+            font_size_px: font,
+            color: palette.git_head_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(clip(label_rect)),
+        });
+    }
+    let middle = |size: f32| ((rects.filter[1] + rects.filter[3] - size) / 2.0).round();
+    sprites.push(ChromeSprite::new(
+        ChromeMark::chevron(0.0),
+        clip([
+            chevron_left,
+            middle(mark),
+            chevron_left + mark,
+            middle(mark) + mark,
+        ]),
+        palette.git_head_muted,
+    ));
+
+    if let Some(field) = rects.search {
+        tool_ground(sprites, field, GraphTool::Search, toolbar.search_focused);
+        let text_left = field[0] + pad;
+        // The count holds the trailing end, and the `×` holds the end after
+        // that: the text's room is what is left, so a long query is cut by the
+        // field rather than running under the number that describes it.
+        let mut right = rects
+            .search_clear
+            .map_or(field[2] - pad, |x| x[0] - tool_gap);
+        if !toolbar.search_count.is_empty() {
+            let count_rect = [
+                (right - toolbar.search_count_width).max(text_left),
+                field[1],
+                right,
+                field[3],
+            ];
+            labels.push(ChromeLabel {
+                text: toolbar.search_count.clone(),
+                rect: count_rect,
+                font_size_px: font,
+                color: palette.git_head_muted,
+                align_right: true,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: true,
+                clip: Some(clip(count_rect)),
+            });
+            right = count_rect[0] - tool_gap;
+        }
+        let text_rect = [text_left, field[1], right.max(text_left), field[3]];
+        labels.push(ChromeLabel {
+            text: toolbar.search.clone(),
+            rect: text_rect,
+            font_size_px: font,
+            // The placeholder is the field saying what it is for; typed text is
+            // the reader's, and the two must not be the same ink or an empty
+            // field would read as a query nobody can delete.
+            color: if toolbar.search_typed {
+                palette.git_head_text
+            } else {
+                palette.git_head_muted
+            },
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(clip(text_rect)),
+        });
+        if toolbar.search_focused {
+            let caret = (GRAPH_SEARCH_CARET_LOGICAL_PX * scale).round().max(1.0);
+            let inset = (GRAPH_SEARCH_CARET_INSET_LOGICAL_PX * scale).round();
+            let x = (text_left + toolbar.caret_x).min(text_rect[2] - caret);
+            quads.push(ChromeQuad {
+                rect: clip([x, field[1] + inset, x + caret, field[3] - inset]),
+                color: palette.accent,
+            });
+        }
+        if let Some(cross) = rects.search_clear {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::TabClose,
+                clip(cross),
+                if hover == Some(GraphTool::SearchClear) {
+                    palette.git_act_glyph_on_pill
+                } else {
+                    palette.git_act_glyph
+                },
+            ));
+        }
+    }
+
+    tool_ground(sprites, rects.refresh, GraphTool::Refresh, false);
+    let refresh_mark = (GRAPH_REFRESH_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let refresh_middle = |size: f32| ((rects.refresh[1] + rects.refresh[3] - size) / 2.0).round();
+    let refresh_left = ((rects.refresh[0] + rects.refresh[2] - refresh_mark) / 2.0).round();
+    sprites.push(ChromeSprite::new(
+        ChromeMark::Refresh,
+        clip([
+            refresh_left,
+            refresh_middle(refresh_mark),
+            refresh_left + refresh_mark,
+            refresh_middle(refresh_mark) + refresh_mark,
+        ]),
+        if hover == Some(GraphTool::Refresh) {
+            palette.git_act_glyph_on_pill
+        } else {
+            palette.git_act_glyph
+        },
+    ));
 }
 
 /// The column header (V2): five words in `.glabel` grammar, each over its own
@@ -3243,25 +4107,49 @@ fn push_commit_row(
     let pill_radius = (GRAPH_REF_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let pill_edge = (GRAPH_REF_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32;
     let pill_top = ((rect[1] + rect[3] - pill_height) / 2.0).round();
+    let tag_mark = (GRAPH_REF_TAG_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let tag_gap = (GRAPH_REF_TAG_GAP_LOGICAL_PX * scale).round();
     let mut cursor = column_right + gap;
     for pill in &commit.refs {
-        let width = pill.text_width + pill_pad * 2.0;
+        // A tag spends its own glyph's width before its name (T7).
+        let tagged = pill.kind == crate::git::GitRefKind::Tag;
+        let lead = if tagged { tag_mark + tag_gap } else { 0.0 };
+        let width = pill.text_width + lead + pill_pad * 2.0;
         if cursor + width > rects.description_right {
             break;
         }
         let box_ = [cursor, pill_top, cursor + width, pill_top + pill_height];
         let lane = palette.graph_lanes[lane_colour_index(pill.lane)];
-        // `background: color-mix(--lane 10%)` — a solid so quiet it is a tint.
-        sprites.push(
-            ChromeSprite::new(
-                ChromeMark::ControlPill {
-                    radius_px: pill_radius,
-                },
-                crop(box_),
-                lane,
-            )
-            .with_opacity(alpha(GRAPH_REF_GROUND_ALPHA)),
-        );
+        // ── the three shapes (T7, v2 ③) ──
+        //
+        // **A local is filled, a remote is hollow, a tag carries a tag.** The
+        // three are told apart by *shape* and never by colour, because the colour
+        // is already the lane's and means "which road this commit is on" — two
+        // facts in one channel is one fact lost.
+        //
+        // **The remote's edge is not dashed, and that is a deviation this note
+        // owns.** The design language for "somewhere else's copy" is a dashed
+        // outline, and this rasterizer draws marks from geometry through one
+        // stroke: a dashed pill would need a dash pattern on `control_pill_path`,
+        // which is a new parameter on a cached mark for one caller. What is drawn
+        // instead is the *hollow* half of the idea — the ground is left off
+        // entirely and the edge stays at `GRAPH_REF_EDGE_ALPHA` — which carries
+        // the same claim (this is not a name in your repository) with the tools
+        // already here. Recorded in `docs/DESIGN.md` §7.1.3g so that the day
+        // somebody wants the dashes, they find out this was a choice.
+        if pill.kind != crate::git::GitRefKind::Remote {
+            // `background: color-mix(--lane 10%)` — a solid so quiet it is a tint.
+            sprites.push(
+                ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: pill_radius,
+                    },
+                    crop(box_),
+                    lane,
+                )
+                .with_opacity(alpha(GRAPH_REF_GROUND_ALPHA)),
+            );
+        }
         // **`HEAD` wears the accent ring** (R22): every other name is a place in
         // this repository, and this one is where you are standing. The ring is
         // the accent's and not the lane's, because "you are here" is not a fact
@@ -3281,9 +4169,28 @@ fn push_commit_row(
                 alpha(GRAPH_REF_EDGE_ALPHA)
             }),
         );
+        let text_box = if tagged {
+            let mark_left = box_[0] + pill_pad;
+            let mark_top = ((box_[1] + box_[3] - tag_mark) / 2.0).round();
+            sprites.push(ChromeSprite::new(
+                ChromeMark::Tag,
+                crop([
+                    mark_left,
+                    mark_top,
+                    mark_left + tag_mark,
+                    mark_top + tag_mark,
+                ]),
+                lane,
+            ));
+            // Centred in what is left after the glyph, so the name sits in its
+            // own half of the pill rather than in the whole of it.
+            [mark_left + tag_mark + tag_gap, box_[1], box_[2], box_[3]]
+        } else {
+            box_
+        };
         labels.push(ChromeLabel {
             text: pill.name.clone(),
-            rect: box_,
+            rect: text_box,
             font_size_px: GRAPH_REF_FONT_LOGICAL_PX * scale,
             color: lane,
             align_right: false,
@@ -3590,6 +4497,7 @@ mod tests {
                 expanded,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
         )
@@ -3668,6 +4576,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
             0.0,
@@ -3701,6 +4610,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
             5_000.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
@@ -3728,6 +4638,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
             0.0,
@@ -3742,6 +4653,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
             190.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
@@ -3758,6 +4670,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
             190.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
@@ -3783,6 +4696,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
             0.0,
@@ -3798,6 +4712,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             body,
             100.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
@@ -4003,6 +4918,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             WIDE,
             20.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
@@ -4275,6 +5191,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: Some(4),
+                ..GraphLook::default()
             },
             WIDE,
             0.0,
@@ -4291,6 +5208,7 @@ mod tests {
                 expanded: Some("c2"),
                 compare: None,
                 selected: Some(9),
+                ..GraphLook::default()
             },
             WIDE,
             0.0,
@@ -4411,6 +5329,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: Some(last),
+                ..GraphLook::default()
             },
             WIDE,
             scroll,
@@ -4499,6 +5418,7 @@ mod tests {
                 expanded: Some("c0"),
                 compare: None,
                 selected: None,
+                ..GraphLook::default()
             },
             [0.0, 0.0, 300.0, 600.0],
         );
@@ -4869,6 +5789,7 @@ mod tests {
                 expanded: Some("c2"),
                 compare: Some("c6"),
                 selected: None,
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -4895,6 +5816,7 @@ mod tests {
                 expanded: Some("c6"),
                 compare: Some("c2"),
                 selected: None,
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -4909,6 +5831,7 @@ mod tests {
                 expanded: Some("c2"),
                 compare: Some(GRAPH_UNCOMMITTED_HASH),
                 selected: None,
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -4935,6 +5858,7 @@ mod tests {
                 expanded: Some("c2"),
                 compare: Some("c2"),
                 selected: None,
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -4971,6 +5895,7 @@ mod tests {
                 expanded: Some("c2"),
                 compare: Some("c6"),
                 selected: None,
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -5009,6 +5934,7 @@ mod tests {
                 expanded: Some("c2"),
                 compare: Some("c6"),
                 selected: Some(6),
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -5024,6 +5950,7 @@ mod tests {
                 expanded: Some("c2"),
                 compare: None,
                 selected: Some(2),
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -5042,6 +5969,7 @@ mod tests {
                 expanded: None,
                 compare: None,
                 selected: Some(2),
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -5068,6 +5996,7 @@ mod tests {
                 expanded: Some("c0"),
                 compare: None,
                 selected: Some(0),
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -5086,6 +6015,7 @@ mod tests {
                 expanded: Some("c0"),
                 compare: None,
                 selected: Some(start + rows),
+                ..GraphLook::default()
             },
             WIDE,
         );
@@ -5118,5 +6048,529 @@ mod tests {
             Some(GraphItem::File { commit: 2, file: 1 })
         );
         assert_eq!(item_at(8, None, Some(open)), Some(GraphItem::Commit(3)));
+    }
+
+    // ── v2 ③: the toolbar, the pills, the filter and the search ────────────
+
+    /// A commit wearing exactly these names.
+    fn decorated(hash: &str, refs: &[(crate::git::GitRefKind, &str, bool)]) -> GitCommit {
+        let mut commit = commit(hash, &[]);
+        commit.refs = refs
+            .iter()
+            .map(|(kind, name, head)| crate::git::GitRef {
+                name: (*name).to_owned(),
+                head: *head,
+                kind: *kind,
+            })
+            .collect();
+        commit
+    }
+
+    fn pills_of(content: &GraphContent) -> Vec<(crate::git::GitRefKind, String)> {
+        content
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                GraphViewRow::Commit(commit) => Some(commit.refs.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|pill| (pill.kind, pill.name))
+            .collect()
+    }
+
+    /// T7 — a row wears all three kinds of name, in one order, each saying which
+    /// kind it is.
+    #[test]
+    fn a_rows_pills_run_head_then_locals_then_remotes_then_tags() {
+        use crate::git::GitRefKind::{Local, Remote, Tag};
+        let state = state_of(
+            vec![decorated(
+                "aaa",
+                &[
+                    (Tag, "v1.0", false),
+                    (Remote, "origin/main", false),
+                    (Local, "main", true),
+                    (Local, "side", false),
+                ],
+            )],
+            false,
+        );
+        assert_eq!(
+            pills_of(&frame(&state, None, WIDE)),
+            vec![
+                (Local, "main".to_owned()),
+                (Local, "side".to_owned()),
+                (Remote, "origin/main".to_owned()),
+                (Tag, "v1.0".to_owned()),
+            ],
+        );
+        // And `main` + `origin/main` on one commit are **two pills**, honestly:
+        // they are two different claims about the same commit, and every tool in
+        // this space draws both.
+        assert_eq!(
+            pills_of(&frame(&state, None, WIDE))
+                .iter()
+                .filter(|(_, name)| name.ends_with("main"))
+                .count(),
+            2
+        );
+    }
+
+    /// T3 — the two checkboxes decide which pills are drawn, whatever was walked.
+    #[test]
+    fn hiding_remotes_and_tags_takes_their_pills_off_the_rows() {
+        use crate::git::GitRefKind::{Local, Remote, Tag};
+        let state = state_of(
+            vec![decorated(
+                "aaa",
+                &[
+                    (Local, "main", true),
+                    (Remote, "origin/main", false),
+                    (Tag, "v1.0", false),
+                ],
+            )],
+            false,
+        );
+        let filter = GraphFilter {
+            branches: Vec::new(),
+            remotes: false,
+            tags: false,
+        };
+        let content = looked(
+            &state,
+            GraphLook {
+                filter: &filter,
+                ..GraphLook::default()
+            },
+            WIDE,
+        );
+        assert_eq!(
+            pills_of(&content),
+            vec![(Local, "main".to_owned())],
+            "a local is a name in this repository and is never one of the two hidden kinds"
+        );
+    }
+
+    /// T3 — what each setting of the filter asks `git log` to walk.
+    ///
+    /// The whole semantics in one table, because it is the one part of this
+    /// slice that is a *claim about git's command line* rather than about
+    /// pixels: `--all` is every ref there is, and anything narrower has to be
+    /// spelled out — with `HEAD` on the end, or a detached head walks a history
+    /// the reader is not standing in.
+    #[test]
+    fn the_filter_says_which_revisions_the_log_walks() {
+        let mut filter = GraphFilter::default();
+        assert!(filter.all_branches());
+        assert_eq!(filter.log_refs(), vec!["--all".to_owned()]);
+        assert_eq!(filter.label(), GRAPH_FILTER_ALL);
+
+        filter.tags = false;
+        assert_eq!(
+            filter.log_refs(),
+            vec![
+                "--branches".to_owned(),
+                "--remotes".to_owned(),
+                "HEAD".to_owned()
+            ],
+            "hidden means not walked, so `--all` is spelled out without the tags"
+        );
+        filter.remotes = false;
+        assert_eq!(
+            filter.log_refs(),
+            vec!["--branches".to_owned(), "HEAD".to_owned()]
+        );
+        filter.tags = true;
+        assert_eq!(
+            filter.log_refs(),
+            vec![
+                "--branches".to_owned(),
+                "--tags".to_owned(),
+                "HEAD".to_owned()
+            ]
+        );
+
+        // Branches picked by hand are passed verbatim, and the two flags have
+        // nothing to add to a list of local names.
+        let mut filter = GraphFilter::default();
+        filter.toggle_branch("main");
+        assert_eq!(filter.label(), "1 branch", "and not `1 branches`");
+        filter.toggle_branch("side");
+        assert_eq!(filter.label(), "2 branches");
+        assert_eq!(
+            filter.log_refs(),
+            vec!["main".to_owned(), "side".to_owned()]
+        );
+        filter.remotes = false;
+        assert_eq!(
+            filter.log_refs(),
+            vec!["main".to_owned(), "side".to_owned()],
+            "hiding remotes narrows the pills, not a walk somebody named outright"
+        );
+
+        // Unticking the last one is how a reader says "all of them again".
+        filter.toggle_branch("main");
+        filter.toggle_branch("side");
+        assert!(filter.all_branches());
+        assert_eq!(filter.label(), GRAPH_FILTER_ALL);
+    }
+
+    /// T1 — the toolbar is a fixed strip above the column header, and the rows'
+    /// own arithmetic is untouched by it.
+    #[test]
+    fn the_toolbar_is_a_fixed_strip_above_the_column_header() {
+        let state = state_of(straight(50), false);
+        let content = frame(&state, None, WIDE);
+        let geometry = graph_geometry(WIDE, &content, 1.0);
+        let strip = geometry.head.expect("a graph with a repository has a head");
+        let header = geometry.header.expect("and a header under it");
+        assert!(strip[3] <= header[1], "the toolbar stands above the header");
+        assert!(header[3] <= geometry.viewport[1], "and both above the rows");
+        // Not a row: no index reaches it.
+        assert_eq!(
+            geometry.row_at(strip[0] + 1.0, strip[1] + 1.0, content.total_rows),
+            None
+        );
+        // And it does not move when the list is scrolled — the whole of "fixed".
+        let mut measure = |text: &str, _: f32| text.chars().count() as f32 * 6.0;
+        let scrolled = build(
+            &state,
+            GraphLook::default(),
+            WIDE,
+            20.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
+            LaneWidthHold::default(),
+            1.0,
+            &mut measure,
+        );
+        assert_eq!(graph_geometry(WIDE, &scrolled, 1.0).head, Some(strip));
+    }
+
+    /// T1 — the controls collapse from the right in one order: the search
+    /// first, then the filter's label, and the refresh never.
+    #[test]
+    fn a_narrowing_toolbar_sheds_the_search_then_the_filters_label() {
+        let state = state_of(straight(3), false);
+        let widths = |width: f32| {
+            let body = [0.0, 0.0, width, 600.0];
+            let content = frame(&state, None, body);
+            let strip = graph_geometry(body, &content, 1.0)
+                .head
+                .expect("a graph with a repository has a head");
+            let toolbar = content.toolbar.clone().expect("and a toolbar in it");
+            graph_toolbar_rects(strip, &toolbar, 1.0)
+        };
+        let wide = widths(900.0);
+        assert!(wide.search.is_some(), "a wide seat gets the field");
+        assert!(!wide.filter_short, "and the filter's own words");
+
+        let middling = widths(340.0);
+        assert!(
+            middling.search.is_none(),
+            "the search is the first thing to go"
+        );
+        assert!(!middling.filter_short, "the label outlives it");
+
+        let narrow = widths(200.0);
+        assert!(narrow.search.is_none());
+        assert!(
+            narrow.filter_short,
+            "then the label goes and the chevron stays"
+        );
+
+        // The refresh is pinned to the trailing edge at every one of them: a
+        // reader who cannot re-read the repository cannot find out that it moved.
+        for rects in [wide, middling, narrow] {
+            assert!(rects.refresh[2] > rects.refresh[0]);
+            assert!(
+                rects.filter[2] <= rects.refresh[0],
+                "the filter never runs under the refresh"
+            );
+            assert!(rects.head[2] <= rects.filter[0], "nor the head under it");
+        }
+    }
+
+    /// T1 — the head is one head: the repository's name and then the branch,
+    /// both inside the toolbar's strip and neither above it.
+    #[test]
+    fn the_repository_and_the_branch_share_one_strip() {
+        let state = state_with_status(straight(3), CLEAN);
+        let content = frame(&state, None, WIDE);
+        let toolbar = content.toolbar.clone().expect("a toolbar");
+        assert_eq!(toolbar.repo, "repo", "the root's own last component");
+        assert!(toolbar.repo_width > 0.0);
+        let head = content.head.clone().expect("a head");
+        assert_eq!(head.branch, "main");
+
+        let geometry = graph_geometry(WIDE, &content, 1.0);
+        let strip = geometry.head.expect("a strip");
+        let palette = bt_render::chrome_palette();
+        let (mut quads, mut labels, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
+        push_toolbar(
+            strip,
+            &head,
+            &toolbar,
+            None,
+            1.0,
+            &palette,
+            (&mut quads, &mut labels, &mut sprites),
+        );
+        let text: Vec<&str> = labels.iter().map(|label| label.text.as_str()).collect();
+        assert!(text.contains(&"repo"), "{text:?}");
+        assert!(text.contains(&"main"), "{text:?}");
+        assert!(
+            text.contains(&GRAPH_FILTER_ALL),
+            "the filter says what the graph is of: {text:?}"
+        );
+        assert!(
+            text.contains(&GRAPH_SEARCH_PLACEHOLDER),
+            "and the field says what it is for: {text:?}"
+        );
+        // Left to right: the repository, then the branch, then the tools.
+        let at = |wanted: &str| {
+            labels
+                .iter()
+                .find(|label| label.text == wanted)
+                .map(|label| label.rect[0])
+                .expect("drawn")
+        };
+        assert!(at("repo") < at("main"));
+        assert!(at("main") < at(GRAPH_FILTER_ALL));
+    }
+
+    /// T5 — the branch goes quiet while a question is in flight and comes back
+    /// when it lands.
+    #[test]
+    fn the_head_is_muted_while_the_repository_is_being_read() {
+        let mut state = state_with_status(straight(3), CLEAN);
+        assert!(
+            !frame(&state, None, WIDE).head.expect("a head").muted,
+            "a graph that has been told everything says so brightly"
+        );
+        state.cache.mark_pending(&crate::git::GitQuestion::Refs {
+            root: std::path::PathBuf::from(r"D:\repo"),
+        });
+        assert!(
+            frame(&state, None, WIDE).head.expect("a head").muted,
+            "and goes quiet the moment anything is being re-read"
+        );
+    }
+
+    /// T4 — the field counts the matches, lights the rows git named, and says
+    /// nothing at all before anything has been asked.
+    #[test]
+    fn the_search_counts_its_matches_and_lights_the_rows_it_found() {
+        let state = state_of(straight(6), false);
+        let hashes: Vec<String> = state
+            .cache
+            .log()
+            .ready()
+            .expect("a log")
+            .commits
+            .iter()
+            .map(|commit| commit.hash.clone())
+            .collect();
+        let matches = vec![hashes[1].clone(), hashes[4].clone(), hashes[5].clone()];
+
+        let quiet = looked(&state, GraphLook::default(), WIDE);
+        assert_eq!(
+            quiet.toolbar.expect("a toolbar").search_count,
+            "",
+            "a field nobody has pressed Enter in has not failed to match anything"
+        );
+
+        let searched = |at: Option<usize>, hits: &[String]| {
+            looked(
+                &state,
+                GraphLook {
+                    search: GraphSearchLook {
+                        text: "fix",
+                        before_caret: "fix",
+                        preedit: "",
+                        focused: true,
+                        matches: Some(hits),
+                        at,
+                    },
+                    ..GraphLook::default()
+                },
+                WIDE,
+            )
+        };
+
+        let content = searched(Some(0), &matches);
+        assert_eq!(
+            content.toolbar.clone().expect("a toolbar").search_count,
+            "1 of 3"
+        );
+        let lit: Vec<String> = content
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                GraphViewRow::Commit(commit) if commit.matched => Some(commit.hash.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lit, matches, "exactly the rows git named");
+
+        assert_eq!(
+            searched(Some(2), &matches)
+                .toolbar
+                .expect("a toolbar")
+                .search_count,
+            "3 of 3"
+        );
+        // Found but not stepped into: the total on its own, because `0 of 3`
+        // would name a match that is not there.
+        assert_eq!(
+            searched(None, &matches)
+                .toolbar
+                .expect("a toolbar")
+                .search_count,
+            "3"
+        );
+        // A query git answered with nothing says so, rather than `0 of 0`.
+        assert_eq!(
+            searched(None, &[]).toolbar.expect("a toolbar").search_count,
+            GRAPH_SEARCH_NONE
+        );
+    }
+
+    /// T4 — a composition **opens a space in the line** at the caret, and the
+    /// caret stands after it.
+    ///
+    /// The one thing a field that painted the pre-edit *over* the text would get
+    /// wrong: the letters after the caret would stay where they were and the
+    /// composition would share cells with them. It is also why the `×` does not
+    /// appear for a composition alone — a clear button for something the IME has
+    /// not handed over would be offering to delete nothing.
+    #[test]
+    fn a_composition_opens_a_space_at_the_caret_and_the_caret_stands_after_it() {
+        let state = state_of(straight(3), false);
+        let composing = looked(
+            &state,
+            GraphLook {
+                search: GraphSearchLook {
+                    text: "fx",
+                    before_caret: "f",
+                    preedit: "ni",
+                    focused: true,
+                    matches: None,
+                    at: None,
+                },
+                ..GraphLook::default()
+            },
+            WIDE,
+        );
+        let toolbar = composing.toolbar.expect("a toolbar");
+        assert_eq!(toolbar.search, "fnix", "the space opens where the caret is");
+        assert!(toolbar.search_typed);
+        // Six pixels a character, which is the measurer these tests use: the
+        // caret stands after `f` and the two letters being composed.
+        assert_eq!(toolbar.caret_x, 18.0);
+
+        let bare = looked(
+            &state,
+            GraphLook {
+                search: GraphSearchLook {
+                    text: "",
+                    before_caret: "",
+                    preedit: "ni",
+                    focused: true,
+                    matches: None,
+                    at: None,
+                },
+                ..GraphLook::default()
+            },
+            WIDE,
+        );
+        let toolbar = bare.toolbar.expect("a toolbar");
+        assert_eq!(
+            toolbar.search, "ni",
+            "and it is drawn even with nothing typed"
+        );
+        assert!(
+            !toolbar.search_clearable,
+            "but there is nothing committed to clear yet"
+        );
+    }
+
+    /// T4 — `Enter` walks the matches forwards, `Shift+Enter` backwards, and
+    /// both wrap; a search that matched nothing has nowhere to step to.
+    #[test]
+    fn enter_walks_the_matches_and_shift_enter_walks_them_back() {
+        // The first press: the first match going forwards, the last going back.
+        assert_eq!(search_step(None, 3, true), Some(0));
+        assert_eq!(search_step(None, 3, false), Some(2));
+        assert_eq!(search_step(Some(0), 3, true), Some(1));
+        assert_eq!(search_step(Some(1), 3, true), Some(2));
+        assert_eq!(
+            search_step(Some(2), 3, true),
+            Some(0),
+            "off the end is start again, not stop"
+        );
+        assert_eq!(search_step(Some(0), 3, false), Some(2));
+        assert_eq!(search_step(Some(1), 3, false), Some(0));
+        // One match is its own ring.
+        assert_eq!(search_step(Some(0), 1, true), Some(0));
+        assert_eq!(search_step(Some(0), 1, false), Some(0));
+        // And nothing to walk is nowhere to go.
+        assert_eq!(search_step(None, 0, true), None);
+        assert_eq!(search_step(Some(0), 0, false), None);
+    }
+
+    /// T4 — a match beyond the loaded pages is reached by the parent-seek (D2),
+    /// which is the machinery that already knows how to page towards a hash.
+    #[test]
+    fn a_match_beyond_the_loaded_pages_is_sought_rather_than_given_up_on() {
+        let state = state_of(straight(50), true);
+        // A hash git named that this page does not contain: the search asked
+        // `--all` and the graph has read fifty commits of a longer history.
+        let seek = GraphSeek {
+            hash: "no-such-commit-on-this-page".to_owned(),
+            pages: 0,
+        };
+        assert_eq!(
+            graph_seek_step(&state, &seek),
+            GraphSeekStep::NeedPage,
+            "a match off the page asks for the page it is on"
+        );
+        // And one that *is* loaded is arrived at outright.
+        let loaded = state.cache.log().ready().expect("a log").commits[7]
+            .hash
+            .clone();
+        assert_eq!(
+            graph_seek_step(
+                &state,
+                &GraphSeek {
+                    hash: loaded,
+                    pages: 0
+                }
+            ),
+            GraphSeekStep::Arrived(7)
+        );
+    }
+
+    /// T4 — a matched row is quieter than a selected one, and the selection wins
+    /// where they meet.
+    #[test]
+    fn a_matched_row_gives_way_to_the_selection_standing_on_it() {
+        let palette = bt_render::chrome_palette();
+        let ground = |selected: bool, matched: bool| {
+            RowGround {
+                selected,
+                hovered: false,
+                matched,
+                scale: 1.0,
+            }
+            .fill(&palette)
+        };
+        assert_eq!(ground(false, false), None, "an ordinary row has no ground");
+        assert_eq!(ground(false, true), Some(palette.git_row_match));
+        assert_eq!(
+            ground(true, true),
+            Some(palette.git_row_selected),
+            "the selection is where the keyboard is, and a search can light many rows"
+        );
     }
 }

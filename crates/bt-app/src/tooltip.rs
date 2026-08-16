@@ -115,6 +115,12 @@ pub enum TooltipAnchorId {
     /// row says which file, the button says what pressing it does — and for the
     /// `×` that difference is *restore* versus *delete*.
     GitAct(bt_layout::SeatId, usize, crate::git_panel::GitAct),
+    /// One of the commit graph toolbar's controls (T1, v2 (3)).
+    ///
+    /// Three of the four are marks with no words beside them, which is exactly
+    /// the case a tip exists for: a chevron, a cross and a circular arrow are
+    /// idioms, and an idiom is a guess until something says what it does.
+    GitGraphTool(bt_layout::SeatId, crate::git_graph::GraphTool),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.

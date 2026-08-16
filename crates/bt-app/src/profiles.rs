@@ -1685,7 +1685,7 @@ pub fn build(
         push_row(
             &Row {
                 rect: *item,
-                mark: profile.mark,
+                mark: Some(profile.mark),
                 name: title(index),
                 // `margin-left: auto` puts the hint hard against the row's
                 // trailing padding, and it names a fact about the profile rather
@@ -1725,7 +1725,7 @@ pub fn build(
             // names a kind of pane, and every profile mark in the list above it
             // names a shell. Borrowing one here would say the tree belongs to
             // whichever shell lent its glyph.
-            mark: ChromeMark::Folder,
+            mark: Some(ChromeMark::Folder),
             name: FILES_PANE_TEXT,
             hint: Some(hint(FILES_PANE_HINT_TEXT.to_owned())),
             hint_ink: None,
@@ -1757,7 +1757,7 @@ pub fn build(
         push_row(
             &Row {
                 rect: *row,
-                mark: recent_mark(&entry.seed),
+                mark: Some(recent_mark(&entry.seed)),
                 name: recent_label(&entry.seed),
                 // Still the age, and deliberately not `not installed`: a Recent
                 // row's one annotation answers "when", the grey already answers
@@ -1820,7 +1820,16 @@ fn section_label(text: &str, band: [f32; 4], scale: f32, palette: ChromePalette)
 
 struct Row<'a> {
     rect: [f32; 4],
-    mark: ChromeMark,
+    /// The glyph in the row's icon column, or **nothing at all**.
+    ///
+    /// `None` since the graph's branch filter (T2, v2 (3)): an unticked checkbox
+    /// is an empty box and this window draws an empty box as empty space — a
+    /// hollow square would be a second container idiom beside the ring the radio
+    /// rows already use, and at a menu row's fourteen pixels a square and a
+    /// circle differing only in their corners is a distinction nobody reads. The
+    /// column is still *reserved*, so the names of ticked and unticked rows line
+    /// up; what changes is whether anything stands in it.
+    mark: Option<ChromeMark>,
     name: &'a str,
     /// The `.default-hint` slot and **its measured width**: `default` on the
     /// default profile, `3m ago` on a recent row, `not installed` on one this
@@ -1868,16 +1877,18 @@ fn push_row(
     let mark = px(ITEM_MARK_LOGICAL_PX).round();
     let mark_left = ((column_left + column_right - mark) / 2.0).round();
     let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
-    let mut sprite = ChromeSprite::new(
-        row.mark,
-        [mark_left, mark_top, mark_left + mark, mark_top + mark],
-        palette.accent,
-    );
-    if !row.available {
-        sprite.opacity = UNAVAILABLE_MARK_OPACITY;
-        sprite.grayscale = true;
+    if let Some(glyph) = row.mark {
+        let mut sprite = ChromeSprite::new(
+            glyph,
+            [mark_left, mark_top, mark_left + mark, mark_top + mark],
+            palette.accent,
+        );
+        if !row.available {
+            sprite.opacity = UNAVAILABLE_MARK_OPACITY;
+            sprite.grayscale = true;
+        }
+        sprites.push(sprite);
     }
-    sprites.push(sprite);
     // What the hint has already claimed, out of the row's trailing padding: its
     // own measured width, and the `gap: 10px` between two flex items. A row with
     // nothing to add gives the name the whole span, which is what every row did
@@ -2353,11 +2364,11 @@ pub fn root_menu_build(
                 // that is the tick's whole job done by the mark it already has:
                 // one glyph saying "you are here" beats a second column of
                 // empty space on every other row.
-                mark: if choice.path == current {
+                mark: Some(if choice.path == current {
                     ChromeMark::FolderOpen
                 } else {
                     ChromeMark::Folder
-                },
+                }),
                 name: &cwd_leaf_or_path(&choice.path),
                 hint: Some((note, width)),
                 hint_ink: None,
@@ -2385,7 +2396,7 @@ pub fn root_menu_build(
             // the only row here that earns it by meaning rather than by state: the
             // rows above wear an open folder to say "you are already here", and
             // this one wears it to say "go and look".
-            mark: ChromeMark::FolderOpen,
+            mark: Some(ChromeMark::FolderOpen),
             name: BROWSE_TEXT,
             // No note. Every row above answers "why is this offered?"; this one is
             // offered because nothing else was, and a hint saying so would be the
@@ -2632,7 +2643,7 @@ pub fn file_menu_build(
         push_row(
             &Row {
                 rect,
-                mark: row.mark(),
+                mark: Some(row.mark()),
                 name: match row {
                     FileMenuRow::Open => open_text,
                     FileMenuRow::CopyPath => COPY_PATH_TEXT,
@@ -2890,7 +2901,7 @@ pub fn pane_menu_build(layout: &PaneMenuLayout, hover: Option<PaneMenuRow>) -> V
         push_row(
             &Row {
                 rect,
-                mark: row.mark(),
+                mark: Some(row.mark()),
                 name: row.text(),
                 hint: None,
                 hint_ink: None,
@@ -2914,6 +2925,303 @@ pub fn pane_menu_build(layout: &PaneMenuLayout, hover: Option<PaneMenuRow>) -> V
                 alpha: separator_alpha(palette.menu_border),
             });
         }
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
+// ── the commit graph's branch filter (T2/T3, v2 ③) ──────────────────────────
+//
+// The fifth popup in this module and the first one with *state on its rows*: a
+// radio, a list of checkboxes and two more checkboxes under a divider. It is
+// `#file-menu`'s skin and `push_row`'s rows for the reason every menu here gives
+// — a popup that looked like its neighbours but was drawn by different code
+// would be a second popup wearing the first one's clothes — and the only thing
+// it adds to the family is that a row's mark now says whether the row is *on*.
+//
+// **Cloned rather than generalised, and the ruling is the one `#pane-menu` made
+// first.** The four menus above this one differ in exactly what a menu differs
+// in: how many rows, which words, which marks, where the divider falls. A
+// generic "menu of rows" that all five went through would have to take all four
+// of those as parameters, which is the same code with the layout inverted and
+// one more indirection between a row and the rectangle it is drawn in. What is
+// actually shared is what should be — `push_row`, `push_float_window`, the
+// spacing constants — and that is shared here too.
+
+/// One row of the branch filter.
+///
+/// A `Vec`-shaped menu and not a closed one, unlike its four neighbours: how
+/// many rows it has is how many branches the repository has, which is the one
+/// thing a menu in this window has never varied by before. The two ends are
+/// fixed and the middle is the repository's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitFilterRow {
+    /// The radio at the top: walk everything.
+    All,
+    /// One local branch, by name, with a tick when it is picked.
+    Branch(String),
+    /// Whether remote-tracking names are drawn and walked.
+    Remotes,
+    /// Whether tags are.
+    Tags,
+}
+
+/// The two words under the divider.
+pub const GIT_FILTER_REMOTES_TEXT: &str = "Show remote branches";
+pub const GIT_FILTER_TAGS_TEXT: &str = "Show tags";
+
+/// Every rectangle the filter menu draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitFilterMenuLayout {
+    scale: f32,
+    frame: [f32; 4],
+    /// One rectangle per row of [`Self::rows`], in the same order.
+    items: Vec<[f32; 4]>,
+    rows: Vec<GitFilterRow>,
+    /// The rule between the branches and the two flags.
+    separator: [f32; 4],
+}
+
+impl GitFilterMenuLayout {
+    /// The rows this menu is showing, in the order they are drawn.
+    ///
+    /// Read by the tests that pin the layout; the window walks the rows through
+    /// [`git_filter_menu_hit`] and never needs the list itself.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn rows(&self) -> &[GitFilterRow] {
+        &self.rows
+    }
+
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn frame(&self) -> [f32; 4] {
+        self.frame
+    }
+}
+
+/// The rows a repository's branches make, top to bottom.
+#[must_use]
+pub fn git_filter_rows(branches: &[String]) -> Vec<GitFilterRow> {
+    let mut rows = vec![GitFilterRow::All];
+    rows.extend(branches.iter().cloned().map(GitFilterRow::Branch));
+    rows.push(GitFilterRow::Remotes);
+    rows.push(GitFilterRow::Tags);
+    rows
+}
+
+/// The menu hung under the filter button.
+///
+/// **Anchored to the button and not to the pointer**, unlike `#file-menu`: it is
+/// opened by pressing a control, so it hangs from that control's own bottom-left
+/// exactly as the profile picker hangs from its chevron. The caller re-finds the
+/// button's rectangle every frame for E59/E60's reason — a re-layout can move it,
+/// and a menu pinned to where it *was* is a menu floating over nothing.
+#[must_use]
+pub fn git_filter_menu_layout(
+    anchor: [f32; 4],
+    surface: (f32, f32),
+    scale: f32,
+    rows: Vec<GitFilterRow>,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> GitFilterMenuLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let padding = px(MENU_PADDING_LOGICAL_PX);
+    let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    let separator_block = 2.0 * separator_margin + separator_thickness;
+
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    let content = rows
+        .iter()
+        .map(|row| {
+            px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                + px(ITEM_GAP_LOGICAL_PX)
+                + measure(git_filter_text(row), px(ITEM_FONT_LOGICAL_PX))
+        })
+        .fold(0.0_f32, f32::max);
+    let width = (chrome + content)
+        .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
+        .round();
+    #[allow(clippy::cast_precision_loss)]
+    let height =
+        (2.0 * (border + padding) + rows.len() as f32 * item_height + separator_block).round();
+
+    // Both axes clamped, on `#file-menu`'s reasoning: the button this hangs from
+    // is on a preview seat's own toolbar, which can be anywhere in the window —
+    // including the bottom of a short pane, where an unclamped drop would put
+    // every branch under the window's edge.
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    let left = anchor[0]
+        .min(surface_width - width - edge)
+        .max(edge)
+        .round();
+    let top = anchor[3]
+        .min(surface_height - height - edge)
+        .max(edge)
+        .round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+    let mut items = Vec::with_capacity(rows.len());
+    let mut separator = [content_left, cursor, content_right, cursor];
+    for row in &rows {
+        // The divider stands above the first of the two flags, which is where
+        // the menu stops being about *which history* and starts being about
+        // *which names*.
+        if *row == GitFilterRow::Remotes {
+            separator = [
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ];
+            cursor += separator_block;
+        }
+        items.push([content_left, cursor, content_right, cursor + item_height]);
+        cursor += item_height;
+    }
+    GitFilterMenuLayout {
+        scale,
+        frame,
+        items,
+        rows,
+        separator,
+    }
+}
+
+/// What a point is over, with the same three answers the other menus give:
+/// a row, the frame but no row, or nothing at all.
+#[must_use]
+pub fn git_filter_menu_hit(
+    layout: &GitFilterMenuLayout,
+    x: f64,
+    y: f64,
+) -> Option<Option<GitFilterRow>> {
+    let (x, y) = (x as f32, y as f32);
+    for (row, rect) in layout.rows.iter().zip(&layout.items) {
+        if contains(*rect, x, y) {
+            return Some(Some(row.clone()));
+        }
+    }
+    contains(layout.frame, x, y).then_some(None)
+}
+
+/// What each row says.
+#[must_use]
+pub fn git_filter_text(row: &GitFilterRow) -> &str {
+    match row {
+        GitFilterRow::All => crate::git_graph::GRAPH_FILTER_ALL,
+        GitFilterRow::Branch(name) => name,
+        GitFilterRow::Remotes => GIT_FILTER_REMOTES_TEXT,
+        GitFilterRow::Tags => GIT_FILTER_TAGS_TEXT,
+    }
+}
+
+/// Whether a row is currently on, given the filter it is about.
+#[must_use]
+pub fn git_filter_row_on(row: &GitFilterRow, filter: &crate::git_graph::GraphFilter) -> bool {
+    match row {
+        GitFilterRow::All => filter.all_branches(),
+        GitFilterRow::Branch(name) => filter.branches.iter().any(|held| held == name),
+        GitFilterRow::Remotes => filter.remotes,
+        GitFilterRow::Tags => filter.tags,
+    }
+}
+
+/// The mark a row wears for its state.
+///
+/// **A radio is a dot and a checkbox is a tick**, which is the distinction the
+/// Git page's own branch list already draws (G35): a filled circle is a *state*
+/// — this is the one — and it is only ever used where exactly one of the rows
+/// can be it. The branch rows and the two flags are checkboxes, several of which
+/// can be on at once, so they get the tick this window already uses for "done"
+/// and nothing at all when they are off.
+#[must_use]
+fn git_filter_mark(row: &GitFilterRow, on: bool) -> Option<ChromeMark> {
+    match (row, on) {
+        (GitFilterRow::All, true) => Some(ChromeMark::ControlPill {
+            radius_px: GIT_FILTER_RADIO_RADIUS_PX,
+        }),
+        (GitFilterRow::All, false) => Some(ChromeMark::ControlPillRing {
+            radius_px: GIT_FILTER_RADIO_RADIUS_PX,
+            stroke_px: 1,
+        }),
+        (_, true) => Some(ChromeMark::Check),
+        (_, false) => None,
+    }
+}
+
+/// The radio's own round, in the raster's own pixels — half of a mark slot, so
+/// the pill it asks for is a circle rather than a lozenge.
+const GIT_FILTER_RADIO_RADIUS_PX: u32 = 8;
+
+/// The filter menu as one overlay layer.
+#[must_use]
+pub fn git_filter_menu_build(
+    layout: &GitFilterMenuLayout,
+    filter: &crate::git_graph::GraphFilter,
+    hover: Option<&GitFilterRow>,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    quads.push(OverlayQuad {
+        rect: layout.separator,
+        color: palette.menu_border,
+        alpha: separator_alpha(palette.menu_border),
+    });
+
+    for (row, rect) in layout.rows.iter().zip(&layout.items) {
+        let on = git_filter_row_on(row, filter);
+        push_row(
+            &Row {
+                rect: *rect,
+                mark: git_filter_mark(row, on),
+                name: git_filter_text(row),
+                hint: None,
+                hint_ink: None,
+                hovered: hover == Some(row),
+                // Every row here is a setting, and a setting can always be set.
+                // There is no machine on which one of these is a promise that
+                // cannot be kept: what the *repository* answers to a filter is
+                // git's business, and an empty graph is an honest answer.
+                available: true,
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
     }
     vec![OverlayLayer {
         quads,
@@ -3124,7 +3432,7 @@ pub fn preview_menu_build(
         push_row(
             &Row {
                 rect: *rect,
-                mark: ChromeMark::File,
+                mark: Some(ChromeMark::File),
                 name: &item.name,
                 // Reserved on every row and inked on the dirty ones. Drawn as an
                 // empty string rather than omitted so the name's box ends in the
@@ -5975,6 +6283,114 @@ mod tests {
                 "and every row it drew is on screen: {item:?}"
             );
         }
+    }
+
+    // ── the commit graph's branch filter (T2/T3, v2 ③) ─────────────────────
+
+    /// T2 — the menu is a radio, the repository's own branches, a divider and two
+    /// checkboxes, in that order; and a press on each of them is answered as that
+    /// row.
+    #[test]
+    fn the_filter_menu_lists_the_branches_between_its_two_fixed_ends() {
+        let branches = vec!["main".to_owned(), "side".to_owned()];
+        let rows = git_filter_rows(&branches);
+        assert_eq!(
+            rows,
+            vec![
+                GitFilterRow::All,
+                GitFilterRow::Branch("main".to_owned()),
+                GitFilterRow::Branch("side".to_owned()),
+                GitFilterRow::Remotes,
+                GitFilterRow::Tags,
+            ],
+        );
+        assert_eq!(git_filter_text(&GitFilterRow::All), "All branches");
+        assert_eq!(
+            git_filter_text(&GitFilterRow::Remotes),
+            GIT_FILTER_REMOTES_TEXT
+        );
+
+        let anchor = [300.0, 40.0, 420.0, 62.0];
+        let layout =
+            git_filter_menu_layout(anchor, (960.0, 600.0), 1.0, rows.clone(), &mut fake_measure);
+        assert_eq!(layout.rows(), rows.as_slice());
+        // It hangs from the button's own bottom edge, not from a pointer.
+        assert_eq!(layout.frame()[1], anchor[3]);
+        for (row, rect) in layout.rows().iter().zip(&layout.items) {
+            let (x, y) = (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            );
+            assert_eq!(git_filter_menu_hit(&layout, x, y), Some(Some(row.clone())));
+        }
+        assert_eq!(
+            git_filter_menu_hit(
+                &layout,
+                f64::from(layout.frame()[0] + 2.0),
+                f64::from(layout.frame()[1] + 1.0)
+            ),
+            Some(None),
+            "the border and padding swallow rather than fall through"
+        );
+        assert_eq!(
+            git_filter_menu_hit(
+                &layout,
+                f64::from(layout.frame()[0]) - 1.0,
+                f64::from(layout.frame()[1]) - 1.0
+            ),
+            None
+        );
+        // The divider stands between the branches and the two flags — where the
+        // menu stops being about *which history* and starts being about *which
+        // names*.
+        let last_branch = layout.items[rows.len() - 3];
+        let first_flag = layout.items[rows.len() - 2];
+        assert!(layout.separator[1] >= last_branch[3]);
+        assert!(layout.separator[3] <= first_flag[1]);
+    }
+
+    /// T2 — a row's mark says whether it is on, and the radio and the checkboxes
+    /// say it with two different idioms.
+    #[test]
+    fn the_filter_menus_marks_say_which_rows_are_on() {
+        let mut filter = crate::git_graph::GraphFilter::default();
+        assert!(git_filter_row_on(&GitFilterRow::All, &filter));
+        assert!(git_filter_row_on(&GitFilterRow::Remotes, &filter));
+        assert!(git_filter_row_on(&GitFilterRow::Tags, &filter));
+        assert!(!git_filter_row_on(
+            &GitFilterRow::Branch("main".to_owned()),
+            &filter
+        ));
+
+        // A filled dot for the radio when it is on, a ring when it is not: the
+        // Git page's own G35 idiom, where a filled mark is a state and an
+        // outlined one is an offer.
+        assert!(matches!(
+            git_filter_mark(&GitFilterRow::All, true),
+            Some(ChromeMark::ControlPill { .. })
+        ));
+        assert!(matches!(
+            git_filter_mark(&GitFilterRow::All, false),
+            Some(ChromeMark::ControlPillRing { .. })
+        ));
+        // A tick for a checkbox that is on, and **nothing at all** for one that
+        // is off — an empty box drawn as empty space.
+        assert_eq!(
+            git_filter_mark(&GitFilterRow::Tags, true),
+            Some(ChromeMark::Check)
+        );
+        assert_eq!(git_filter_mark(&GitFilterRow::Tags, false), None);
+
+        filter.toggle_branch("main");
+        assert!(!git_filter_row_on(&GitFilterRow::All, &filter));
+        assert!(git_filter_row_on(
+            &GitFilterRow::Branch("main".to_owned()),
+            &filter
+        ));
+        assert_eq!(
+            git_filter_mark(&GitFilterRow::Branch("main".to_owned()), true),
+            Some(ChromeMark::Check)
+        );
     }
 
     /// PIN — a press on each of the three rows is answered as that row, the
