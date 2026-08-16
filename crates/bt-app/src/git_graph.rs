@@ -366,6 +366,11 @@ pub const GRAPH_HEADER_HEIGHT_LOGICAL_PX: f32 = crate::git_panel::GIT_LABEL_LINE
 
 /// The header's five words, in `.glabel` grammar (V2).
 pub const GRAPH_HEADING_GRAPH: &str = "GRAPH";
+/// The narrowest graph column that gets the word GRAPH over it — five tracked
+/// capitals at 9.5 px are about forty pixels, and a column of three lanes is
+/// the first that clears it. Below this the column has no heading (see
+/// `push_column_header`).
+pub const GRAPH_HEADING_GRAPH_MIN_LOGICAL_PX: f32 = 44.0;
 pub const GRAPH_HEADING_DESCRIPTION: &str = "DESCRIPTION";
 pub const GRAPH_HEADING_AUTHOR: &str = "AUTHOR";
 pub const GRAPH_HEADING_DATE: &str = "DATE";
@@ -1568,7 +1573,14 @@ pub fn push_graph(
     }
 
     if let Some(rect) = geometry.header {
-        push_column_header(rect, content.columns, scale, palette, labels);
+        push_column_header(
+            rect,
+            content.columns,
+            content.lane_width,
+            scale,
+            palette,
+            labels,
+        );
     }
 
     let viewport = geometry.viewport;
@@ -1697,12 +1709,20 @@ impl RowGround {
 fn push_column_header(
     rect: [f32; 4],
     columns: GraphColumns,
+    lane_width: usize,
     scale: f32,
     palette: &ChromePalette,
     labels: &mut Vec<ChromeLabel>,
 ) {
     let rects = graph_column_rects(rect, columns, scale);
     let pad = (GRAPH_ROW_PADDING_X_LOGICAL_PX * scale).round();
+    let gap = (GRAPH_ROW_GAP_LOGICAL_PX * scale).round();
+    // The graph column's right edge, by the rows' own arithmetic (`push_lanes`):
+    // the lanes on screen, at least one, each a lane wide.
+    #[allow(clippy::cast_precision_loss)]
+    let column_right = rect[0]
+        + pad
+        + (GRAPH_LANE_WIDTH_LOGICAL_PX * scale).round().max(1.0) * lane_width.max(1) as f32;
     let bottom_pad = (crate::git_panel::GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX * scale).round();
     let line = (crate::git_panel::GIT_LABEL_LINE_LOGICAL_PX * scale).round();
     // The words sit on the *bottom* of the strip, as every `.glabel` does: the
@@ -1731,11 +1751,18 @@ fn push_column_header(
             clip: Some(box_),
         });
     };
-    word(
-        GRAPH_HEADING_GRAPH,
-        [rect[0] + pad, rect[1], rect[2], rect[3]],
-        false,
-    );
+    // **Only when the column can hold the word** (real machine, 2026-08-16): a
+    // one-lane graph is sixteen pixels wide and GRAPH is not, and drawn anyway
+    // it ran into DESCRIPTION and the two read as one smeared word. A heading
+    // is a word over a column, so a column too narrow for the word gets no
+    // heading — the lanes say "graph" well enough on their own.
+    if column_right - (rect[0] + pad) >= (GRAPH_HEADING_GRAPH_MIN_LOGICAL_PX * scale).round() {
+        word(
+            GRAPH_HEADING_GRAPH,
+            [rect[0] + pad, rect[1], column_right, rect[3]],
+            false,
+        );
+    }
     if let Some(box_) = rects.author {
         word(GRAPH_HEADING_AUTHOR, box_, true);
     }
@@ -1747,19 +1774,18 @@ fn push_column_header(
     }
     // Last, because where the description *starts* is the one column edge that
     // is not fixed: it begins after the graph column, which is as wide as the
-    // lanes on screen need it to be.
-    //
-    // Drawn from the graph column's own left edge rather than from the
-    // description's, because the lane count moves with the scroll (R18) and a
-    // heading that slid sideways with it would be a heading the eye had to
-    // find again. It is clipped to the room left before the author column, so
-    // the two words can never overlap.
+    // lanes on screen need it to be — and the heading starts exactly where
+    // every row's own text starts (`column_right + gap` in `push_commit_row`),
+    // so it stands over its column the way the other four do. The lane count
+    // is already held steady across a scroll by R18's hysteresis, and when it
+    // does change the rows' text moves with it; a heading that stayed put would
+    // then be the one thing on the page not over what it names.
     word(
         GRAPH_HEADING_DESCRIPTION,
         [
-            rect[0] + pad + (GRAPH_LANE_WIDTH_LOGICAL_PX * scale).round(),
+            column_right + gap,
             rect[1],
-            rects.description_right,
+            rects.description_right.max(column_right + gap),
             rect[3],
         ],
         false,
@@ -2791,6 +2817,52 @@ mod tests {
             let (head, row) = (head.expect("wide"), row.expect("wide"));
             assert_eq!((head[0], head[2]), (row[0], row[2]));
         }
+
+        // The words themselves (real machine, 2026-08-16): a one-lane graph is
+        // too narrow for the word GRAPH, which then ran into DESCRIPTION; now
+        // the narrow column has no heading and DESCRIPTION starts where a
+        // row's own text starts — one lane and a gap in.
+        let palette = bt_render::chrome_palette();
+        let mut labels = Vec::new();
+        push_column_header(header, content.columns, 1, 1.0, &palette, &mut labels);
+        let words: Vec<&str> = labels.iter().map(|label| label.text.as_str()).collect();
+        assert!(
+            !words.contains(&GRAPH_HEADING_GRAPH),
+            "a one-lane column has no room for its heading: {words:?}"
+        );
+        let description = labels
+            .iter()
+            .find(|label| label.text == GRAPH_HEADING_DESCRIPTION)
+            .expect("the description is always headed");
+        assert_eq!(
+            description.rect[0],
+            header[0]
+                + GRAPH_ROW_PADDING_X_LOGICAL_PX
+                + GRAPH_LANE_WIDTH_LOGICAL_PX
+                + GRAPH_ROW_GAP_LOGICAL_PX,
+            "over the rows' own text start"
+        );
+        // Three lanes hold the word, and the description heading moves out
+        // with the column it follows.
+        let mut labels = Vec::new();
+        push_column_header(header, content.columns, 3, 1.0, &palette, &mut labels);
+        let graph = labels
+            .iter()
+            .find(|label| label.text == GRAPH_HEADING_GRAPH)
+            .expect("three lanes are wide enough for the word");
+        assert_eq!(
+            graph.rect[2],
+            header[0] + GRAPH_ROW_PADDING_X_LOGICAL_PX + 3.0 * GRAPH_LANE_WIDTH_LOGICAL_PX,
+            "and it is clipped to its own column"
+        );
+        let description = labels
+            .iter()
+            .find(|label| label.text == GRAPH_HEADING_DESCRIPTION)
+            .expect("headed");
+        assert_eq!(
+            description.rect[0],
+            graph.rect[2] + GRAPH_ROW_GAP_LOGICAL_PX
+        );
     }
 
     /// V2 — a hidden column takes its heading with it.
