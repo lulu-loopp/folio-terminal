@@ -82,6 +82,13 @@ syntect = { version = "5.3", default-features = false, features = [
     "default-syntaxes",
     "regex-fancy",
 ] }
+# The grammars Sublime's default dump does not carry — TOML, TypeScript, TSX,
+# Dockerfile and a hundred more (user ruling 2026-08-16: bundle them; a Rust
+# project opens `Cargo.toml` every day). `two-face` is bat's curated syntax set
+# behind syntect, and it was **already in this tree** through typst, on the same
+# `syntect-fancy` backend, so naming it here costs no new package. Its
+# `default-features = false` is the same refusal of onig as syntect's own line.
+two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 typst-as-lib = { version = "=0.16.0", features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
 typst-layout = "=0.15.0"
 typst-library = "=0.15.0"

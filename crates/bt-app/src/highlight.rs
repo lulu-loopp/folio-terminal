@@ -371,15 +371,20 @@ fn token_of(stack: &ScopeStack) -> HighlightToken {
     HighlightToken::Body
 }
 
-/// Sublime's default grammars, loaded once.
+/// The grammars, loaded once: Sublime's defaults **plus bat's extras** — TOML,
+/// TypeScript and TSX among them (user ruling 2026-08-16, after the first cut
+/// left `Cargo.toml` plain).
 ///
-/// `load_defaults_newlines` rather than `nonewlines` because the walk feeds each
+/// `extra_newlines` rather than the no-newlines set because the walk feeds each
 /// line with its break: the newline variants are the ones whose `$` anchors and
-/// whose line-ending contexts behave, and the nonewlines set exists for the case
-/// where you genuinely cannot supply one.
+/// whose line-ending contexts behave, and the no-newlines set exists for the
+/// case where you genuinely cannot supply one. The extras come from `two-face`,
+/// which was already in the tree behind typst on the same regex backend; its
+/// grammars carry their own licences (`two_face::acknowledgement`), which the
+/// about page owes a line the day it exists.
 fn syntaxes() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
-    SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
+    SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
 /// Whether a syntax is the "no syntax" one. Plain Text is what syntect answers
@@ -399,13 +404,9 @@ fn is_plain_text(syntax: &SyntaxReference) -> bool {
 /// document that begins `<?xml`.
 ///
 /// `None` means plain, which is this window's behaviour before #49 and the
-/// honest answer for a language whose grammar is not in the box. **TOML and
-/// TypeScript are the two that will be missed**: Sublime's default set carries
-/// neither, so `Cargo.toml` and a `.ts` file preview plain. Bundling extra
-/// grammars is a separate decision — a `.sublime-syntax` in `assets/` and a
-/// dump built at start-up — and deliberately not made in this slice, because a
-/// vendored grammar is a vendored dependency with its own licence and its own
-/// update story.
+/// honest answer for a language whose grammar is not in the box. The box is
+/// Sublime's defaults plus bat's extras (see [`syntaxes`]) — TOML and TypeScript
+/// were the two the defaults missed, and the user ruled them in on 2026-08-16.
 pub fn syntax_for_file(name: &str, first_line: Option<&str>) -> Option<&'static SyntaxReference> {
     let syntaxes = syntaxes();
     let by_name = syntaxes
@@ -540,9 +541,21 @@ mod tests {
         assert!(syntax_for_file("notes", None).is_none());
         // `.txt` resolves to Plain Text, which is the same thing as no grammar.
         assert!(syntax_for_file("notes.txt", None).is_none());
-        // TOML is the one this slice knowingly leaves plain — Sublime's default
-        // grammars do not carry it. See `syntax_for_file`.
-        assert!(syntax_for_file("Cargo.toml", None).is_none());
+        // TOML and TypeScript are not in Sublime's default dump; the first cut
+        // left them plain and the user ruled them in (2026-08-16) — bat's
+        // extras carry both.
+        assert_eq!(
+            syntax_for_file("Cargo.toml", None).map(|s| s.name.as_str()),
+            Some("TOML")
+        );
+        assert_eq!(
+            syntax_for_file("app.ts", None).map(|s| s.name.as_str()),
+            Some("TypeScript")
+        );
+        assert_eq!(
+            syntax_for_file("App.tsx", None).map(|s| s.name.as_str()),
+            Some("TypeScriptReact")
+        );
     }
 
     /// A fence is read by its info string, and by nothing else.
@@ -567,9 +580,12 @@ mod tests {
             syntax_for_fence(Some("javascript")).map(|s| s.name.as_str()),
             Some("JavaScript")
         );
-        // TypeScript is not in Sublime's default set, so ```ts is plain — the
-        // same honest silence `Cargo.toml` gets. See `syntax_for_file`.
-        assert!(syntax_for_fence(Some("ts")).is_none());
+        // TypeScript is not in Sublime's default set; bat's extras carry it
+        // (user ruling 2026-08-16), so ```ts reads as what it says.
+        assert_eq!(
+            syntax_for_fence(Some("ts")).map(|s| s.name.as_str()),
+            Some("TypeScript")
+        );
         assert!(syntax_for_fence(None).is_none());
         assert!(syntax_for_fence(Some("")).is_none());
         assert!(syntax_for_fence(Some("wibble")).is_none());

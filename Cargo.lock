@@ -267,6 +267,7 @@ dependencies = [
  "pollster",
  "serde_json",
  "syntect",
+ "two-face",
  "winit",
 ]
 
