@@ -452,8 +452,21 @@ pub enum GitBadgeInk {
 /// it (R32) show the same file's state and would otherwise be two readings of one
 /// porcelain line: the index's letter first, then the working tree's. A space is
 /// an absence and draws nothing.
+///
+/// **`??` is one badge and not two.** Porcelain spells untracked with both
+/// columns, but the columns are not two claims there — an untracked file has no
+/// index side and no working-tree side to disagree, it has one state — and a
+/// row that drew `? ?` would be reading git's notation as if it were git's
+/// meaning. The Untracked heading already says the word; the badge only has to
+/// say it once. (`!!` is the same shape and is asked for by nothing.)
 #[must_use]
 pub fn badges_of(entry: &GitStatusEntry) -> Vec<GitBadge> {
+    if matches!(entry.staged, Some(StatusCode::Untracked)) {
+        return vec![GitBadge {
+            letter: StatusCode::Untracked.letter(),
+            ink: GitBadgeInk::Untracked,
+        }];
+    }
     [entry.staged, entry.unstaged]
         .into_iter()
         .flatten()
@@ -3229,7 +3242,7 @@ mod tests {
     /// real machine before this test existed.
     #[test]
     fn the_load_more_row_answers_over_its_whole_body() {
-        let cache = answered(b"## main ", vec![commit("aaaaaaa", "newest", 1)], true);
+        let cache = answered(b"## main\0", vec![commit("aaaaaaa", "newest", 1)], true);
         let content = rows_of(&cache);
         let index = content
             .rows
@@ -4052,10 +4065,10 @@ mod tests {
         assert_eq!(letters("/src/main.rs"), "M");
         assert_eq!(letters("/src/new.rs"), "A");
         assert_eq!(letters("/docs/gone.md"), "D");
-        // `??` occupies both of porcelain's columns, so it wears both — the same
-        // two letters the Git page draws for it. One would be this module
-        // deciding that git's own record is too wide for a tree.
-        assert_eq!(letters("/junk.tmp"), "??");
+        // `??` occupies both of porcelain's columns but is one state, so it
+        // wears one letter — the same one the Git page draws for it. Two would
+        // be reading git's notation as if it were two claims.
+        assert_eq!(letters("/junk.tmp"), "?");
         assert_eq!(letters("/both.rs"), "MM", "index first, then working tree");
         assert_eq!(
             badges.letters("/src/new.rs")[0].ink,
