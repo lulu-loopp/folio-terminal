@@ -803,11 +803,49 @@
   /* match the close button: hidden until the pane is hovered, so an idle split
      header stays quiet and the two controls reveal together (not one-always,
      one-on-hover) */
-  .panehead .pane-files { margin-left: auto; opacity: 0; transition: opacity .12s ease; }
+  .panehead .pane-files { opacity: 0; transition: opacity .12s ease; }
   .panehead .pane-files + .pane-close { margin-left: 0; }
   .pane:hover .panehead .pane-files { opacity: .7; }
   .pane:hover .panehead .pane-files:hover { opacity: 1; }
   @media (prefers-reduced-motion: reduce) { .panehead .pane-files { transition: none; } }
+
+  /* 2026-08-15 (user ruling) — THE DIVIDER JOINS THE RUN. A pane head reads
+     `⊞ 🗀 ×` from here on, and the `margin-left: auto` that used to sit on the
+     folder moves to whichever control is first, because the run is what floats
+     right, not any one member of it.
+
+     Why it exists at all. Splitting has had three chords since the fleet did —
+     Ctrl+Shift+D, Alt+Shift+- and Alt+Shift+= — and a hand on the mouse could
+     reach none of them. The only pointer route was: open a new tab, drag its
+     body across the window, drop it on an edge. Three gestures for one verb,
+     and the only obvious one of the three makes a tab you did not want. A verb
+     with a keyboard door and no mouse door is a verb half the users never find.
+
+     What it does. Cuts along the pane's LONGER side — wide panes side by side,
+     tall ones stacked, ties to side by side. The same "auto" Windows Terminal's
+     `duplicatePane` takes, and the same measurement the duplicate chord already
+     made. That is why the glyph is the 田 and not one vertical rule: the button
+     does not commit to an axis, so its picture must not either. The two axes
+     are named outright one layer down, in the head's own context menu.
+
+     Why not a fourth control on the files head. A column has no profile to
+     duplicate and no shell to put in the new half, and a preview has neither.
+     Terminal heads only; the slot is simply not cut on the others.
+
+     No gap at the joint, exactly like `.pane-files + .pane-close` above. These
+     are one run of triggers that reveal together, and a gap inside a run whose
+     other joint has none reads as two runs standing near each other. */
+  .panehead .pane-split {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 19px; height: 19px; border-radius: 5px; cursor: pointer; color: var(--ink3);
+    opacity: 0; transition: opacity .12s ease;
+  }
+  .panehead .pane-split svg { width: 13px; height: 13px; }
+  .panehead .pane-split + .pane-files { margin-left: 0; }
+  .panehead > .pane-split, .panehead > .pane-files:first-of-type { margin-left: auto; }
+  .pane:hover .panehead .pane-split { opacity: .7; }
+  .pane:hover .panehead .pane-split:hover { opacity: 1; background: var(--hover); color: var(--accent); }
+  @media (prefers-reduced-motion: reduce) { .panehead .pane-split { transition: none; } }
   .files-tree { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 4px 8px; outline: none; font-size: 13px; }
 
   /* One row = one node. Indent is inline padding scaled by depth, so the whole
@@ -2287,6 +2325,26 @@
     </g>
   </symbol>
   <symbol id="i-panel" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M6.2 2.5v11" stroke="currentColor" stroke-width="1.1"/></symbol>
+  <!-- 2026-08-15 (user ruling) — the split family, struck for this product.
+
+       `#i-split` is the pane head's `⊞`: the same frame `#i-panel` uses, divided
+       on BOTH axes. Both, and both centred, because the button does not commit
+       to an axis — it takes the pane's longer side, which is vertical in a tall
+       pane and horizontal in a wide one. One rule would be a promise broken half
+       the time; the off-centre single rule is already `#i-panel` and means "a
+       pane with a sidebar", which is a statement about contents, not about
+       cutting. The dividers run wall to wall: a rule that stops short floats
+       inside a box, and a division reaches the walls.
+
+       `#i-split-right` and `#i-split-down` are the head menu's two rows, where
+       the axis IS committed to — so they draw the result rather than the cut:
+       the two panes the split leaves, side by side or stacked. Same rects, same
+       1.2-unit gutter, same stroke; only the axis differs, because that is the
+       only thing the reader is being asked to tell apart at a menu row's
+       fourteen pixels. -->
+  <symbol id="i-split" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M8 2.5v11M1.5 8h13" fill="none" stroke="currentColor" stroke-width="1.1"/></symbol>
+  <symbol id="i-split-right" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><rect x="8.6" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/></symbol>
+  <symbol id="i-split-down" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><rect x="1.5" y="8.6" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/></symbol>
   <!-- Files panel toggle: the panel bar with a folder on the sidebar side, so it
        is not mistaken for the tab-rail toggle beside it. -->
   <symbol id="i-files" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M6.2 2.5v11" stroke="currentColor" stroke-width="1.1"/><path d="M2.9 6.2h2.1M2.9 8.2h2.1M2.9 10.2h1.3" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></symbol>
@@ -2363,6 +2421,10 @@
   <div class="term-menu" id="term-menu"></div>
   <div id="pv-float" class="float-win pinned"></div>
   <div class="term-menu" id="file-menu"></div>
+  <!-- 2026-08-15 (user ruling) — the pane head's own context menu. `#file-menu`'s
+       skin, because it is the same kind of object: a flat list of verbs raised at
+       a point. See openPaneMenu. -->
+  <div class="term-menu" id="pane-menu"></div>
   <div class="term-menu" id="pv-menu"></div>
   <div class="layout-peek" id="layout-peek"></div>
   <div id="cmd-peek"></div>
@@ -2567,6 +2629,7 @@
   const $ = (id) => document.getElementById(id);
   const closeSvg = `<svg><use href="#i-close"/></svg>`;
   const folderSvg = `<svg><use href="#i-folder"/></svg>`;
+  const splitSvg = `<svg><use href="#i-split"/></svg>`;
   const pinSvg = `<svg class="pinsvg"><use href="#i-pin"/></svg>`;
   const pinnedSvg = `<svg class="pinsvg"><use href="#i-pinned"/></svg>`;
   const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -4668,6 +4731,7 @@
       return `<div class="pane ${focused ? "focused" : ""}" data-leaf="${node.id}">
         <div class="pane-inner">
           ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.cwd}</span>
+            <span class="pane-split" data-split-leaf="${node.id}" title="Split pane">${splitSvg}</span>
             <span class="pane-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>
             <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : ""}
           <div class="term" data-leaf="${node.id}" data-uid="${s.uid}">${termHtml(s, focused)}</div>
@@ -5166,6 +5230,7 @@
     closeRootMenu();
     $("term-menu").classList.remove("show");
     $("file-menu").classList.remove("show");
+    $("pane-menu").classList.remove("show");
     closePvMenu();
     document.querySelectorAll(".combo.open").forEach(c => c.classList.remove("open"));
   }
@@ -5947,6 +6012,15 @@
     document.querySelectorAll(".pane").forEach(el =>
       el.addEventListener("click", (e) => {
         if (e.target.closest(".pane-close")) { closePane(+el.dataset.leaf); return; }
+        /* 2026-08-15 (user ruling) — the `⊞`. Cuts along the pane's LONGER side,
+           the same "auto" the duplicate chord takes, measured off the pane's own
+           rectangle rather than guessed. */
+        const ps = e.target.closest(".pane-split");
+        if (ps) {
+          const r = ps.closest(".pane").getBoundingClientRect();
+          splitPane(+ps.dataset.splitLeaf, r.width >= r.height ? "right" : "bottom");
+          return;
+        }
         const pf = e.target.closest(".pane-files");
         if (pf) {
           const rect = pf.getBoundingClientRect();
@@ -5958,14 +6032,14 @@
       }));
     document.querySelectorAll(".panehead").forEach(el => {
       el.addEventListener("pointerdown", (e) => {
-        if (e.target.closest(".pane-close, .pane-files, .pv-tool")) return;
+        if (e.target.closest(".pane-close, .pane-files, .pane-split, .pv-tool")) return;
         if (activeTab().focusLeaf != null) return;   /* focus mode: the tree is parked, no pane drags */
         startDrag(e, { kind: "pane", leafId: +el.dataset.leaf });
       });
       /* serial/parallel toggle (§7.1.6b): double-click a pane header focuses it
          full-bleed; double-click again (or Esc) restores the tree untouched */
       el.addEventListener("dblclick", (e) => {
-        if (e.target.closest(".pane-close, .pane-files, .pv-tool")) return;
+        if (e.target.closest(".pane-close, .pane-files, .pane-split, .pv-tool")) return;
         if (!focusEligible()) return;   /* serial mode is a vertical-text-rail capability */
         const w = activeTab();
         const id = +el.dataset.leaf;
@@ -6247,6 +6321,7 @@
       if ($("pv-menu").classList.contains("show")) { closePvMenu(); return; }
       if ($("term-menu").classList.contains("show")) { $("term-menu").classList.remove("show"); return; }
       if ($("file-menu").classList.contains("show")) { $("file-menu").classList.remove("show"); return; }
+      if ($("pane-menu").classList.contains("show")) { $("pane-menu").classList.remove("show"); return; }
       if ($("root-menu").classList.contains("show")) { closeRootMenu(); return; }
       if ($("profile-menu").classList.contains("show")) { closeProfileMenu(); return; }
       const openCombo = document.querySelector(".combo.open");
@@ -6280,7 +6355,8 @@
        must not land in the terminal behind it */
     if ($("profile-menu").classList.contains("show") || $("root-menu").classList.contains("show")
         || $("term-menu").classList.contains("show") || $("pv-menu").classList.contains("show")
-        || $("file-menu").classList.contains("show")) return;
+        || $("file-menu").classList.contains("show")
+        || $("pane-menu").classList.contains("show")) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     /* the focused pane might be a files tree, which handles its own keys (delegated
        on termhost). Only a terminal gets typed into. This is the kind check the
@@ -8193,6 +8269,73 @@
     menu.style.left = Math.max(6, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
     menu.style.top = Math.max(6, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
   }
+  /* 2026-08-15 (user ruling) — THE PANE HEAD'S CONTEXT MENU.
+
+     The `⊞` beside it takes the pane's longer side and asks nothing, which is
+     right for the common case and useless for the one where you know which way
+     you want it. This is where the axis is named. Same skin, same rows, same
+     both-axis clamp as #file-menu — it is the same kind of object (a flat list
+     of verbs raised at a point), and a menu that looked like its neighbour but
+     was built by different code would be a second popup wearing the first's
+     clothes.
+
+     THREE ROWS, AND FLAT. `Split with…` — the same split against a chosen
+     profile — is the obvious fourth and is deliberately absent: it is a SUBMENU,
+     nothing in this product has ever drawn one, and the first one owes the
+     safety triangle (queue item #53) that keeps a pointer travelling diagonally
+     toward a child menu from being stolen by the rows it crosses on the way.
+     That triangle is its own geometry and its own tests. A submenu WITHOUT it is
+     the version of this feature every user has already met and hated, so the
+     row waits for the slice that can afford the triangle.
+
+     The rule sits ABOVE `Close pane`, not under the first row as #file-menu's
+     does. Same principle, different sentence boundary: two verbs that make a
+     pane, then one that ends one. A destructive verb flush against constructive
+     ones is a verb the hand finds by overshooting.
+
+     The whole head is the context, its buttons included — a right click on the
+     `×` raises this rather than closing the pane. An 18-pixel hole in a context
+     bar that silently means something else is exactly the edge a hand finds by
+     accident. */
+  /* One verb behind both doors — the `⊞`, which picks the axis, and the menu
+     rows, which are told it. Two copies of "make a shell and seat it" is how the
+     button and the menu come to disagree about what a split is. */
+  function splitPane(leafId, zone) {
+    const w = activeTab();
+    const leaf = findLeafIn(w, leafId);
+    if (!leaf) return;   /* the pane may have gone while the menu stood open */
+    /* "another one of these, here": the arriving shell inherits the SOURCE
+       pane's profile and directory, not the window's default. Splitting a Git
+       Bash pane must not seat a PowerShell beside it. */
+    const src = leafSession(leaf);
+    const d = defaultProfile();
+    const make = (src && src.make) || d.make;
+    const s = mkSession((src && src.name) || d.title.split(" ·")[0], (src && src.icon) || d.icon,
+                        make(), false, (src && src.cwd) || HOME, make);
+    const nl = mkLeaf(s.uid);
+    splitLeafIn(w, leafId, zone, nl);
+    w.focus = nl.id;   /* focus follows the split: you split to work in the new pane */
+    render();
+  }
+  function openPaneMenu(leafId, x, y) {
+    closeAllPopups();
+    const menu = $("pane-menu");
+    menu.innerHTML =
+      `<div class="tm-item" data-act="right"><svg><use href="#i-split-right"/></svg><span>Split right</span></div>
+       <div class="tm-item" data-act="down"><svg><use href="#i-split-down"/></svg><span>Split down</span></div>
+       <div class="tm-sep"></div>
+       <div class="tm-item" data-act="close"><svg><use href="#i-close"/></svg><span>Close pane</span></div>`;
+    menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      menu.classList.remove("show");
+      const act = el.dataset.act;
+      if (act === "close") closePane(leafId);
+      else splitPane(leafId, act === "right" ? "right" : "bottom");
+    }));
+    menu.classList.add("show");
+    menu.style.left = Math.max(6, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
+    menu.style.top = Math.max(6, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
+  }
   function fileMenuFromRow(e, row) {
     const tree = row.closest(".files-tree");
     const leaf = tree ? findLeafIn(activeTab(), +tree.dataset.leaf) : null;
@@ -8211,6 +8354,15 @@
     }
     const row = e.target.closest(".frow");
     if (row && row.dataset.dir !== "1") { fileMenuFromRow(e, row); return; }
+    /* 2026-08-15 (user ruling) — the whole pane head, its buttons included.
+       Below the file rows, because a files column's head sits over its own rows
+       and the rows are the more specific thing. */
+    const head = e.target.closest(".panehead");
+    if (head) {
+      e.preventDefault();
+      openPaneMenu(+head.dataset.leaf, e.clientX, e.clientY);
+      return;
+    }
     const term = e.target.closest(".term");
     if (!term) return;   /* directory rows etc. keep the native menu for now */
     e.preventDefault();
@@ -8660,6 +8812,7 @@
   document.addEventListener("click", (e) => {
     if (!e.target.closest("#term-menu")) $("term-menu").classList.remove("show");
     if (!e.target.closest("#file-menu")) $("file-menu").classList.remove("show");
+    if (!e.target.closest("#pane-menu")) $("pane-menu").classList.remove("show");
     if (!e.target.closest("#pv-menu, .pv-name.switch")) closePvMenu();
   });
 

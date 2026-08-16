@@ -1003,7 +1003,7 @@ impl PreviewFault {
 /// [`crate::files::DirNode`] has three: "not read yet" and "will never be read"
 /// are different answers and draw differently, and folding them is how a refusal
 /// comes to look like a slow disk.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreviewLoad {
     /// Asked, or about to be; the worker has not answered.
     Pending,
@@ -1011,6 +1011,22 @@ pub enum PreviewLoad {
     Ready,
     /// No body will ever arrive, and the card says why.
     Refused(PreviewRefusal),
+    /// **A composed document whose composer would not answer** — git's own
+    /// sentence, carried whole (G-3).
+    ///
+    /// A fourth state rather than a fifth [`PreviewRefusal`] because the two
+    /// differ in what they offer, not only in what they say: the refusal card's
+    /// one control is "open this in the default app", and a document composed
+    /// out of a repository has no file for that button to hand over. So this
+    /// prints where the "Loading …" line prints — one sentence, no card, no way
+    /// out that leads nowhere.
+    ///
+    /// It carries a `String` because the sentence is git's, not this module's.
+    /// Every other wording in this window is written here and can be a
+    /// `&'static str`; "fatal: bad object deadbee" is written by the program we
+    /// asked, and the whole of [`crate::git`]'s fail-soft discipline is that it
+    /// reaches the user unedited.
+    Unavailable(String),
 }
 
 /// **Where a buffer's content comes from** — the identity every preview surface
@@ -1048,11 +1064,22 @@ pub enum PreviewSource {
     /// names. `staged` is the whole of the `--cached` mapping (R25): the staged
     /// and unstaged diffs of one file are two different documents, so they are
     /// two different buffers.
-    #[allow(dead_code)]
     GitDiff {
         root: PathBuf,
         path: String,
         staged: bool,
+    },
+    /// **One commit's reading of one file** (R15) — `git show {hash} -- {path}`.
+    ///
+    /// A separate case rather than a `commit: Option<String>` on [`Self::GitDiff`]
+    /// because `staged` has no meaning here and a field that is meaningless in
+    /// one of its cases is a field every reader has to be told to ignore. A
+    /// commit's diff is against that commit's parent, and there is no index in
+    /// the question at all.
+    GitShow {
+        root: PathBuf,
+        hash: String,
+        path: String,
     },
     /// One repository's commit graph. Keyed by the repo alone: there is one
     /// graph per repository and it is the same graph whoever asks.
@@ -1072,15 +1099,84 @@ impl PreviewSource {
     /// in Explorer, opening with the system handler, resolving a relative
     /// markdown link, the head read. A git-backed document answers `None`, and
     /// `None` is not a failure: those verbs are about a file, and this content
-    /// has none. What a git document offers in their place is G-1's and G-3's to
-    /// add here, beside this.
+    /// has none. What a git document offers in their place is [`Self::repo_file`]
+    /// and [`Self::composed_lead`], below.
     pub fn file_path(&self) -> Option<&Path> {
         match self {
             Self::File(path) => Some(path),
-            Self::GitDiff { .. } | Self::GitGraph { .. } => None,
+            Self::GitDiff { .. } | Self::GitShow { .. } | Self::GitGraph { .. } => None,
+        }
+    }
+
+    /// Whether a repository composed this content.
+    pub fn is_git(&self) -> bool {
+        match self {
+            Self::File(_) => false,
+            Self::GitDiff { .. } | Self::GitShow { .. } | Self::GitGraph { .. } => true,
+        }
+    }
+
+    /// **What the foot prints on the left for a document that has no path**
+    /// (G-3).
+    ///
+    /// The strip's left hand asks "where is this", and for a file the answer is
+    /// its path. A diff has no path, but it has the two facts a path would have
+    /// carried: which repository, and where in it. So it prints `folio ·
+    /// crates/bt-app/src/main.rs`, in git's own spelling of the second half —
+    /// which is also what the `diff --git a/… b/…` line in the body says, so the
+    /// foot and the document agree letter for letter.
+    ///
+    /// `None` for a file, deliberately: this is not a general "describe
+    /// yourself", it is the branch the foot takes when `file_path` had no
+    /// answer, and a file's foot has never gone through it.
+    pub fn composed_lead(&self) -> Option<String> {
+        let repository = |root: &Path| {
+            // A repository at a drive root has no last component. Naming it by
+            // the whole root is not a fallback to nothing — it is the only name
+            // it has, and an empty word here would be the foot going blank on
+            // the one surface whose whole job is saying what you are looking at.
+            root.file_name().map_or_else(
+                || root.to_string_lossy().into_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        };
+        match self {
+            Self::File(_) => None,
+            Self::GitDiff { root, path, .. } | Self::GitShow { root, path, .. } => {
+                Some(format!("{} \u{b7} {path}", repository(root)))
+            }
+            Self::GitGraph { root } => Some(repository(root)),
+        }
+    }
+
+    /// **The working-tree file a git document is about**, when it is about one.
+    ///
+    /// The one file verb a composed document keeps: Explorer can be pointed at
+    /// the file a diff is of, because that file is genuinely there. It is *not*
+    /// [`Self::file_path`] and must never become it — saving, editing, the head
+    /// read and `session.json` all ask that question and all of them would be
+    /// wrong about this file. What is true is only that the repository has a
+    /// file at this path; whether it still exists is the caller's to check,
+    /// because a diff of a deletion names a file that is gone.
+    pub fn repo_file(&self) -> Option<PathBuf> {
+        match self {
+            Self::File(path) => Some(path.clone()),
+            Self::GitDiff { root, path, .. } | Self::GitShow { root, path, .. } => {
+                Some(root.join(path))
+            }
+            Self::GitGraph { .. } => None,
         }
     }
 }
+
+/// What a composed document with nothing in it says.
+///
+/// The two ways to arrive here are both ordinary: an untracked file has no
+/// working-tree diff, because git has never had a copy to differ from, and a
+/// commit's reading of a file it did not touch is empty by definition. Neither
+/// is a failure, so neither gets the refusal card — they get one line where the
+/// body would have been.
+pub const GIT_DOCUMENT_EMPTY: &str = "No changes to show";
 
 /// One buffer's live content.
 ///
@@ -1167,7 +1263,9 @@ impl PreviewBuffer {
             // `Pending` a head read waits in — but for the git worker G-1 builds,
             // never for [`PreviewWorker`], which reads disks (see
             // [`Self::wants_head_read`]).
-            PreviewSource::GitDiff { .. } | PreviewSource::GitGraph { .. } => PreviewLoad::Pending,
+            PreviewSource::GitDiff { .. }
+            | PreviewSource::GitShow { .. }
+            | PreviewSource::GitGraph { .. } => PreviewLoad::Pending,
         };
         Self {
             source,
@@ -1311,7 +1409,7 @@ impl PreviewBuffer {
     pub fn view(&self, md_source: bool) -> PreviewView {
         match &self.source {
             PreviewSource::File(_) => preview_view(&self.name, self.ftype, md_source),
-            PreviewSource::GitDiff { .. } => PreviewView::Diff,
+            PreviewSource::GitDiff { .. } | PreviewSource::GitShow { .. } => PreviewView::Diff,
             // G-4's full graph is its own surface and has no body in this
             // vocabulary yet; until it exists the honest answer is the card that
             // says there is nothing to show.
@@ -1320,11 +1418,53 @@ impl PreviewBuffer {
     }
 
     /// Why there is no body to show, when there is none.
+    ///
+    /// **The card's question**, and [`PreviewLoad::Unavailable`] is deliberately
+    /// not an answer to it: see that variant for why a composed document's
+    /// refusal is a line and not a card.
     pub fn refusal(&self) -> Option<PreviewRefusal> {
         match self.load {
             PreviewLoad::Refused(refusal) => Some(refusal),
-            PreviewLoad::Pending | PreviewLoad::Ready => None,
+            PreviewLoad::Pending | PreviewLoad::Ready | PreviewLoad::Unavailable(_) => None,
         }
+    }
+
+    /// **The one line a body prints instead of itself** (G-3).
+    ///
+    /// Two cases and both of them are about composed content: a repository that
+    /// would not answer, in git's own words, and a document that came back
+    /// empty. Neither is a state a *file* can be in — an empty file is a file
+    /// with nothing in it, and printing "No changes to show" over one would be
+    /// a sentence about a repository laid across a zero-byte `.gitkeep`.
+    ///
+    /// The "Loading …" line is not here because it belongs to a different
+    /// question: it is what a pane says while it is *waiting*, which a picture
+    /// does too, and that lane already answers for both.
+    pub fn body_notice(&self) -> Option<&str> {
+        if let PreviewLoad::Unavailable(words) = &self.load {
+            return Some(words);
+        }
+        (self.source.is_git()
+            && self.load == PreviewLoad::Ready
+            && self.content.as_ref().is_none_or(|body| body.is_empty()))
+        .then_some(GIT_DOCUMENT_EMPTY)
+    }
+
+    /// **The repository would not answer** (G-3) — git's sentence, kept whole.
+    ///
+    /// [`Self::accept`]'s opposite number for the git lane, and a separate door
+    /// rather than a fifth [`HeadOutcome`] because `HeadOutcome` is what a
+    /// *disk* answers: its refusals are a permission, a missing file, a NUL in
+    /// the head. A repository's refusal is a sentence, and giving the disk lane
+    /// a variant only the git lane can produce would be a case every reader of
+    /// a head read has to be told never happens.
+    pub fn decline(&mut self, words: String) {
+        self.revision += 1;
+        self.content = None;
+        self.truncated = false;
+        self.max_columns = 0;
+        self.disk_mtime = None;
+        self.load = PreviewLoad::Unavailable(words);
     }
 
     /// File the worker's answer.
@@ -3733,6 +3873,154 @@ mod tests {
             asked,
             vec![PreviewSource::file("b.rs"), PreviewSource::file("a.rs")],
             "the superseded first question is never read"
+        );
+    }
+
+    // ── G-3 ────────────────────────────────────────────────────────────────
+
+    /// **⑤ The foot's left hand, for a document that has no path to print.**
+    ///
+    /// The strip asks "where is this", and a file answers with its path. A diff
+    /// composed out of a repository has no such answer — but it does have the
+    /// two facts that make one: *which repository*, and *where in it*. The
+    /// mock-up wrote a pseudo-path here and the pseudo-path is gone (G-0), so
+    /// this is what stands in its place.
+    ///
+    /// MUTATION: drop [`PreviewSource::composed_lead`] and let the callers fall
+    /// back to `file_path().unwrap_or_default()` as they did before this slice.
+    /// Every git document's foot goes blank — a strip whose whole job is saying
+    /// what you are looking at, saying nothing, on the one surface where the
+    /// name alone (`main.rs.diff`) does not say which of two repositories it
+    /// came from.
+    #[test]
+    fn a_composed_document_s_foot_names_its_repository_and_its_place_in_it() {
+        let root = PathBuf::from(r"D:\work\folio");
+        assert_eq!(
+            PreviewSource::GitDiff {
+                root: root.clone(),
+                path: "crates/bt-app/src/main.rs".to_owned(),
+                staged: true,
+            }
+            .composed_lead()
+            .as_deref(),
+            Some("folio \u{b7} crates/bt-app/src/main.rs")
+        );
+        assert_eq!(
+            PreviewSource::GitShow {
+                root: root.clone(),
+                hash: "a".repeat(40),
+                path: "README.md".to_owned(),
+            }
+            .composed_lead()
+            .as_deref(),
+            Some("folio \u{b7} README.md"),
+            "a commit's reading of a file is still that file, in that repository"
+        );
+        assert_eq!(
+            PreviewSource::GitGraph { root: root.clone() }
+                .composed_lead()
+                .as_deref(),
+            Some("folio"),
+            "a graph is about the whole repository and names no file"
+        );
+        assert_eq!(
+            PreviewSource::file(r"D:\work\folio\README.md").composed_lead(),
+            None,
+            "a file's foot is its path, and this function does not answer for it"
+        );
+        // A repository at a drive root has no last component to name, and the
+        // honest answer there is the root itself rather than an empty word.
+        assert_eq!(
+            PreviewSource::GitGraph {
+                root: PathBuf::from(r"D:\"),
+            }
+            .composed_lead()
+            .as_deref(),
+            Some(r"D:\")
+        );
+
+        // The working-tree file a git document is *about* — the one door
+        // Explorer can be pointed at, and the only file verb a composed
+        // document keeps.
+        assert_eq!(
+            PreviewSource::GitDiff {
+                root: root.clone(),
+                path: "crates/bt-app/src/main.rs".to_owned(),
+                staged: false,
+            }
+            .repo_file(),
+            Some(root.join("crates/bt-app/src/main.rs"))
+        );
+        assert_eq!(PreviewSource::GitGraph { root }.repo_file(), None);
+    }
+
+    /// **⑥ Two honest answers a diff has to be able to give.**
+    ///
+    /// git says "Binary files … differ" in one line and that line *is* the diff;
+    /// and a question with no answer — an untracked file's working-tree diff, a
+    /// commit that did not touch the file — produces nothing at all, which a
+    /// pane must say rather than draw as a blank.
+    ///
+    /// MUTATION: let [`PreviewBuffer::body_notice`] answer for any empty body
+    /// rather than only a composed one. An empty *file* — a zero-byte
+    /// `.gitkeep`, opened from the tree — then reads "No changes to show",
+    /// which is a sentence about a repository printed over a file that is
+    /// simply empty.
+    #[test]
+    fn an_empty_diff_says_so_and_a_binary_one_keeps_git_s_own_line() {
+        let source = PreviewSource::GitDiff {
+            root: PathBuf::from(r"D:\repo"),
+            path: "logo.png".to_owned(),
+            staged: false,
+        };
+        let mut binary = PreviewBuffer::new(source.clone(), "logo.png.diff".to_owned());
+        binary.accept(read(
+            "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n",
+            false,
+        ));
+        assert_eq!(binary.load, PreviewLoad::Ready);
+        assert_eq!(
+            binary.body_notice(),
+            None,
+            "there is a body, so it is drawn"
+        );
+        assert_eq!(binary.view(false), PreviewView::Diff);
+        assert!(
+            binary
+                .content
+                .as_deref()
+                .expect("the body is git's own words")
+                .contains("Binary files a/logo.png and b/logo.png differ"),
+            "git already says this in one line and nothing here rewrites it"
+        );
+
+        let mut empty = PreviewBuffer::new(source.clone(), "logo.png.diff".to_owned());
+        empty.accept(read("", false));
+        assert_eq!(empty.load, PreviewLoad::Ready);
+        assert_eq!(
+            empty.body_notice(),
+            Some(GIT_DOCUMENT_EMPTY),
+            "a diff with nothing in it says so"
+        );
+
+        // An empty *file* is not an empty diff, and says nothing.
+        let mut file = PreviewBuffer::new(
+            PreviewSource::file(r"D:\repo\.gitkeep"),
+            ".gitkeep".to_owned(),
+        );
+        file.accept(read("", false));
+        assert_eq!(file.body_notice(), None);
+
+        // And a repository that would not answer prints git's own refusal on
+        // the same line — not the "no preview" card, whose one control opens a
+        // *file* and a composed document has none.
+        let mut refused = PreviewBuffer::new(source, "logo.png.diff".to_owned());
+        refused.decline("fatal: bad object deadbee".to_owned());
+        assert_eq!(refused.body_notice(), Some("fatal: bad object deadbee"));
+        assert_eq!(
+            refused.refusal(),
+            None,
+            "and the card, with its file-shaped way out, stays down"
         );
     }
 }

@@ -1236,12 +1236,22 @@ impl FloatHost {
         }
     }
 
-    /// Whether a *transient* peek is up.
+    /// Whether a *transient* peek is up — **the dismissal grace's own question,
+    /// and only that.**
     ///
-    /// This is `railBusy`'s clause (G102): a peek hangs off a rail row and floats
-    /// out past the rail, so moving onto it must not read as having left the
-    /// rail. A pinned window is torn off and free-standing, so it holds nothing
-    /// open — hence `!pinned`, spelled here as the mode test.
+    /// [`Self::release`] has nothing to arm a grace for without one, and
+    /// [`Self::grace_expired`] has nothing to take away. A pinned window is torn
+    /// off and free-standing and no clock of this kind runs for it, which is what
+    /// the peek slot already says: it holds the transient window and never a
+    /// pinned one.
+    ///
+    /// **Not `railBusy`'s clause, and it used to be misread as one** (2026-08-15).
+    /// A rail is held open by a peek *hanging off one of its own rows*, which is
+    /// a question about the peek's trigger and not about its existence; asked as
+    /// a bare "is a peek up" it made the folder button on every terminal pane's
+    /// head a second, invisible rail trigger. That question lives with the rail
+    /// now — see `rail_zone_wants_open` in `main.rs`, which reads [`Self::peek`]
+    /// and asks its [`FloatWin::origin`].
     #[must_use]
     pub fn peek_is_open(&self) -> bool {
         self.peek().is_some()
@@ -3208,16 +3218,22 @@ mod tests {
         );
     }
 
-    /// G102: a transient peek is the rail's unfinished business; a pinned window,
-    /// having been torn off, is not.
+    /// Promotion ends peek-hood, and with it everything the peek slot answers
+    /// for — the dismissal grace above all: a window the hand has kept must not
+    /// be carried off by a clock that was started while it was still a question.
+    ///
+    /// The rail's half of G102 is **not** here, and deliberately so since
+    /// 2026-08-15: which peeks hold the rail open is a question about the peek's
+    /// trigger, and it is asked in `main.rs`'s `rail_zone_wants_open`. See
+    /// [`FloatHost::peek_is_open`].
     #[test]
-    fn only_a_transient_peek_holds_the_rail_open() {
+    fn promotion_empties_the_peek_slot() {
         let now = Instant::now();
         let mut host = FloatHost::default();
         let peek = open_peek(&mut host, TAB, now);
-        assert!(host.peek_is_open(), "a peek holds it");
+        assert!(host.peek_is_open(), "a peek is in the slot");
         assert!(host.promote().is_some());
-        assert!(!host.peek_is_open(), "a pinned window lets it go");
+        assert!(!host.peek_is_open(), "a pinned window has left it");
         assert!(host.is_pinned(peek));
     }
 

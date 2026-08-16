@@ -112,9 +112,25 @@ const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
 /// reports no deadline at all otherwise, so this is the *rate* of an animation
 /// and never a standing poll.
 ///
-/// The budget it has to fit in is small and known: an animating ring costs one
-/// rasterize of a 15px SVG per frame, measured at 16.5µs on this workspace's
-/// own rasterizer — a tenth of a percent of a frame, per ring.
+/// **What a tick actually costs, measured rather than budgeted.** This comment
+/// used to read "an animating ring costs one rasterize of a 15px SVG per frame,
+/// measured at 16.5µs — a tenth of a percent of a frame, per ring." The
+/// rasterize was measured honestly; what was never measured is what the tick
+/// dragged behind it. Every tick called `publish_frame(Expose)`, and
+/// `publish_frame_inner` composed a whole terminal picture before anything
+/// could opt out: full grid capture, viewport projection, inline-reference
+/// scan, IME re-anchor, then a present that re-shaped the grid's text. Sampled
+/// on this workspace at **6-8ms of main-thread CPU per tick — a ~400x miss** —
+/// with the main thread allocator-bound (ntdll 50% self, `__rdl_dealloc` on
+/// 75% of stacks). A `Start-Sleep 30` emitting *zero bytes* held one core at
+/// **69%**, because the cost tracked nothing but "is a command running".
+///
+/// A tick now takes [`Runtime::publish_chrome_frame`], which re-presents the
+/// picture already on the glass instead of composing another one — see
+/// [`chrome_tick_reuses_picture`] for the licence. The 16.5µs figure is a
+/// budget this rate can be held to only because nothing but chrome is rebuilt
+/// inside it; if a tick ever composes a terminal frame again, 60Hz is the wrong
+/// rate for it and this constant is not the thing to change.
 const STRIP_ANIMATION_FRAME: Duration = Duration::from_millis(16);
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
 /// silence interval while the local surface and terminal grid continue to follow every event.
@@ -2611,6 +2627,27 @@ struct FileMenuState {
     hover: Option<profiles::FileMenuRow>,
 }
 
+/// The pane head's context menu, and the head it was raised on (user ruling,
+/// 2026-08-15).
+///
+/// [`FileMenuState`]'s shape, with a **seat** where that one holds a path — and
+/// for the same reason it holds a path rather than a row index. All three verbs
+/// are about one pane, and which pane that is must not be re-derived from where
+/// the pointer has since wandered: a menu raised on the left head and released
+/// over the right one has to close the pane it was opened about.
+///
+/// A seat is safe to keep in a way an index is not. Seats are minted and retired
+/// by name; if the pane behind this one goes away while the menu is up — the
+/// shell exits, another window's drag takes it — the seat simply stops naming a
+/// session, and every verb here already asks for one before it acts.
+struct PaneMenuState {
+    /// Where it was raised, in physical pixels of the surface.
+    point: [f32; 2],
+    /// The pane it is about.
+    seat: SeatId,
+    hover: Option<profiles::PaneMenuRow>,
+}
+
 /// The exact characters an `Insert path into terminal` press puts in the input
 /// line (K144).
 ///
@@ -3313,6 +3350,35 @@ struct Runtime {
     first_visible_present_dpi_checked: bool,
     first_text_presented: bool,
     last_presented_frame: Option<ViewportFrame>,
+    /// How many times a terminal picture has been *composed and published*.
+    ///
+    /// The counter [`chrome_tick_reuses_picture`] reads. It is bumped at the one
+    /// line a composed frame enters the presentation slot, which is what makes
+    /// it a fact about pictures rather than about events: a trigger that is
+    /// held, skipped as unchanged, or answered from the glass moves nothing.
+    terminal_content_revision: u64,
+    /// The value [`Self::terminal_content_revision`] had when the glass last
+    /// took a picture. Equality between the two is "what is on the screen is
+    /// the newest thing anyone has composed" — the whole of the chrome-only
+    /// path's licence.
+    presented_picture_revision: u64,
+    /// A present that redraws only what the renderer already holds.
+    ///
+    /// Set by [`Runtime::publish_chrome_frame`] when an animation moved
+    /// something that lives in *retained* renderer state — the strip's chrome
+    /// quads, the caret's blink phase, a pane's transform — and the terminal
+    /// picture underneath it is already current. `redraw` answers it with the
+    /// frame that is on the glass, so the ring turns without the grid being
+    /// captured, projected, decorated and recomposed to say the same thing it
+    /// said 16ms ago.
+    chrome_present_pending: bool,
+    /// How many terminal frames this window has composed, for the trace and for
+    /// the tests that count them. Monotonic; never read by the app itself.
+    composed_terminal_frames: u64,
+    /// When [`Self::advance_strip_animation`] last ran, so
+    /// [`STRIP_ANIMATION_FRAME`] can be the rate it claims to be rather than a
+    /// floor nothing stands on. `None` until the first tick.
+    strip_animation_ticked_at: Option<Instant>,
     preedit: Option<Preedit>,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
@@ -3737,6 +3803,9 @@ struct Runtime {
     /// nothing behind the menu can change. It is also what lets one menu serve
     /// both hosts (K146) without carrying which one it came from.
     file_menu: Option<FileMenuState>,
+    /// The pane head's context menu, and the head it was raised on (user ruling,
+    /// 2026-08-15).
+    pane_menu: Option<PaneMenuState>,
     /// How wide each files head's name was last *drawn* — see
     /// [`Runtime::measure_files_names`] for why the hit test reads it from here
     /// rather than measuring for itself.
@@ -4422,6 +4491,48 @@ impl TabState {
 
     fn leaves(&self) -> impl Iterator<Item = (&SeatId, &LeafSession)> {
         self.sessions.iter()
+    }
+
+    /// One named leaf of this tab — the pane a gesture belongs to, said outright.
+    ///
+    /// The counterpart of [`Self::focused`], and the antidote to it. Reaching a
+    /// leaf through the [`Deref`] asks "whichever pane holds the keyboard",
+    /// which is the right question for a keystroke and the wrong one for
+    /// anything the pointer is doing. The `expect` carries the same invariant
+    /// `focused` does: a Terminal seat and a session are created and destroyed
+    /// together, so a seat that named a session still names it.
+    fn leaf(&self, seat: SeatId) -> &LeafSession {
+        self.sessions
+            .get(&seat)
+            .expect("a terminal seat and its session are created and destroyed together")
+    }
+
+    /// What one named pane's child has asked of the mouse.
+    ///
+    /// Read from the named seat, never through the focused deref: these four
+    /// bits decide whether a wheel notch is spoken to a child at all, and the
+    /// notch belongs to the pane under the pointer (user ruling, 2026-08-15).
+    /// Asking the keyboard's pane instead is how a hovered TUI came to be judged
+    /// by a neighbouring shell's modes.
+    fn leaf_terminal_modes(&self, seat: SeatId) -> TerminalModes {
+        self.leaf(seat).session.terminal_modes()
+    }
+
+    /// Whether one named pane's child has put its cursor keys in application
+    /// mode — the difference between `ESC O A` and `ESC [ A`, which is the
+    /// difference between a TUI scrolling and a TUI printing `OA`.
+    fn leaf_application_cursor_mode(&self, seat: SeatId) -> bool {
+        self.leaf(seat).session.application_cursor_mode()
+    }
+
+    /// How many rows one named pane holds — what "one screen at a time" means
+    /// when the system wheel setting says a page rather than a line count.
+    ///
+    /// Per pane because a split is rarely even: a page of the focused pane's
+    /// rows applied to the pane under the pointer scrolls the wrong distance in
+    /// the wrong window, and the two stop agreeing the moment the divider moves.
+    fn leaf_wheel_rows(&self, seat: SeatId) -> f64 {
+        f64::from(self.leaf(seat).grid.rows.get())
     }
 
     /// Every leaf of this tab, focused one included, in seat order.
@@ -8265,6 +8376,11 @@ struct OverlayStack {
     /// same reason it is not in their exclusive chain: it is about whatever is
     /// under it.
     file_menu: Vec<marks::OverlayLayer>,
+    /// The pane head's own menu, on `#file-menu`'s level and for its reason: it
+    /// is about whatever is under it. The two can never be up together (E61 —
+    /// the opener closes the others), so their order between themselves is
+    /// bookkeeping rather than a claim.
+    pane_menu: Vec<marks::OverlayLayer>,
     /// `.tip { z-index: 60 }` — the one surface in this window that is never
     /// covered, because it is the only one whose whole job is to explain what is
     /// under it.
@@ -8297,6 +8413,7 @@ impl OverlayStack {
             float,
             modal,
             file_menu,
+            pane_menu,
             tooltip,
             file_peek,
             drag_ghost,
@@ -8309,6 +8426,7 @@ impl OverlayStack {
             float,
             modal,
             file_menu,
+            pane_menu,
             tooltip,
             file_peek,
             drag_ghost,
@@ -10265,6 +10383,9 @@ fn revive_plan(
                         bt_persist::FilesViewV1::Files => seats::FilesView::Files,
                         bt_persist::FilesViewV1::Git => seats::FilesView::Git,
                     },
+                    // Nothing to restore: an expansion is a glance and does not
+                    // cross the disk — see [`seats::FilesLeafState::git_expanded`].
+                    git_expanded: None,
                 },
             )
         })
@@ -11478,6 +11599,65 @@ fn columns_wanting_git(
         .collect()
 }
 
+/// **What Explorer can be pointed at, for a buffer** (G-3).
+///
+/// A file, always. A git document, only when the working-tree file it is a
+/// reading of is still on the disk — which for a diff of a deletion, or a
+/// `git show` of a file that has since been removed, it is not. The existence
+/// check is here rather than in [`preview::PreviewSource`] because that module
+/// answers about identities and this is a question about a disk.
+fn revealable_preview_file(source: &preview::PreviewSource) -> Option<PathBuf> {
+    match source.file_path() {
+        Some(path) => Some(path.to_path_buf()),
+        None => source.repo_file().filter(|path| path.is_file()),
+    }
+}
+
+/// **Which git answers are documents, and which buffer each belongs in** (G-3).
+///
+/// The one place the two lanes part. Four of the seven answers are a column's —
+/// they are rows, and they are filed into that column's [`git::GitCache`]. Two
+/// are *documents*: a file's diff and a commit's reading of a file, both of
+/// which go to the tab's preview pool against the [`preview::PreviewSource`]
+/// they were opened under.
+///
+/// The source is **rebuilt from the answer's own fields** rather than carried
+/// along with the question, and that is the whole reason every answer brings its
+/// subject back with it: an answer that could not say which document it is about
+/// could only be filed by faith into whatever the pane happens to be showing —
+/// which, by the time a cold `git show` returns, may be a different file
+/// entirely.
+///
+/// `Err` hands the answer back untouched, so the caller can go on and file it
+/// the other way. A `Result` and not an `Option` because the answer is not
+/// `Copy` and the caller still needs it.
+#[allow(clippy::result_large_err)]
+fn git_document_answer(
+    answer: git::GitAnswer,
+) -> Result<(preview::PreviewSource, git::GitOutcome<String>), git::GitAnswer> {
+    match answer {
+        git::GitAnswer::Diff {
+            root,
+            path,
+            staged,
+            outcome,
+        } => Ok((
+            preview::PreviewSource::GitDiff { root, path, staged },
+            outcome,
+        )),
+        git::GitAnswer::Show {
+            root,
+            hash,
+            path,
+            outcome,
+        } => Ok((
+            preview::PreviewSource::GitShow { root, hash, path },
+            outcome,
+        )),
+        answer => Err(answer),
+    }
+}
+
 /// Drain every shell this tab holds.
 ///
 /// Written as a loop rather than left to the tab's deref because "drain this
@@ -11501,7 +11681,11 @@ impl Runtime {
         let trace_startup = std::env::var_os("BT_STARTUP_TRACE").is_some();
         let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
         let trace_layout_events = std::env::var_os("BT_LAYOUT_EVENTS").is_some();
-        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
+        // Set-but-empty is off, not on. `BT_PERF_TRACE=` is how a shell says
+        // "not this run", and taking it as on turned a profiling session into a
+        // measurement of its own `eprintln!`s — the per-frame trace dominated
+        // the profile that was supposed to be reading the frames.
+        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty());
         let phase_started = Instant::now();
         // Read the previous session before the window exists, so its bounds can
         // be the window's opening bounds rather than a correction applied after
@@ -11759,6 +11943,11 @@ impl Runtime {
             first_visible_present_dpi_checked: false,
             first_text_presented: false,
             last_presented_frame: None,
+            terminal_content_revision: 0,
+            presented_picture_revision: 0,
+            chrome_present_pending: false,
+            composed_terminal_frames: 0,
+            strip_animation_ticked_at: None,
             preedit: None,
             ime_active: false,
             ime_cursor_throttle: ImeCursorThrottle::default(),
@@ -11835,6 +12024,7 @@ impl Runtime {
             preview_menu: profiles::PreviewMenu::default(),
             preview_head_measures: BTreeMap::new(),
             file_menu: None,
+            pane_menu: None,
             float: float::FloatHost::default(),
             float_drag: None,
             float_head_press: None,
@@ -12808,9 +12998,17 @@ impl Runtime {
                 ) {
                     (Some(preview), _) => preview.message(),
                     // A document on its way: the same sentence a picture uses,
-                    // because it is the same wait.
-                    (None, Some(buffer)) => (buffer.load == preview::PreviewLoad::Pending)
-                        .then(|| format!("Loading {}\u{2026}", buffer.name)),
+                    // because it is the same wait. And, after it arrives, the
+                    // one line a *composed* document prints instead of a body —
+                    // a diff with nothing in it, or a repository that would not
+                    // answer (G-3, [`preview::PreviewBuffer::body_notice`]).
+                    (None, Some(buffer)) => {
+                        if buffer.load == preview::PreviewLoad::Pending {
+                            Some(format!("Loading {}\u{2026}", buffer.name))
+                        } else {
+                            buffer.body_notice().map(str::to_owned)
+                        }
+                    }
                     // An open pane with nothing chosen invites rather than sits
                     // mute.
                     (None, None) => Some("Click a dotted path to preview it here".to_owned()),
@@ -14008,6 +14206,7 @@ impl Runtime {
         stack.layout_peek = self.layout_peek_layer();
         stack.float = self.float_layer(now);
         stack.file_menu = self.file_menu_layer();
+        stack.pane_menu = self.pane_menu_layer();
         stack.tooltip = self.tooltip_layer();
         stack.file_peek = self.file_peek_layer();
         stack.drag_ghost = self.drag_ghost_layer();
@@ -14531,6 +14730,7 @@ impl Runtime {
     fn toggle_profile_menu(&mut self) -> Result<()> {
         self.root_menu.close();
         self.file_menu = None;
+        self.pane_menu = None;
         self.profile_menu.toggle();
         self.start_chevron_turn();
         if self.refresh_chrome() {
@@ -15276,17 +15476,26 @@ impl Runtime {
     /// longer side. A pane the solver has not placed cannot be measured, and the
     /// side-by-side split is the one the dev chord had always used.
     fn duplicate_split_axis(&self) -> Axis {
+        self.pane_split_axis(self.focused_leaf)
+    }
+
+    /// The axis an "auto" split of **one named pane** cuts along: across its
+    /// longer side, so the two halves come out as square as the pane allows.
+    ///
+    /// Windows Terminal's `duplicatePane` defaults to `split: "auto"` and means
+    /// exactly this. The measurement is the solver's own rectangle, never a
+    /// guess (red line L10); a pane the solver has not placed cannot be measured
+    /// and falls to the side-by-side cut the dev chord always used.
+    ///
+    /// Named seat rather than the focused leaf, because the pane head's `⊞` is
+    /// a button on a *particular* head and the pointer can press it over a pane
+    /// that does not hold the keyboard. Reading the focused pane's rectangle
+    /// there would cut a tall pane sideways because the wide one next door said
+    /// so.
+    fn pane_split_axis(&self, seat: SeatId) -> Axis {
         let scale = self.renderer.metrics().scale_factor as f32;
-        seats::pane_body_viewport(&self.seats, &self.seat_layout, self.focused_leaf, scale).map_or(
-            Axis::Row,
-            |body| {
-                if body.width >= body.height {
-                    Axis::Row
-                } else {
-                    Axis::Col
-                }
-            },
-        )
+        seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+            .map_or(Axis::Row, |body| auto_split_axis(body.width, body.height))
     }
 
     /// Split the focused terminal pane, seating a second shell beside it.
@@ -15303,8 +15512,20 @@ impl Runtime {
     /// report. A pane whose shell has never named a directory hands over
     /// nothing, and the new shell starts where it always did.
     fn split_focused_terminal(&mut self, dir: Axis) -> Result<()> {
+        self.split_terminal_seat(self.focused_leaf, dir)
+    }
+
+    /// [`Self::split_focused_terminal`], for a pane named outright.
+    ///
+    /// The keyboard's three split chords all mean "the pane I am typing in", and
+    /// for seven months that was the only way to ask, so the source was read off
+    /// `focused_leaf` inside the verb. The pane head's `⊞` and its menu ask
+    /// about the pane **under the pointer** (user ruling, 2026-08-15), and while
+    /// D40 does move focus into a pane on the way down for a press on its head,
+    /// leaning on that would make this verb's subject an accident of routing
+    /// order rather than something the call site said. So it is said.
+    fn split_terminal_seat(&mut self, source: SeatId, dir: Axis) -> Result<()> {
         let metrics = self.seat_metrics();
-        let source = self.focused_leaf;
         // Ask the solver first. `split_terminal` leaves the tree untouched when
         // it refuses, so there is nothing to undo on this path.
         let Some(arriving) = self.seats.split_terminal(&metrics, source, dir, false) else {
@@ -16208,17 +16429,22 @@ impl Runtime {
         let surface = PreviewSurface::Seat(seat);
         // **A path, because the left hand of this strip is "where is this".**
         // A document with no file behind it has no answer to that question in
-        // this vocabulary; what a git diff writes here instead — the repo and
-        // the repo-relative name — is G-3's, and belongs beside this line rather
-        // than inside a path that was never one.
-        let path = match self
-            .preview_buffer_on(surface)
-            .and_then(|buffer| buffer.source.file_path())
-        {
-            Some(path) => path.to_owned(),
-            None => self.preview_pane(surface)?.image.as_ref()?.path.clone(),
+        // this vocabulary, so it answers in its own: `folio · src/main.rs`, the
+        // repository and the place in it, which is exactly the pair a path would
+        // have carried (G-3, [`preview::PreviewSource::composed_lead`]).
+        let lead = match self.preview_buffer_on(surface) {
+            Some(buffer) => match buffer.source.file_path() {
+                Some(path) => path.to_string_lossy().into_owned(),
+                None => buffer.source.composed_lead().unwrap_or_default(),
+            },
+            None => self
+                .preview_pane(surface)?
+                .image
+                .as_ref()?
+                .path
+                .to_string_lossy()
+                .into_owned(),
         };
-        let path = path.to_string_lossy().into_owned();
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
         let saved = self.preview_save_notice(surface, now) == Some(preview::PREVIEW_SAVED_NOTICE);
         let flash = if revealed {
@@ -16240,7 +16466,7 @@ impl Runtime {
         Some(seats::dress_foot(
             seats::FootDress {
                 run,
-                lead: &path,
+                lead: &lead,
                 flash,
                 notice: &notice,
                 // **Left-truncated** (P35): the ellipsis goes at the head so the
@@ -16257,12 +16483,15 @@ impl Runtime {
     /// (P32), the same verb and the same confirmation a files column's foot has.
     fn reveal_preview_file(&mut self, seat: SeatId) -> Result<()> {
         let surface = PreviewSurface::Seat(seat);
-        // Explorer points at files, so this door is a file's: a view composed
-        // out of a repository has nothing in a folder to be highlighted.
+        // **The one file verb a composed document keeps** (G-3). Explorer points
+        // at files, and a diff has none — but the diff is *of* a file, and that
+        // file is in the working tree where Explorer can point at it. Offered
+        // only when it is still there: a diff of a deletion names a file that is
+        // gone, and asking Explorer to highlight it would open its folder with
+        // nothing selected, which is a verb quietly doing something else.
         let Some(path) = self
             .preview_buffer_on(surface)
-            .and_then(|buffer| buffer.source.file_path())
-            .map(Path::to_path_buf)
+            .and_then(|buffer| revealable_preview_file(&buffer.source))
             .or_else(|| {
                 self.preview_pane(surface)
                     .and_then(|pane| pane.image.as_ref())
@@ -17066,6 +17295,7 @@ impl Runtime {
             menu_or_dialog: self.dirty_gate.is_open()
                 || self.settings.is_open()
                 || self.file_menu.is_some()
+                || self.pane_menu.is_some()
                 || self.profile_menu.is_open()
                 || self.root_menu.seat().is_some()
                 || self.preview_menu.seat().is_some(),
@@ -18787,6 +19017,40 @@ impl Runtime {
             .map(|_| ())
     }
 
+    /// What the window knows about its own picture, for
+    /// [`chrome_tick_reuses_picture`].
+    fn picture_on_glass(&self) -> PictureOnGlass {
+        PictureOnGlass {
+            frame_pending: self.pending_frames.pending_frame().is_some(),
+            has_presented_frame: self.last_presented_frame.is_some(),
+            presentation_hold: self.projection.presentation_hold(),
+            content_revision: self.terminal_content_revision,
+            presented_revision: self.presented_picture_revision,
+        }
+    }
+
+    /// A frame owed by something that lives in retained renderer state.
+    ///
+    /// The strip's ring, the caret's blink phase, a pane in flight: each of
+    /// them has already written what it changed into the renderer — chrome
+    /// quads through `set_chrome`, the blink through `set_cursor_blink_visible`,
+    /// the transform through the tween the redraw samples — and what is left
+    /// owing is a *present*, not a terminal picture. When the picture on the
+    /// glass is already the newest one anybody composed, that is all this asks
+    /// for; otherwise it falls through to the ordinary whole-window publish,
+    /// which is what the caller did unconditionally before.
+    fn publish_chrome_frame(&mut self, now: Instant) -> Result<()> {
+        if chrome_tick_reuses_picture(self.picture_on_glass()) {
+            self.chrome_present_pending = true;
+            self.window.request_redraw();
+            return Ok(());
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: now,
+            source: FrameSource::Expose,
+        })
+    }
+
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
         // **The tripwire.** A frame is about to describe a tab whose seat set
         // may have changed; if it changed without anyone carrying the change to
@@ -18817,6 +19081,7 @@ impl Runtime {
             &mut self.math_worker_running,
             &mut self.math_worker_notice_pending,
         );
+        self.composed_terminal_frames = self.composed_terminal_frames.saturating_add(1);
         let mut terminal_frame = {
             // Bound once, to the focused leaf: `session` and `projection` are
             // two fields of one shell, and reaching each through its own deref
@@ -18969,6 +19234,11 @@ impl Runtime {
         self.session
             .record_published_frame(&composed.frame, trigger.occurred_at);
         self.flush_resize_trace();
+        // **The one line a picture becomes newer than the glass.** Everything
+        // above this can hold, skip or decide the frame says nothing new; only
+        // a frame that actually enters the slot moves the revision the
+        // chrome-only path compares against.
+        self.terminal_content_revision = self.terminal_content_revision.saturating_add(1);
         self.pending_frames
             .publish(composed.frame, trigger)
             .context("reject non-rectangular frame at publish boundary")?;
@@ -19025,6 +19295,11 @@ impl Runtime {
     /// changed something the active tab is drawing asks for a new frame.
     fn apply_git_results(&mut self) -> Result<()> {
         let mut changed = false;
+        // A document landing is not a chrome change (G-3): what it turns from
+        // "Loading …" into lines is the renderer's own preview surface, exactly
+        // as a head read does — see the tail of [`Self::apply_preview_results`]
+        // for what asking `refresh_chrome` alone costs.
+        let mut body = false;
         loop {
             match self.git_worker.responses.try_recv() {
                 Ok(response) => {
@@ -19036,10 +19311,38 @@ impl Runtime {
                     if !tab.files.contains_key(&host.seat) {
                         continue;
                     }
+                    // **The two answers that are documents go to the pool**
+                    // (G-3), which is a tab's and not a column's: a diff opened
+                    // from one column is the same buffer whichever pane shows
+                    // it, and a column re-rooted since does not make the
+                    // document it opened wrong.
+                    let answer = match git_document_answer(response.answer) {
+                        Ok((source, outcome)) => {
+                            // Evicted, or never opened — the cancellation,
+                            // arriving as a dropped result.
+                            let Some(buffer) = tab.preview_pool.get_mut(&source) else {
+                                continue;
+                            };
+                            match outcome {
+                                Ok(text) => buffer.accept(preview::HeadOutcome::Read {
+                                    text,
+                                    // Nothing truncated it and no disk wrote it:
+                                    // both of those are facts about a file, and
+                                    // this document is not one.
+                                    truncated: false,
+                                    mtime: None,
+                                }),
+                                Err(fault) => buffer.decline(git_panel::fault_sentence(&fault)),
+                            }
+                            body |= index == self.active_tab;
+                            continue;
+                        }
+                        Err(answer) => answer,
+                    };
                     let Some(cache) = tab.git_trees.get_mut(&host.seat) else {
                         continue;
                     };
-                    let filed = cache.accept(response.answer);
+                    let filed = cache.accept(answer);
                     changed |= filed && index == self.active_tab;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -19049,7 +19352,11 @@ impl Runtime {
                 }
             }
         }
-        if changed && self.refresh_chrome() {
+        if body {
+            self.refresh_preview_for_layout();
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        } else if changed && self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -19345,6 +19652,144 @@ impl Runtime {
         self.set_files_view(seat, view.toggled())
     }
 
+    /// **A Git row's body, pressed** (G-3) — the row itself, not its verbs.
+    ///
+    /// Three rows do something and the page says which
+    /// ([`git_panel::row_document`]): a changed file opens its diff, a commit
+    /// turns its file list over, and one of those files opens that commit's
+    /// reading of it. Nothing is decided here — this resolves the repository the
+    /// press is about and carries out the answer, exactly as
+    /// [`Self::press_git_act`] carries out `press_outcome`'s.
+    fn press_git_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+        let active = self.active_tab;
+        // The rows as they are **on screen**, and the root as the *cache* has
+        // it: a document opened against a root the column has since left would
+        // be a diff of a file in another repository, and the cache is the one
+        // thing that knows which repository this column found.
+        let Some(root) = self.tabs[active]
+            .git_trees
+            .get(&seat)
+            .and_then(git::GitCache::root)
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        let Some(open) = self
+            .git_pages_shown
+            .get(&seat)
+            .and_then(|page| page.rows.get(index))
+            .and_then(|row| git_panel::row_document(row, &root))
+        else {
+            return Ok(());
+        };
+        match open {
+            git_panel::GitRowOpen::Document {
+                source,
+                name,
+                renamed_from,
+            } => self.open_git_document(seat, source, name, renamed_from),
+            git_panel::GitRowOpen::Expand { hash } => self.expand_commit(seat, &hash),
+        }
+    }
+
+    /// Put a repository's document on the preview seat, and ask for its body.
+    ///
+    /// **Two steps, and the mock-up's own shape** (G93): the seat is taken
+    /// first and the content arrives afterwards, because the content is not on
+    /// a disk to be read synchronously. What the mock-up did next was assign the
+    /// text into the buffer it had just opened; what happens here is a question
+    /// on the git lane, and [`Self::apply_git_results`] files the answer into
+    /// the same buffer.
+    ///
+    /// **A document already read is not read again.** A diff is a *snapshot* —
+    /// what the repository said at the moment it was asked — and staging the
+    /// file it is about does not rewrite the page you are looking at. That is
+    /// the honest reading of it: the pane's head names the document, the panel
+    /// beside it has already redrawn, and a diff that silently became a diff of
+    /// something else while you were reading it would be the one surface here
+    /// that changes under you. Pressing the row again re-asks, because that is a
+    /// person saying "now".
+    fn open_git_document(
+        &mut self,
+        seat: SeatId,
+        source: preview::PreviewSource,
+        name: String,
+        renamed_from: Option<String>,
+    ) -> Result<()> {
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_source_on(surface, source.clone(), name)?;
+        let unread = self
+            .preview_pool
+            .get(&source)
+            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+        if !unread {
+            return Ok(());
+        }
+        let question = match &source {
+            preview::PreviewSource::GitDiff { root, path, staged } => git::GitQuestion::Diff {
+                root: root.clone(),
+                path: path.clone(),
+                staged: *staged,
+                renamed_from,
+            },
+            preview::PreviewSource::GitShow { root, hash, path } => git::GitQuestion::Show {
+                root: root.clone(),
+                hash: hash.clone(),
+                path: path.clone(),
+                renamed_from,
+            },
+            // The graph is G-4's document and has no question on this lane yet;
+            // a file is not this door's business at all.
+            preview::PreviewSource::File(_) | preview::PreviewSource::GitGraph { .. } => {
+                return Ok(());
+            }
+        };
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        if !self.git_worker.request(git::GitRequest {
+            host: LeafId { tab: tab_id, seat },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+        Ok(())
+    }
+
+    /// Turn one commit's file list over (R15).
+    ///
+    /// The toggle is the column's ([`seats::FilesLeafState::git_expanded`]) and
+    /// the list is the cache's, which is the same split the whole page is built
+    /// on: what the repository said, and what this column is looking at.
+    fn expand_commit(&mut self, seat: SeatId, hash: &str) -> Result<()> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+            return Ok(());
+        };
+        let opened = git_panel::toggled_expansion(state.git_expanded.as_deref(), hash);
+        state.git_expanded.clone_from(&opened);
+        // Shutting one asks nothing: the answer stays in the cache, so pressing
+        // the same commit again draws its files without a second subprocess.
+        if let Some(hash) = opened
+            && let Some(cache) = self.tabs[active].git_trees.get_mut(&seat)
+            && let Some(question) = cache.begin_commit_files(&hash)
+            && !self.git_worker.request(git::GitRequest {
+                host: LeafId { tab: tab_id, seat },
+                question,
+            })
+        {
+            self.disable_git_worker();
+        }
+        // The list is chrome, so it is asked for the chrome way — see
+        // [`Self::set_files_view`] for what happens when it is not.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// One of a Git row's verbs, pressed.
     ///
     /// **The gate is here and not in the worker** (R14): a discard is stopped
@@ -19536,9 +19981,16 @@ impl Runtime {
                 pages.insert(seat, git_panel::GitPanelContent::default());
                 continue;
             };
+            // Which commit is open is the *column's* (R15), so it is read off
+            // the leaf beside the cache rather than out of it — the cache holds
+            // the answer, this decides whether it is on screen.
+            let expanded = self.tabs[active]
+                .files
+                .get(&seat)
+                .and_then(|state| state.git_expanded.clone());
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
-            let mut content = git_panel::build(&cache, scale, &mut measure);
+            let mut content = git_panel::build(&cache, expanded.as_deref(), scale, &mut measure);
             content.scroll_px = self.tabs[active]
                 .git_scroll
                 .get(&seat)
@@ -20991,6 +21443,7 @@ impl Runtime {
         // be left to a press falling through, because every opener stops its own
         // press from travelling.
         self.profile_menu.close();
+        self.pane_menu = None;
         self.root_menu.toggle(seat);
         // Pressing the head is also how you say "type here", and the column is
         // somewhere you can type — so the button lends the keyboard exactly as
@@ -21257,6 +21710,7 @@ impl Runtime {
         self.profile_menu.close();
         self.root_menu.close();
         self.close_file_menu()?;
+        self.close_pane_menu()?;
         self.preview_menu.toggle(seat);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -21360,6 +21814,7 @@ impl Runtime {
         // a popup, and this menu is very often *about a row inside it*.
         self.profile_menu.close();
         self.root_menu.close();
+        self.pane_menu = None;
         self.file_menu = Some(FileMenuState {
             point,
             activation,
@@ -21482,6 +21937,108 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    // ── the pane head's context menu (user ruling, 2026-08-15) ──────────────
+
+    /// Where the pane menu is, if one is up. [`Runtime::file_menu_layout`]'s
+    /// twin, and anchored the same way: at the point the pointer was at, which
+    /// no re-layout can move or destroy.
+    fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
+        let point = self.pane_menu.as_ref()?.point;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        Some(profiles::pane_menu_layout(
+            point,
+            (width as f32, height as f32),
+            scale,
+            &mut measure,
+        ))
+    }
+
+    /// Raise the menu on one pane head.
+    ///
+    /// **Terminal heads only.** All three verbs are about a shell: two of them
+    /// put a second one beside it, and closing a files column or a preview is
+    /// what that head's own `×` is for. A menu of three verbs that a surface
+    /// cannot perform is worse than no menu — the same refusal
+    /// [`Runtime::open_file_menu`] makes for a directory row, made here for the
+    /// same reason and in the same one place rather than at each caller.
+    fn open_pane_menu(&mut self, seat: SeatId, point: [f32; 2]) -> Result<()> {
+        if !self.sessions.contains_key(&seat) {
+            return Ok(());
+        }
+        // E61: the opener closes the others.
+        self.profile_menu.close();
+        self.root_menu.close();
+        self.file_menu = None;
+        self.pane_menu = Some(PaneMenuState {
+            point,
+            seat,
+            hover: None,
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The pane menu's own level of the overlay stack, or nothing when none is
+    /// up.
+    fn pane_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some(layout) = self.pane_menu_layout() else {
+            return Vec::new();
+        };
+        let Some(menu) = self.pane_menu.as_ref() else {
+            return Vec::new();
+        };
+        profiles::pane_menu_build(&layout, menu.hover)
+    }
+
+    fn close_pane_menu(&mut self) -> Result<bool> {
+        if self.pane_menu.take().is_none() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Do what one row of the pane menu says, and put the menu away.
+    ///
+    /// The menu closes *first*, on [`Runtime::run_file_menu_row`]'s order and
+    /// for a sharper version of its reason: two of these verbs rebuild the
+    /// layout the menu is drawn over, and the third destroys the pane it was
+    /// raised on.
+    ///
+    /// The seat comes out of the menu, never from the pointer. Between the right
+    /// click that raised this and the left click that ran it, the pointer has
+    /// travelled — down the menu, which is drawn over some *other* pane as often
+    /// as not.
+    fn run_pane_menu_row(&mut self, row: profiles::PaneMenuRow) -> Result<()> {
+        let Some(menu) = self.pane_menu.take() else {
+            return Ok(());
+        };
+        let seat = menu.seat;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        // The pane may have gone while the menu stood open — its shell exited,
+        // or another gesture took it. Every verb below needs it to still be
+        // there, so it is asked once.
+        if !self.sessions.contains_key(&seat) {
+            return Ok(());
+        }
+        match row {
+            profiles::PaneMenuRow::SplitRight => self.split_terminal_seat(seat, Axis::Row),
+            profiles::PaneMenuRow::SplitDown => self.split_terminal_seat(seat, Axis::Col),
+            // The `×`'s own verb, reached through the `×`'s own door — so the
+            // gate a destruction has to pass is passed once and not twice.
+            profiles::PaneMenuRow::ClosePane => self.close_pane(seat),
+        }
     }
 
     /// Do what one row of the file menu says, and put the menu away.
@@ -22013,11 +22570,11 @@ impl Runtime {
     /// it is in" is not an answer to "where is this file").
     fn reveal_float_file(&mut self, id: float::FloatId) -> Result<()> {
         let surface = PreviewSurface::Float(id);
-        // A file's door, for [`Self::reveal_preview_file`]'s reason.
+        // A file's door, for [`Self::reveal_preview_file`]'s reason — including
+        // the working-tree file a git document is a reading of.
         let Some(path) = self
             .preview_buffer_on(surface)
-            .and_then(|buffer| buffer.source.file_path())
-            .map(Path::to_path_buf)
+            .and_then(|buffer| revealable_preview_file(&buffer.source))
             .or_else(|| {
                 self.preview_pane(surface)
                     .and_then(|pane| pane.image.as_ref())
@@ -22638,12 +23195,16 @@ impl Runtime {
         let (title, path, dirty, flip_to_source) = match self.preview_buffer_on(surface) {
             Some(buffer) => (
                 buffer.name.clone(),
-                // The foot's left hand is "where is this", which only a file
-                // answers — see [`Self::dress_preview_foot`].
+                // The foot's left hand is "where is this": a path for a file,
+                // and the repository and the place in it for a document
+                // composed out of one — the docked foot's own answer, on the
+                // torn-off window, because it is the same strip
+                // ([`Self::dress_preview_foot`]).
                 buffer
                     .source
                     .file_path()
                     .map(|path| path.to_string_lossy().into_owned())
+                    .or_else(|| buffer.source.composed_lead())
                     .unwrap_or_default(),
                 buffer.dirty,
                 // This window's own face, not the file's — a pane behind it may
@@ -22739,7 +23300,32 @@ impl Runtime {
             },
             float::FloatBody {
                 quads: Vec::new(),
-                labels: Vec::new(),
+                // **The one line a composed document prints instead of a body**
+                // (G-3) — a diff with nothing in it, or a repository that would
+                // not answer. It rides the tenant's own channel because a float
+                // has no seat placement for the docked pane's message lane to
+                // find, and without it a torn-off empty diff is a blank window.
+                //
+                // Quiet ink, centred, at the docked notice's size: it is the
+                // same sentence in the same voice, and a window is not a
+                // different kind of surface for it to be said on.
+                labels: self
+                    .preview_buffer_on(surface)
+                    .and_then(preview::PreviewBuffer::body_notice)
+                    .map(|words| bt_render::ChromeLabel {
+                        text: words.to_owned(),
+                        rect: geometry.body,
+                        font_size_px: bt_render::SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        color: palette.body_hint_text,
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        weight: bt_render::ChromeLabelWeight::Regular,
+                        tabular_numerals: false,
+                        clip: Some(geometry.body),
+                    })
+                    .into_iter()
+                    .collect(),
                 sprites: Vec::new(),
             },
             scale,
@@ -24080,10 +24666,10 @@ impl Runtime {
         }
         self.renderer
             .set_cursor_blink_visible(self.cursor_blink.visible());
-        self.publish_frame(FrameTrigger {
-            occurred_at: now,
-            source: FrameSource::Expose,
-        })
+        // The phase it just changed lives in the renderer, not in the frame:
+        // this is a present the caret owes, not a picture. Same road as the
+        // strip's ring, and for the same reason.
+        self.publish_chrome_frame(now)
     }
 
     /// Redraw the tab strip if anything in a mark slot has moved.
@@ -24095,6 +24681,25 @@ impl Runtime {
     /// every frame they are alive, and neither moves at all once its session
     /// stops working.
     fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {
+        // **[`STRIP_ANIMATION_FRAME`] is a rate, and a rate nothing enforces is
+        // not a rate.** `about_to_wait` runs after *every* event, not only when
+        // a deadline expires — and the present each tick asks for is itself an
+        // event. The arc moves far enough in half a frame to owe another, so
+        // the ring free-ran at whatever the loop could turn: measured at **120
+        // ticks a second against a declared 62.5**, with the swapchain's own
+        // vsync as the only thing throttling it. Two frames of animation
+        // composited onto a 60Hz design, at twice the price.
+        //
+        // The gate is the constant, read as what it says it is. A tick skipped
+        // here is not a tick lost: [`Self::strip_animation_deadline`] is
+        // clamped to the same clock, so the loop is woken exactly when the ring
+        // is next allowed to move.
+        if let Some(last) = self.strip_animation_ticked_at
+            && now.saturating_duration_since(last) < STRIP_ANIMATION_FRAME
+        {
+            return Ok(());
+        }
+        self.strip_animation_ticked_at = Some(now);
         let active = self.active_tab;
         let window_is_focused = self.window_focused;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -24260,10 +24865,11 @@ impl Runtime {
         if !self.refresh_chrome() && !panes_owe {
             return Ok(());
         }
-        self.publish_frame(FrameTrigger {
-            occurred_at: now,
-            source: FrameSource::Expose,
-        })
+        // Everything this pass can have moved is now in the renderer's hands or
+        // in a pane transform the present re-samples. What is owed is a
+        // present, and only when the picture underneath it is stale is it a
+        // whole frame — see [`chrome_tick_reuses_picture`].
+        self.publish_chrome_frame(now)
     }
 
     /// When the tab strip next needs waking, or `None` when nothing is moving.
@@ -24273,6 +24879,18 @@ impl Runtime {
     /// no working session, no indeterminate ring and no tween in flight asks
     /// for no wake-ups at all, which is why this is a deadline rather than a
     /// standing 60fps loop.
+    /// The earliest instant [`Self::advance_strip_animation`] will do anything,
+    /// given when it last did.
+    ///
+    /// Every animation deadline this window reports is clamped to it. Reporting
+    /// an earlier one would wake the loop to be turned away by the rate gate
+    /// and then re-arm the same deadline — a spin dressed as a schedule.
+    fn strip_animation_next_tick(&self, now: Instant) -> Instant {
+        self.strip_animation_ticked_at
+            .map_or(now, |last| last + STRIP_ANIMATION_FRAME)
+            .max(now)
+    }
+
     fn strip_animation_deadline(&self, now: Instant) -> Option<Instant> {
         let motion = self.motion;
         let tabs_moving = self.tabs.iter().any(|tab| {
@@ -24343,6 +24961,9 @@ impl Runtime {
         .into_iter()
         .flatten()
         .min()
+        // Clamped to the gate that will actually admit the tick. See
+        // [`Self::strip_animation_next_tick`].
+        .map(|deadline| deadline.max(self.strip_animation_next_tick(now)))
     }
 
     /// The rail as the chrome would draw it, quantised to what can reach the
@@ -24812,6 +25433,26 @@ impl Runtime {
 
     fn forwarded_mouse_hit(&self) -> Option<bt_render::GridHit> {
         let (_, position, frame) = self.pane_hit_context()?;
+        let hit = self
+            .renderer
+            .metrics()
+            .hit_test_frame(frame, position.x, position.y)?;
+        Some(live_viewport_mouse_hit(frame, hit))
+    }
+
+    /// The forwarded cell under the pointer, refused unless the pointer is in
+    /// the pane whose child is about to be told about it.
+    ///
+    /// [`Self::forwarded_mouse_hit`] answers "where is the pointer", which is
+    /// the whole question for a press — the press is what put the pointer's pane
+    /// on the receiving end. A wheel notch picks its pane first, on its own
+    /// rules, and only then asks for coordinates; the guard is what keeps those
+    /// two answers from being about different panes.
+    fn forwarded_mouse_hit_in(&self, seat: SeatId) -> Option<bt_render::GridHit> {
+        let (hit_seat, position, frame) = self.pane_hit_context()?;
+        if hit_seat != seat {
+            return None;
+        }
         let hit = self
             .renderer
             .metrics()
@@ -25509,6 +26150,42 @@ impl Runtime {
         changed
     }
 
+    /// Put a pointer gesture's bytes in **one named pane's** shell.
+    ///
+    /// [`Self::send_user_input`] writes through the focused-leaf deref, which is
+    /// the right shell for a keystroke and the wrong one for a wheel notch: the
+    /// notch belongs to the pane under the pointer (user ruling, 2026-08-15),
+    /// and a report addressed to the keyboard's pane is a row and a column from
+    /// one grid delivered into another. Named seat, one write, no deref.
+    ///
+    /// No return-to-live half, and not because this path happens not to need one
+    /// — because a mouse gesture never has one. [`UserInputKind::Mouse`] is
+    /// exactly the kind whose `returns_view_to_live` is false, so the branch
+    /// would be dead code standing where a policy looks like it lives.
+    fn send_mouse_input_to(
+        &mut self,
+        seat: SeatId,
+        bytes: &[u8],
+        context: &'static str,
+    ) -> Result<()> {
+        // Typing into the stand-in shell is what makes it yours — and a wheel
+        // forwarded into a program running there is as much a claim on it as a
+        // keystroke. Same sentence as `send_user_input`'s, for the same reason.
+        if self.placeholder_tab == Some(self.tabs[self.active_tab].id) {
+            self.placeholder_tab = None;
+        }
+        self.pending_keyboard_at = Some(Instant::now());
+        let active = self.active_tab;
+        if let Some(pty) = self.tabs[active]
+            .sessions
+            .get_mut(&seat)
+            .and_then(|leaf| leaf.pty.as_mut())
+        {
+            pty.write(bytes).with_context(|| context)?;
+        }
+        Ok(())
+    }
+
     fn send_user_input(
         &mut self,
         bytes: &[u8],
@@ -25847,6 +26524,26 @@ impl Runtime {
             let over = profiles::file_menu_hit(&layout, position.x, position.y);
             if let Some(row) = over
                 && let Some(menu) = self.file_menu.as_mut()
+                && menu.hover != row
+            {
+                menu.hover = row;
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            if over.is_some() {
+                self.note_tooltip(None)?;
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
+        }
+        // And the pane head's menu on the same level, by the same three lines.
+        // The two are never up together, so this is the file menu's block asked
+        // about the other one rather than a second policy.
+        if let Some(layout) = self.pane_menu_layout() {
+            let over = profiles::pane_menu_hit(&layout, position.x, position.y);
+            if let Some(row) = over
+                && let Some(menu) = self.pane_menu.as_mut()
                 && menu.hover != row
             {
                 menu.hover = row;
@@ -27885,6 +28582,18 @@ impl Runtime {
                 self.tab_clicks.interrupt();
                 self.undock_files_column(seat)?;
             }
+            // The `⊞` (user ruling, 2026-08-15). Its own arm rather than a
+            // sub-case of the header's, which is also what keeps it out of the
+            // drag: this arm never touches `pane_press`, so the six pixels of
+            // travel that would begin a tear-out are never armed here.
+            //
+            // Along the pane's longer side, which is the same "auto" the
+            // duplicate chord takes — and the same verb underneath, so the two
+            // doors onto one action cannot drift apart.
+            seats::ChromeTarget::PaneSplit(seat) => {
+                self.tab_clicks.interrupt();
+                self.split_terminal_seat(seat, self.pane_split_axis(seat))?;
+            }
             seats::ChromeTarget::FilesRow { seat, index } => {
                 self.tab_clicks.interrupt();
                 // P81, in the mock-up's own order: the row is armed as a drag
@@ -27910,15 +28619,15 @@ impl Runtime {
                 self.files_row_clicks.interrupt();
                 self.set_files_view(seat, view)?;
             }
-            // A Git row's body is not a verb in this slice. It becomes one in
-            // G-3, where a press opens that file's diff in the preview seat
-            // (mock-up 7974, `openDiffPreview`); until then the row is the hover
-            // host its buttons live on and nothing more, which is why it takes
-            // the press and does nothing with it rather than letting it fall
-            // through to the pane underneath.
-            seats::ChromeTarget::GitRow { .. } => {
+            // A Git row's body, which is a verb as of G-3: a changed file opens
+            // its diff in the preview seat (mock-up 7974, `openDiffPreview`), a
+            // commit turns its file list over (R15). It breaks a click chain for
+            // `.files-foot`'s reason — this is a press on a control, not the
+            // beginning of a gesture somewhere else.
+            seats::ChromeTarget::GitRow { seat, index } => {
                 self.tab_clicks.interrupt();
                 self.files_row_clicks.interrupt();
+                self.press_git_row(seat, index)?;
             }
             seats::ChromeTarget::GitAct { seat, index, act } => {
                 self.tab_clicks.interrupt();
@@ -28117,6 +28826,29 @@ impl Runtime {
                 }
             }
         }
+        // The pane head's menu, on the file menu's level and by its three rules:
+        // a row runs on a left press, the menu's own padding swallows, and a
+        // press outside puts it away and then goes on being the press it always
+        // was — including a second right press, which is how a context menu is
+        // moved from one head to another.
+        if let (Some(layout), Some(position)) = (self.pane_menu_layout(), self.pointer_position) {
+            match profiles::pane_menu_hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed
+                        && button == MouseButton::Left
+                        && let Some(row) = row
+                    {
+                        self.run_pane_menu_row(row)?;
+                    }
+                    return Ok(());
+                }
+                None => {
+                    if state == ElementState::Pressed {
+                        self.close_pane_menu()?;
+                    }
+                }
+            }
+        }
         // **The glance card takes its own presses** (user ruling, 2026-08-14),
         // above the float and below the menus — the order it is drawn in.
         //
@@ -28136,6 +28868,30 @@ impl Runtime {
             && let Some(activation) = self.file_row_under(position)
         {
             self.open_file_menu(activation, [position.x as f32, position.y as f32])?;
+            return Ok(());
+        }
+        // The right press that raises the pane head's menu (user ruling,
+        // 2026-08-15). Below the file rows because a files column's head sits
+        // over its own rows and the rows are the more specific thing; above the
+        // chrome router below because that router answers only the left button
+        // and would otherwise let this press fall all the way through to the
+        // shell's own mouse protocol.
+        //
+        // Every part of the head, its buttons included. A right click on the `×`
+        // is not a request to close — the head's whole bar is one context, and
+        // an 18-pixel hole in it that silently means something else is exactly
+        // the kind of edge a hand finds by accident.
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && let Some(position) = self.pointer_position
+            && let Some(
+                seats::ChromeTarget::PaneHeader(seat)
+                | seats::ChromeTarget::PaneClose(seat)
+                | seats::ChromeTarget::PaneFiles(seat)
+                | seats::ChromeTarget::PaneSplit(seat),
+            ) = self.chrome_target_at(position)
+        {
+            self.open_pane_menu(seat, [position.x as f32, position.y as f32])?;
             return Ok(());
         }
         // A peek header press that never travelled stops waiting here, and means
@@ -28553,20 +29309,16 @@ impl Runtime {
         // The rail begins at the title bar's lower edge, so a pointer up in the
         // caption run is not in the rail however far left it is.
         let top = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX) * scale;
-        let inside = position.is_some_and(|position| position.y >= top && position.x < width);
-        // **G102 — the rail has unfinished business.** A rectangle can only ever
-        // answer "is the pointer near the rail", and a transient peek is the case
-        // where that is the wrong question: the peek hangs off a rail row and
-        // floats out past the rail's own edge, so moving onto the thing the rail
-        // just opened would otherwise read as having left it — and the rail would
-        // retract out from under it, taking the anchor with it.
-        //
-        // A **pinned** window holds nothing open, and the mock-up is explicit
-        // about why (8735-8738): it has been torn off into a free-floating
-        // window, so the rail is free to retract normally. That is the whole
-        // difference between the two modes stated once more, in the one place
-        // where it changes what a *different* piece of chrome does.
-        self.aim_rail_at(inside || self.float.peek_is_open());
+        // The peek is handed over as **the trigger it hangs from**, not as a
+        // yes/no: only a peek hanging off a rail row is the rail's business, and
+        // that is a question about identity that no boolean can carry. See
+        // [`rail_zone_wants_open`].
+        self.aim_rail_at(rail_zone_wants_open(
+            position,
+            width,
+            top,
+            self.float.peek().and_then(|win| win.origin),
+        ));
     }
 
     /// Point both of the rail's clocks at `open`.
@@ -29031,21 +29783,9 @@ impl Runtime {
                 return self.publish_interaction_frame();
             }
         }
-        let target_is_focused = target_seat == self.focused_leaf;
-        let modes = self.sessions.get(&target_seat).map_or_else(
-            || self.session.terminal_modes(),
-            |leaf| leaf.session.terminal_modes(),
-        );
-        let target_is_scrolled = self
-            .sessions
-            .get(&target_seat)
-            .is_some_and(|leaf| leaf.projection.is_scrolled());
-        match wheel_route(
-            target_is_focused,
-            self.modifiers.shift_key(),
-            modes,
-            target_is_scrolled,
-        ) {
+        let modes = self.leaf_terminal_modes(target_seat);
+        let target_is_scrolled = self.leaf(target_seat).projection.is_scrolled();
+        match wheel_route(self.modifiers.shift_key(), modes, target_is_scrolled) {
             WheelRoute::MouseReport => {
                 // Mouse-protocol wheel reports are per-notch, never per-system-scroll-line: the
                 // application applies its own lines-per-event step, so multiplying by the Windows
@@ -29055,7 +29795,10 @@ impl Runtime {
                 if notches == 0 {
                     return Ok(());
                 }
-                let Some(hit) = self.forwarded_mouse_hit() else {
+                // The cell under the pointer *in the pane being addressed*. A hit
+                // taken from anywhere else would be a row and a column measured in
+                // one grid and delivered to another.
+                let Some(hit) = self.forwarded_mouse_hit_in(target_seat) else {
                     return Ok(());
                 };
                 let button = if notches > 0 {
@@ -29071,25 +29814,29 @@ impl Runtime {
                     hit.column,
                     self.modifiers,
                 );
-                self.send_user_input(
+                self.send_mouse_input_to(
+                    target_seat,
                     &one.repeat(notches.unsigned_abs() as usize),
                     "forward SGR mouse wheel to PTY",
-                    UserInputKind::Mouse,
                 )
             }
             WheelRoute::ArrowKeys => {
-                let lines = self.take_forward_wheel_lines(delta);
+                let lines = self.take_forward_wheel_lines(target_seat, delta);
                 if lines == 0 {
                     return Ok(());
                 }
-                // The focused shell's cursor mode, and this route is only ever
-                // reached for the focused pane — see [`wheel_route`].
-                let bytes =
-                    input::alternate_scroll_bytes(lines, self.session.application_cursor_mode());
-                self.send_user_input(
+                // The addressed shell's own cursor mode. `ESC O A` and `ESC [ A`
+                // are different bytes, and which one a program understands is a
+                // fact about *that* program — a hovered vim judged by the focused
+                // shell's mode would be sent letters to print.
+                let bytes = input::alternate_scroll_bytes(
+                    lines,
+                    self.leaf_application_cursor_mode(target_seat),
+                );
+                self.send_mouse_input_to(
+                    target_seat,
                     &bytes,
                     "forward alternate-screen wheel to PTY",
-                    UserInputKind::Mouse,
                 )
             }
             WheelRoute::Local => self.scroll_view_exact_in(target_seat, event_subpixels),
@@ -29100,13 +29847,17 @@ impl Runtime {
     /// Whole-line quantization for the alternate-scroll emulation route: arrow-key emulation
     /// mirrors the local scroll distance, so the system lines-per-notch setting applies here.
     /// Fractional motion parks in the forwarding accumulators, never the local subpixel one.
-    fn take_forward_wheel_lines(&mut self, delta: MouseScrollDelta) -> i32 {
+    ///
+    /// `seat` is the pane being addressed, because "one screen at a time" is a
+    /// number of rows and rows are per pane. Reading the focused leaf's count
+    /// would send a hovered half-height pane a full window's worth of arrows.
+    fn take_forward_wheel_lines(&mut self, seat: SeatId, delta: MouseScrollDelta) -> i32 {
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
                 let multiplier =
                     match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
                         bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
-                        bt_platform::WheelScrollAmount::Page => self.grid.rows.get() as f64,
+                        bt_platform::WheelScrollAmount::Page => self.leaf_wheel_rows(seat),
                     };
                 self.line_wheel_remainder += f64::from(y) * multiplier;
                 drain_whole_units(&mut self.line_wheel_remainder, 1.0) as i32
@@ -29314,6 +30065,36 @@ impl Runtime {
                 // Everything else is swallowed rather than passed down. With a
                 // menu on screen there is nothing to type into — the same
                 // sentence D49 makes about a focused column, and the same answer.
+                _ => {}
+            }
+            return Ok(());
+        }
+        // The pane head's menu owns the keyboard on the same terms and by the
+        // same four rules. It is a context menu raised at a point, which is the
+        // one shape in this window that has already been ruled walkable.
+        if self.pane_menu.is_some() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    if !event.repeat {
+                        self.close_pane_menu()?;
+                    }
+                }
+                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                    let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
+                    if let Some(menu) = self.pane_menu.as_mut() {
+                        menu.hover = Some(profiles::PaneMenuRow::step(menu.hover, forwards));
+                    }
+                    if self.refresh_overlay() {
+                        self.present_chrome_change()?;
+                    }
+                }
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                    if !event.repeat
+                        && let Some(row) = self.pane_menu.as_ref().and_then(|menu| menu.hover)
+                    {
+                        self.run_pane_menu_row(row)?;
+                    }
+                }
                 _ => {}
             }
             return Ok(());
@@ -29923,46 +30704,15 @@ impl Runtime {
         Ok(())
     }
 
-    fn redraw(&mut self) -> Result<()> {
-        let Some((frame, trigger)) = self.pending_frames.take() else {
-            return Ok(());
-        };
-        if let Some(expected) = self.pending_resize_present {
-            ensure!(
-                frame_matches_grid(&frame, expected),
-                "resize presentation requires the newly projected grid: expected {}x{}, got {}x{}",
-                expected.columns,
-                expected.rows,
-                frame.columns,
-                frame.grid_rows
-            );
-        }
-        let has_text = frame
-            .cells
-            .iter()
-            .take(
-                frame
-                    .drawable_rows()
-                    .saturating_mul(frame.columns.get() as usize),
-            )
-            .any(|cell| !cell.text.trim().is_empty());
-        // The other panes of this tab. The focused leaf's frame came out of the
-        // slot above, with every presentation-hold and resize contract the slot
-        // exists to enforce still attached to it; the panes the user is not
-        // typing in hold nothing, so they are projected here, at the moment they
-        // are drawn.
-        //
-        // A lone terminal leaf produces exactly one entry, whose rectangle is
-        // the same `pane_body_viewport` answer `resolve_seat_layout` already
-        // handed the renderer — so the slice is N = 1 and the command stream is
-        // the one that was always issued. The loop is not a second path; it is
-        // the same path counted.
-        let focused_leaf = self.focused_leaf;
+    /// Every terminal pane's rectangle pair on this frame's own clock, and the
+    /// preview seat's picture re-placed against the same one.
+    ///
+    /// Lifted out of [`Self::redraw`] so the chrome-only present can ask the
+    /// identical question: a ring turning while a pane is mid-flight has to be
+    /// drawn through the transform this instant, and a second copy of this
+    /// arithmetic would be a second answer.
+    fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        // U8 — one instant for the whole frame, as everywhere else a tween is
-        // read: two panes of one present sampled at two times would be two
-        // frames of the same animation composited together.
-        let now = Instant::now();
         let motion = self.motion;
         let bodies: Vec<PaneDraw> = self
             .seats
@@ -30009,6 +30759,144 @@ impl Runtime {
             self.renderer
                 .place_preview_image(placement.seat, placement.clip);
         }
+        bodies
+    }
+
+    /// Put the picture that is already on the glass back on the glass, with
+    /// whatever the renderer has been told since.
+    ///
+    /// **No projection, no capture, no composition.** Every frame here is one
+    /// this window has already presented; the only things that changed are held
+    /// by the renderer — the chrome quads, the caret's blink phase — and by the
+    /// pane transforms, which are re-sampled because they are a function of
+    /// this instant. See [`chrome_tick_reuses_picture`] for why that is a
+    /// complete account of what an animation tick can have moved.
+    fn present_retained_picture(&mut self) -> Result<()> {
+        self.chrome_present_pending = false;
+        if self.last_presented_frame.is_none() {
+            return Ok(());
+        }
+        let focused_leaf = self.focused_leaf;
+        let now = Instant::now();
+        // Before the frame is borrowed: this samples the tweens and re-places
+        // the preview raster, both of which want the renderer mutably.
+        let bodies = self.pane_draws(now);
+        let frame = self
+            .last_presented_frame
+            .as_ref()
+            .expect("the picture was there one statement ago and nothing here removes it");
+        let focused_body = bodies
+            .iter()
+            .find(|pane| pane.seat == focused_leaf)
+            .copied()
+            .unwrap_or_else(|| {
+                let viewport = self.renderer.seat_viewport();
+                PaneDraw {
+                    seat: focused_leaf,
+                    viewport,
+                    clip: viewport,
+                }
+            });
+        let active = self.active_tab;
+        let mut seat_frames = Vec::with_capacity(bodies.len());
+        seat_frames.push(bt_render::SeatFrame {
+            seat: focused_body.viewport,
+            clip: focused_body.clip,
+            frame,
+            focused: self.keyboard_owner_is_a_shell(),
+        });
+        // Each unfocused pane's own last picture, for the same reason the
+        // focused one's is reused: a pane that has not been given anything new
+        // to say is showing what it last said, and re-projecting it would be
+        // asking it to say the same thing at the price of a whole capture.
+        // A pane that has never presented is simply not drawn this present —
+        // it has nothing on the glass to keep.
+        for pane in &bodies {
+            if pane.seat == focused_leaf {
+                continue;
+            }
+            let Some(leaf) = self.tabs[active].sessions.get(&pane.seat) else {
+                continue;
+            };
+            let Some(projected) = leaf.last_presented_frame.as_ref() else {
+                continue;
+            };
+            seat_frames.push(bt_render::SeatFrame {
+                seat: pane.viewport,
+                clip: pane.clip,
+                frame: projected,
+                focused: false,
+            });
+        }
+        let trigger = FrameTrigger {
+            occurred_at: now,
+            source: FrameSource::Expose,
+        };
+        match self
+            .renderer
+            .present_seats(&seat_frames, trigger)
+            .context("re-present the retained terminal picture")?
+        {
+            PresentOutcome::Presented(_) => Ok(()),
+            // The swapchain was not ready. The picture is unchanged and still
+            // owed, so the debt is simply re-filed — there is no frame to put
+            // back in the slot, which is the whole point of this path.
+            PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
+                self.chrome_present_pending = true;
+                self.window.request_redraw();
+                Ok(())
+            }
+        }
+    }
+
+    fn redraw(&mut self) -> Result<()> {
+        let Some((frame, trigger)) = self.pending_frames.take() else {
+            // Nothing composed. If an animation owes the glass a present of
+            // what is already there, this is where that debt is paid.
+            if self.chrome_present_pending {
+                return self.present_retained_picture();
+            }
+            return Ok(());
+        };
+        // A composed frame supersedes any chrome-only debt: it is about to be
+        // presented, chrome and all.
+        self.chrome_present_pending = false;
+        if let Some(expected) = self.pending_resize_present {
+            ensure!(
+                frame_matches_grid(&frame, expected),
+                "resize presentation requires the newly projected grid: expected {}x{}, got {}x{}",
+                expected.columns,
+                expected.rows,
+                frame.columns,
+                frame.grid_rows
+            );
+        }
+        let has_text = frame
+            .cells
+            .iter()
+            .take(
+                frame
+                    .drawable_rows()
+                    .saturating_mul(frame.columns.get() as usize),
+            )
+            .any(|cell| !cell.text.trim().is_empty());
+        // The other panes of this tab. The focused leaf's frame came out of the
+        // slot above, with every presentation-hold and resize contract the slot
+        // exists to enforce still attached to it; the panes the user is not
+        // typing in hold nothing, so they are projected here, at the moment they
+        // are drawn.
+        //
+        // A lone terminal leaf produces exactly one entry, whose rectangle is
+        // the same `pane_body_viewport` answer `resolve_seat_layout` already
+        // handed the renderer — so the slice is N = 1 and the command stream is
+        // the one that was always issued. The loop is not a second path; it is
+        // the same path counted.
+        let focused_leaf = self.focused_leaf;
+        // U8 — one instant for the whole frame, as everywhere else a tween is
+        // read: two panes of one present sampled at two times would be two
+        // frames of the same animation composited together.
+        let now = Instant::now();
+        let bodies = self.pane_draws(now);
         let active = self.active_tab;
         // The pointer's marks belong to the pane the pointer is in, focused or not, so an
         // unfocused pane that is being hovered is projected *and then decorated* — the same two
@@ -30080,6 +30968,10 @@ impl Runtime {
             .context("render terminal frame")?
         {
             PresentOutcome::Presented(receipt) => {
+                // The glass now holds the newest picture anyone composed. This
+                // is the equality [`chrome_tick_reuses_picture`] reads as its
+                // licence to answer the next animation tick from the screen.
+                self.presented_picture_revision = self.terminal_content_revision;
                 if self.window_shown && !self.first_visible_present_dpi_checked {
                     self.first_visible_present_dpi_checked = true;
                     self.reconcile_authoritative_dpi("first-present")?;
@@ -30717,9 +31609,8 @@ enum WheelRoute {
     Nothing,
 }
 
-/// **"A wheel scrolls whatever it hovers but whispers protocol only to the
-/// focused shell"** — the wheel ruling, as a function of the four facts it turns
-/// on.
+/// **"A wheel notch belongs to the pane it is over"** (user ruling, 2026-08-15)
+/// — the wheel ruling, as a function of the three facts it turns on.
 ///
 /// A function rather than a run of `if`s inside the event handler, because the
 /// ruling is a claim about a decision and a decision that cannot be named cannot
@@ -30727,38 +31618,34 @@ enum WheelRoute {
 /// the PTY, the projection — happens *after* this returns, so the part that is a
 /// policy is testable and the part that is plumbing is not asked to be.
 ///
-/// The two halves of the ruling are deliberately independent here:
+/// **Focus is not one of the facts, and its absence from the signature is the
+/// ruling.** One law for both screens: the pointer names the pane, and what that
+/// pane is *doing* — a shell with scrollback, or a program that has taken the
+/// whole screen — decides only whether the notch scrolls our own buffer or is
+/// spoken to that pane's child. Which pane holds the keyboard decides neither.
 ///
-/// * **Scrolling follows the pointer.** `target_is_focused` never turns a
-///   [`Self::Local`] into a [`Self::Nothing`]. Reading a build log in one pane
-///   while typing in another is the reason to have two panes at all, and it is
-///   the thing that breaks the moment focus is allowed into this decision for
-///   any purpose but bytes.
-/// * **Bytes follow the keyboard.** A mouse report carries a row and a column,
-///   and those coordinates mean something only to the shell whose grid measured
-///   them; sending an unfocused pane's notch to a TUI would move a cursor in a
-///   program the pointer is nowhere near. So both forwarding routes — the SGR
-///   report and the arrow-key emulation, which is equally bytes — require the
-///   target to hold the keyboard.
+/// The bug this replaces (user report, 2026-08-15): the two forwarding routes
+/// each required the target to be focused, on the reasoning that a mouse
+/// report's row and column mean something only to the shell that measured them.
+/// They do — and they are measured in *the pane the pointer is in*, which is the
+/// pane being addressed, so the coordinates were never the problem. What the
+/// focus gate actually produced was an unfocused alternate-screen pane falling
+/// through to [`WheelRoute::Local`], where "local" means scrolling an alternate
+/// screen's scrollback, which by definition is empty: the wheel over an
+/// unfocused TUI moved nothing and said nothing. Hovering a pane running Claude
+/// Code and turning the wheel did *nothing at all* until you clicked it first.
 ///
-/// The case that was wrong, and is the bug this pins: an **unfocused pane in
-/// alternate screen**. Every forwarding route refused it for being unfocused,
-/// the local route was reachable only with Shift held, and what was left was a
-/// bare "do nothing" — so a wheel over an unfocused TUI was silently discarded.
-/// It now falls to [`Self::Local`], which is the ruling's own first clause: the
-/// wheel still scrolls what it hovers, it simply never speaks. Nothing is
-/// forwarded that was not forwarded before, and the focused pane's behaviour is
-/// unchanged in every combination.
+/// The child's own wishes are still respected exactly as before, and that is the
+/// half that was never about focus: mouse tracking on, and the notch is an SGR
+/// report; tracking off but alternate scroll on, and it is the arrow-key
+/// emulation; neither, and [`WheelRoute::Nothing`] — a program that owns its
+/// screen and asked for no wheel keeps it, whether or not you are typing in it.
 ///
-/// [`Self::Nothing`] survives for the one case that really is the application's:
-/// the **focused** alternate-screen pane whose program asked for neither mouse
-/// tracking nor alternate scroll. It owns its screen and has declined the wheel.
-fn wheel_route(
-    target_is_focused: bool,
-    shift: bool,
-    modes: bt_term::TerminalModes,
-    target_is_scrolled: bool,
-) -> WheelRoute {
+/// Two overrides stand above all of that, and both are about *our* view rather
+/// than the child's: Shift is the explicit local override, and an
+/// alternate-screen pane already displaced into local review stays there until
+/// it is scrolled back to rest.
+fn wheel_route(shift: bool, modes: bt_term::TerminalModes, target_is_scrolled: bool) -> WheelRoute {
     // Sticky local review: while the alternate-screen viewport is displaced into
     // the projection-local overflow (Shift+wheel entered it), the user is looking
     // at displaced pixels, not the application's live pane — forwarding bytes
@@ -30768,7 +31655,7 @@ fn wheel_route(
     if modes.alternate_screen && target_is_scrolled {
         return WheelRoute::Local;
     }
-    if target_is_focused && !shift && modes.mouse_tracking != MouseTracking::Off {
+    if !shift && modes.mouse_tracking != MouseTracking::Off {
         return WheelRoute::MouseReport;
     }
     if modes.alternate_screen {
@@ -30777,17 +31664,34 @@ fn wheel_route(
         if shift {
             return WheelRoute::Local;
         }
-        if modes.alternate_scroll && target_is_focused {
+        if modes.alternate_scroll {
             return WheelRoute::ArrowKeys;
         }
-        // The pane the pointer is not in still scrolls; it just never speaks.
-        return if target_is_focused {
-            WheelRoute::Nothing
-        } else {
-            WheelRoute::Local
-        };
+        // A program that owns the screen and asked for neither protocol has
+        // declined the wheel. Scrolling its empty alternate scrollback instead
+        // would be motion nobody asked for and nobody would see.
+        return WheelRoute::Nothing;
     }
     WheelRoute::Local
+}
+
+/// **Cut a pane across its longer side.** The whole of what "auto" means, as a
+/// function of the only two numbers it turns on.
+///
+/// A function rather than three lines inside a method, for [`wheel_route`]'s
+/// reason: it is the rule the pane head's `⊞` promises, and a promise made by a
+/// button has to be pinnable without a window, a renderer and a solve behind it.
+///
+/// A wide pane is cut side by side ([`Axis::Row`], the new shell on the right);
+/// a tall one is cut across ([`Axis::Col`], the new shell below). Ties go to
+/// side by side, which is where the dev chord always went and where a square
+/// pane on a landscape screen wants to go anyway.
+fn auto_split_axis(width: u32, height: u32) -> Axis {
+    if width >= height {
+        Axis::Row
+    } else {
+        Axis::Col
+    }
 }
 
 fn recoverable_wheel_scroll_amount(
@@ -31757,6 +32661,110 @@ fn pty_frame_is_unchanged(
         .is_some_and(|previous| presentation_equivalent(previous, next))
 }
 
+/// What the window can say about the terminal picture, at the moment an
+/// animation asks whether it has to build another one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PictureOnGlass {
+    /// A composed frame is already in the presentation slot, waiting for the
+    /// redraw this tick is about to ask for anyway.
+    frame_pending: bool,
+    /// The glass has a terminal picture on it at all. False for exactly one
+    /// window in its life: the one that has not presented yet.
+    has_presented_frame: bool,
+    /// The window is deliberately holding the picture it has — a review
+    /// displacement, an off-band DPI reprint. Composing during a hold produces
+    /// a frame that [`Runtime::publish_frame_inner`] throws away.
+    presentation_hold: bool,
+    /// [`Runtime::terminal_content_revision`].
+    content_revision: u64,
+    /// [`Runtime::presented_picture_revision`].
+    presented_revision: u64,
+}
+
+/// Whether a chrome animation's tick can be answered from the picture already
+/// on the glass instead of composing a new one.
+///
+/// **This is the whole of the P0 fix, as one question.** The tab strip's
+/// indeterminate ring turns at 60Hz for as long as any session has a command
+/// running, and every one of those ticks used to publish a whole-window frame:
+/// grid capture, viewport projection, inline-reference scan, IME re-anchor,
+/// text re-shaping — all to redraw a fifteen-pixel arc one degree further round.
+/// Measured at 6-8ms of main-thread CPU per tick, against a design comment that
+/// budgeted 16.5µs (see [`STRIP_ANIMATION_FRAME`]). A command emitting *zero
+/// bytes* cost 69% of a core.
+///
+/// The licence to reuse rests on one property of this app: **nothing repaints
+/// unless something calls [`Runtime::publish_frame`]**. A fresh idle window
+/// publishes no frames at all and sits at 0.0% CPU, which is only true because
+/// every content change already announces itself with its own publish. So an
+/// animation tick that re-presents what is on the glass is never *less* correct
+/// than what already happens on the frames where `refresh_chrome` reports
+/// nothing moved, which is to present nothing whatsoever.
+///
+/// The revisions guard the one case that argument does not cover: a picture
+/// that was composed but has not reached the glass yet. Then the newest thing
+/// anyone has said is not what is being shown, and the tick composes.
+fn chrome_tick_reuses_picture(picture: PictureOnGlass) -> bool {
+    // A frame is already composed and queued; this tick's redraw request will
+    // present it. Composing a second one on top would throw the first away.
+    if picture.frame_pending {
+        return true;
+    }
+    // Nothing to reuse. One window, once.
+    if !picture.has_presented_frame {
+        return false;
+    }
+    // A held picture is the picture, by decision. Composing under a hold builds
+    // a frame the hold discards a few lines later.
+    picture.presentation_hold || picture.presented_revision == picture.content_revision
+}
+
+/// **R2's zone, as a decision instead of a method** — everything the icon rail
+/// consults to answer "should I be open", with no window and no clock in it.
+///
+/// `position` is the pointer in physical pixels, `rail_right` the physical x the
+/// rail the zone is *aiming* at ends on, and `rail_top` the title bar's lower
+/// edge — the rail begins there, so a pointer up in the caption run is not in
+/// the rail however far left it is.
+///
+/// `peek_origin` is the live transient peek's trigger, or `None` when no peek is
+/// up. **The trigger and not a flag**, and that is the whole of this function's
+/// reason to exist:
+///
+/// **G102 — the rail has unfinished business.** A rectangle can only ever answer
+/// "is the pointer near the rail", and a transient peek is the case where that
+/// is the wrong question: a peek hanging off a *rail row* floats out past the
+/// rail's own edge, so moving onto the thing the rail just opened would
+/// otherwise read as having left it — and the rail would retract out from under
+/// it, taking the anchor with it.
+///
+/// **That clause belongs to [`float::FloatTrigger::Tab`] alone.** A rail row is
+/// a tab, and in the vertical layout `hit_rail_chrome` is the only thing that
+/// produces `ChromeTarget::TabFiles` — so under an icon rail (the only posture
+/// [`Runtime::drive_rail_zone`] runs in) a `Tab` peek *is* a peek hanging off a
+/// rail row. A [`float::FloatTrigger::Pane`] peek is the folder button on a
+/// terminal pane's own head, out in the panes and nowhere near the rail; it
+/// overhangs nothing of the rail's, so the rail has no business being held open
+/// by it. Asking only "is a peek up" made every pane head a second, invisible
+/// rail trigger: hovering a pane's folder icon opened its flyout *and* rolled
+/// the rail out from the left edge, with the pointer never having gone near it
+/// (user report, 2026-08-15).
+///
+/// A **pinned** window holds nothing open whatever it was summoned from, and the
+/// mock-up is explicit about why (8735-8738): it has been torn off into a
+/// free-floating window, so the rail is free to retract normally. That falls out
+/// of the argument rather than being tested here — the caller reads
+/// [`float::FloatHost::peek`], which is the transient slot and only ever that.
+fn rail_zone_wants_open(
+    position: Option<PhysicalPosition<f64>>,
+    rail_right: f64,
+    rail_top: f64,
+    peek_origin: Option<float::FloatTrigger>,
+) -> bool {
+    let inside = position.is_some_and(|position| position.y >= rail_top && position.x < rail_right);
+    inside || matches!(peek_origin, Some(float::FloatTrigger::Tab(_)))
+}
+
 /// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**
 ///
 /// Every route into the rail goes through here — today the settings dialog's two
@@ -32200,9 +33208,10 @@ mod tests {
             float: mark(4),
             modal: mark(5),
             file_menu: mark(6),
-            tooltip: mark(7),
-            file_peek: mark(8),
-            drag_ghost: mark(9),
+            pane_menu: mark(7),
+            tooltip: mark(8),
+            file_peek: mark(9),
+            drag_ghost: mark(10),
         };
         let order: Vec<u8> = stack
             .flattened()
@@ -32211,9 +33220,9 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-            "bottom to top: pane bars, rail, ground, schematic, float, modal, file menu, tip, \
-             glance, ghost"
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "bottom to top: pane bars, rail, ground, schematic, float, modal, file menu, \
+             pane menu, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -32233,15 +33242,21 @@ mod tests {
             "and the float still covers the panes, the rail and the dock drawing"
         );
         assert!(
-            at(7) > at(5) && at(7) > at(4),
+            at(8) > at(5) && at(8) > at(4),
             "the tip is covered by nothing"
+        );
+        // The pane head's menu sits on the file menu's level, above every
+        // surface either of them can be raised over.
+        assert!(
+            at(7) > at(5) && at(7) > at(4) && at(7) > at(2),
+            "the pane menu is drawn over the panes, the float and the modal family"
         );
         // P143 — `.file-peek { z-index: 70 }` against `#files-flyout`'s 60: the
         // glance card is drawn over the pinned window, because "flyout rows peek
         // too" and a card that its own host covered would be unreadable in the
         // very place the ruling names.
         assert!(
-            at(8) > at(4) && at(8) > at(7),
+            at(9) > at(4) && at(9) > at(8),
             "the glance card stands over the float it may have been raised from"
         );
     }
@@ -34399,8 +35414,8 @@ mod tests {
         );
     }
 
-    /// Every combination of the four facts [`wheel_route`] turns on.
-    fn every_wheel_situation() -> impl Iterator<Item = (bool, bool, bt_term::TerminalModes, bool)> {
+    /// Every combination of the three facts [`wheel_route`] turns on.
+    fn every_wheel_situation() -> impl Iterator<Item = (bool, bt_term::TerminalModes, bool)> {
         use bt_term::{MouseTracking, TerminalModes};
         let trackings = [
             MouseTracking::Off,
@@ -34408,24 +35423,21 @@ mod tests {
             MouseTracking::Drag,
             MouseTracking::Motion,
         ];
-        [true, false].into_iter().flat_map(move |focused| {
-            [true, false].into_iter().flat_map(move |shift| {
-                [true, false].into_iter().flat_map(move |alternate_screen| {
-                    [true, false].into_iter().flat_map(move |alternate_scroll| {
-                        trackings.into_iter().flat_map(move |mouse_tracking| {
-                            [true, false].into_iter().map(move |scrolled| {
-                                (
-                                    focused,
-                                    shift,
-                                    TerminalModes {
-                                        alternate_screen,
-                                        alternate_scroll,
-                                        sgr_mouse: true,
-                                        mouse_tracking,
-                                    },
-                                    scrolled,
-                                )
-                            })
+        [true, false].into_iter().flat_map(move |shift| {
+            [true, false].into_iter().flat_map(move |alternate_screen| {
+                [true, false].into_iter().flat_map(move |alternate_scroll| {
+                    trackings.into_iter().flat_map(move |mouse_tracking| {
+                        [true, false].into_iter().map(move |scrolled| {
+                            (
+                                shift,
+                                TerminalModes {
+                                    alternate_screen,
+                                    alternate_scroll,
+                                    sgr_mouse: true,
+                                    mouse_tracking,
+                                },
+                                scrolled,
+                            )
                         })
                     })
                 })
@@ -34433,99 +35445,217 @@ mod tests {
         })
     }
 
-    /// PIN (1a39adc): **"a wheel scrolls whatever it hovers but whispers
-    /// protocol only to the focused shell."**
+    /// PIN (user ruling, 2026-08-15): **"a wheel notch belongs to the pane it is
+    /// over — one law for the main screen and the alternate screen alike; what
+    /// the pane is doing decides only whether the notch scrolls our buffer or is
+    /// spoken to its child."**
     ///
-    /// The ruling has two halves and they are pinned separately, because the bug
-    /// was that one half quietly acquired the other's condition. Scrolling is
-    /// supposed to follow the *pointer* and bytes are supposed to follow the
-    /// *keyboard*; what shipped let focus veto scrolling too, so a wheel over an
-    /// unfocused pane running any full-screen program — vim, htop, less, Claude
-    /// Code — was dropped on the floor with nothing to show for it.
+    /// The bug it replaces (user report, same day). The previous ruling had two
+    /// halves — scrolling follows the pointer, bytes follow the keyboard — and
+    /// the second half quietly ate the first on the alternate screen. An
+    /// unfocused pane running a full-screen program was refused by both
+    /// forwarding routes for being unfocused and fell through to
+    /// [`WheelRoute::Local`], which for an alternate screen means scrolling a
+    /// scrollback that does not exist. So hovering an unfocused pane running
+    /// Claude Code and turning the wheel produced **nothing at all**: no bytes,
+    /// no motion, no clue. The main screen had no such hole, which is exactly
+    /// why the two screens now answer to one law instead of two.
     ///
-    /// Asserted over the **whole fact space** rather than a handful of cases,
-    /// because the failure was a hole in a chain of `if`s and a hole is found by
-    /// covering the space, not by sampling it. A hundred and twenty-eight
-    /// situations, sixty-four of them unfocused, three invariants:
+    /// Asserted over the **whole fact space** against an oracle written in a
+    /// different shape from the implementation — a match on the tuple, arms in
+    /// the ruling's order rather than the code's — because the failure was a
+    /// hole in a chain of `if`s and a hole is found by covering the space, not
+    /// by sampling it. Focus does not appear, here or in the signature: that
+    /// absence *is* the ruling, and the fact that a `wheel_route` which consults
+    /// focus no longer compiles is the strongest pin available.
     ///
-    /// * an unfocused pane is **never** told to do nothing — it always scrolls;
-    /// * an unfocused pane **never** forwards, by either route, so the pointer
-    ///   can never put bytes in a shell the keyboard is not in;
-    /// * the focused pane's answers are unchanged in every combination, which is
-    ///   what makes this a repair rather than a new policy.
-    ///
-    /// MUTATION: return [`WheelRoute::Nothing`] instead of [`WheelRoute::Local`]
-    /// for the unfocused alternate-screen case — the shipped behaviour — and the
-    /// first invariant goes red. Drop `target_is_focused` from either forwarding
-    /// arm and the second goes red.
+    /// MUTATION: return [`WheelRoute::Local`] instead of [`WheelRoute::Nothing`]
+    /// for the mute alternate-screen case — the shipped behaviour for an
+    /// unfocused pane — and the sweep goes red. Gate the [`WheelRoute::MouseReport`]
+    /// arm on `!modes.alternate_screen`, which is the shape "bytes only to the
+    /// main screen" would take, and it goes red on every tracked TUI.
     #[test]
-    fn a_wheel_scrolls_whatever_it_hovers_and_whispers_only_to_the_focused_shell() {
-        let mut unfocused_situations = 0;
-        for (focused, shift, modes, scrolled) in every_wheel_situation() {
-            let route = wheel_route(focused, shift, modes, scrolled);
-            if focused {
-                continue;
-            }
-            unfocused_situations += 1;
+    fn a_wheel_notch_belongs_to_the_pane_it_is_over_on_either_screen() {
+        use bt_term::{MouseTracking, TerminalModes};
+        let mut situations = 0;
+        for (shift, modes, scrolled) in every_wheel_situation() {
+            situations += 1;
+            let tracks = modes.mouse_tracking != MouseTracking::Off;
+            // The ruling, restated as a table rather than as the chain of `if`s
+            // under test. Same answers or the implementation is wrong; same
+            // *text* and this test would be worth nothing.
+            let expected = match (
+                shift,
+                modes.alternate_screen,
+                modes.alternate_scroll,
+                tracks,
+                scrolled,
+            ) {
+                // Displaced into local review, and sticky until it rests again:
+                // forwarding to pixels the user is not looking at is a lie.
+                (_, true, _, _, true) => WheelRoute::Local,
+                // The child asked for mouse reports. Both screens, focused or
+                // not — this is the clause the alternate screen used to be
+                // denied.
+                (false, _, _, true, _) => WheelRoute::MouseReport,
+                // Shift is the explicit local override, everywhere.
+                (true, _, _, _, _) => WheelRoute::Local,
+                // No tracking, but the alternate screen asked for the emulation.
+                (false, true, true, false, _) => WheelRoute::ArrowKeys,
+                // A program that owns the screen and asked for neither keeps its
+                // wheel; there is no scrollback under it to move instead.
+                (false, true, false, false, _) => WheelRoute::Nothing,
+                // An ordinary shell: our own buffer, exact subpixels.
+                (false, false, _, false, _) => WheelRoute::Local,
+            };
             assert_eq!(
-                route,
-                WheelRoute::Local,
-                "a wheel over an unfocused pane scrolls it and says nothing \
-                 (shift={shift} modes={modes:?} scrolled={scrolled})"
+                wheel_route(shift, modes, scrolled),
+                expected,
+                "shift={shift} modes={modes:?} scrolled={scrolled}"
             );
         }
         assert_eq!(
-            unfocused_situations, 64,
-            "the sweep really did cover every unfocused situation"
+            situations, 64,
+            "the sweep really did cover every situation the route turns on"
         );
 
-        // The focused pane, unchanged — the established table, restated so a
-        // change to it cannot hide behind the repair above.
-        use bt_term::{MouseTracking, TerminalModes};
+        // 主副屏同一律, said outright: with the child asking for reports and the
+        // view at rest, which screen it is on changes nothing. This is the one
+        // sentence the old code could not have satisfied.
         let plain = TerminalModes {
             alternate_screen: false,
             alternate_scroll: false,
             sgr_mouse: true,
-            mouse_tracking: MouseTracking::Off,
-        };
-        assert_eq!(wheel_route(true, false, plain, false), WheelRoute::Local);
-        let tracked = TerminalModes {
             mouse_tracking: MouseTracking::Drag,
-            ..plain
         };
         assert_eq!(
-            wheel_route(true, false, tracked, false),
-            WheelRoute::MouseReport,
-            "the focused shell still gets its protocol first"
+            wheel_route(false, plain, false),
+            wheel_route(
+                false,
+                TerminalModes {
+                    alternate_screen: true,
+                    ..plain
+                },
+                false
+            ),
+            "a tracked main screen and a tracked alternate screen answer alike"
+        );
+    }
+
+    /// PIN (user ruling, 2026-08-15): **the pane head's `⊞` cuts the pane along
+    /// its longer side.**
+    ///
+    /// The button makes exactly one promise beyond "a split happens", and it is
+    /// this one: the halves come out as square as the pane allows, so a tall
+    /// pane is cut across and a wide one down the middle. It is the promise the
+    /// glyph is drawn to keep — the 田 is axis-agnostic on purpose, because a
+    /// glyph showing one vertical rule over a button that sometimes cuts
+    /// horizontally would be a lie told sixteen pixels wide.
+    ///
+    /// It is also the one thing about this button that a wrong answer hides. A
+    /// split always *happens*, so the failure is not an error — it is two long
+    /// thin panes where two square ones were asked for, and a user shrugging.
+    ///
+    /// MUTATION: return [`Axis::Row`] unconditionally — "always side by side",
+    /// the shape this would take if the measurement were dropped — and every
+    /// tall case goes red. Flip the comparison to `>` and the square case goes
+    /// red, which is the tie the dev chord's own default settles.
+    #[test]
+    fn the_pane_heads_divider_cuts_the_longer_side() {
+        assert_eq!(
+            auto_split_axis(1600, 900),
+            Axis::Row,
+            "a wide pane is cut side by side: the new shell goes on the right"
         );
         assert_eq!(
-            wheel_route(true, true, tracked, false),
-            WheelRoute::Local,
-            "Shift is the local override it has always been"
+            auto_split_axis(600, 1400),
+            Axis::Col,
+            "a tall pane is cut across: the new shell goes below"
         );
-        let tui = TerminalModes {
-            alternate_screen: true,
-            alternate_scroll: true,
-            ..plain
+        assert_eq!(
+            auto_split_axis(800, 800),
+            Axis::Row,
+            "a square pane ties to side by side, where the duplicate chord \
+             always went"
+        );
+        // One pixel either side of the tie, so the boundary is pinned and not
+        // merely the two comfortable cases around it.
+        assert_eq!(auto_split_axis(801, 800), Axis::Row);
+        assert_eq!(auto_split_axis(799, 800), Axis::Col);
+    }
+
+    /// PIN (user ruling, 2026-08-15): **every fact that shapes a wheel notch's
+    /// bytes is read from the pane the notch is over.**
+    ///
+    /// [`wheel_route`] having lost its focus parameter settles the *decision*;
+    /// this settles the *facts fed to it*, which is where the same bug would
+    /// grow back and would grow back silently. The shipped handler asked the
+    /// window for `self.session.terminal_modes()`, `self.session.application_
+    /// cursor_mode()` and `self.grid.rows` — every one of them a
+    /// [`Deref`] into whichever leaf holds the keyboard. Route the hovered
+    /// pane by its own modes and then encode with the focused pane's cursor
+    /// mode and a hovered vim gets `ESC [ A` where it wanted `ESC O A`: not a
+    /// scroll but the letters `[A` typed into a buffer.
+    ///
+    /// Two panes, deliberately opposite in all three facts, and the keyboard
+    /// deliberately in the *plain* one — which is exactly the user's report:
+    /// pointer over the TUI, focus in the shell next door.
+    ///
+    /// MUTATION: implement any of the three readers as `self.session.…` or
+    /// `self.grid.…` — the shipped shape — and the matching assertion goes red,
+    /// while the control assertions at the end keep proving the fixture really
+    /// did differ.
+    #[test]
+    fn a_wheel_reads_the_hovered_panes_own_shell_and_not_the_keyboards() {
+        use bt_term::MouseTracking;
+        // Pane 0 is a plain shell and holds the keyboard; pane 1 is a
+        // full-screen program that asked for mouse reports and application
+        // cursor keys — a TUI, which is what the user was hovering.
+        let mut tab = cross_tab(1, &["plain shell", "\x1b[?1049h\x1b[?1002h\x1b[?1h"]);
+        let [keyboard, hovered] = tab.seats.terminals()[..] else {
+            panic!("a two-pane cross tab holds two terminal seats");
         };
         assert_eq!(
-            wheel_route(true, false, tui, false),
-            WheelRoute::ArrowKeys,
-            "alternate-scroll emulation still answers the focused pane"
+            tab.focused_leaf, keyboard,
+            "the fixture only means anything with the keyboard in the other pane"
         );
-        let mute_tui = TerminalModes {
-            alternate_screen: true,
-            ..plain
-        };
-        assert_eq!(
-            wheel_route(true, false, mute_tui, false),
-            WheelRoute::Nothing,
-            "a focused program that owns its screen and declined the wheel keeps it"
+        // Panes of a real split are rarely the same height; give them different
+        // row counts so "one screen at a time" has two possible answers.
+        tab.sessions
+            .get_mut(&hovered)
+            .expect("the hovered seat holds a session")
+            .grid
+            .rows = std::num::NonZeroU16::new(17).expect("a nonzero row count");
+
+        let modes = tab.leaf_terminal_modes(hovered);
+        assert!(
+            modes.alternate_screen && modes.mouse_tracking != MouseTracking::Off,
+            "the hovered pane's own modes: a full-screen program asking for reports, {modes:?}"
+        );
+        assert!(
+            tab.leaf_application_cursor_mode(hovered),
+            "and its own cursor-key mode, which decides ESC O A against ESC [ A"
         );
         assert_eq!(
-            wheel_route(true, false, mute_tui, true),
-            WheelRoute::Local,
-            "except once displaced into local review, which is sticky"
+            tab.leaf_wheel_rows(hovered),
+            17.0,
+            "and its own row count, which is what a page of it means"
+        );
+
+        // The control: the keyboard's pane really is the opposite in all three,
+        // so none of the three assertions above could have passed by reading it.
+        let keyboard_modes = tab.leaf_terminal_modes(keyboard);
+        assert!(
+            !keyboard_modes.alternate_screen && keyboard_modes.mouse_tracking == MouseTracking::Off,
+            "the keyboard's pane is a plain shell, {keyboard_modes:?}"
+        );
+        assert!(!tab.leaf_application_cursor_mode(keyboard));
+        assert_eq!(tab.leaf_wheel_rows(keyboard), 4.0);
+        assert_eq!(
+            tab.session.terminal_modes(),
+            keyboard_modes,
+            "and the deref really does answer with the keyboard's pane — which is \
+             the whole reason the readers above must not use it"
         );
     }
 
@@ -36767,6 +37897,17 @@ mod tests {
         pending: LatestFrameSlot,
         last_presented: Option<ViewportFrame>,
         publications: usize,
+        /// **What the P0 fix is measured in.** Every call this harness makes to
+        /// `DualPlaneSession::viewport_frame` — the whole-grid capture, the
+        /// projection and the decoration pass that an animation tick used to
+        /// pay for sixty times a second.
+        viewport_frames: usize,
+        /// [`Runtime::terminal_content_revision`], on the same bump: a frame
+        /// that actually entered the slot.
+        content_revision: u64,
+        /// [`Runtime::presented_picture_revision`], on the same bump: a frame
+        /// that actually reached the glass.
+        presented_revision: u64,
     }
 
     impl PtyPresentationHarness {
@@ -36782,7 +37923,62 @@ mod tests {
                 pending: LatestFrameSlot::default(),
                 last_presented: None,
                 publications: 0,
+                viewport_frames: 0,
+                content_revision: 0,
+                presented_revision: 0,
             }
+        }
+
+        /// What `Runtime::picture_on_glass` reads, off this harness's mirror of
+        /// the same five facts.
+        fn picture_on_glass(&self) -> PictureOnGlass {
+            PictureOnGlass {
+                frame_pending: self.pending.pending_frame().is_some(),
+                has_presented_frame: self.last_presented.is_some(),
+                presentation_hold: self.projection.presentation_hold(),
+                content_revision: self.content_revision,
+                presented_revision: self.presented_revision,
+            }
+        }
+
+        /// One turn of the tab strip's indeterminate ring.
+        ///
+        /// `reuse` is the policy under test, injected rather than called
+        /// directly so a test can run the *mutant* — the unconditional
+        /// reprojection this window shipped with — through the identical loop
+        /// and show what it costs.
+        fn chrome_tick(&mut self, reuse: fn(PictureOnGlass) -> bool) {
+            if reuse(self.picture_on_glass()) {
+                // `Runtime::present_retained_picture`: the glass is redrawn
+                // from the frame it already holds. No session, no projection.
+                self.present_pending();
+                return;
+            }
+            self.publish_expose_frame();
+            self.present_pending();
+        }
+
+        /// `publish_frame_inner` for a source that is not PTY output: composes
+        /// unconditionally, with no unchanged-frame gate to fall back on.
+        fn publish_expose_frame(&mut self) -> bool {
+            self.session.refresh_projection(&mut self.projection);
+            self.viewport_frames += 1;
+            let frame = self.session.viewport_frame(&mut self.projection).unwrap();
+            if self.projection.presentation_hold() && self.last_presented.is_some() {
+                return false;
+            }
+            self.content_revision += 1;
+            self.pending
+                .publish(
+                    frame,
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .unwrap();
+            self.publications += 1;
+            true
         }
 
         fn feed_drain(&mut self, bytes: &[u8]) -> bool {
@@ -36801,6 +37997,7 @@ mod tests {
 
         fn publish_pty_frame(&mut self) -> bool {
             self.session.refresh_projection(&mut self.projection);
+            self.viewport_frames += 1;
             let frame = self.session.viewport_frame(&mut self.projection).unwrap();
             // Mirror publish_frame_inner's combined review/exact-source presentation hold.
             if self.projection.presentation_hold() && self.last_presented.is_some() {
@@ -36822,6 +38019,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+            self.content_revision += 1;
             self.publications += 1;
             true
         }
@@ -36831,8 +38029,155 @@ mod tests {
                 return false;
             };
             self.last_presented = Some(frame);
+            self.presented_revision = self.content_revision;
             true
         }
+    }
+
+    /// The mutant: the window this fix replaced, which reprojected on every
+    /// animation tick no matter what the picture on the glass already said.
+    fn always_recompose(_: PictureOnGlass) -> bool {
+        false
+    }
+
+    /// **P0.** Six hundred turns of the tab strip's ring — ten seconds of a
+    /// command that prints nothing — must not project the grid once.
+    ///
+    /// This is the burn the diagnosis measured at 69% of a core: the ring's
+    /// 16ms deadline held `session.working = true` for a command's whole life,
+    /// and every tick of it composed a whole terminal picture to redraw a
+    /// fifteen-pixel arc.
+    #[test]
+    fn strip_animation_ticks_project_nothing_while_the_grid_is_still() {
+        let mut harness = PtyPresentationHarness::new(80, 24);
+        harness.feed_drain(b"$ sleep 30\r\n");
+        harness.present_pending();
+        let projections_before = harness.viewport_frames;
+        let revision_before = harness.content_revision;
+
+        for _ in 0..600 {
+            harness.chrome_tick(chrome_tick_reuses_picture);
+        }
+
+        assert_eq!(
+            harness.viewport_frames - projections_before,
+            0,
+            "an animation tick must be answered from the picture on the glass"
+        );
+        assert_eq!(
+            harness.content_revision, revision_before,
+            "nothing said anything new, so no picture became newer than the glass"
+        );
+    }
+
+    /// The same six hundred ticks under the mutant, so the assertion above is
+    /// known to have teeth: the count it asserts is zero was six hundred.
+    #[test]
+    fn the_unconditional_reprojection_this_replaced_costs_one_projection_a_tick() {
+        let mut harness = PtyPresentationHarness::new(80, 24);
+        harness.feed_drain(b"$ sleep 30\r\n");
+        harness.present_pending();
+        let projections_before = harness.viewport_frames;
+
+        for _ in 0..600 {
+            harness.chrome_tick(always_recompose);
+        }
+
+        assert_eq!(harness.viewport_frames - projections_before, 600);
+    }
+
+    /// The other half of the contract: content that *does* change is projected,
+    /// exactly once, and the ticks around it still cost nothing.
+    #[test]
+    fn output_between_animation_ticks_is_projected_exactly_once() {
+        let mut harness = PtyPresentationHarness::new(80, 24);
+        harness.feed_drain(b"$ sleep 30\r\n");
+        harness.present_pending();
+
+        for _ in 0..60 {
+            harness.chrome_tick(chrome_tick_reuses_picture);
+        }
+        let projections_before = harness.viewport_frames;
+
+        harness.feed_drain(b"a line of output\r\n");
+        assert_eq!(
+            harness.viewport_frames - projections_before,
+            1,
+            "the shell spoke once and the grid was projected once"
+        );
+        assert!(
+            harness.pending.pending_frame().is_some(),
+            "the new picture is composed and waiting for the glass"
+        );
+
+        // The tick that lands while it waits presents *that* frame rather than
+        // composing a second one on top of it.
+        harness.chrome_tick(chrome_tick_reuses_picture);
+        assert_eq!(harness.viewport_frames - projections_before, 1);
+        assert_eq!(harness.presented_revision, harness.content_revision);
+
+        for _ in 0..60 {
+            harness.chrome_tick(chrome_tick_reuses_picture);
+        }
+        assert_eq!(
+            harness.viewport_frames - projections_before,
+            1,
+            "and the ticks after it are free again"
+        );
+    }
+
+    /// A window with nothing on the glass yet composes, whatever else is true.
+    /// There is exactly one such window per lifetime and it is the one whose
+    /// first picture nobody else is coming to draw.
+    #[test]
+    fn the_first_picture_is_never_answered_from_an_empty_screen() {
+        assert!(!chrome_tick_reuses_picture(PictureOnGlass {
+            frame_pending: false,
+            has_presented_frame: false,
+            presentation_hold: false,
+            content_revision: 0,
+            presented_revision: 0,
+        }));
+    }
+
+    /// A picture that was composed and never presented is not the picture on
+    /// the glass, so the tick that finds one waiting presents it instead of
+    /// building a third.
+    #[test]
+    fn a_composed_frame_still_waiting_is_presented_rather_than_recomposed() {
+        assert!(chrome_tick_reuses_picture(PictureOnGlass {
+            frame_pending: true,
+            has_presented_frame: true,
+            presentation_hold: false,
+            content_revision: 9,
+            presented_revision: 8,
+        }));
+    }
+
+    /// A held picture is the picture by decision: composing under a hold builds
+    /// a frame `publish_frame_inner` throws away a few lines later.
+    #[test]
+    fn a_presentation_hold_is_answered_from_the_glass_it_is_holding() {
+        assert!(chrome_tick_reuses_picture(PictureOnGlass {
+            frame_pending: false,
+            has_presented_frame: true,
+            presentation_hold: true,
+            content_revision: 9,
+            presented_revision: 4,
+        }));
+    }
+
+    /// And the case the revisions exist for: a picture newer than the glass,
+    /// with nothing queued to carry it there, is composed.
+    #[test]
+    fn a_picture_newer_than_the_glass_is_composed() {
+        assert!(!chrome_tick_reuses_picture(PictureOnGlass {
+            frame_pending: false,
+            has_presented_frame: true,
+            presentation_hold: false,
+            content_revision: 9,
+            presented_revision: 8,
+        }));
     }
 
     fn frame_row_text(frame: &ViewportFrame, row: usize) -> String {
@@ -38443,6 +39788,75 @@ mod tests {
             claimed(ModifiersState::CONTROL | ModifiersState::SHIFT),
             Some(shortcuts::Action::CommandPalette)
         );
+    }
+
+    /// **Red gate (user report, 2026-08-15): a peek summoned from a pane head
+    /// must not roll the rail out.**
+    ///
+    /// The vertical icon-rail layout, a pointer parked on the folder button in a
+    /// terminal pane's own head — far out in the panes, nowhere near the rail —
+    /// and the flyout it summoned standing open. The flyout is right; the rail
+    /// coming out from the left edge under a pointer that never went near it is
+    /// the bug.
+    ///
+    /// All four cells of the grid are asserted together because three of them
+    /// pass while the fourth is broken: keeping the pointer clause without
+    /// narrowing the peek clause is the bug itself, and narrowing it to *nothing*
+    /// would silently repeal G102 — a rail row's own peek overhangs the rail and
+    /// still has to hold it open.
+    ///
+    /// Mutation: restore `peek_origin.is_some()` in [`rail_zone_wants_open`] and
+    /// the two `Pane` rows go red at once.
+    #[test]
+    fn only_a_peek_hanging_off_a_rail_row_holds_the_icon_rail_open() {
+        // The rail the zone is aiming at while parked: 46 logical px at 1.5×.
+        const SCALE: f64 = 1.5;
+        let rail_right = f64::from(bt_render::RAIL_PARK_LOGICAL_PX) * SCALE;
+        let rail_top = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX) * SCALE;
+
+        // A pane head's folder button in a split tab, out where the panes are.
+        let on_pane_head = Some(PhysicalPosition::new(rail_right + 400.0, rail_top + 120.0));
+        // The same pointer, inside the parked strip.
+        let on_the_rail = Some(PhysicalPosition::new(rail_right - 1.0, rail_top + 120.0));
+
+        let tab_peek = Some(float::FloatTrigger::Tab(TabId(1)));
+        let pane_peek = Some(float::FloatTrigger::Pane(LeafId {
+            tab: TabId(1),
+            seat: SeatId(7),
+        }));
+
+        assert!(
+            !rail_zone_wants_open(on_pane_head, rail_right, rail_top, None),
+            "a pointer out in the panes with nothing open leaves the rail parked"
+        );
+        assert!(
+            !rail_zone_wants_open(on_pane_head, rail_right, rail_top, pane_peek),
+            "and a flyout it summoned from the pane's own head is none of the \
+             rail's business — the rail must stay parked (2026-08-15)"
+        );
+        assert!(
+            rail_zone_wants_open(on_the_rail, rail_right, rail_top, None),
+            "the rail's own rectangle is still the whole of the ordinary trigger"
+        );
+        assert!(
+            rail_zone_wants_open(on_pane_head, rail_right, rail_top, tab_peek),
+            "G102 survives: a peek hanging off a rail row overhangs the rail, so \
+             the pointer on it must not read as having left the rail"
+        );
+
+        // The caption run is not the rail, however far left the pointer is —
+        // and a peek from a rail row still holds it open up there, because the
+        // clause is about the window and not about where the hand is.
+        let in_the_caption = Some(PhysicalPosition::new(4.0, rail_top - 1.0));
+        assert!(!rail_zone_wants_open(
+            in_the_caption,
+            rail_right,
+            rail_top,
+            None
+        ));
+        // And a pointer that has left the window entirely.
+        assert!(!rail_zone_wants_open(None, rail_right, rail_top, pane_peek));
+        assert!(rail_zone_wants_open(None, rail_right, rail_top, tab_peek));
     }
 
     /// Every rail state the settings dialog can ask for arrives with both of the

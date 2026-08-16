@@ -1039,6 +1039,7 @@ mod tests {
             open: open.iter().map(|key| (*key).to_owned()).collect(),
             sel: sel.map(str::to_owned),
             view: crate::seats::FilesView::default(),
+            git_expanded: None,
         }
     }
 

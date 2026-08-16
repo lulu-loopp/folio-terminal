@@ -151,20 +151,44 @@ pub enum GitQuestion {
         count: usize,
     },
     /// "How does this file differ?" — `staged` is the whole of the `--cached`
-    /// mapping (R25). Asked by G-3, when a changed-file row opens a diff.
-    #[allow(dead_code)]
+    /// mapping (R25). Asked when a changed-file row opens a diff.
     Diff {
         root: PathBuf,
         path: String,
         staged: bool,
+        /// **Where a rename came from**, when this file is one.
+        ///
+        /// Not decoration: `git diff --cached -- <new path>` on a staged rename
+        /// prints *a new file* — rename detection needs both halves of the pair
+        /// and a pathspec naming one of them hides the other. So the row that
+        /// wears an `R` badge would open a diff claiming the file had just been
+        /// created, which is the panel and the diff disagreeing on one screen —
+        /// the one thing §7 of the backend adjudication chose the CLI to
+        /// prevent. Handing git both paths is what makes it answer with the
+        /// rename it already knows about.
+        ///
+        /// It is **not** part of the question's identity ([`Self::same_target`]):
+        /// the same file at the same stage is the same question however it got
+        /// its name.
+        renamed_from: Option<String>,
     },
-    /// "How did this commit change this file?" (R15). Asked by G-3.
-    #[allow(dead_code)]
+    /// "How did this commit change this file?" (R15).
     Show {
         root: PathBuf,
         hash: String,
         path: String,
+        /// The same pair, for the same reason — `git show <hash> -- <new path>`
+        /// loses a rename exactly as `git diff` does.
+        renamed_from: Option<String>,
     },
+    /// "Which files did this commit touch?" — what R15's accordion lists.
+    ///
+    /// Separate from [`Self::Show`] rather than the same question with an empty
+    /// path, because the two answers are different kinds of thing: this one is
+    /// *rows on the page* and is filed into the column's cache, while a `Show`
+    /// is a document and goes to the preview pool. One question, one answer, one
+    /// home.
+    CommitFiles { root: PathBuf, hash: String },
     /// **The one question that changes something** (R14).
     ///
     /// Four verbs and one shape, because what the panel does with the answer is
@@ -250,11 +274,13 @@ impl GitQuestion {
                     root: left,
                     path: from,
                     staged: was,
+                    ..
                 },
                 Self::Diff {
                     root: right,
                     path: to,
                     staged: is,
+                    ..
                 },
             ) => left == right && from == to && was == is,
             (
@@ -262,13 +288,24 @@ impl GitQuestion {
                     root: left,
                     hash: old,
                     path: from,
+                    ..
                 },
                 Self::Show {
                     root: right,
                     hash: new,
                     path: to,
+                    ..
                 },
             ) => left == right && old == new && from == to,
+            // **Every expansion is the same target**, whichever commit it is
+            // about: R15's accordion has exactly one open commit, so a second
+            // press while the first list is still loading has already replaced
+            // the list the answer was for. Coalescing on the root alone is what
+            // stops a fast walk down the history spending a subprocess on every
+            // commit it passed through.
+            (Self::CommitFiles { root: left, .. }, Self::CommitFiles { root: right, .. }) => {
+                left == right
+            }
             // **Two writes are never one question.** Every read above coalesces
             // because a newer answer makes an older one worthless; a write has no
             // answer to make worthless, it has an *effect*, and dropping the
@@ -331,6 +368,11 @@ pub enum GitAnswer {
         hash: String,
         path: String,
         outcome: GitOutcome<String>,
+    },
+    CommitFiles {
+        root: PathBuf,
+        hash: String,
+        outcome: GitOutcome<Vec<GitCommitFile>>,
     },
     /// A write finished. **The receipt** (R13).
     ///
@@ -457,6 +499,23 @@ pub enum GitGroup {
     Staged,
     Changes,
     Untracked,
+}
+
+/// One file a commit touched (R15) — one record of `--name-status`.
+///
+/// **One letter and not two.** A status entry carries the index's column and the
+/// working tree's because a file can be in both at once; a commit is a single
+/// point and has one story about each file it touched. The letter comes out of
+/// the same [`StatusCode`] alphabet so that a badge drawn here and a badge drawn
+/// in the changed list are the same badge, meaning the same thing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitCommitFile {
+    /// Repo-relative, in git's grammar. For a rename this is where the file
+    /// **went**, which is the row the page draws.
+    pub path: String,
+    pub code: StatusCode,
+    /// Where a rename or a copy came from. `None` for everything else.
+    pub renamed_from: Option<String>,
 }
 
 /// One line of `git status --porcelain`, in full.
@@ -817,6 +876,53 @@ pub fn parse_branches(bytes: &[u8], now_unix: i64) -> Vec<GitBranch> {
     branches
 }
 
+/// `git show --name-status -z --format=`, decoded (R15).
+///
+/// **The record grammar is one field per status and one per path**, not one line
+/// per file: with `-z` git writes `M\0path\0` and — for a rename or a copy —
+/// `R100\0from\0to\0`, three fields where the others spend two. The similarity
+/// gives the same score attached to the letter (`R100`), which is why only the
+/// first character is read.
+///
+/// **A merge commit answers with nothing**, because `--name-status` on a merge
+/// compares against no parent by default. That is an empty answer and not a
+/// failure, and it is the accordion's own empty sentence rather than anything
+/// this function has to detect.
+#[must_use]
+pub fn parse_name_status(bytes: &[u8]) -> Vec<GitCommitFile> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut fields = text.split('\0');
+    let mut files = Vec::new();
+    while let Some(record) = fields.next() {
+        // The stream ends on its terminator, so the split ends on an empty
+        // string; nothing else in it is empty.
+        if record.is_empty() {
+            continue;
+        }
+        let Some(code) = record.chars().next().and_then(StatusCode::from_letter) else {
+            continue;
+        };
+        let moved = matches!(code, StatusCode::Renamed | StatusCode::Copied);
+        let first = fields.next().unwrap_or_default().to_owned();
+        // A rename's *second* path is the row: the file is at the new name now,
+        // and that is the name a press has to be able to open.
+        let (path, renamed_from) = if moved {
+            (fields.next().unwrap_or_default().to_owned(), Some(first))
+        } else {
+            (first, None)
+        };
+        if path.is_empty() {
+            continue;
+        }
+        files.push(GitCommitFile {
+            path,
+            code,
+            renamed_from,
+        });
+    }
+    files
+}
+
 /// `git log -z --parents`, decoded.
 ///
 /// `wanted` is the page size the caller asked for; the command asks git for one
@@ -1088,13 +1194,22 @@ fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
             skip: *skip,
             outcome: Err(fault),
         },
-        GitQuestion::Diff { root, path, staged } => GitAnswer::Diff {
+        GitQuestion::Diff {
+            root, path, staged, ..
+        } => GitAnswer::Diff {
             root: root.clone(),
             path: path.clone(),
             staged: *staged,
             outcome: Err(fault),
         },
-        GitQuestion::Show { root, hash, path } => GitAnswer::Show {
+        GitQuestion::CommitFiles { root, hash } => GitAnswer::CommitFiles {
+            root: root.clone(),
+            hash: hash.clone(),
+            outcome: Err(fault),
+        },
+        GitQuestion::Show {
+            root, hash, path, ..
+        } => GitAnswer::Show {
             root: root.clone(),
             hash: hash.clone(),
             path: path.clone(),
@@ -1220,12 +1335,23 @@ pub fn answer(
                 Err(fault) => faulted(question, fault),
             }
         }
-        GitQuestion::Diff { root, path, staged } => {
+        GitQuestion::Diff {
+            root,
+            path,
+            staged,
+            renamed_from,
+        } => {
             let mut arguments = vec![OsStr::new("diff"), OsStr::new("--no-color")];
             if *staged {
                 arguments.push(OsStr::new("--cached"));
             }
             arguments.push(OsStr::new("--"));
+            // **Both halves of a rename, in git's own order.** See
+            // `GitQuestion::Diff::renamed_from`: a pathspec naming only the new
+            // name turns a rename into a brand-new file.
+            if let Some(from) = renamed_from {
+                arguments.push(OsStr::new(from));
+            }
             arguments.push(OsStr::new(path));
             let command = git_command(program, root, &arguments);
             match run_git(command, timeout) {
@@ -1300,24 +1426,57 @@ pub fn answer(
                 Err(fault) => faulted(question, fault),
             }
         }
-        GitQuestion::Show { root, hash, path } => {
-            let command = git_command(
-                program,
-                root,
-                &[
-                    OsStr::new("show"),
-                    OsStr::new("--no-color"),
-                    OsStr::new(hash),
-                    OsStr::new("--"),
-                    OsStr::new(path),
-                ],
-            );
+        // `--format=` empties the header git would otherwise print above the
+        // patch: a `show` restricted to one path is being asked for a diff, and
+        // the commit's subject, author and date are already on the row that was
+        // pressed to get here.
+        GitQuestion::Show {
+            root,
+            hash,
+            path,
+            renamed_from,
+        } => {
+            let mut arguments = vec![
+                OsStr::new("show"),
+                OsStr::new("--no-color"),
+                OsStr::new("--format="),
+                OsStr::new(hash),
+                OsStr::new("--"),
+            ];
+            if let Some(from) = renamed_from {
+                arguments.push(OsStr::new(from));
+            }
+            arguments.push(OsStr::new(path));
+            let command = git_command(program, root, &arguments);
             match run_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Show {
                     root: root.clone(),
                     hash: hash.clone(),
                     path: path.clone(),
                     outcome: Ok(String::from_utf8_lossy(&run.stdout).into_owned()),
+                },
+                Ok(run) => faulted(question, classify_failure(&run.stderr)),
+                Err(fault) => faulted(question, fault),
+            }
+        }
+        GitQuestion::CommitFiles { root, hash } => {
+            let command = git_command(
+                program,
+                root,
+                &[
+                    OsStr::new("show"),
+                    OsStr::new("--no-color"),
+                    OsStr::new("--name-status"),
+                    OsStr::new("-z"),
+                    OsStr::new("--format="),
+                    OsStr::new(hash),
+                ],
+            );
+            match run_git(command, timeout) {
+                Ok(run) if run.ok => GitAnswer::CommitFiles {
+                    root: root.clone(),
+                    hash: hash.clone(),
+                    outcome: Ok(parse_name_status(&run.stdout)),
                 },
                 Ok(run) => faulted(question, classify_failure(&run.stderr)),
                 Err(fault) => faulted(question, fault),
@@ -1391,6 +1550,20 @@ pub struct GitCache {
     status: GitSlot<GitStatus>,
     branches: GitSlot<Vec<GitBranch>>,
     log: GitSlot<GitLog>,
+    /// The one expanded commit's file list, and which commit it is about (R15).
+    ///
+    /// **One, because the page has one.** The accordion opens a single commit,
+    /// so a map keyed by hash would be a cache of lists for commits that are
+    /// shut — a repository's worth of answers kept warm for presses that may
+    /// never come. Replacing it on every expansion is not forgetting anything a
+    /// reader could still see.
+    ///
+    /// The *hash* lives here beside the answer rather than only in the column's
+    /// view state, because an answer must be able to say which question it
+    /// belongs to: a list that arrives after the user has opened a different
+    /// commit is filed against the commit it is about, and drawn only if that is
+    /// still the open one.
+    commit_files: Option<(String, GitSlot<Vec<GitCommitFile>>)>,
     /// The paths a write is in flight for — **the whole of R13's pessimism**.
     ///
     /// A row whose path is in here is drawn dimmed and answers no verb, and it
@@ -1549,6 +1722,34 @@ impl GitCache {
 
     /// The next page of history, when there is one and the list wants it (R16) —
     /// what G-2's "Load more" row asks for, and the reason that row is drawn.
+    /// **What one commit touched** (R15) — the accordion's question, and the
+    /// slot it will land in.
+    ///
+    /// Asked at the moment of the press rather than derived by
+    /// [`Self::pending_questions`], for [`Self::more_commits`]'s reason: it is
+    /// not something a complete page needs, it is something a *gesture* wants,
+    /// and a question the paint could re-derive is a question the paint would
+    /// re-ask every frame the list was empty.
+    #[must_use]
+    pub fn begin_commit_files(&mut self, hash: &str) -> Option<GitQuestion> {
+        let root = self.repo.ready()?.clone();
+        self.commit_files = Some((hash.to_owned(), GitSlot::Pending));
+        Some(GitQuestion::CommitFiles {
+            root,
+            hash: hash.to_owned(),
+        })
+    }
+
+    /// The expanded commit's files, when the expansion asked about is the one
+    /// this cache holds an answer for.
+    #[must_use]
+    pub fn commit_files(&self, hash: &str) -> Option<&GitSlot<Vec<GitCommitFile>>> {
+        match &self.commit_files {
+            Some((held, slot)) if held == hash => Some(slot),
+            _ => None,
+        }
+    }
+
     #[allow(dead_code)]
     #[must_use]
     pub fn more_commits(&self) -> Option<GitQuestion> {
@@ -1573,9 +1774,12 @@ impl GitCache {
             GitQuestion::Log { skip: 0, .. } => self.log = GitSlot::Pending,
             // A write's own "already asked" bookkeeping is `pending_writes`,
             // written by `begin_write` at the moment the question is built.
+            // An expansion's own "already asked" bookkeeping is written by
+            // `begin_commit_files`, at the moment the question is built.
             GitQuestion::Log { .. }
             | GitQuestion::Diff { .. }
             | GitQuestion::Show { .. }
+            | GitQuestion::CommitFiles { .. }
             | GitQuestion::Write { .. } => {}
         }
     }
@@ -1661,6 +1865,29 @@ impl GitCache {
                     Ok(()) => self.refresh(),
                     Err(fault) => self.write_error = Some(write_refusal(&fault)),
                 }
+                true
+            }
+            // **A commit's file list is rows, not a document** (R15). It is
+            // filed here beside the status for the same reason the status is
+            // here: it is thrown away when the column re-roots, it is drawn and
+            // never read, and it has no body. A list that arrives about a commit
+            // that is no longer the open one is dropped, which is the accordion's
+            // cancellation arriving late.
+            GitAnswer::CommitFiles {
+                root,
+                hash,
+                outcome,
+            } => {
+                if self.root() != Some(root.as_path()) {
+                    return false;
+                }
+                let Some((held, slot)) = &mut self.commit_files else {
+                    return false;
+                };
+                if *held != hash {
+                    return false;
+                }
+                *slot = GitSlot::take(outcome);
                 true
             }
             // Diffs and file histories are documents, not column state: they
@@ -2265,6 +2492,7 @@ mod tests {
                 root: PathBuf::from(r"D:\repo"),
                 path: "src/main.rs".to_owned(),
                 staged,
+                renamed_from: None,
             },
         };
         tx.send(diff(false)).unwrap();
@@ -2448,11 +2676,17 @@ mod tests {
                 root: PathBuf::from(r"D:\repo"),
                 path: "a.rs".to_owned(),
                 staged: true,
+                renamed_from: None,
             },
             GitQuestion::Show {
                 root: PathBuf::from(r"D:\repo"),
                 hash: "abc".to_owned(),
                 path: "a.rs".to_owned(),
+                renamed_from: None,
+            },
+            GitQuestion::CommitFiles {
+                root: PathBuf::from(r"D:\repo"),
+                hash: "abc".to_owned(),
             },
         ] {
             let answer = faulted(&question, fault.clone());
@@ -2463,6 +2697,7 @@ mod tests {
                 GitAnswer::Log { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Diff { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Show { outcome, .. } => outcome.as_ref().err(),
+                GitAnswer::CommitFiles { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Write { outcome, .. } => outcome.as_ref().err(),
             };
             assert_eq!(carried, Some(&fault), "{question:?} came back unanswered");
@@ -2806,5 +3041,294 @@ mod tests {
                 || page.commits.iter().all(|commit| !commit.parents.is_empty()),
             "every commit but the root has a parent"
         );
+    }
+
+    // ── G-3 ────────────────────────────────────────────────────────────────
+
+    /// **② A diff is a document, and documents do not live in a column's
+    /// cache.**
+    ///
+    /// The two answers that carry a *body* — one file's diff, and one commit's
+    /// diff of one file — are filed into the tab's preview pool against their
+    /// own [`crate::preview::PreviewSource`], which is what makes the staged and
+    /// unstaged readings of one file two buffers. A commit's *file list* is the
+    /// opposite kind of answer: it is rows on the page, it is thrown away when
+    /// the column re-roots, and it belongs here beside the status.
+    ///
+    /// MUTATION: give `GitCache` a `diff: GitSlot<String>` and file
+    /// `GitAnswer::Diff` into it. One cache then holds one diff, so opening a
+    /// second file's diff silently replaces the first — while the pool, which is
+    /// what the panes actually read, still holds both.
+    #[test]
+    fn a_diff_is_a_document_and_a_commit_s_file_list_is_column_state() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::default();
+        cache.retarget(&root);
+        assert!(cache.accept(GitAnswer::Repo {
+            dir: root.clone(),
+            outcome: Ok(root.clone()),
+        }));
+        let before = format!("{cache:?}");
+
+        assert!(
+            !cache.accept(GitAnswer::Diff {
+                root: root.clone(),
+                path: "src/main.rs".to_owned(),
+                staged: true,
+                outcome: Ok("diff --git a/src/main.rs b/src/main.rs\n".to_owned()),
+            }),
+            "a diff is not this cache's to keep"
+        );
+        assert!(
+            !cache.accept(GitAnswer::Show {
+                root: root.clone(),
+                hash: "a".repeat(40),
+                path: "src/main.rs".to_owned(),
+                outcome: Ok("diff --git a/src/main.rs b/src/main.rs\n".to_owned()),
+            }),
+            "nor is one commit's reading of a file"
+        );
+        assert_eq!(
+            before,
+            format!("{cache:?}"),
+            "and neither of them left a mark on it"
+        );
+
+        // The file list, on the other hand, is rows.
+        let hash = "b".repeat(40);
+        assert!(
+            cache.commit_files(&hash).is_none(),
+            "nothing is expanded until something asks"
+        );
+        let question = cache
+            .begin_commit_files(&hash)
+            .expect("a repository can be asked what a commit touched");
+        assert_eq!(
+            question,
+            GitQuestion::CommitFiles {
+                root: root.clone(),
+                hash: hash.clone(),
+            }
+        );
+        assert!(
+            matches!(cache.commit_files(&hash), Some(GitSlot::Pending)),
+            "and the slot says the question is out"
+        );
+        assert!(cache.accept(GitAnswer::CommitFiles {
+            root: root.clone(),
+            hash: hash.clone(),
+            outcome: Ok(vec![GitCommitFile {
+                path: "src/main.rs".to_owned(),
+                code: StatusCode::Modified,
+                renamed_from: None,
+            }]),
+        }));
+        assert_eq!(
+            cache
+                .commit_files(&hash)
+                .and_then(GitSlot::ready)
+                .map(Vec::len),
+            Some(1)
+        );
+        // One expansion at a time: asking about another commit forgets the
+        // first, because the page only ever has one open (R15).
+        let other = "c".repeat(40);
+        assert!(cache.begin_commit_files(&other).is_some());
+        assert!(
+            cache.commit_files(&hash).is_none(),
+            "the shut commit's list is not kept warm for a press that may never come"
+        );
+    }
+
+    /// `git show --name-status -z --format=`, decoded — including the two shapes
+    /// that are not one record per file.
+    #[test]
+    fn a_commit_s_file_list_reads_letters_paths_and_where_a_rename_came_from() {
+        let files = parse_name_status(b"M\0src/main.rs\0A\0new.txt\0R100\0old.txt\0moved.txt\0");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].path, "src/main.rs");
+        assert_eq!(files[0].code, StatusCode::Modified);
+        assert_eq!(files[1].code, StatusCode::Added);
+        // A rename spends three fields, and the **new** path is the one the row
+        // is about — the same grammar `parse_status` already reads.
+        assert_eq!(files[2].code, StatusCode::Renamed);
+        assert_eq!(files[2].path, "moved.txt");
+        assert_eq!(files[2].renamed_from.as_deref(), Some("old.txt"));
+
+        // A merge commit's `--name-status` is empty against its first parent,
+        // and empty is an answer rather than a parse failure.
+        assert!(parse_name_status(b"").is_empty());
+    }
+
+    /// **A staged rename's diff is a rename, and only both names make it one.**
+    ///
+    /// Measured against real git rather than asserted about an argument list,
+    /// because the fact being pinned is git's own behaviour: `git diff --cached
+    /// -- <new path>` prints `new file mode`, and the same command given both
+    /// halves prints `rename from` / `rename to`. Rename detection compares a
+    /// *pair*, and a pathspec naming one half hides the other.
+    ///
+    /// What it costs to get wrong is a row wearing an `R` badge opening a diff
+    /// that says the file was just created — the panel and the diff disagreeing
+    /// on one screen, which is the failure §7 of the backend adjudication chose
+    /// the CLI to prevent.
+    ///
+    /// MUTATION: drop the `renamed_from` push from the `Diff` branch of
+    /// [`answer`]. The second half of this test starts printing `new file mode`
+    /// like the first.
+    #[test]
+    fn a_staged_rename_needs_both_names_to_read_as_a_rename() {
+        let git = real_git();
+        let root = std::env::temp_dir().join(format!(
+            "folio-git-rename-{}-{}",
+            std::process::id(),
+            RECORDED_AT
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch folder can be made");
+        let run = |arguments: &[&str]| {
+            let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
+                .expect("the scratch repository is built with the same git under test")
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "folio-test"]);
+        run(&["config", "user.email", "folio@example.invalid"]);
+        std::fs::write(root.join("was.txt"), "one\ntwo\nthree\n").expect("a file can be written");
+        run(&["add", "was.txt"]);
+        run(&["commit", "-q", "-m", "seed"]);
+        run(&["mv", "was.txt", "renamed.txt"]);
+
+        let ask = |renamed_from: Option<&str>| {
+            let question = GitQuestion::Diff {
+                root: root.clone(),
+                path: "renamed.txt".to_owned(),
+                staged: true,
+                renamed_from: renamed_from.map(str::to_owned),
+            };
+            let GitAnswer::Diff { outcome, .. } =
+                answer(&git, &question, GIT_COMMAND_TIMEOUT, RECORDED_AT)
+            else {
+                panic!("a diff question is answered with a diff");
+            };
+            outcome.expect("the scratch repository answers")
+        };
+
+        let half = ask(None);
+        let whole = ask(Some("was.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            half.contains("new file mode"),
+            "git's own behaviour, and the reason the field exists: one name \
+             turns a rename into an addition — {half}"
+        );
+        assert!(
+            whole.contains("rename from was.txt") && whole.contains("rename to renamed.txt"),
+            "and both names get the rename git already knows about — {whole}"
+        );
+        assert!(
+            !whole.contains("new file mode"),
+            "with nothing left claiming the file was created — {whole}"
+        );
+    }
+
+    /// **The four documents a change list can open, against a real
+    /// repository** — R25's mapping and G-3's honest states, end to end.
+    ///
+    /// Every claim here is checked against what a person typing the command in
+    /// the pane beside the panel would see, which is the whole argument for the
+    /// CLI backend: the staged reading is compared **byte for byte** with `git
+    /// diff --cached`, not merely inspected for plausibility.
+    ///
+    /// MUTATION: ignore `staged` when building the `diff` arguments. The staged
+    /// and unstaged readings become the same text, and the byte-for-byte
+    /// comparison against `--cached` fails on the first of them.
+    #[test]
+    fn a_real_repository_answers_four_ways_and_each_matches_the_command_line() {
+        let git = real_git();
+        let root = std::env::temp_dir().join(format!(
+            "folio-git-diff-{}-{}",
+            std::process::id(),
+            RECORDED_AT
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch folder can be made");
+        let run = |arguments: &[&str]| {
+            let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
+                .expect("the scratch repository is built with the same git under test")
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "folio-test"]);
+        run(&["config", "user.email", "folio@example.invalid"]);
+        std::fs::write(root.join("text.txt"), "one\ntwo\nthree\n").expect("a file is written");
+        // A NUL in the first bytes is what makes git call a file binary.
+        std::fs::write(root.join("blob.bin"), [0u8, 1, 2, 3, 4, 5, 6, 7])
+            .expect("a file is written");
+        run(&["add", "text.txt", "blob.bin"]);
+        run(&["commit", "-q", "-m", "seed"]);
+        // Staged: a line appended and packed. Unstaged: another line on top of
+        // it, so the two readings are genuinely different documents.
+        std::fs::write(root.join("text.txt"), "one\ntwo\nthree\nstaged\n").expect("written");
+        run(&["add", "text.txt"]);
+        std::fs::write(root.join("text.txt"), "one\ntwo\nthree\nstaged\nworking\n")
+            .expect("written");
+        std::fs::write(root.join("blob.bin"), [0u8, 9, 9, 9]).expect("written");
+        std::fs::write(root.join("fresh.txt"), "never seen\n").expect("written");
+
+        let ask = |path: &str, staged: bool| {
+            let question = GitQuestion::Diff {
+                root: root.clone(),
+                path: path.to_owned(),
+                staged,
+                renamed_from: None,
+            };
+            let GitAnswer::Diff { outcome, .. } =
+                answer(&git, &question, GIT_COMMAND_TIMEOUT, RECORDED_AT)
+            else {
+                panic!("a diff question is answered with a diff");
+            };
+            outcome.expect("the scratch repository answers")
+        };
+        let command_line =
+            |arguments: &[&str]| String::from_utf8_lossy(&run(arguments).stdout).into_owned();
+
+        // ① R25's mapping: a STAGED row's document *is* `git diff --cached`.
+        let staged = ask("text.txt", true);
+        assert_eq!(
+            staged,
+            command_line(&["diff", "--no-color", "--cached", "--", "text.txt"]),
+            "the index's reading, byte for byte with the command the pane beside \
+             it would run"
+        );
+        assert!(staged.contains("+staged") && !staged.contains("+working"));
+
+        // ② And a CHANGES row's is the working tree's — a different document.
+        let unstaged = ask("text.txt", false);
+        assert_eq!(
+            unstaged,
+            command_line(&["diff", "--no-color", "--", "text.txt"])
+        );
+        assert!(unstaged.contains("+working") && !unstaged.contains("+staged"));
+        assert_ne!(staged, unstaged, "two readings, two documents (R25)");
+
+        // ③ The binary honesty: git's own one line, and nothing invented.
+        let binary = ask("blob.bin", false);
+        assert!(
+            binary.contains("Binary files a/blob.bin and b/blob.bin differ"),
+            "git says it in one line — {binary}"
+        );
+        assert!(
+            !binary.contains("@@"),
+            "and there is no hunk, because there is nothing to show line by line"
+        );
+
+        // ④ An untracked file has no working-tree diff — git has never had a
+        // copy to differ from — and empty is what the pane says a sentence
+        // about (`crate::preview::GIT_DOCUMENT_EMPTY`).
+        assert!(ask("fresh.txt", false).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

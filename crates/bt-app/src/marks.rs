@@ -156,6 +156,38 @@ pub enum ChromeMark {
     /// that moves text into somewhere — the same distinction the two words keep
     /// everywhere else, and the reason the mock-up carries both (line 2239).
     Paste,
+    /// `#i-split` — "cut this pane in two" (user ruling, 2026-08-15), the
+    /// `.pane-split` button on a terminal head and the mark on both Split rows
+    /// of the pane-head menu.
+    ///
+    /// The 田: the house frame with a divider on each axis. Struck for this
+    /// product rather than lifted from anyone's sheet, and drawn as *division
+    /// itself* rather than as one particular cut, because the button does not
+    /// commit to an axis — it takes the pane's longer side, which is a different
+    /// axis in a tall pane than in a wide one. A glyph showing one vertical rule
+    /// would be a promise the button breaks half the time.
+    ///
+    /// Deliberately not [`Self::Panel`]'s picture, which is the same frame with
+    /// *one off-centre* rule: that one reads as a sidebar beside a body, which
+    /// is a statement about what a pane contains. Both rules, both centred, is a
+    /// statement about a pane being cut, and at a pane head's 13 pixels the two
+    /// have to be told apart at a glance.
+    Split,
+    /// `#i-split-right` — the pane-head menu's `Split right` row.
+    ///
+    /// Two panes side by side with a gutter between them: the *result*, not the
+    /// cut. Drawn this way rather than as [`Self::Split`]'s frame with a single
+    /// centred rule for the reason that variant's own note gives — a frame with
+    /// one internal rule is already [`Self::Panel`], and three marks in one
+    /// build that differ by where a line falls are three marks nobody can tell
+    /// apart at a menu row's fourteen pixels.
+    SplitRight,
+    /// `#i-split-down` — the pane-head menu's `Split down` row.
+    ///
+    /// [`Self::SplitRight`] turned a quarter: two panes stacked, same gutter.
+    /// The pair has to be a pair — same rects, same gap, same weight — because
+    /// the only thing a reader is being asked to see is which way they lie.
+    SplitDown,
     /// `#i-float` — "pop this column out into a floating window" (B18/B19), the
     /// `.pane-float` button on a files head.
     ///
@@ -418,6 +450,9 @@ impl ChromeMark {
             Self::Panel => "i-panel",
             Self::Copy => "i-copy",
             Self::Paste => "i-paste",
+            Self::Split => "i-split",
+            Self::SplitRight => "i-split-right",
+            Self::SplitDown => "i-split-down",
             Self::Float => "i-float",
             Self::DockLeft => "i-dock-left",
             Self::DockRight => "i-dock-right",
@@ -1191,6 +1226,9 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::GitGraph => 28,
         ChromeMark::Minus => 29,
         ChromeMark::GitMergeCurve => 30,
+        ChromeMark::Split => 31,
+        ChromeMark::SplitRight => 32,
+        ChromeMark::SplitDown => 33,
         // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
@@ -1204,7 +1242,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 31] = [
+const SYMBOL_VIEW_BOX: [&str; 34] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1258,11 +1296,18 @@ const SYMBOL_VIEW_BOX: [&str; 31] = [
     // height of one commit row. Not the house sixteen, for `#i-tri`'s reason —
     // the design quotes this curve's control points in these units.
     "0 0 14 27",
+    // `#i-split`, the house sixteen — it stands beside `#i-folder` in the same
+    // run and has to be cut in the same units to sit at the same weight.
+    "0 0 16 16",
+    // `#i-split-right` and `#i-split-down`, the same sixteen: they are the same
+    // drawing turned, and a turn is only legible if nothing else changed.
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 31] = [
+const SYMBOL_BODY: [&str; 34] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1447,6 +1492,30 @@ const SYMBOL_BODY: [&str; 31] = [
     // just short of the 3.1-radius circle centred at (7, 13.5) — so the line
     // stops *at* the node rather than under it.
     r#"<path d="M13 0 C 13 8, 9.5 10.5, 7.6 12.6" fill="none" stroke="currentColor" stroke-width="1.5"/>"#,
+    // `#i-split` — the house frame, divided on both axes. Same rect and same
+    // 1.1 stroke as `#i-panel`, deliberately: they are the same object seen
+    // twice, and only where the rules fall separates "a pane with a sidebar"
+    // from "a pane being cut". The dividers run edge to edge rather than
+    // stopping short, because a rule that stops short is a rule floating inside
+    // a box; a division reaches the walls.
+    concat!(
+        r#"<rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+        r#"<path d="M8 2.5v11M1.5 8h13" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+    ),
+    // `#i-split-right` — the two panes the cut leaves, side by side. The gutter
+    // is 1.2 units, which at a menu row's fourteen pixels is one pixel of gap:
+    // enough to be a gap and not enough to be a third shape.
+    concat!(
+        r#"<rect x="1.5" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+        r#"<rect x="8.6" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+    ),
+    // `#i-split-down` — the same two panes, stacked. Same gutter, same stroke,
+    // same outer box; only the axis differs, because that is the only thing the
+    // reader is being asked to tell apart.
+    concat!(
+        r#"<rect x="1.5" y="2.5" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+        r#"<rect x="1.5" y="8.6" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -1938,6 +2007,14 @@ mod tests {
             (ChromeMark::File, 14.0),
             (ChromeMark::Folder, 13.0),
             (ChromeMark::Panel, 13.0),
+            // `.panehead .pane-split svg { width: 13px }` — the folder's size,
+            // and it is asked at the folder's size because the two stand in one
+            // run and are read together or not at all.
+            (ChromeMark::Split, 13.0),
+            // The menu's icon column is 14 (`ITEM_ICON_COLUMN_LOGICAL_PX`), and
+            // these two are only ever drawn there.
+            (ChromeMark::SplitRight, 14.0),
+            (ChromeMark::SplitDown, 14.0),
             // 13 in a 17px box, deliberately not the close mark's 8 (mock-up
             // lines 362-365): the pin carries a state and a glyph that has to
             // survive a 45° turn, and both cost silhouette.

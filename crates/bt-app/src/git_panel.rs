@@ -34,8 +34,13 @@
 
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad};
 
-use crate::git::{GitCache, GitFault, GitGroup, GitSlot, GitStatusEntry, GitWriteVerb, StatusCode};
+use std::path::Path;
+
+use crate::git::{
+    GitCache, GitCommitFile, GitFault, GitGroup, GitSlot, GitStatusEntry, GitWriteVerb, StatusCode,
+};
 use crate::marks::{ChromeMark, ChromeSprite};
+use crate::preview::PreviewSource;
 
 // ── the page's measurements, all from the mock-up ──────────────────────────
 
@@ -111,6 +116,14 @@ pub const GIT_ROW_GAP_LOGICAL_PX: f32 = 8.0;
 pub const GIT_ROW_PADDING_X_LOGICAL_PX: f32 = 7.0;
 /// `.gcommit { padding: 0 7px 0 3px }` — the graph column gets the left edge.
 pub const GIT_COMMIT_PADDING_LEFT_LOGICAL_PX: f32 = 3.0;
+/// How far an expanded commit's file rows stand in from the list's edge (R15).
+///
+/// The commit row's left three pixels and its fourteen-pixel graph column,
+/// exactly: the files hang under the *message*, and the lane's gutter stays
+/// empty beside them. An indent chosen for looks would be a number that stopped
+/// agreeing with the graph the first time either moved.
+pub const GIT_COMMIT_FILE_INDENT_LOGICAL_PX: f32 =
+    GIT_COMMIT_PADDING_LEFT_LOGICAL_PX + GIT_GRAPH_WIDTH_LOGICAL_PX;
 /// `.grow bdi`, `.gmsg` — the page's body size.
 pub const GIT_ROW_FONT_LOGICAL_PX: f32 = 12.5;
 
@@ -197,6 +210,14 @@ pub const GIT_DETACHED: &str = "detached HEAD";
 
 /// The row that asks for the next page of history (R16).
 pub const GIT_LOAD_MORE: &str = "Load more";
+
+/// An expansion with nothing under it (R15).
+///
+/// Almost always a **merge**: `--name-status` compares a commit against its
+/// parent, and a merge has two, so git answers with nothing rather than choosing
+/// one. Saying "no files" flatly would be a claim about the commit; saying it
+/// this way is a claim about the question that was asked, which is the true one.
+pub const GIT_COMMIT_NO_FILES: &str = "No files against the first parent";
 
 /// What the three groups are called.
 #[must_use]
@@ -443,6 +464,10 @@ pub struct GitChangeRow {
     /// because a row that hid it would claim the file was in one place.
     pub badges: Vec<GitBadge>,
     pub group: GitGroup,
+    /// Where a rename came from, when this row is one — what the diff this row
+    /// opens needs in order to *be* a rename (see
+    /// [`crate::git::GitQuestion::Diff`]'s own field).
+    pub renamed_from: Option<String>,
     /// Whether a discard here deletes rather than restores.
     pub untracked: bool,
     /// A write about this path is in flight (R13).
@@ -459,6 +484,15 @@ pub struct GitBadge {
 /// One commit, ready to draw.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GitCommitRow {
+    /// The whole forty characters — what `git show` is asked with, and what an
+    /// expansion is keyed on.
+    ///
+    /// The **full** hash and not the abbreviation git already gave us to draw:
+    /// an abbreviation is short enough to be ambiguous by construction (git
+    /// lengthens it as a repository grows), and a key that can collide is a key
+    /// that opens the wrong commit's files on the day the repository gets big
+    /// enough.
+    pub hash: String,
     /// git's own abbreviation (R21 puts it at 10.5, before the subject).
     pub short: String,
     pub short_width: f32,
@@ -474,6 +508,31 @@ pub struct GitCommitRow {
     /// than as a stack of dashes.
     pub first: bool,
     pub last: bool,
+    /// Whether this commit's file list is standing open below it (R15).
+    ///
+    /// Drawn as a row that stays lit: the accordion has no chevron — the design
+    /// gave the commit row its whole width to the graph, the hash, the subject
+    /// and the time, and there is no column left for one — so *being open* is
+    /// said by the row keeping the ground its hover gave it.
+    pub expanded: bool,
+}
+
+/// One file an expanded commit touched (R15).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitCommitFileRow {
+    /// Which commit this row is a reading of. Carried on the row rather than
+    /// looked up from the column's view state when the row is pressed, for
+    /// [`GitRow`]'s own reason: a row that indexes into something the presser
+    /// also has to hold is a row that can disagree with it.
+    pub hash: String,
+    /// Repo-relative, in git's grammar.
+    pub path: String,
+    /// Where a rename came from — [`GitChangeRow::renamed_from`]'s twin, and
+    /// needed for the same reason: `git show <hash> -- <new path>` loses a
+    /// rename exactly as `git diff` does.
+    pub renamed_from: Option<String>,
+    pub badge: GitBadge,
+    pub tooltip: String,
 }
 
 /// One row of the page.
@@ -506,6 +565,8 @@ pub enum GitRow {
     },
     Change(GitChangeRow),
     Commit(GitCommitRow),
+    /// A file under the one expanded commit (R15).
+    CommitFile(GitCommitFileRow),
     LoadMore,
     /// A sentence in the list's own voice: the status cap's surrender (R33),
     /// or a group that came back empty when the page expected one.
@@ -522,7 +583,11 @@ impl GitRow {
     fn on_card(&self) -> bool {
         matches!(
             self,
-            Self::Change(_) | Self::Commit(_) | Self::LoadMore | Self::Notice(_)
+            Self::Change(_)
+                | Self::Commit(_)
+                | Self::CommitFile(_)
+                | Self::LoadMore
+                | Self::Notice(_)
         )
     }
 
@@ -539,11 +604,100 @@ impl GitRow {
                 + GIT_LABEL_PADDING_BOTTOM_LOGICAL_PX)
                 * scale)
                 .round(),
-            Self::Change(_) | Self::Commit(_) | Self::LoadMore | Self::Notice(_) => {
-                (GIT_ROW_HEIGHT_LOGICAL_PX * scale).round().max(1.0)
-            }
+            Self::Change(_)
+            | Self::Commit(_)
+            | Self::CommitFile(_)
+            | Self::LoadMore
+            | Self::Notice(_) => (GIT_ROW_HEIGHT_LOGICAL_PX * scale).round().max(1.0),
         }
     }
+}
+
+/// **What a press on a row's body opens** (R15/R25) — and nothing else does.
+///
+/// Split out of the press handler for [`press_outcome`]'s reason: which document
+/// a row stands for is a fact about the page, and a fact about the page should be
+/// holdable by a test that has no window, no tab and no worker. The handler then
+/// looks the answer up here and carries it out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitRowOpen {
+    /// Put this document on the preview seat.
+    Document {
+        source: PreviewSource,
+        /// What the head and the switcher call it.
+        name: String,
+        /// The other half of a rename, for the question this open will ask.
+        ///
+        /// **Beside the identity rather than inside it.** Two readings of one
+        /// file at one stage are one document however the file came by its name,
+        /// so this is not part of [`PreviewSource`] — it is a fact the *command*
+        /// needs (`crate::git::GitQuestion::Diff::renamed_from`) and nothing
+        /// else does.
+        renamed_from: Option<String>,
+    },
+    /// Turn this commit's file list over (R15).
+    Expand { hash: String },
+}
+
+/// The display name a git document wears: the file's base name and `.diff`.
+///
+/// **The suffix says what it is to a reader and to nothing else** (R24). The
+/// mock-up added the same three letters so that the *view* would be chosen by
+/// the name; that mechanism is retired, and what is left is a caption, which is
+/// what it always should have been. A pane 240 pixels wide has room for a name,
+/// so the folders above it are dropped exactly as a files row drops them.
+#[must_use]
+pub fn git_document_name(path: &str) -> String {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    format!("{base}.diff")
+}
+
+/// Which document a row's body opens, if any.
+#[must_use]
+pub fn row_document(row: &GitRow, root: &Path) -> Option<GitRowOpen> {
+    match row {
+        // **R25's whole mapping.** A row under STAGED is a claim about the
+        // index, so the diff it opens is the index's; every other group's row is
+        // about the working tree. An untracked row asks the working tree too and
+        // gets nothing, which is the honest answer — git has no copy of that
+        // file to differ from, and the pane says so in one line.
+        GitRow::Change(change) => Some(GitRowOpen::Document {
+            source: PreviewSource::GitDiff {
+                root: root.to_owned(),
+                path: change.path.clone(),
+                staged: change.group == GitGroup::Staged,
+            },
+            name: git_document_name(&change.path),
+            renamed_from: change.renamed_from.clone(),
+        }),
+        GitRow::Commit(commit) => Some(GitRowOpen::Expand {
+            hash: commit.hash.clone(),
+        }),
+        GitRow::CommitFile(file) => Some(GitRowOpen::Document {
+            source: PreviewSource::GitShow {
+                root: root.to_owned(),
+                hash: file.hash.clone(),
+                path: file.path.clone(),
+            },
+            name: git_document_name(&file.path),
+            renamed_from: file.renamed_from.clone(),
+        }),
+        // A masthead, a heading, the "load more" row and a notice are not
+        // documents. The first three answer their own presses through
+        // [`GitAct`]; the last answers none.
+        GitRow::Masthead(_) | GitRow::Heading { .. } | GitRow::LoadMore | GitRow::Notice(_) => None,
+    }
+}
+
+/// **The accordion** (R15): one commit open, or none.
+///
+/// An `Option` and not a set, and that is the whole ruling: a 240-pixel column
+/// with three commits' file lists standing open in it is a history you have to
+/// scroll past your own expansions to read. Pressing the open one shuts it;
+/// pressing another *replaces* it.
+#[must_use]
+pub fn toggled_expansion(current: Option<&str>, hash: &str) -> Option<String> {
+    (current != Some(hash)).then(|| hash.to_owned())
 }
 
 /// One frame of the Git page.
@@ -578,8 +732,18 @@ pub type Measure<'a> = dyn FnMut(&str, f32) -> f32 + 'a;
 /// **The whole derivation, in one place.** The painter, the hit test and the
 /// wheel all read the rows this returns, so a row that is drawn is a row that can
 /// be pressed and a row that can be pressed is a row that is there.
+///
+/// `expanded` is the one commit whose files are showing (R15). It arrives as a
+/// parameter rather than off the cache because it is a *view* state — which
+/// commit this column is looking into — and the cache is what the repository
+/// said. The cache holds the answer; whether it is on screen is the column's.
 #[must_use]
-pub fn build(cache: &GitCache, scale: f32, measure: &mut Measure<'_>) -> GitPanelContent {
+pub fn build(
+    cache: &GitCache,
+    expanded: Option<&str>,
+    scale: f32,
+    measure: &mut Measure<'_>,
+) -> GitPanelContent {
     let mut content = GitPanelContent::default();
 
     // The repository probe answers first and answers for everything: until it
@@ -667,13 +831,18 @@ pub fn build(cache: &GitCache, scale: f32, measure: &mut Measure<'_>) -> GitPane
             });
             let last = log.commits.len().saturating_sub(1);
             for (index, commit) in log.commits.iter().enumerate() {
+                let open = expanded == Some(commit.hash.as_str());
                 content.rows.push(GitRow::Commit(commit_row(
                     commit,
                     index == 0,
                     index == last && !log.has_more,
+                    open,
                     scale,
                     measure,
                 )));
+                if open {
+                    push_expansion(&mut content.rows, cache, &commit.hash);
+                }
             }
             if log.has_more {
                 content.rows.push(GitRow::LoadMore);
@@ -686,6 +855,54 @@ pub fn build(cache: &GitCache, scale: f32, measure: &mut Measure<'_>) -> GitPane
     }
 
     content
+}
+
+/// The open commit's file list, or the one line that stands in for it (R15).
+///
+/// **All four states of the slot get a row**, on [`GitCache`]'s own reading of
+/// why: an expansion that drew nothing while the subprocess ran would look like
+/// a commit that touched no files, and then like one that touched some — a list
+/// that flickers into existence under the row you just pressed.
+///
+/// The empty case is the interesting one and it is not an error: `--name-status`
+/// on a **merge** compares against no parent and answers with nothing, so the
+/// sentence says which kind of nothing this is rather than leaving a gap.
+fn push_expansion(rows: &mut Vec<GitRow>, cache: &GitCache, hash: &str) {
+    match cache.commit_files(hash) {
+        Some(GitSlot::Ready(files)) if !files.is_empty() => {
+            rows.extend(files.iter().map(|file| commit_file_row(file, hash)));
+        }
+        // **Only git answering with nothing earns the "no files" sentence.**
+        Some(GitSlot::Ready(_)) => {
+            rows.push(GitRow::Notice(GIT_COMMIT_NO_FILES.to_owned()));
+        }
+        // A hash this cache holds no answer for is a question not yet answered,
+        // and that is what this sentence says. It is unreachable by
+        // construction — an expansion and its question are begun in the same
+        // call — and it is written this way rather than as the line above
+        // because if it *were* ever reached, claiming the commit touched no
+        // files would be a claim about a repository nobody has asked.
+        None | Some(GitSlot::Idle | GitSlot::Pending) => {
+            rows.push(GitRow::Notice(GIT_READING.to_owned()));
+        }
+        Some(GitSlot::Failed(fault)) => rows.push(GitRow::Notice(fault_sentence(fault))),
+    }
+}
+
+fn commit_file_row(file: &GitCommitFile, hash: &str) -> GitRow {
+    GitRow::CommitFile(GitCommitFileRow {
+        hash: hash.to_owned(),
+        tooltip: match &file.renamed_from {
+            Some(from) => format!("{} — renamed from {from}", file.path),
+            None => file.path.clone(),
+        },
+        path: file.path.clone(),
+        renamed_from: file.renamed_from.clone(),
+        badge: GitBadge {
+            letter: file.code.letter(),
+            ink: GitBadgeInk::of(file.code),
+        },
+    })
 }
 
 /// The masthead: which branch, and how far from its upstream.
@@ -790,16 +1007,19 @@ fn change_row(entry: &GitStatusEntry, group: GitGroup, cache: &GitCache) -> GitC
         },
         pending: cache.write_pending(&entry.path),
         path: entry.path.clone(),
+        renamed_from: entry.renamed_from.clone(),
         badges,
         group,
         untracked,
     }
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn commit_row(
     commit: &crate::git::GitCommit,
     first: bool,
     last: bool,
+    expanded: bool,
     scale: f32,
     measure: &mut Measure<'_>,
 ) -> GitCommitRow {
@@ -820,12 +1040,14 @@ fn commit_row(
         } else {
             format!("{}\n{}", commit.subject, commit.author)
         },
+        hash: commit.hash.clone(),
         short: commit.short.clone(),
         subject: commit.subject.clone(),
         time: commit.time_relative.clone(),
         merge,
         first,
         last,
+        expanded,
     }
 }
 
@@ -951,6 +1173,12 @@ pub fn git_panel_geometry(
         let (row_left, row_right) = match row {
             GitRow::Masthead(_) => (left + head_pad_x, (right - head_pad_x).max(left)),
             GitRow::Heading { .. } => (left + label_pad_x, (right - label_pad_x).max(left)),
+            // The one indented row on the page — under its commit's message,
+            // beside its commit's lane.
+            GitRow::CommitFile(_) => (
+                left + card_pad + (GIT_COMMIT_FILE_INDENT_LOGICAL_PX * scale).round(),
+                (right - card_pad).max(left),
+            ),
             _ => (left + card_pad, (right - card_pad).max(left)),
         };
         rows.push([row_left, y, row_right, y + height]);
@@ -1094,6 +1322,7 @@ pub fn row_tooltip(row: &GitRow) -> Option<String> {
         GitRow::Heading { tooltip, .. } => Some((*tooltip).to_owned()),
         GitRow::Change(change) => Some(change.tooltip.clone()),
         GitRow::Commit(commit) => Some(commit.tooltip.clone()),
+        GitRow::CommitFile(file) => Some(file.tooltip.clone()),
         GitRow::LoadMore => Some(GitAct::LoadMore.tooltip(false).to_owned()),
         GitRow::Notice(_) => None,
     }
@@ -1205,14 +1434,31 @@ pub fn push_git_panel(
                 push_acts(row, rect, hover, hovered, scale, palette, sprites, &crop);
             }
             GitRow::Commit(commit) => {
-                push_row_ground(rect, hovered, scale, palette, sprites, &crop);
+                // **An open commit keeps the ground its hover gave it** — the
+                // accordion's whole affordance, and the reason the row's inks
+                // are then the hovered set too: a lit row with unlit text reads
+                // as a row the pointer has left, not as one that is open.
+                let lit = hovered || commit.expanded;
+                push_row_ground(rect, lit, scale, palette, sprites, &crop);
                 push_commit(
                     commit,
+                    rect,
+                    lit,
+                    scale,
+                    palette,
+                    (quads, labels, sprites),
+                    &crop,
+                );
+            }
+            GitRow::CommitFile(file) => {
+                push_row_ground(rect, hovered, scale, palette, sprites, &crop);
+                push_commit_file(
+                    file,
                     rect,
                     hovered,
                     scale,
                     palette,
-                    (quads, labels, sprites),
+                    (labels, sprites),
                     &crop,
                 );
             }
@@ -1527,6 +1773,79 @@ fn push_change(
     });
 }
 
+/// One file under an expanded commit (R15): its letter, and its path.
+///
+/// The change row's vocabulary with everything a change row has and this does
+/// not taken out — no second badge, because a commit has one story per file; no
+/// verbs, because there is nothing to stage in a commit that has already
+/// happened; no reserved corner, because reserving room for verbs that do not
+/// exist would push the paths in for nothing.
+#[allow(clippy::too_many_arguments)]
+fn push_commit_file(
+    file: &GitCommitFileRow,
+    rect: [f32; 4],
+    hovered: bool,
+    scale: f32,
+    palette: &ChromePalette,
+    out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
+    crop: &dyn Fn([f32; 4]) -> [f32; 4],
+) {
+    let (labels, sprites) = out;
+    let pad = (GIT_ROW_PADDING_X_LOGICAL_PX * scale).round();
+    let gap = (GIT_ROW_GAP_LOGICAL_PX * scale).round();
+    let badge = (GIT_BADGE_LOGICAL_PX * scale).round().max(1.0);
+    let badge_radius = (GIT_BADGE_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let ground = if hovered {
+        palette.git_row_hover
+    } else {
+        palette.git_section
+    };
+    let top = ((rect[1] + rect[3] - badge) / 2.0).round();
+    let box_ = [rect[0] + pad, top, rect[0] + pad + badge, top + badge];
+    let ink = file.badge.ink.colour(palette);
+    sprites.push(ChromeSprite::new(
+        ChromeMark::ControlPill {
+            radius_px: badge_radius,
+        },
+        crop(box_),
+        bt_render::ink_over(ground, ink, GIT_BADGE_GROUND_ALPHA),
+    ));
+    labels.push(ChromeLabel {
+        text: file.badge.letter.to_string(),
+        rect: box_,
+        font_size_px: GIT_BADGE_FONT_LOGICAL_PX * scale,
+        color: ink,
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: Some(crop(box_)),
+    });
+    let name_rect = [
+        box_[2] + gap,
+        rect[1],
+        (rect[2] - pad).max(box_[2]),
+        rect[3],
+    ];
+    labels.push(ChromeLabel {
+        text: file.path.clone(),
+        rect: name_rect,
+        font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
+        color: if hovered {
+            palette.git_row_text_hover
+        } else {
+            palette.git_row_text
+        },
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: Some(crop(name_rect)),
+    });
+}
+
 /// How much room `count` verbs keep at a row's trailing edge.
 fn reserved_act_width(count: usize, scale: f32) -> f32 {
     if count == 0 {
@@ -1795,7 +2114,7 @@ mod tests {
     }
 
     fn rows_of(cache: &GitCache) -> GitPanelContent {
-        build(cache, 1.0, &mut ruler)
+        build(cache, None, 1.0, &mut ruler)
     }
 
     fn change_rows(content: &GitPanelContent) -> Vec<GitChangeRow> {
@@ -2398,6 +2717,287 @@ mod tests {
             commits.iter().map(|c| c.merge).collect::<Vec<_>>(),
             vec![false, true, false],
             "two parents is what makes a merge, and nothing else does"
+        );
+    }
+
+    // ── G-3 ────────────────────────────────────────────────────────────────
+
+    /// The porcelain the diff tests are written against: one file packed, one
+    /// edited, one git has never seen.
+    const THREE_WAYS: &[u8] = b"## main\0M  staged.txt\0 M mod.txt\0?? new.txt\0";
+
+    fn change_named<'rows>(content: &'rows GitPanelContent, path: &str) -> &'rows GitRow {
+        content
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::Change(change) if change.path == path))
+            .expect("the page draws this file")
+    }
+
+    /// **① R25's whole mapping, on the row that carries it.**
+    ///
+    /// A row in the STAGED group is about the *index*, and the index's diff is
+    /// `git diff --cached`; a row in CHANGES is about the working tree. The
+    /// mock-up's row had one `data-staged` attribute and one diff behind it, and
+    /// which of the two it meant was never written down — this is where it is
+    /// written down.
+    ///
+    /// MUTATION: hard-code `staged: false` in [`row_document`]. A staged file's
+    /// row then opens the working tree's diff — which for a file that is *only*
+    /// staged is empty, so the page says "no changes" about a file it is drawing
+    /// under a heading that counts it.
+    #[test]
+    fn a_staged_row_opens_the_index_s_diff_and_a_changed_row_the_working_tree_s() {
+        let content = rows_of(&answered(THREE_WAYS, Vec::new(), false));
+        let root = Path::new(ROOT);
+
+        let staged = row_document(change_named(&content, "staged.txt"), root)
+            .expect("a change row opens a document");
+        assert_eq!(
+            staged,
+            GitRowOpen::Document {
+                source: PreviewSource::GitDiff {
+                    root: PathBuf::from(ROOT),
+                    path: "staged.txt".to_owned(),
+                    staged: true,
+                },
+                name: "staged.txt.diff".to_owned(),
+                renamed_from: None,
+            },
+            "a row under STAGED is about the index"
+        );
+
+        let changed = row_document(change_named(&content, "mod.txt"), root)
+            .expect("a change row opens a document");
+        assert_eq!(
+            changed,
+            GitRowOpen::Document {
+                source: PreviewSource::GitDiff {
+                    root: PathBuf::from(ROOT),
+                    path: "mod.txt".to_owned(),
+                    staged: false,
+                },
+                name: "mod.txt.diff".to_owned(),
+                renamed_from: None,
+            },
+            "a row under CHANGES is about the working tree"
+        );
+
+        // The suffix is a *display name* and nothing is judged by it (R24): the
+        // buffer that name goes on is a diff because its source says so.
+        let GitRowOpen::Document { source, name, .. } =
+            row_document(change_named(&content, "new.txt"), root).expect("untracked opens too")
+        else {
+            panic!("a change row is a document, not an expansion");
+        };
+        assert!(name.ends_with(".diff"), "the display name wears the suffix");
+        assert!(
+            matches!(source, PreviewSource::GitDiff { staged: false, .. }),
+            "and the buffer is a diff because the *source* says so, not the name"
+        );
+    }
+
+    /// **③ R15's accordion — one commit open, never two.**
+    ///
+    /// MUTATION: make [`toggled_expansion`] keep the old hash when a different
+    /// one is pressed (a set instead of an option). Two commits' file lists then
+    /// stand open in a 240-pixel column, and the history below the first is
+    /// pushed off the bottom by a list nobody asked to keep.
+    #[test]
+    fn only_one_commit_is_ever_open() {
+        assert_eq!(
+            toggled_expansion(None, "aaa"),
+            Some("aaa".to_owned()),
+            "a press on a closed commit opens it"
+        );
+        assert_eq!(
+            toggled_expansion(Some("aaa"), "aaa"),
+            None,
+            "a press on the open one closes it"
+        );
+        assert_eq!(
+            toggled_expansion(Some("aaa"), "bbb"),
+            Some("bbb".to_owned()),
+            "and a press on another *replaces* it — the accordion, not a set"
+        );
+
+        // And the page draws it that way: two commits, one expansion, one list.
+        let mut cache = answered(
+            b"## main\0",
+            vec![
+                commit("aaaaaaa", "newest", 1),
+                commit("bbbbbbb", "older", 1),
+            ],
+            false,
+        );
+        let open = commit("bbbbbbb", "older", 1).hash;
+        assert!(cache.begin_commit_files(&open).is_some());
+        assert!(cache.accept(GitAnswer::CommitFiles {
+            root: PathBuf::from(ROOT),
+            hash: open.clone(),
+            outcome: Ok(vec![crate::git::GitCommitFile {
+                path: "src/main.rs".to_owned(),
+                code: StatusCode::Modified,
+                renamed_from: None,
+            }]),
+        }));
+        let content = build(&cache, Some(&open), 1.0, &mut ruler);
+        let files: Vec<&GitCommitFileRow> = content
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                GitRow::CommitFile(file) => Some(file),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "one open commit contributes one file list");
+        assert_eq!(files[0].hash, open);
+        // Under the commit it belongs to, and not under the one above it.
+        let commit_at = |hash: &str| {
+            content
+                .rows
+                .iter()
+                .position(|row| matches!(row, GitRow::Commit(c) if c.hash == hash))
+                .expect("the commit is drawn")
+        };
+        let file_at = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::CommitFile(_)))
+            .expect("the file is drawn");
+        assert!(
+            commit_at(&open) < file_at,
+            "the list hangs below its commit"
+        );
+        assert!(
+            file_at > commit_at(&commit("aaaaaaa", "newest", 1).hash),
+            "and nothing hangs below the commit that is shut"
+        );
+    }
+
+    /// **④ A file row inside an expansion opens that commit's diff of that
+    /// file** (R15) — not the working tree's, which is a different document
+    /// about a different pair of bytes.
+    ///
+    /// MUTATION: build a `GitDiff` from the file row instead of a `GitShow`.
+    /// Pressing a file inside a commit from last March then shows what *you*
+    /// have edited today, under that commit's heading.
+    #[test]
+    fn a_commit_s_file_row_opens_that_commit_s_own_diff() {
+        let hash = commit("aaaaaaa", "newest", 1).hash;
+        let mut cache = answered(b"## main\0", vec![commit("aaaaaaa", "newest", 1)], false);
+        assert!(cache.begin_commit_files(&hash).is_some());
+        assert!(cache.accept(GitAnswer::CommitFiles {
+            root: PathBuf::from(ROOT),
+            hash: hash.clone(),
+            outcome: Ok(vec![crate::git::GitCommitFile {
+                path: "src/deep/main.rs".to_owned(),
+                code: StatusCode::Modified,
+                renamed_from: None,
+            }]),
+        }));
+        let content = build(&cache, Some(&hash), 1.0, &mut ruler);
+        let row = content
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::CommitFile(_)))
+            .expect("the file is drawn");
+        assert_eq!(
+            row_document(row, Path::new(ROOT)),
+            Some(GitRowOpen::Document {
+                source: PreviewSource::GitShow {
+                    root: PathBuf::from(ROOT),
+                    hash: hash.clone(),
+                    path: "src/deep/main.rs".to_owned(),
+                },
+                // The base name and nothing of the folders above it — the same
+                // naming a file row gets, and the same reason: a 240-pixel
+                // switcher has room for a name.
+                name: "main.rs.diff".to_owned(),
+                renamed_from: None,
+            })
+        );
+
+        // And a press on the commit row itself is the accordion, not a document.
+        let commit_row = content
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::Commit(_)))
+            .expect("the commit is drawn");
+        assert_eq!(
+            row_document(commit_row, Path::new(ROOT)),
+            Some(GitRowOpen::Expand { hash })
+        );
+    }
+
+    /// **A renamed file's row carries both of its names** — because the command
+    /// behind it needs both to *be* a rename.
+    ///
+    /// `git diff --cached -- <new path>` on a staged rename prints `new file
+    /// mode 100644`: rename detection compares a pair, and a pathspec naming one
+    /// half hides the other. Measured against real git 2.52 on a scratch
+    /// repository while writing this. So a row wearing an `R` badge would open a
+    /// diff claiming the file had just been created — the panel and the diff
+    /// disagreeing on one screen, which is the failure the CLI backend was
+    /// chosen to prevent.
+    ///
+    /// MUTATION: drop `renamed_from` from what [`row_document`] hands back (or
+    /// from the pathspec [`crate::git::answer_question`] builds). The rename's
+    /// diff becomes an addition of the whole file, under an `R`.
+    #[test]
+    fn a_renamed_row_hands_the_command_both_of_its_names() {
+        // `R  new\0old\0` — porcelain spends a second record on where a rename
+        // came from, and the **new** path comes first.
+        let content = rows_of(&answered(
+            b"## main\0R  renamed.txt\0was.txt\0",
+            Vec::new(),
+            false,
+        ));
+        assert_eq!(
+            row_document(change_named(&content, "renamed.txt"), Path::new(ROOT)),
+            Some(GitRowOpen::Document {
+                source: PreviewSource::GitDiff {
+                    root: PathBuf::from(ROOT),
+                    path: "renamed.txt".to_owned(),
+                    staged: true,
+                },
+                name: "renamed.txt.diff".to_owned(),
+                renamed_from: Some("was.txt".to_owned()),
+            }),
+            "the row knows where the file came from, and the open carries it"
+        );
+
+        // And the same for a file inside an expanded commit, whose
+        // `--name-status` said `R100 old new`.
+        let hash = commit("aaaaaaa", "newest", 1).hash;
+        let mut cache = answered(b"## main\0", vec![commit("aaaaaaa", "newest", 1)], false);
+        assert!(cache.begin_commit_files(&hash).is_some());
+        assert!(cache.accept(GitAnswer::CommitFiles {
+            root: PathBuf::from(ROOT),
+            hash: hash.clone(),
+            outcome: Ok(vec![crate::git::GitCommitFile {
+                path: "renamed.txt".to_owned(),
+                code: StatusCode::Renamed,
+                renamed_from: Some("was.txt".to_owned()),
+            }]),
+        }));
+        let page = build(&cache, Some(&hash), 1.0, &mut ruler);
+        let row = page
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::CommitFile(_)))
+            .expect("the file is drawn");
+        assert_eq!(
+            row_document(row, Path::new(ROOT)),
+            Some(GitRowOpen::Document {
+                source: PreviewSource::GitShow {
+                    root: PathBuf::from(ROOT),
+                    hash,
+                    path: "renamed.txt".to_owned(),
+                },
+                name: "renamed.txt.diff".to_owned(),
+                renamed_from: Some("was.txt".to_owned()),
+            })
         );
     }
 }
