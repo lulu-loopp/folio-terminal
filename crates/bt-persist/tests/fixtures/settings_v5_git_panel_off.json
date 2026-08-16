@@ -1,0 +1,8 @@
+{
+  "theme_mode": "Dark",
+  "display_formulas": false,
+  "inline_formulas": true,
+  "default_profile": "wsl",
+  "git_panel": false,
+  "schema_version": 5
+}

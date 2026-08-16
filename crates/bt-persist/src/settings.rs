@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 /// Current `schema_version` for `settings.json`.
 ///
 /// v2 adds `display_formulas`, v3 adds `inline_formulas`, v4 adds
-/// `default_profile`, v5 adds `git_panel`. §2's "只收录已经在 DESIGN/M2 文档里
-/// 落定的用户可见项" is satisfied the way §1.3 intends it to be: each field
-/// arrives in the same change that gives it a reader, not ahead of one.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 5;
+/// `default_profile`, v5 adds `git_panel`, v6 adds `split_direction`. §2's
+/// "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is satisfied the way §1.3
+/// intends it to be: each field arrives in the same change that gives it a
+/// reader, not ahead of one.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 6;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -29,15 +30,16 @@ pub const SETTINGS_SCHEMA_VERSION: u32 = 5;
 /// gone" already goes down instead of through a second one.
 pub const DEFAULT_PROFILE_UNSET: &str = "";
 
-/// `settings.json` v5 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v6 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 5,
+///   "schema_version": 6,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
 ///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
-///   "git_panel": true | false
+///   "git_panel": true | false,
+///   "split_direction": "Auto" | "Right" | "Down"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +95,21 @@ pub struct SettingsV1 {
     /// On by default. The panel is the feature this build shipped; a feature that
     /// arrives switched off is a feature nobody finds.
     pub git_panel: bool,
+    /// Which way a split that was never told a direction cuts (user ruling,
+    /// 2026-08-16).
+    ///
+    /// **It governs only the splits that have no direction of their own**, and
+    /// that is the whole of the setting rather than a caveat about it. `Alt+Shift+-`
+    /// draws a horizontal rule and `Alt+Shift+=` a vertical one; the four zones of
+    /// the pane menu's picker *are* four directions. None of those five asks this
+    /// question. What asks it is every verb whose sentence stops at "split": the
+    /// duplicate chord, `Split with…`, `New terminal in folder…`, `Duplicate pane`
+    /// — and for seven months each of those silently answered `Auto`.
+    ///
+    /// [`SplitDirectionV1::Auto`] by default, because that is what the answer was
+    /// before there was a question, and a setting that arrives having changed
+    /// something is a setting that broke a habit to announce itself.
+    pub split_direction: SplitDirectionV1,
 }
 
 impl Default for SettingsV1 {
@@ -104,8 +121,27 @@ impl Default for SettingsV1 {
             inline_formulas: true,
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),
             git_panel: true,
+            split_direction: SplitDirectionV1::default(),
         }
     }
+}
+
+/// Which way a direction-less split cuts — `docs/DESIGN.md` §7.1.6.
+///
+/// Three values and not two plus a boolean, because `Auto` is not "no choice":
+/// it is a rule (cut across the pane's longer side, so both halves come out as
+/// square as the pane allows) and it is the one Windows Terminal's
+/// `duplicatePane` takes by default. A user who picks `Right` is turning that
+/// rule off, not declining to answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SplitDirectionV1 {
+    /// Across the pane's longer side.
+    #[default]
+    Auto,
+    /// Always side by side, the new pane on the right.
+    Right,
+    /// Always stacked, the new pane below.
+    Down,
 }
 
 /// `docs/DESIGN.md` §7.1.6: "主题 System/Light/Dark 跟随系统".
@@ -144,6 +180,43 @@ mod tests {
             wire["default_profile"].is_string(),
             "a profile is named, never numbered"
         );
+    }
+
+    /// PIN — a settings file that has never been asked which way a split goes
+    /// answers `Auto`, and says so with a word rather than with a number.
+    ///
+    /// Both halves matter. `Auto` because it is what every direction-less split
+    /// did before the setting existed, and a default that changed behaviour on
+    /// upgrade would be the setting announcing itself by breaking a habit; a word
+    /// because an ordinal would go on meaning `Right` the day a fourth direction
+    /// is inserted above it — the same trap `default_profile` is pinned against
+    /// one test up.
+    #[test]
+    fn a_split_with_no_direction_of_its_own_defaults_to_the_longer_edge() {
+        let defaults = SettingsV1::default();
+        assert_eq!(defaults.split_direction, SplitDirectionV1::Auto);
+        let wire = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(wire["split_direction"], serde_json::Value::from("Auto"));
+    }
+
+    /// PIN — the round trip, which is the whole of what this field owes a reader:
+    /// what was chosen is what comes back.
+    #[test]
+    fn every_split_direction_survives_a_round_trip_through_the_file() {
+        for direction in [
+            SplitDirectionV1::Auto,
+            SplitDirectionV1::Right,
+            SplitDirectionV1::Down,
+        ] {
+            let settings = SettingsV1 {
+                split_direction: direction,
+                ..SettingsV1::default()
+            };
+            let text = serde_json::to_string(&settings).unwrap();
+            let read: SettingsV1 = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.split_direction, direction);
+            assert_eq!(read, settings);
+        }
     }
 
     #[test]

@@ -121,6 +121,14 @@ pub enum TooltipAnchorId {
     /// the case a tip exists for: a chevron, a cross and a circular arrow are
     /// idioms, and an idiom is a guess until something says what it does.
     GitGraphTool(bt_layout::SeatId, crate::git_graph::GraphTool),
+    /// A pane head's `⌄` — the one control in a pane head with no word beside
+    /// it and more than one thing behind it (user ruling, 2026-08-16).
+    ///
+    /// The head's other two controls do not register: a folder and a `×` are
+    /// idioms this product has taught elsewhere, while a chevron says only "there
+    /// is a list here" and never what is on it. It is exactly the case a tip is
+    /// for.
+    PaneChevron(bt_layout::SeatId),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.

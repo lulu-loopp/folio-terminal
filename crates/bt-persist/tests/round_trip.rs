@@ -18,8 +18,8 @@ use bt_persist::{
     DegradationReport, FilesViewV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, PreviewPaneV1,
     PreviewPoolEntryV1, ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
     SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
-    SettingsV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings,
-    write_session_atomic, write_settings_atomic,
+    SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session,
+    read_settings, write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -559,9 +559,10 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 5,
+        SETTINGS_SCHEMA_VERSION, 6,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
-         the default profile the v3→v4, and the Git panel's master switch the v4→v5 (§1.3)"
+         the default profile the v3→v4, the Git panel's master switch the v4→v5, \
+         and the direction-less split's direction the v5→v6 (§1.3)"
     );
     assert!(
         defaults.display_formulas,
@@ -575,6 +576,47 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
         defaults.git_panel,
         "the Git page is on by default — a feature that arrives switched off is a \
          feature nobody finds. Turning it off is what stops the repository being read"
+    );
+    assert_eq!(
+        defaults.split_direction,
+        SplitDirectionV1::Auto,
+        "a direction-less split has always cut across the pane's longer side; the \
+         setting writes that answer down rather than changing it"
+    );
+}
+
+/// PIN (the ⌄ ruling, 2026-08-16) — a v5 settings file migrates to v6 with the
+/// split direction at `Auto`, and every sibling crosses untouched.
+///
+/// The fixture is non-default in all five of its older fields (§1.3 rule 1),
+/// `git_panel` deliberately among them: a step that reset a sibling to its
+/// default while inserting its own field is the one failure this shape of test
+/// exists to catch, and `git_panel: false` is the sibling most recently added
+/// and therefore the one most likely to be clobbered by a copy-paste of the step
+/// above it.
+#[test]
+fn settings_v5_fixture_migrates_to_v6_with_the_longer_edge_and_disturbs_nothing() {
+    let (v6, report) = read_settings(&fixture_path("settings_v5_git_panel_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v6.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        v6.split_direction,
+        SplitDirectionV1::Auto,
+        "a v5 build cut every direction-less split across the pane's longer side \
+         and offered no way to ask for anything else — `Auto` carries that \
+         behaviour forward rather than imposing a new one"
+    );
+    assert_eq!(
+        v6.theme_mode,
+        ThemeModeV1::Dark,
+        "v5→v6 is structural: every sibling crosses untouched"
+    );
+    assert!(!v6.display_formulas);
+    assert!(v6.inline_formulas);
+    assert_eq!(v6.default_profile, "wsl");
+    assert!(
+        !v6.git_panel,
+        "and the switch this user deliberately turned off stays off"
     );
 }
 

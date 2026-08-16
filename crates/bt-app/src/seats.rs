@@ -1841,11 +1841,12 @@ pub enum ChromeTarget {
     PaneFiles(SeatId),
     /// `.pane-float` — pop this files column out into a floating window (B18).
     PaneFloat(SeatId),
-    /// `.pane-split` — cut this pane along its longer side (user ruling,
-    /// 2026-08-15). Its own target for [`Self::PaneClose`]'s reason, and the
-    /// same reason is the whole of its exclusion from the drag: a button that
-    /// shared the header's target would begin a tear-out on the way to a split.
-    PaneSplit(SeatId),
+    /// `.pane-chev` — the `⌄` that opens this pane's own menu (user rulings,
+    /// 2026-08-15 and 2026-08-16). Its own target for [`Self::PaneClose`]'s
+    /// reason, and the same reason is the whole of its exclusion from the drag:
+    /// a button that shared the header's target would begin a tear-out on the
+    /// way to a menu.
+    PaneMenu(SeatId),
     /// One row of one files column's tree (C30/C155).
     ///
     /// **By index and not by id.** The hit test's whole job is "which rectangle
@@ -3706,8 +3707,8 @@ pub fn hit_chrome(
             if head.float.is_some_and(|float| contains(float, x, y)) {
                 return Some(ChromeTarget::PaneFloat(placement.id));
             }
-            if head.split.is_some_and(|split| contains(split, x, y)) {
-                return Some(ChromeTarget::PaneSplit(placement.id));
+            if head.chevron.is_some_and(|split| contains(split, x, y)) {
+                return Some(ChromeTarget::PaneMenu(placement.id));
             }
             if contains(head.head, x, y) {
                 return Some(ChromeTarget::PaneHeader(placement.id));
@@ -3849,10 +3850,17 @@ pub const PANE_HEAD_FILES_GLYPH_LOGICAL_PX: f32 = 13.0;
 pub const PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX: f32 = 14.0;
 /// `.files-head .pane-float + .pane-close { margin-left: 6px }`.
 pub const PANE_HEAD_FLOAT_CLOSE_GAP_LOGICAL_PX: f32 = 6.0;
-/// `.panehead .pane-split svg { width: 13px }` — the folder's size, because the
+/// `.panehead .pane-chev svg { width: 13px }` — the folder's size, because the
 /// two stand next to each other in the same run and a run of triggers that do
 /// not agree about their glyph size reads as a mistake rather than a set.
-pub const PANE_HEAD_SPLIT_GLYPH_LOGICAL_PX: f32 = 13.0;
+///
+/// The strip's own `⌄` is drawn at 9 (`.chevbtn svg`), and this is deliberately
+/// not that number. A chevron is a wide, short arrow: at 9 it would be a third
+/// the visual mass of the 13px folder standing beside it, and the run would read
+/// as one control and one smudge. The two chevrons agree about *behaviour*,
+/// which is what the ruling is about; they wear the size their own run wears,
+/// which is what every other glyph in this window does.
+pub const PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX: f32 = 13.0;
 /// `.tab:hover .tab-files { opacity: .6 }` — the middle rung of the tab's own
 /// reveal ladder (H76/H104).
 pub const TAB_FILES_TRIGGER_REVEAL: f32 = 0.6;
@@ -3900,16 +3908,22 @@ pub struct PaneHeadGeometry {
     /// `.pane-float` — pop this column out into a floating window (B18), on a
     /// **files** head only.
     pub float: Option<[f32; 4]>,
-    /// `.pane-split` — cut this pane in two along its longer side (user ruling,
-    /// 2026-08-15), on a **terminal** head only.
+    /// `.pane-chev` — the `⌄` that opens this pane's own menu (user rulings,
+    /// 2026-08-15 and 2026-08-16), on a **terminal** head only.
     ///
     /// A third box in the trailing run rather than a third verb in
     /// [`Self::files`]'s slot, because it is not the same slot: a terminal head
-    /// now carries *both*, the folder and the divider, and the two are always
-    /// offered together. The chords for this verb (Ctrl+Shift+D, Alt+Shift+-/=)
-    /// have existed since the fleet did; what did not exist was any way to reach
-    /// it with a mouse short of opening a tab and dragging it back in.
-    pub split: Option<[f32; 4]>,
+    /// carries *both*, the folder and this, and the two are always offered
+    /// together.
+    ///
+    /// **It held a `⊞` for one day.** The 2026-08-15 ruling put a split button
+    /// here — press it and the pane is cut along its longer side, no questions
+    /// asked — and the 2026-08-16 ruling replaced it with the chevron, because a
+    /// button that does one thing occupies the one slot in the head where a
+    /// button that does *everything a pane can be asked* could stand. The verb
+    /// did not go away: it is the first entry of the menu this now opens, where
+    /// it is a picture of four directions instead of one silent guess.
+    pub chevron: Option<[f32; 4]>,
 }
 
 /// Lay out one pane head.
@@ -3993,7 +4007,7 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
     });
 
     // The third control, taken off the run before both of them — so a terminal
-    // head reads, left to right, `⊞ 🗀 ×`. It shares an edge with the folder for
+    // head reads, left to right, `⌄ 🗀 ×`. It shares an edge with the folder for
     // the same reason the folder shares one with the `×`
     // (`.panehead .pane-files + .pane-close { margin-left: 0 }`): these are one
     // run of triggers that reveal together, and a gap inside a run that has no
@@ -4001,15 +4015,15 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
     //
     // Terminal heads only. A files column and a preview have no profile to
     // duplicate and no shell to put in the new half.
-    let split = (kind == SeatKind::Terminal).then_some(()).and_then(|()| {
+    let chevron = (kind == SeatKind::Terminal).then_some(()).and_then(|()| {
         let right = trigger.map(|(_, box_)| box_[0])?;
         let left = right - trigger_box;
         (left > mark[2] && trigger_top >= rect[1])
             .then(|| pixel_snapped([left, trigger_top, right, trigger_top + trigger_box]))
     });
 
-    let run_left = split
-        .map(|split| split[0])
+    let run_left = chevron
+        .map(|chevron| chevron[0])
         .or_else(|| trigger.map(|(_, box_)| box_[0]))
         .or(close.map(|close| close[0]));
     let title_right = match run_left {
@@ -4029,7 +4043,7 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
         close,
         files: trigger.and_then(|(is_float, box_)| (!is_float).then_some(box_)),
         float: trigger.and_then(|(is_float, box_)| is_float.then_some(box_)),
-        split,
+        chevron,
     }
 }
 
@@ -5641,19 +5655,31 @@ pub fn build_chrome_for_tabs(
                 // under the pointer.
                 //
                 // A run rather than a single control since the divider joined it
-                // (user ruling, 2026-08-15): a terminal head now wears `⊞ 🗀 ×`
+                // (user ruling, 2026-08-15): a terminal head now wears `⌄ 🗀 ×`
                 // and the two 19px triggers must climb the *same* ladder, or the
                 // pair that reveals together would rest at two different alphas.
                 // Written as one loop for D4's reason — the ladder said twice is
                 // the ladder that comes apart at the rung nobody tested.
                 if pointer.pane_hover == Some(placement.id) {
                     let triggers = [
-                        head.split.map(|box_| {
+                        head.chevron.map(|box_| {
                             (
                                 box_,
-                                ChromeTarget::PaneSplit(placement.id),
-                                ChromeMark::Split,
-                                PANE_HEAD_SPLIT_GLYPH_LOGICAL_PX,
+                                ChromeTarget::PaneMenu(placement.id),
+                                // The house's one glyph for "there is a list
+                                // behind me", at rest — pointing down at a menu
+                                // that is folded away. It does not turn when the
+                                // menu opens, and that is the strip's chevron's
+                                // rule read honestly rather than copied: the
+                                // strip's `⌄` turns because its menu hangs
+                                // *below* it and the arrow ends up pointing at
+                                // the list; this menu is dropped at the pointer
+                                // and can land above, below or beside the
+                                // button, so an arrow that swung to 180° would be
+                                // pointing away from its own list as often as at
+                                // it.
+                                ChromeMark::Chevron { turned_degrees: 0 },
+                                PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX,
                             )
                         }),
                         head.files.map(|box_| {
@@ -9475,6 +9501,38 @@ pub fn files_pane_rect(layout: &SeatLayout, seat: SeatId) -> Option<[f32; 4]> {
         device.right as f32,
         device.bottom as f32,
     ])
+}
+
+/// One pane head's `⌄` box, in physical pixels, or `None` when that seat has no
+/// head, is collapsed, or is too narrow to seat the control.
+///
+/// The menu the chevron opens has to hang off the rectangle the chevron was
+/// *drawn* in, and that rectangle is [`pane_head_geometry`]'s — so this asks the
+/// same function the hit test and the painter ask, rather than re-deriving
+/// `right - 6px - 3 * 19px` in the window. It is the same D4 discipline
+/// `files_pane_rect` above exists for: the box you can press is the box you can
+/// see, by one derivation.
+#[must_use]
+pub fn pane_chevron_box(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<[f32; 4]> {
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat && matches!(placement.presentation, Presentation::Full)
+    })?;
+    if !seats.seat_wears_head(placement.kind) {
+        return None;
+    }
+    let device = placement.device_rect?;
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    pane_head_geometry(rect, placement.kind, scale).chevron
 }
 
 /// The tree's own rectangle inside one named files column.
@@ -19593,15 +19651,15 @@ mod tests {
         // And one pixel left of the *run* is the handle, which is the claim this
         // test was always making.
         //
-        // The run grew a third member on 2026-08-15 (the `⊞`), so its left edge
+        // The run grew a third member on 2026-08-15 (the `⌄`), so its left edge
         // moved one box further left — and this line moved with it rather than
         // being deleted, because the claim was never about the folder. It is
         // "everywhere no control stands, the head answers", and the only thing
         // that changed is where the controls stand.
-        let split = head.split.expect("a terminal head carries the divider");
+        let split = head.chevron.expect("a terminal head carries the divider");
         assert_eq!(
             hit_chrome(&seats, &layout, 1.0, f64::from(files[0]) - 1.0, middle_y),
-            Some(ChromeTarget::PaneSplit(terminal)),
+            Some(ChromeTarget::PaneMenu(terminal)),
             "the box to the folder's left is the divider now, not the bar"
         );
         assert_eq!(
@@ -19610,8 +19668,8 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling, 2026-08-15): **the `⊞` is a third box in the trailing
-    /// run, not a third meaning for the second one.**
+    /// PIN (user rulings, 2026-08-15 and 2026-08-16): **the `⌄` is a third box
+    /// in the trailing run, not a third meaning for the second one.**
     ///
     /// Before this the mouse could not reach a split at all: the three chords
     /// existed, and the only pointer route was new tab → drag → drop on an edge.
@@ -19622,7 +19680,7 @@ mod tests {
     ///
     /// * it is a 19px trigger, the same box `.pane-files` and `.pane-float`
     ///   stand in — one run of controls at one size;
-    /// * it sits **left of the folder**, so the head reads `⊞ 🗀 ×` in the
+    /// * it sits **left of the folder**, so the head reads `⌄ 🗀 ×` in the
     ///   mock-up's own DOM order;
     /// * it shares an edge with the folder exactly as the folder shares one with
     ///   the `×`, because a gap inside a run that has no gap at its other joint
@@ -19645,12 +19703,12 @@ mod tests {
         // reads them: an expectation derived from the value under test is a
         // tautology.
         assert_eq!(PANE_HEAD_TRIGGER_BOX_LOGICAL_PX, 19.0);
-        assert_eq!(PANE_HEAD_SPLIT_GLYPH_LOGICAL_PX, 13.0);
+        assert_eq!(PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX, 13.0);
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let rect = device_rect_of(&layout, terminal);
             let head = pane_head_geometry(rect, SeatKind::Terminal, scale);
-            let split = head.split.expect("the head is wide enough for all three");
+            let split = head.chevron.expect("the head is wide enough for all three");
             let files = head.files.expect("and for the folder");
             let close = head.close.expect("and for the `×`");
             let box_px = (PANE_HEAD_TRIGGER_BOX_LOGICAL_PX * scale).round();
@@ -19681,7 +19739,7 @@ mod tests {
         }
     }
 
-    /// The same ruling at the hit test: a press on the `⊞` is a split, and
+    /// The same ruling at the hit test: a press on the `⌄` opens the menu, and
     /// **never** the first six pixels of a tear-out.
     ///
     /// This is the drag exclusion, and it is enforced structurally rather than
@@ -19690,7 +19748,7 @@ mod tests {
     /// reasoning for the `×` — "the button is not the bar" has to be true at the
     /// hit test or it is not true anywhere.
     ///
-    /// Red gate: drop the `PaneSplit` arm from [`hit_chrome`] and every press on
+    /// Red gate: drop the `PaneMenu` arm from [`hit_chrome`] and every press on
     /// the divider answers `PaneHeader` — which is to say, arms a drag that will
     /// tear the pane out of its tab the moment the hand moves.
     #[test]
@@ -19701,7 +19759,7 @@ mod tests {
         let layout = solved(&seats, viewport, &metrics);
         let terminal = layout.rects[0].id;
         let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
-        let split = head.split.expect("the head is wide enough");
+        let split = head.chevron.expect("the head is wide enough");
         let middle_y = f64::from((split[1] + split[3]) / 2.0);
 
         assert_eq!(
@@ -19712,11 +19770,11 @@ mod tests {
                 f64::from((split[0] + split[2]) / 2.0),
                 middle_y
             ),
-            Some(ChromeTarget::PaneSplit(terminal)),
+            Some(ChromeTarget::PaneMenu(terminal)),
         );
         assert_eq!(
             hit_chrome(&seats, &layout, 1.0, f64::from(split[0]), middle_y),
-            Some(ChromeTarget::PaneSplit(terminal)),
+            Some(ChromeTarget::PaneMenu(terminal)),
             "half-open on its leading edge, like every other target"
         );
         // One pixel to the left of the run is the handle again, which is where
@@ -19787,11 +19845,11 @@ mod tests {
                 .find(|sprite| {
                     matches!(sprite.mark, ChromeMark::ControlPill { .. })
                         && sprite.color == palette.pane_close_pill
-                        && sprite.rect == head.split.expect("the head carries a divider")
+                        && sprite.rect == head.chevron.expect("the head carries a divider")
                 })
                 .map(|sprite| sprite.rect);
             (
-                find(ChromeMark::Split, head.split),
+                find(ChromeMark::Chevron { turned_degrees: 0 }, head.chevron),
                 find(ChromeMark::Folder, head.files),
                 pill,
             )
@@ -19817,7 +19875,7 @@ mod tests {
         assert_eq!(pill, None, "and no fill until the pointer is on the button");
 
         // Rung 2 — on the divider itself.
-        let (split, folder, pill) = run(Some(terminal), Some(ChromeTarget::PaneSplit(terminal)));
+        let (split, folder, pill) = run(Some(terminal), Some(ChromeTarget::PaneMenu(terminal)));
         assert_eq!(
             split,
             Some((palette.accent, 1.0)),
@@ -19829,7 +19887,7 @@ mod tests {
             "and its neighbour stays at rest — the ladder is per control"
         );
         assert_eq!(
-            pill, head.split,
+            pill, head.chevron,
             "the pill is the button's own box, so the lit area is exactly the \
              area that answers the press"
         );
@@ -19881,16 +19939,16 @@ mod tests {
         // A column has no profile to duplicate and no shell to put in the new
         // half; a preview has neither and no head tools of this family at all.
         assert!(
-            term_head.split.is_some(),
+            term_head.chevron.is_some(),
             "a terminal offers to be cut in two"
         );
         assert!(
-            files_head.split.is_none(),
+            files_head.chevron.is_none(),
             "a column does not — there is no second tree to seat beside it"
         );
         assert!(
             pane_head_geometry(device_rect_of(&layout, column), SeatKind::Preview, 1.0)
-                .split
+                .chevron
                 .is_none(),
             "and neither does a preview"
         );

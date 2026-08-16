@@ -2738,7 +2738,77 @@ struct PaneMenuState {
     point: [f32; 2],
     /// The pane it is about.
     seat: SeatId,
-    hover: Option<profiles::PaneMenuRow>,
+    hover: Option<profiles::PaneMenuHover>,
+    /// Whether the `Split with` submenu is up — the house's first child menu.
+    submenu_open: bool,
+    /// **The safety triangle's two facts** (#53): where the pointer last was,
+    /// and how long the submenu is entitled to survive the rows the pointer is
+    /// crossing on its way to it.
+    ///
+    /// The apex is kept rather than re-derived because the triangle is about a
+    /// *movement*: `from` is the position the last pointer event reported and
+    /// `to` is the one this event reports, and a triangle drawn from the current
+    /// position to itself contains nothing. It is updated on every move that the
+    /// triangle does not hold, so that a hand which changes its mind gets a
+    /// fresh apex rather than one from three rows ago.
+    ///
+    /// The deadline is only ever `Some` while a hold is actually running; see
+    /// [`profiles::SUBMENU_SAFE_HOLD`] for why a cap is owed at all.
+    pointer_was: Option<[f32; 2]>,
+    submenu_hold_until: Option<Instant>,
+}
+
+/// **Both chevrons' clocks, and the one place their policy is applied** (user
+/// ruling, 2026-08-16).
+///
+/// The ruling's whole content is that the tab strip's `⌄` and the pane head's
+/// `⌄` behave identically — "和 tab 那边语义对齐" — and the one way to make that
+/// structurally true rather than true-for-now is to give them no separate code
+/// to drift in. [`Self::observe`] is the only function in this program that
+/// starts either clock and [`Self::due`] the only one that reads either, so a
+/// change to the policy is a change to one function that both buttons already
+/// go through.
+///
+/// Two [`profiles::ChevronGate`]s rather than one, because they are two
+/// *clocks*: a pointer resting on the pane head's chevron while the strip's menu
+/// is up is one gate opening and the other one's grace running, at the same
+/// instant, and a shared clock could only tell one of those two stories.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ChevronGates {
+    /// The tab strip's `⌄`, beside the `+`.
+    profile: profiles::ChevronGate,
+    /// The pane head's.
+    pane: profiles::ChevronGate,
+}
+
+impl ChevronGates {
+    /// Tell both gates where the pointer stands and which menus are up.
+    ///
+    /// One call taking four arguments rather than two calls taking two, and that
+    /// shape is the point: a caller cannot update one gate and forget the other,
+    /// because there is no way to say so.
+    fn observe(
+        &mut self,
+        profile: (profiles::ChevronPointer, bool),
+        pane: (profiles::ChevronPointer, bool),
+        now: Instant,
+    ) {
+        self.profile.observe(profile.0, profile.1, now);
+        self.pane.observe(pane.0, pane.1, now);
+    }
+
+    /// The earliest instant either gate has something to do.
+    fn deadline(&self) -> Option<Instant> {
+        earliest_deadline([self.profile.deadline(), self.pane.deadline()])
+    }
+
+    /// Both gates are cleared together by everything that is not a pointer move
+    /// — Esc, a click, another popup opening. Whatever put a menu away has
+    /// already answered the question the clocks were asking.
+    fn clear(&mut self) {
+        self.profile.clear();
+        self.pane.clear();
+    }
 }
 
 /// The exact characters an `Insert path into terminal` press puts in the input
@@ -3418,14 +3488,14 @@ struct Runtime {
     math_context_menu: bt_platform::MathContextMenu,
     /// The system folder chooser behind the root menu's `Browse…` (E55).
     folder_picker: bt_platform::FolderPicker,
-    /// Which column asked for it, so the answer knows where to land.
+    /// **What the answer is for**, so it knows where to land.
     ///
     /// Beside the picker rather than inside it, because the picker is a bridge
-    /// to Windows and a `SeatId` means nothing there. It is cleared when the
-    /// answer is collected, and a column that closes while the dialog is open
-    /// simply finds no seat to re-root — [`Runtime::reroot_files_column`]
-    /// already returns for a seat it cannot find.
-    folder_picker_seat: Option<SeatId>,
+    /// to Windows and neither a `SeatId` nor a verb means anything there. It is
+    /// cleared when the answer is collected, and a pane or column that closes
+    /// while the dialog is open simply finds no seat to act on — both verbs ask
+    /// for one before they do anything.
+    folder_pick: Option<FolderPick>,
     custom_window_frame: bt_platform::CustomWindowFrame,
     window: Arc<Window>,
     startup_started: Instant,
@@ -3964,9 +4034,12 @@ struct Runtime {
     /// nothing behind the menu can change. It is also what lets one menu serve
     /// both hosts (K146) without carrying which one it came from.
     file_menu: Option<FileMenuState>,
-    /// The pane head's context menu, and the head it was raised on (user ruling,
-    /// 2026-08-15).
+    /// The pane head's own menu, and the head it was raised on (user rulings,
+    /// 2026-08-15 and 2026-08-16).
     pane_menu: Option<PaneMenuState>,
+    /// **The two `⌄` clocks** (user ruling, 2026-08-16) — one policy, two
+    /// buttons, and a single struct so that there is nowhere for them to differ.
+    chevrons: ChevronGates,
     /// The graph's branch filter menu, and the seat whose toolbar raised it
     /// (T2, v2 ③).
     ///
@@ -11031,6 +11104,186 @@ struct LeafSeed {
     cwd: Option<PathBuf>,
 }
 
+/// **Every popup this window can raise** — E61's "one at a time" written as a
+/// list rather than as six hand-copied prefixes.
+///
+/// It was six, and they had drifted. Each opener carried its own run of
+/// `self.x = None` lines, and no two runs were the same: the pane menu did not
+/// close the preview switcher, the root menu did not close the file menu, and
+/// none of the four that closed the *profile* picker turned its chevron back
+/// (P133's "so the chevron never gets stranded flipped", which the picker's own
+/// close path has always done and nobody else did). Every one of those is the
+/// same bug in a different pair, and the reason they all existed is that the
+/// rule lived in six places at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Popup {
+    /// The tab strip's `⌄`.
+    Profile,
+    /// A files column's root menu (E53-E61).
+    Root,
+    /// A file row's context menu (K146).
+    File,
+    /// A pane head's `⌄` (2026-08-15, 2026-08-16).
+    Pane,
+    /// The commit graph's branch filter (T2).
+    GraphFilter,
+    /// The preview head's filename switcher (P130-P137).
+    Preview,
+}
+
+impl Popup {
+    const ALL: [Self; 6] = [
+        Self::Profile,
+        Self::Root,
+        Self::File,
+        Self::Pane,
+        Self::GraphFilter,
+        Self::Preview,
+    ];
+
+    /// What one opener has to put away: **every other popup, always.**
+    ///
+    /// No exceptions, and the absence of exceptions is the content. The float is
+    /// not on this list at all — it is a *place*, not a popup, and §7.1.2 rules
+    /// that clicking away does not close a pinned window — so the list itself is
+    /// the statement about what mutual exclusion covers.
+    fn others(self) -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter().filter(move |other| *other != self)
+    }
+}
+
+/// **The setting, resolved against the pane's own measurement** (user ruling,
+/// 2026-08-16).
+///
+/// A free function so the rule can be pinned without a window: it is two lines,
+/// and the two lines are the whole of what a user who opened the settings dialog
+/// is entitled to expect.
+fn split_axis(direction: bt_persist::SplitDirectionV1, auto: Axis) -> Axis {
+    match direction {
+        bt_persist::SplitDirectionV1::Auto => auto,
+        bt_persist::SplitDirectionV1::Right => Axis::Row,
+        bt_persist::SplitDirectionV1::Down => Axis::Col,
+    }
+}
+
+/// **What a returned folder pick actually asks the window to do**, if anything.
+///
+/// Split out of [`Runtime::apply_folder_pick_result`] so that the three ways a
+/// chooser can come back with nothing — cancelled, failed, or asked for by a
+/// verb that has since been forgotten — are one function with one answer instead
+/// of three arms nested inside a method that needs a live window and a COM
+/// apartment to reach. The dialog itself is never involved: this takes the
+/// answer, not the question.
+fn folder_pick_outcome(
+    asked: Option<FolderPick>,
+    result: Result<Option<PathBuf>, String>,
+) -> Option<(FolderPick, PathBuf)> {
+    match result {
+        Ok(Some(path)) => Some((asked?, path)),
+        // **Cancelled is silent.** No toast, no notice, nothing on screen: a
+        // cancel is the user saying "never mind", and a window that answers that
+        // with a card has not listened.
+        Ok(None) => None,
+        // A chooser that could not be shown leaves everything where it was, and
+        // says so to the log rather than in a banner about COM apartments. The
+        // caller logs it; this only reports that nothing is owed.
+        Err(error) => {
+            eprintln!("recoverable folder chooser failure: {error}");
+            None
+        }
+    }
+}
+
+/// What the pane head's `⌄` says it does (user ruling, 2026-08-16).
+///
+/// "Split and more", and both halves are doing work. `Split` because that is
+/// what the button in this slot did yesterday and what four of the six entries
+/// behind it still do — a tip that named the *menu* ("Pane options") would be
+/// telling you the shape of the thing rather than what it is for. `and more`
+/// because the sixth entry closes the pane, and a tip that promised only
+/// splitting would be a tip that hid the destructive verb behind it.
+const PANE_CHEVRON_TIP: &str = "Split and more";
+
+/// **Which verb the system folder chooser was opened for.**
+///
+/// The chooser is one bridge — `IFileDialog::Show` runs a nested message loop,
+/// so there is exactly one of these in flight at a time by construction — and
+/// two rows in two different menus now open it. Which one asked cannot be
+/// recovered from the answer (a `PathBuf` says nothing about why it was wanted),
+/// so it is written down when the dialog is queued and spent when the answer
+/// arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderPick {
+    /// `Browse…` on a files column's root menu (E55): point this column at it.
+    Reroot(SeatId),
+    /// `New terminal in folder…` on a pane's menu (2026-08-16): split this pane,
+    /// with the chosen folder as the arriving shell's directory.
+    SplitInto(SeatId),
+}
+
+/// **What the shell a split seats is to be**, said by the call site.
+///
+/// Three answers, because the pane menu asks three different questions of one
+/// machine and the difference between them is exactly one field each. Written as
+/// a closed enum rather than as an `Option<usize>` beside an `Option<PathBuf>`,
+/// because two independent options describe four states and only three of them
+/// mean anything — "a named profile in a named folder" is a combination no row
+/// offers and nothing here should have to decide what to do with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum SplitSeed {
+    /// The source pane's own profile, in the source pane's own directory —
+    /// which is what a split has always meant. `Duplicate pane` is this verb
+    /// wearing a name; the chords and the picker are it wearing none.
+    #[default]
+    Inherit,
+    /// A profile named outright, standing where the source pane stands.
+    ///
+    /// The directory is **translated** across the two profiles' path namespaces
+    /// rather than copied: splitting a PowerShell sitting in `D:\repo` with the
+    /// WSL profile has to hand `wsl.exe` `/mnt/d/repo`, and handing it the
+    /// Windows spelling is how a pane opens at `~` with no explanation.
+    /// `profiles::cwd_for_spawn` is the one place that translation lives, and
+    /// the tab strip's Recent rows already go through it.
+    Profile(usize),
+    /// The source pane's profile, in a folder the user named — the system
+    /// chooser's answer.
+    Folder(PathBuf),
+}
+
+impl SplitSeed {
+    /// The seed a split actually spawns, given what the source pane is and where
+    /// it stands.
+    fn applied(&self, source_profile: usize, source_cwd: Option<&Path>) -> LeafSeed {
+        match self {
+            Self::Inherit => LeafSeed {
+                profile: source_profile,
+                cwd: source_cwd.map(Path::to_path_buf),
+                // A running pane's profile is one this build has, by construction.
+                unknown_profile_id: None,
+            },
+            Self::Profile(profile) => LeafSeed {
+                profile: *profile,
+                cwd: profiles::cwd_for_spawn(source_profile, *profile, source_cwd),
+                unknown_profile_id: None,
+            },
+            // The chooser answers with a Windows path, because
+            // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
+            // so it is a directory in the *source profile's* namespace exactly
+            // when that profile speaks Windows, and `cwd_for_spawn` is asked the
+            // same translation question with `pwsh` as the origin.
+            Self::Folder(path) => LeafSeed {
+                profile: source_profile,
+                cwd: profiles::translate_cwd(
+                    profiles::PathNamespace::Windows,
+                    profiles::PROFILES[source_profile].paths,
+                    path,
+                ),
+                unknown_profile_id: None,
+            },
+        }
+    }
+}
+
 // Eight, and every one of them is a different question the answer to which
 // cannot be derived from the others: identity, shape, the two rendering
 // facts, the wake channel, the probe bytes, the place, and the seed. Bundling
@@ -12464,7 +12717,7 @@ impl Runtime {
             modifiers: ModifiersState::default(),
             math_context_menu,
             folder_picker,
-            folder_picker_seat: None,
+            folder_pick: None,
             custom_window_frame,
             window,
             startup_started,
@@ -12568,6 +12821,7 @@ impl Runtime {
             preview_head_measures: BTreeMap::new(),
             file_menu: None,
             pane_menu: None,
+            chevrons: ChevronGates::default(),
             graph_filter_menu: None,
             float: float::FloatHost::default(),
             float_drag: None,
@@ -13853,6 +14107,39 @@ impl Runtime {
                 anchors.push(id, rect, text);
             }
         }
+        // Every pane head's `⌄` (user ruling, 2026-08-16). Inside the same
+        // `drag.is_none()` guard as everything above, because a head under a
+        // drag is a head nobody is pointing at — the list is empty for the whole
+        // gesture and this would be registering into it.
+        //
+        // Pushed before the Git page's rows below and after the strip's above,
+        // which is this list's innermost-first order read literally: a pane head
+        // sits over its own pane and under the popups, and nothing else in the
+        // window claims these nineteen pixels.
+        if self.drag.is_none() {
+            // Silenced on the head whose menu is up — the gear's rule and the
+            // strip chevron's, for their reason: a tip explaining what a button
+            // opens, standing beside the thing it just opened, is a sentence
+            // about a fact already on screen.
+            let open_on = self.pane_menu.as_ref().map(|menu| menu.seat);
+            let seats: Vec<SeatId> = self
+                .seat_layout
+                .rects
+                .iter()
+                .map(|placement| placement.id)
+                .filter(|seat| Some(*seat) != open_on)
+                .collect();
+            for seat in seats {
+                let Some(rect) = self.pane_chevron_box(seat) else {
+                    continue;
+                };
+                anchors.push(
+                    tooltip::TooltipAnchorId::PaneChevron(seat),
+                    rect,
+                    PANE_CHEVRON_TIP,
+                );
+            }
+        }
         // The Git page's own tips, from the page that was drawn (R5, and the
         // three teaching headings the mock-up wrote at 4950-4952). Pushed last of
         // the pane-level anchors and inside the same `drag.is_none()` guard as
@@ -14833,6 +15120,7 @@ impl Runtime {
             display_formulas: self.settings_store.loaded().display_formulas,
             inline_formulas: self.settings_store.loaded().inline_formulas,
             git_panel: self.settings_store.loaded().git_panel,
+            split_direction: self.settings_store.loaded().split_direction,
             default_profile: self.default_profile(),
             profile_available: std::array::from_fn(|index| {
                 self.profile_programs.is_available(index)
@@ -15513,16 +15801,53 @@ impl Runtime {
     /// judgement forbids — it holds until some other door (a chord, a menu row,
     /// a restored gesture) opens this menu without a press in the right place.
     fn toggle_profile_menu(&mut self) -> Result<()> {
-        self.root_menu.close();
-        self.file_menu = None;
-        self.pane_menu = None;
-        self.graph_filter_menu = None;
+        self.close_popups_except(Popup::Profile);
         self.profile_menu.toggle();
         self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **E61 — the opener closes the others**, in the one place that knows what
+    /// "the others" are.
+    ///
+    /// Called by every opener before it raises its own, and never after: an
+    /// opener that toggled first would close the menu it had just opened. The
+    /// popup being raised is passed in and skipped, which is what lets a
+    /// *toggle* go through the same door as an open.
+    ///
+    /// Nothing is repainted here. Each caller repaints once after it has raised
+    /// its own popup, and a repaint in the middle of the chain would be a frame
+    /// showing a window with every menu shut — a flicker on every single press
+    /// that opens one.
+    ///
+    /// **Both `⌄` clocks stop too** (2026-08-16). Whatever ran this has answered
+    /// the question the clocks were asking, and a rest that matured a frame later
+    /// would re-open a menu the press had just put away.
+    fn close_popups_except(&mut self, keep: Popup) {
+        for popup in keep.others() {
+            match popup {
+                Popup::Profile => {
+                    // P133's rule, owed by every closer and paid by only one of
+                    // them until now: the arrow turns back when the list goes.
+                    if self.profile_menu.close() {
+                        self.start_chevron_turn();
+                    }
+                }
+                Popup::Root => {
+                    self.root_menu.close();
+                }
+                Popup::File => self.file_menu = None,
+                Popup::Pane => self.pane_menu = None,
+                Popup::GraphFilter => self.graph_filter_menu = None,
+                Popup::Preview => {
+                    self.preview_menu.close();
+                }
+            }
+        }
+        self.chevrons.clear();
     }
 
     /// Put the picker away and repaint if it was up. Every press that is not the
@@ -15532,6 +15857,11 @@ impl Runtime {
         if !self.profile_menu.close() {
             return Ok(false);
         }
+        // The gate goes with it. A grace still running against a menu that has
+        // already gone would fire a second close on an empty state — harmless
+        // today, and exactly the kind of live clock that stops being harmless
+        // when a third chevron is added.
+        self.chevrons.profile.clear();
         self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -15607,6 +15937,9 @@ impl Runtime {
                 }
                 if let Some(enabled) = settings::git_panel_requested(target) {
                     self.apply_git_panel(enabled)?;
+                }
+                if let Some(direction) = settings::split_direction_requested(target) {
+                    self.apply_split_direction(direction)?;
                 }
                 // Both rail combos go through the one constructor: the layout
                 // choice keeps the sidebar mode standing and the sidebar choice
@@ -15947,6 +16280,21 @@ impl Runtime {
     /// the switch decides reachability, the column remembers the choice, and
     /// forcing every column back to Files here would silently spend a decision
     /// the user made about something else.
+    /// **Which way a direction-less split cuts**, written down (user ruling,
+    /// 2026-08-16).
+    ///
+    /// The shortest `apply_*` in this dialog, and the reason is worth stating:
+    /// nothing on screen depends on it. Every other switch here changes what is
+    /// drawn or what is running, so its verb has a second half; this one changes
+    /// what the *next* split does, and there is no next split until somebody asks
+    /// for one. `Runtime::settings_split_axis` reads the store at the moment of
+    /// the split, so there is no copy of this value anywhere to keep in step.
+    fn apply_split_direction(&mut self, direction: bt_persist::SplitDirectionV1) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.split_direction = direction;
+        Ok(self.settings_store.store(settings))
+    }
+
     fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
         let mut settings = self.settings_store.loaded().clone();
         settings.git_panel = enabled;
@@ -16227,11 +16575,14 @@ impl Runtime {
             // opens beside it.
             shortcuts::Action::SplitHorizontal => self.split_focused_terminal(Axis::Col),
             shortcuts::Action::SplitVertical => self.split_focused_terminal(Axis::Row),
-            // Windows Terminal's `duplicatePane` defaults to `split: "auto"` —
-            // cut the pane across its longer side, so the two halves come out as
-            // square as the pane allows and a wide pane never becomes two
-            // slivers. The measurement is the solver's own rectangle, never a
-            // guess (red line L10).
+            // **The chord with no direction in its name**, and therefore the
+            // chord the `Split direction` setting governs (user ruling,
+            // 2026-08-16). Its default is still Windows Terminal's
+            // `duplicatePane` rule — `split: "auto"`, cut across the pane's
+            // longer side, so the two halves come out as square as the pane
+            // allows and a wide pane never becomes two slivers — but a user who
+            // has said `Right` or `Down` has said it about this chord too. The
+            // two chords one line up name their own rule and are untouched.
             shortcuts::Action::DuplicatePaneSplit => {
                 self.split_focused_terminal(self.duplicate_split_axis())
             }
@@ -16258,11 +16609,19 @@ impl Runtime {
         }
     }
 
-    /// The axis `Alt+Shift+D`'s duplicate cuts along: across the focused pane's
-    /// longer side. A pane the solver has not placed cannot be measured, and the
-    /// side-by-side split is the one the dev chord had always used.
+    /// The axis `Alt+Shift+D`'s duplicate cuts along.
+    ///
+    /// **The setting's answer for the focused pane** (user ruling, 2026-08-16),
+    /// which under the default `Auto` is what it always was: across the focused
+    /// pane's longer side. A pane the solver has not placed cannot be measured,
+    /// and the side-by-side split is the one the dev chord had always used.
+    ///
+    /// It goes through [`Self::settings_split_axis`] rather than reading the
+    /// setting itself, because the ruling is that *every* direction-less split
+    /// obeys one answer and a second reader is a second place that can stop
+    /// obeying it.
     fn duplicate_split_axis(&self) -> Axis {
-        self.pane_split_axis(self.focused_leaf)
+        self.settings_split_axis(self.focused_leaf)
     }
 
     /// The axis an "auto" split of **one named pane** cuts along: across its
@@ -16301,20 +16660,45 @@ impl Runtime {
         self.split_terminal_seat(self.focused_leaf, dir)
     }
 
-    /// [`Self::split_focused_terminal`], for a pane named outright.
+    /// [`Self::split_focused_terminal`], for a pane named outright, arriving on
+    /// this pane's own terms.
     ///
     /// The keyboard's three split chords all mean "the pane I am typing in", and
     /// for seven months that was the only way to ask, so the source was read off
-    /// `focused_leaf` inside the verb. The pane head's `⊞` and its menu ask
-    /// about the pane **under the pointer** (user ruling, 2026-08-15), and while
-    /// D40 does move focus into a pane on the way down for a press on its head,
-    /// leaning on that would make this verb's subject an accident of routing
-    /// order rather than something the call site said. So it is said.
+    /// `focused_leaf` inside the verb. The pane head's menu asks about the pane
+    /// **under the pointer** (user ruling, 2026-08-15), and while D40 does move
+    /// focus into a pane on the way down for a press on its head, leaning on
+    /// that would make this verb's subject an accident of routing order rather
+    /// than something the call site said. So it is said.
     fn split_terminal_seat(&mut self, source: SeatId, dir: Axis) -> Result<()> {
+        self.split_seat(source, dir, false, SplitSeed::Inherit)
+    }
+
+    /// **Every split in this window, with the one thing they differ in named.**
+    ///
+    /// Four call sites and one machine: the chords, the menu's picker, the
+    /// menu's four verbs, and the drag that lands a pane on an edge. What varies
+    /// between them is the axis, which side the arriving leaf goes on, and what
+    /// the arriving shell is — and all three are parameters here rather than
+    /// three near-copies of the eighty lines below, which is the shape in which
+    /// one of them silently stops re-solving before it spawns.
+    ///
+    /// `leading` is `Edit::SplitSeat`'s own flag, carried through
+    /// `Seats::split_terminal` since the tree existed and passed as `false` by
+    /// every caller until the picker's `Left` and `Up` zones needed the other
+    /// value. **No layout work was owed for them**: "put the new pane first" is
+    /// a tree edit the solver has always been able to make.
+    fn split_seat(
+        &mut self,
+        source: SeatId,
+        dir: Axis,
+        leading: bool,
+        seed: SplitSeed,
+    ) -> Result<()> {
         let metrics = self.seat_metrics();
         // Ask the solver first. `split_terminal` leaves the tree untouched when
         // it refuses, so there is nothing to undo on this path.
-        let Some(arriving) = self.seats.split_terminal(&metrics, source, dir, false) else {
+        let Some(arriving) = self.seats.split_terminal(&metrics, source, dir, leading) else {
             return Ok(());
         };
         // Re-solve before spawning: the new pane's shell has to be told how many
@@ -16338,13 +16722,11 @@ impl Runtime {
         // to seat a PowerShell beside it, because a split spawned the default
         // shell whatever the pane was running. Splitting is "another one of
         // these, here", and it is now able to mean it.
-        let inherited = self.sessions.get(&source).map(|leaf| LeafSeed {
-            profile: leaf.profile,
-            cwd: leaf.session.working_directory().map(Path::to_path_buf),
-            // A running pane's profile is one this build has, by construction.
-            unknown_profile_id: None,
-        });
-        let inherited = inherited.unwrap_or_default();
+        let inherited = self
+            .sessions
+            .get(&source)
+            .map(|leaf| seed.applied(leaf.profile, leaf.session.working_directory()))
+            .unwrap_or_default();
         let proxy = self.event_proxy.clone();
         let wake: OutputWake = Arc::new(move || {
             let _ = proxy.send_event(AppEvent::PtyOutput);
@@ -23270,35 +23652,52 @@ impl Runtime {
         let start = self.tabs[self.active_tab].files_state(seat).root;
         let start = (!start.is_empty()).then(|| PathBuf::from(start));
         match self.folder_picker.request(start.as_deref()) {
-            Ok(true) => self.folder_picker_seat = Some(seat),
+            Ok(true) => self.folder_pick = Some(FolderPick::Reroot(seat)),
             // Already queued or already open: a second `Browse…` while one is up
-            // is one dialog, not two, and the seat that asked first keeps the
-            // answer.
+            // is one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
             Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
         }
     }
 
     /// Collect the folder chooser's answer, once the dialog has shut.
+    ///
+    /// **Two verbs behind one bridge** (2026-08-16). The chooser is a single
+    /// posted-message channel to Windows — it has to be, because two nested
+    /// modal loops on one thread is not a thing a window survives — so which
+    /// verb asked is remembered on this side, in [`Self::folder_pick`], and
+    /// spent here.
     fn apply_folder_pick_result(&mut self) -> Result<()> {
         let Some(result) = self.folder_picker.take_result() else {
             return Ok(());
         };
-        let seat = self.folder_picker_seat.take();
-        match result {
-            // A folder was chosen. Re-rooting is the same verb the quick list's
-            // rows commit, down to clearing the expansion set and keeping the
-            // width (E56) — a folder reached by a different route is not a
-            // different kind of destination.
-            Ok(Some(path)) => {
-                if let Some(seat) = seat {
-                    let path = path.to_string_lossy().into_owned();
-                    self.reroot_files_column(seat, &path)?;
+        let asked = self.folder_pick.take();
+        let Some((asked, path)) = folder_pick_outcome(asked, result) else {
+            return Ok(());
+        };
+        match asked {
+            // A folder was chosen for a column. Re-rooting is the same verb the
+            // quick list's rows commit, down to clearing the expansion set and
+            // keeping the width (E56) — a folder reached by a different route is
+            // not a different kind of destination.
+            FolderPick::Reroot(seat) => {
+                let path = path.to_string_lossy().into_owned();
+                self.reroot_files_column(seat, &path)?;
+            }
+            // And for a pane: the ordinary split, in the ordinary direction,
+            // with the folder as the arriving shell's own. The pane is asked for
+            // again because a chooser can stand open for a minute and the shell
+            // behind it can exit in that minute.
+            FolderPick::SplitInto(seat) => {
+                if self.sessions.contains_key(&seat) {
+                    self.split_seat(
+                        seat,
+                        self.settings_split_axis(seat),
+                        false,
+                        SplitSeed::Folder(path),
+                    )?;
                 }
             }
-            // Cancelled. Nothing happened, and nothing should be said about it.
-            Ok(None) => {}
-            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
         }
         Ok(())
     }
@@ -23310,9 +23709,7 @@ impl Runtime {
         // opener that does it: E61's judgement is that mutual exclusion cannot
         // be left to a press falling through, because every opener stops its own
         // press from travelling.
-        self.profile_menu.close();
-        self.pane_menu = None;
-        self.graph_filter_menu = None;
+        self.close_popups_except(Popup::Root);
         self.root_menu.toggle(seat);
         // Pressing the head is also how you say "type here", and the column is
         // somewhere you can type — so the button lends the keyboard exactly as
@@ -23576,11 +23973,7 @@ impl Runtime {
         // A popup opening closes whatever else was up, and it is the opener that
         // does it (E61): mutual exclusion cannot be left to a press falling
         // through, because every opener stops its own press from travelling.
-        self.profile_menu.close();
-        self.root_menu.close();
-        self.close_file_menu()?;
-        self.close_pane_menu()?;
-        self.graph_filter_menu = None;
+        self.close_popups_except(Popup::Preview);
         self.preview_menu.toggle(seat);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -23682,10 +24075,7 @@ impl Runtime {
         }
         // E61: the opener closes the others. Not the float — that is a place, not
         // a popup, and this menu is very often *about a row inside it*.
-        self.profile_menu.close();
-        self.root_menu.close();
-        self.pane_menu = None;
-        self.graph_filter_menu = None;
+        self.close_popups_except(Popup::File);
         self.file_menu = Some(FileMenuState {
             point,
             activation,
@@ -23810,13 +24200,14 @@ impl Runtime {
         Ok(true)
     }
 
-    // ── the pane head's context menu (user ruling, 2026-08-15) ──────────────
+    // ── the pane head's own menu (user rulings, 2026-08-15, 2026-08-16) ─────
 
     /// Where the pane menu is, if one is up. [`Runtime::file_menu_layout`]'s
     /// twin, and anchored the same way: at the point the pointer was at, which
     /// no re-layout can move or destroy.
     fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
-        let point = self.pane_menu.as_ref()?.point;
+        let menu = self.pane_menu.as_ref()?;
+        let (point, submenu_open) = (menu.point, menu.submenu_open);
         let scale = self.renderer.metrics().scale_factor as f32;
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         let renderer = &mut self.renderer;
@@ -23825,16 +24216,17 @@ impl Runtime {
             point,
             (width as f32, height as f32),
             scale,
+            submenu_open,
             &mut measure,
         ))
     }
 
     /// Raise the menu on one pane head.
     ///
-    /// **Terminal heads only.** All three verbs are about a shell: two of them
-    /// put a second one beside it, and closing a files column or a preview is
-    /// what that head's own `×` is for. A menu of three verbs that a surface
-    /// cannot perform is worse than no menu — the same refusal
+    /// **Terminal heads only.** Every verb here is about a shell — four of them
+    /// put a second one somewhere, one moves this one, one ends it — and closing
+    /// a files column or a preview is what that head's own `×` is for. A menu of
+    /// verbs a surface cannot perform is worse than no menu: the same refusal
     /// [`Runtime::open_file_menu`] makes for a directory row, made here for the
     /// same reason and in the same one place rather than at each caller.
     fn open_pane_menu(&mut self, seat: SeatId, point: [f32; 2]) -> Result<()> {
@@ -23842,18 +24234,69 @@ impl Runtime {
             return Ok(());
         }
         // E61: the opener closes the others.
-        self.profile_menu.close();
-        self.root_menu.close();
-        self.file_menu = None;
+        self.close_popups_except(Popup::Pane);
         self.pane_menu = Some(PaneMenuState {
             point,
             seat,
             hover: None,
+            submenu_open: false,
+            pointer_was: None,
+            submenu_hold_until: None,
         });
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// The `⌄`'s verb: open the menu under it, or put away the one it opened
+    /// (user ruling, 2026-08-16).
+    ///
+    /// The toggle half is the `⌄` grammar's second door — a click opens what a
+    /// rest would have opened, and a click on a button whose menu is already up
+    /// closes it. Without it the hover rule would make the button unclickable in
+    /// practice: by the time a hand has travelled to a chevron and pressed it,
+    /// the rest has usually already opened the menu, and a press that opened it
+    /// *again* would be a press that did nothing at all.
+    ///
+    /// The menu drops from the button's own bottom-left corner rather than from
+    /// the pointer, which is where a menu belonging to a *control* hangs — the
+    /// strip's `⌄` does the same, and a right click on the head still drops this
+    /// same menu at the pointer, because that gesture belongs to the surface
+    /// rather than to a button on it.
+    fn toggle_pane_menu(&mut self, seat: SeatId) -> Result<()> {
+        if self
+            .pane_menu
+            .as_ref()
+            .is_some_and(|menu| menu.seat == seat)
+        {
+            self.chevrons.clear();
+            self.close_pane_menu()?;
+            return Ok(());
+        }
+        let Some(anchor) = self.pane_chevron_box(seat) else {
+            return Ok(());
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        self.open_pane_menu(
+            seat,
+            [
+                anchor[0],
+                anchor[3] + profiles::MENU_OFFSET_LOGICAL_PX * scale,
+            ],
+        )
+    }
+
+    /// The `⌄`'s box on one pane head, or `None` when that head has no room for
+    /// one.
+    ///
+    /// Re-derived from the frame the seat is standing in rather than remembered,
+    /// which is the `&self`-hit-test discipline every other control in this
+    /// window keeps: the rectangle a menu hangs off has to be the rectangle the
+    /// button was drawn in, by one derivation and not by two that agree today.
+    fn pane_chevron_box(&self, seat: SeatId) -> Option<[f32; 4]> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        seats::pane_chevron_box(&self.seats, &self.seat_layout, seat, scale)
     }
 
     /// The pane menu's own level of the overlay stack, or nothing when none is
@@ -23865,7 +24308,16 @@ impl Runtime {
         let Some(menu) = self.pane_menu.as_ref() else {
             return Vec::new();
         };
-        profiles::pane_menu_build(&layout, menu.hover)
+        let (hover, seat) = (menu.hover, menu.seat);
+        // The profile the pane is *running*, which is what the submenu marks —
+        // never the window's default. A pane you split from a Git Bash is a Git
+        // Bash, and a submenu that ticked PowerShell on it would be telling you
+        // about the window rather than about the pane the menu was raised on.
+        let current = self.sessions.get(&seat).map(|leaf| leaf.profile);
+        let programs = &self.profile_programs;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        profiles::pane_menu_build(&layout, hover, current, programs, &mut measure)
     }
 
     fn close_pane_menu(&mut self) -> Result<bool> {
@@ -23876,6 +24328,287 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    /// Open or shut the `Split with` submenu, and report whether anything moved.
+    ///
+    /// The hold is cleared on both edges: an opening submenu has nothing to
+    /// survive yet, and a closing one has nothing left to survive for.
+    fn set_pane_submenu(&mut self, open: bool) -> Result<bool> {
+        let Some(menu) = self.pane_menu.as_mut() else {
+            return Ok(false);
+        };
+        if menu.submenu_open == open {
+            return Ok(false);
+        }
+        menu.submenu_open = open;
+        menu.submenu_hold_until = None;
+        // The highlight follows the surface it is on. Opening lands on the first
+        // profile, which is what `→` and a click both mean; closing takes the
+        // highlight back to the heading it came from, so `←` leaves the keyboard
+        // somewhere rather than nowhere.
+        menu.hover = if open {
+            Some(profiles::PaneMenuHover::Submenu(0))
+        } else {
+            Some(profiles::PaneMenuHover::Row(
+                profiles::PaneMenuRow::SplitWith,
+            ))
+        };
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **The pane menu's hover, with the safety triangle in it** (#53).
+    ///
+    /// Answers whether the pointer is on either of the menu's two surfaces, so
+    /// the caller can stop the pointer stream there exactly as it does for every
+    /// other popup.
+    ///
+    /// Four things happen, in this order and for these reasons:
+    ///
+    /// 1. **What is under the pointer** is asked once, of the same layout the
+    ///    menu was drawn from.
+    /// 2. **The triangle is consulted only when it could change the answer** —
+    ///    that is, only when a submenu is open and the pointer has moved onto
+    ///    something that is neither the submenu nor its heading. Everywhere else
+    ///    it has no opinion, and asking it would be a rule with no subject.
+    /// 3. **A held highlight does not move**, which is the whole of what the
+    ///    triangle buys: the row the hand is crossing does not light up, and the
+    ///    submenu it was crossing toward stays open.
+    /// 4. **The apex is re-seated** on every move the triangle does *not* hold,
+    ///    so a hand that changes direction is measured from where it changed
+    ///    rather than from where it started three rows ago.
+    fn drive_pane_menu_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(layout) = self.pane_menu_layout() else {
+            return Ok(false);
+        };
+        let hit = profiles::pane_menu_hit(&layout, position.x, position.y);
+        let submenu = layout.submenu_frame();
+        let to = [position.x as f32, position.y as f32];
+        let now = Instant::now();
+        let Some(menu) = self.pane_menu.as_mut() else {
+            return Ok(false);
+        };
+        let hovering_child = matches!(
+            hit,
+            Some(profiles::PaneMenuHit::Submenu(_))
+                | Some(profiles::PaneMenuHit::Row(profiles::PaneMenuRow::SplitWith))
+        );
+        let was_open = menu.submenu_open;
+        let mut held = false;
+        if let Some(submenu) = submenu
+            && !hovering_child
+        {
+            // The hold is armed the first time the pointer leaves the child's
+            // corridor and is spent by the clock, never by a row: a hand that
+            // stops inside the triangle sends no more events, so the cap has to
+            // be a deadline rather than a count of moves.
+            let from = menu.pointer_was.unwrap_or(to);
+            if profiles::safe_triangle_holds(from, to, submenu) {
+                let until = *menu
+                    .submenu_hold_until
+                    .get_or_insert(now + profiles::SUBMENU_SAFE_HOLD);
+                held = now < until;
+            }
+            if !held {
+                menu.submenu_open = false;
+                menu.submenu_hold_until = None;
+            }
+        } else {
+            menu.submenu_hold_until = None;
+        }
+        // The apex only moves when the triangle is not holding. While it holds,
+        // the aim is still the one the hand set when it left the heading — a
+        // triangle re-drawn from each intermediate position narrows to nothing
+        // and the whole rule evaporates halfway across.
+        if !held {
+            menu.pointer_was = Some(to);
+        }
+        let hovered = match hit {
+            Some(profiles::PaneMenuHit::Zone(zone)) => Some(profiles::PaneMenuHover::Zone(zone)),
+            Some(profiles::PaneMenuHit::Row(row)) => Some(profiles::PaneMenuHover::Row(row)),
+            Some(profiles::PaneMenuHit::Submenu(index)) => {
+                Some(profiles::PaneMenuHover::Submenu(index))
+            }
+            // The padding, and everywhere outside: nothing is lit. A menu whose
+            // last-hovered row stayed lit while the pointer sat in its own margin
+            // would be a menu Enter could fire from a place that looks idle.
+            Some(profiles::PaneMenuHit::Surface) | None => None,
+        };
+        // The submenu going is a change even when the highlight does not move —
+        // a hold that expires over the row it was already on takes a whole
+        // window off the screen, and a repaint skipped because "the hover is the
+        // same" would leave that window drawn over nothing.
+        let mut changed = menu.submenu_open != was_open;
+        if !held && menu.hover != hovered {
+            menu.hover = hovered;
+            changed = true;
+        }
+        // Resting on the heading opens the child, on the same 250ms the chevrons
+        // themselves take (user ruling, 2026-08-16) — one number for "a hand has
+        // settled on something that has more behind it". It is armed here and
+        // matured in `advance_pane_menu`.
+        let on_heading = hit == Some(profiles::PaneMenuHit::Row(profiles::PaneMenuRow::SplitWith));
+        if on_heading && !menu.submenu_open {
+            menu.submenu_hold_until
+                .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN);
+        }
+        let inside = hit.is_some();
+        if changed && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(inside)
+    }
+
+    /// The pane menu's own clocks, matured.
+    ///
+    /// Two live in the one slot and they are never both meaningful: while the
+    /// submenu is shut the deadline is the heading's 250ms rest, and while it is
+    /// open it is the safety triangle's 300ms cap. One field because there is one
+    /// question — "what does this menu owe at some instant" — and a menu cannot
+    /// be both waiting to open its child and holding it open against the rows.
+    fn advance_pane_menu(&mut self, now: Instant) -> Result<()> {
+        let Some(menu) = self.pane_menu.as_ref() else {
+            return Ok(());
+        };
+        let Some(due) = menu.submenu_hold_until else {
+            return Ok(());
+        };
+        if now < due {
+            return Ok(());
+        }
+        if menu.submenu_open {
+            // The cap ran out with the hand still short of the child. The
+            // submenu goes, and the highlight is owed to whatever the pointer is
+            // actually over — which is asked of the geometry rather than
+            // remembered, because the rows have not moved but the hold was
+            // deliberately keeping the answer stale.
+            self.set_pane_submenu(false)?;
+            if let Some(position) = self.pointer_position {
+                self.drive_pane_menu_hover(position)?;
+            }
+            return Ok(());
+        }
+        // The rest on the heading matured: the child opens, exactly as a rest on
+        // a chevron opens its own menu.
+        self.set_pane_submenu(true)?;
+        Ok(())
+    }
+
+    /// The pane menu's next wake-up, for the loop's set.
+    fn pane_menu_deadline(&self) -> Option<Instant> {
+        self.pane_menu.as_ref()?.submenu_hold_until
+    }
+
+    /// **Both `⌄` clocks, told where the pointer is** (user ruling, 2026-08-16).
+    ///
+    /// Called from the one place every pointer move passes through, above the
+    /// routing that returns early: a chevron's rest has to keep accumulating
+    /// while the pointer is over a *menu* — that is precisely the state the leave
+    /// grace exists to distinguish — so it cannot be observed from inside a
+    /// branch that a menu's own hover handler returns out of.
+    ///
+    /// Where the pointer is, for each chevron, is three questions asked of three
+    /// geometries and answered once here rather than at each gate: the button's
+    /// own box, the menu's frame (and its submenu's), and everything else.
+    fn observe_chevrons(&mut self, position: PhysicalPosition<f64>, now: Instant) {
+        // **A drag owns the pointer outright**, and a gesture in flight is not a
+        // hover — the same rule the tip, the layout peek and the float's own
+        // intent already live by (`rebuild_tooltip_anchors` empties its whole
+        // list for the length of a drag). A menu dropped under a pane being
+        // carried across the window would be a menu nobody asked for, standing
+        // in the way of the drop.
+        if self.drag.is_some() || self.float_drag.is_some() {
+            self.chevrons.clear();
+            return;
+        }
+        let profile_open = self.profile_menu.is_open();
+        let pane_open = self.pane_menu.is_some();
+        let target = self.chrome_target_at(position);
+        let on_profile_button = matches!(target, Some(seats::ChromeTarget::NewTabMenu));
+        let pane_seat = self.pane_menu.as_ref().map(|menu| menu.seat);
+        // A rest on *any* pane head's chevron arms that head's menu — including
+        // a second head's while the first head's menu is up, which is how a hand
+        // walks a menu across a split without clicking. The gate is told
+        // `Button` for that case with `open` false, because the menu that is up
+        // is not this button's.
+        let on_pane_button = match target {
+            Some(seats::ChromeTarget::PaneMenu(seat)) => Some(seat),
+            _ => None,
+        };
+        let profile_where = if on_profile_button {
+            profiles::ChevronPointer::Button
+        } else if profile_open
+            && self
+                .profile_menu_layout()
+                .is_some_and(|layout| layout.contains(position.x as f32, position.y as f32))
+        {
+            profiles::ChevronPointer::Surface
+        } else {
+            profiles::ChevronPointer::Away
+        };
+        let pane_on_surface = pane_open
+            && self
+                .pane_menu_layout()
+                .is_some_and(|layout| layout.contains(position.x as f32, position.y as f32));
+        let (pane_where, pane_owner_open) = match (on_pane_button, pane_on_surface) {
+            (Some(seat), _) => (
+                profiles::ChevronPointer::Button,
+                pane_seat == Some(seat) && pane_open,
+            ),
+            (None, true) => (profiles::ChevronPointer::Surface, pane_open),
+            (None, false) => (profiles::ChevronPointer::Away, pane_open),
+        };
+        self.chevrons.observe(
+            (profile_where, profile_open),
+            (pane_where, pane_owner_open),
+            now,
+        );
+    }
+
+    /// **The two `⌄` clocks, matured** — the one place either menu is opened or
+    /// closed by time rather than by a press.
+    ///
+    /// Both gates are read through [`profiles::ChevronGate::due`] and acted on by
+    /// the same two verbs each button already has, which is what makes the
+    /// ruling's "两处 ⌄ 语义完全对齐" a property of the code rather than a
+    /// coincidence of two implementations.
+    fn advance_chevrons(&mut self, now: Instant) -> Result<()> {
+        if let Some(action) = self.chevrons.profile.due(now) {
+            self.chevrons.profile.clear();
+            match action {
+                profiles::ChevronAction::Open => {
+                    if !self.profile_menu.is_open() {
+                        self.toggle_profile_menu()?;
+                    }
+                }
+                profiles::ChevronAction::Close => {
+                    self.close_profile_menu()?;
+                }
+            }
+        }
+        if let Some(action) = self.chevrons.pane.due(now) {
+            self.chevrons.pane.clear();
+            match action {
+                profiles::ChevronAction::Open => {
+                    // Which head is under the pointer is asked again here rather
+                    // than remembered with the clock: the rest is 250ms long and
+                    // a layout can change inside it.
+                    if let Some(position) = self.pointer_position
+                        && let Some(seats::ChromeTarget::PaneMenu(seat)) =
+                            self.chrome_target_at(position)
+                    {
+                        self.toggle_pane_menu(seat)?;
+                    }
+                }
+                profiles::ChevronAction::Close => {
+                    self.close_pane_menu()?;
+                }
+            }
+        }
+        Ok(())
     }
 
     // ── the commit graph's toolbar (T1/T2/T3/T4/T5, v2 ③) ──────────────────
@@ -24185,11 +24918,7 @@ impl Runtime {
             .graph_filter_menu
             .as_ref()
             .is_some_and(|menu| menu.seat == seat);
-        self.profile_menu.close();
-        self.root_menu.close();
-        self.preview_menu.close();
-        self.file_menu = None;
-        self.pane_menu = None;
+        self.close_popups_except(Popup::GraphFilter);
         self.graph_filter_menu = (!already).then_some(GraphFilterMenuState { seat, hover: None });
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -24331,22 +25060,22 @@ impl Runtime {
         Ok(())
     }
 
-    /// Do what one row of the pane menu says, and put the menu away.
+    /// Do what one entry of the pane menu says, and put the menu away.
     ///
     /// The menu closes *first*, on [`Runtime::run_file_menu_row`]'s order and
-    /// for a sharper version of its reason: two of these verbs rebuild the
-    /// layout the menu is drawn over, and the third destroys the pane it was
-    /// raised on.
+    /// for a sharper version of its reason: most of these verbs rebuild the
+    /// layout the menu is drawn over, one destroys the pane it was raised on,
+    /// and one opens a modal dialog with a message loop of its own.
     ///
-    /// The seat comes out of the menu, never from the pointer. Between the right
-    /// click that raised this and the left click that ran it, the pointer has
-    /// travelled — down the menu, which is drawn over some *other* pane as often
-    /// as not.
-    fn run_pane_menu_row(&mut self, row: profiles::PaneMenuRow) -> Result<()> {
+    /// The seat comes out of the menu, never from the pointer. Between the press
+    /// that raised this and the one that ran it, the pointer has travelled —
+    /// down the menu, which is drawn over some *other* pane as often as not.
+    fn run_pane_menu_row(&mut self, hit: profiles::PaneMenuHit) -> Result<()> {
         let Some(menu) = self.pane_menu.take() else {
             return Ok(());
         };
         let seat = menu.seat;
+        self.chevrons.clear();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -24356,13 +25085,132 @@ impl Runtime {
         if !self.sessions.contains_key(&seat) {
             return Ok(());
         }
-        match row {
-            profiles::PaneMenuRow::SplitRight => self.split_terminal_seat(seat, Axis::Row),
-            profiles::PaneMenuRow::SplitDown => self.split_terminal_seat(seat, Axis::Col),
-            // The `×`'s own verb, reached through the `×`'s own door — so the
-            // gate a destruction has to pass is passed once and not twice.
-            profiles::PaneMenuRow::ClosePane => self.close_pane(seat),
+        match hit {
+            // The picker: the one place in this window where the direction is
+            // the *gesture*, so the setting is not consulted. `Left` and `Up`
+            // are the same two axes with the arriving leaf inserted first, which
+            // is `Edit::SplitSeat`'s `leading` flag and has been since the tree
+            // existed.
+            profiles::PaneMenuHit::Zone(zone) => {
+                self.split_seat(seat, zone.axis(), zone.leading(), SplitSeed::Inherit)
+            }
+            profiles::PaneMenuHit::Submenu(profile) => self.split_seat(
+                seat,
+                self.settings_split_axis(seat),
+                false,
+                SplitSeed::Profile(profile),
+            ),
+            profiles::PaneMenuHit::Row(row) => match row {
+                // The heading is not a verb: pressing it opens the submenu, and
+                // that press never reaches here (see `press_pane_menu`). Listed
+                // so the match is exhaustive over a closed set rather than over
+                // a wildcard that would silently swallow a row added later.
+                profiles::PaneMenuRow::Picker | profiles::PaneMenuRow::SplitWith => Ok(()),
+                profiles::PaneMenuRow::NewInFolder => {
+                    self.browse_for_split_root(seat);
+                    Ok(())
+                }
+                // The split's own default: same profile, same directory. It is
+                // exactly what a bare split already inherits, so this row is the
+                // *name* of that behaviour rather than a second implementation
+                // of it — which is why it hands over `Inherit` and not a seed it
+                // assembled itself.
+                profiles::PaneMenuRow::Duplicate => self.split_seat(
+                    seat,
+                    self.settings_split_axis(seat),
+                    false,
+                    SplitSeed::Inherit,
+                ),
+                profiles::PaneMenuRow::MoveToNewTab => self.move_pane_to_new_tab(seat),
+                // The `×`'s own verb, reached through the `×`'s own door — so the
+                // gate a destruction has to pass is passed once and not twice.
+                profiles::PaneMenuRow::ClosePane => self.close_pane(seat),
+            },
+            // The menu's own padding. A press there is the menu swallowing it,
+            // which `press_pane_menu` already decided; nothing to run.
+            profiles::PaneMenuHit::Surface => Ok(()),
         }
+    }
+
+    /// **The axis a split with no direction of its own takes** (user ruling,
+    /// 2026-08-16, `settings.json` v6).
+    ///
+    /// One reader for every such verb — the duplicate chord, `Split with…`,
+    /// `New terminal in folder…`, `Duplicate pane` — because the ruling is that
+    /// they all obey one setting, and a second place that read it would be a
+    /// second place that could stop.
+    ///
+    /// `Auto` is the pane's longer side, which is what all four of them did
+    /// before the setting existed and what Windows Terminal's `duplicatePane`
+    /// means by `split: "auto"`. The measurement is the solver's own rectangle,
+    /// never a guess (red line L10).
+    ///
+    /// The picker's four zones deliberately do not come through here: a zone
+    /// *is* a direction, and a setting that overrode the thing the hand just
+    /// pointed at would be the setting overruling the gesture.
+    fn settings_split_axis(&self, seat: SeatId) -> Axis {
+        // The pane is measured whatever the setting says, because measuring is
+        // cheap and because a branch that skipped it would make `Auto` the only
+        // path that touches the solver — which is how a rectangle nobody asks
+        // for goes stale unnoticed.
+        split_axis(
+            self.settings_store.loaded().split_direction,
+            self.pane_split_axis(seat),
+        )
+    }
+
+    /// **`New terminal in folder…`** — ask the system for a folder and split
+    /// into it.
+    ///
+    /// The chooser only gets *queued* here, for [`Runtime::browse_for_root`]'s
+    /// reason at length: `IFileDialog::Show` runs a nested message loop that
+    /// would re-enter this window's own event handling underneath the `&mut`
+    /// borrow that started it. The answer arrives in
+    /// [`Runtime::apply_folder_pick_result`].
+    ///
+    /// **The menu is already gone** — `run_pane_menu_row` took it before this
+    /// runs — and that is the ruling's own requirement ("while the modal dialog
+    /// is up the menu is closed"). A popup left standing behind a system modal
+    /// is a popup nothing can dismiss: it takes no input while the dialog owns
+    /// the loop, and the click that dismisses the dialog is spent on the dialog.
+    ///
+    /// The chooser opens where the pane is standing, by that pane's own OSC 7
+    /// report — the same courtesy `browse_for_root` shows a column, and the same
+    /// one I88 asks of every arriving shell.
+    fn browse_for_split_root(&mut self, seat: SeatId) {
+        let start = self
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
+        match self.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.folder_pick = Some(FolderPick::SplitInto(seat)),
+            // Already queued or already open: a second request while one is up
+            // is one dialog, not two, and whoever asked first keeps the answer.
+            Ok(false) => {}
+            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+        }
+    }
+
+    /// **`Move pane to new tab`** — the pane leaves this tab and becomes the
+    /// only pane of one of its own.
+    ///
+    /// **The leaf moves; it is not respawned.** This is the same verb, through
+    /// the same function, that dropping a pane on the tab strip already runs
+    /// (N157/K123) — [`tear_pane_into_tab`] takes the `Seat` out of the tree and
+    /// carries the session across under its new id, so the shell keeps its
+    /// scrollback, its child processes and its working directory. Two gestures
+    /// that look the same on screen and differ in whether the user's work
+    /// survives are not interchangeable, and a menu row that quietly killed a
+    /// shell and started a fresh one in a new tab would be exactly that.
+    ///
+    /// The new tab lands at the end of the strip rather than beside the one it
+    /// came from, and is **not activated** — N157's rule, and it is the right one
+    /// here for the same reason it is right for the drag: the gesture was "put
+    /// this over there", not "take me there".
+    fn move_pane_to_new_tab(&mut self, seat: SeatId) -> Result<()> {
+        let slot = self.tabs.len();
+        self.extract_pane_into_new_tab(seat, slot)?;
+        Ok(())
     }
 
     /// Do what one row of the file menu says, and put the menu away.
@@ -28810,6 +29658,12 @@ impl Runtime {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.pointer_position = Some(position);
+        // **Both `⌄` clocks, before anything returns** (user ruling, 2026-08-16).
+        // A chevron's leave grace is running precisely when the pointer is
+        // somewhere else, so it has to be told about moves that every branch
+        // below consumes — including the ones inside the menu it opened, which
+        // is the state the grace exists to tell apart from having left.
+        self.observe_chevrons(position, Instant::now());
         // The glance card's thumb, ahead of everything: it is the topmost thing
         // on the glass, and a gesture in flight is not a hover. It owns the
         // pointer outside the card too — a drag that let go the moment it left
@@ -28992,25 +29846,16 @@ impl Runtime {
                 return Ok(());
             }
         }
-        // And the pane head's menu on the same level, by the same three lines.
-        // The two are never up together, so this is the file menu's block asked
-        // about the other one rather than a second policy.
-        if let Some(layout) = self.pane_menu_layout() {
-            let over = profiles::pane_menu_hit(&layout, position.x, position.y);
-            if let Some(row) = over
-                && let Some(menu) = self.pane_menu.as_mut()
-                && menu.hover != row
-            {
-                menu.hover = row;
-                if self.refresh_overlay() {
-                    self.present_chrome_change()?;
-                }
-            }
-            if over.is_some() {
-                self.note_tooltip(None)?;
-                self.update_chrome_hover_target(None)?;
-                return Ok(());
-            }
+        // And the pane head's menu on the same level. Its own function rather
+        // than the file menu's three lines a fourth time, because this is the
+        // one popup in the window with a *child*: what the highlight does when
+        // the pointer leaves a row is no longer "the new row takes it" but "the
+        // new row takes it unless the hand is on its way to the submenu", which
+        // is the safety triangle and is not three lines.
+        if self.drive_pane_menu_hover(position)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
         }
         // A peek's header, pressed and now travelling: the window is kept and the
         // same gesture becomes the carry (user ruling 2026-08-12). Immediately
@@ -30547,6 +31392,18 @@ impl Runtime {
         let DragSource::Pane(seat) = drag.source else {
             return Ok(false);
         };
+        self.extract_pane_into_new_tab(seat, slot)
+    }
+
+    /// The move itself, with no drag around it.
+    ///
+    /// Split out when `Move pane to new tab` joined the drag as a second door
+    /// onto this verb (user ruling, 2026-08-16). One verb, two ways of asking —
+    /// which is this window's rule for every gesture that also has a menu row,
+    /// and it matters more here than usual: the whole point of the row is that
+    /// the pane *moves*, sessions and scrollback intact, and a second
+    /// implementation is exactly how a move quietly becomes a respawn.
+    fn extract_pane_into_new_tab(&mut self, seat: SeatId, slot: usize) -> Result<bool> {
         let metrics = self.seat_metrics();
         let id = TabId(self.next_tab_id);
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
@@ -31051,17 +31908,20 @@ impl Runtime {
                 self.tab_clicks.interrupt();
                 self.undock_files_column(seat)?;
             }
-            // The `⊞` (user ruling, 2026-08-15). Its own arm rather than a
-            // sub-case of the header's, which is also what keeps it out of the
-            // drag: this arm never touches `pane_press`, so the six pixels of
-            // travel that would begin a tear-out are never armed here.
+            // The `⌄` (user rulings, 2026-08-15 and 2026-08-16). Its own arm
+            // rather than a sub-case of the header's, which is also what keeps
+            // it out of the drag: this arm never touches `pane_press`, so the
+            // six pixels of travel that would begin a tear-out are never armed
+            // here.
             //
-            // Along the pane's longer side, which is the same "auto" the
-            // duplicate chord takes — and the same verb underneath, so the two
-            // doors onto one action cannot drift apart.
-            seats::ChromeTarget::PaneSplit(seat) => {
+            // A **toggle**, which is the second half of the `⌄` grammar: a rest
+            // of 250ms has usually already opened this menu by the time a hand
+            // that travelled here presses, so a press that only ever opened
+            // would be a press that did nothing. The strip's `⌄` has always
+            // toggled; this now does too, through the same policy.
+            seats::ChromeTarget::PaneMenu(seat) => {
                 self.tab_clicks.interrupt();
-                self.split_terminal_seat(seat, self.pane_split_axis(seat))?;
+                self.toggle_pane_menu(seat)?;
             }
             seats::ChromeTarget::FilesRow { seat, index } => {
                 self.tab_clicks.interrupt();
@@ -31338,19 +32198,37 @@ impl Runtime {
         // press outside puts it away and then goes on being the press it always
         // was — including a second right press, which is how a context menu is
         // moved from one head to another.
+        //
+        // **Except the `⌄` itself**, which is not "outside": a press there is the
+        // toggle's close, and letting this arm consume it would shut the menu
+        // and then let `press_pane_head` open it again on the same press.
         if let (Some(layout), Some(position)) = (self.pane_menu_layout(), self.pointer_position) {
             match profiles::pane_menu_hit(&layout, position.x, position.y) {
-                Some(row) => {
-                    if state == ElementState::Pressed
-                        && button == MouseButton::Left
-                        && let Some(row) = row
-                    {
-                        self.run_pane_menu_row(row)?;
+                Some(hit) => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        // The submenu heading is the one entry whose press is not
+                        // a verb: it opens the child menu, which is the `→` key's
+                        // job through the same door.
+                        if matches!(hit, profiles::PaneMenuHit::Row(row) if row.has_submenu()) {
+                            let open = self
+                                .pane_menu
+                                .as_ref()
+                                .is_some_and(|menu| menu.submenu_open);
+                            self.set_pane_submenu(!open)?;
+                        } else {
+                            self.run_pane_menu_row(hit)?;
+                        }
                     }
                     return Ok(());
                 }
                 None => {
-                    if state == ElementState::Pressed {
+                    if state == ElementState::Pressed
+                        && !matches!(
+                            self.chrome_target_at(position),
+                            Some(seats::ChromeTarget::PaneMenu(_))
+                        )
+                    {
+                        self.chevrons.clear();
                         self.close_pane_menu()?;
                     }
                 }
@@ -31419,7 +32297,7 @@ impl Runtime {
                 seats::ChromeTarget::PaneHeader(seat)
                 | seats::ChromeTarget::PaneClose(seat)
                 | seats::ChromeTarget::PaneFiles(seat)
-                | seats::ChromeTarget::PaneSplit(seat),
+                | seats::ChromeTarget::PaneMenu(seat),
             ) = self.chrome_target_at(position)
         {
             self.open_pane_menu(seat, [position.x as f32, position.y as f32])?;
@@ -32644,19 +33522,62 @@ impl Runtime {
             return Ok(());
         }
         // The pane head's menu owns the keyboard on the same terms and by the
-        // same four rules. It is a context menu raised at a point, which is the
-        // one shape in this window that has already been ruled walkable.
+        // same four rules, plus the two its picker and its submenu add: `←→`
+        // aim the picker's compass and open and shut the child, and Esc unwinds
+        // one layer at a time rather than dismissing the whole menu from inside
+        // the submenu.
         if self.pane_menu.is_some() {
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => {
                     if !event.repeat {
-                        self.close_pane_menu()?;
+                        // One press, one layer — §7.1.5's ladder read inside a
+                        // single popup. A submenu is a surface you opened, and a
+                        // key that closed both would make the child unclosable
+                        // without also losing the parent.
+                        self.chevrons.clear();
+                        if !self.set_pane_submenu(false)? {
+                            self.close_pane_menu()?;
+                        }
                     }
                 }
-                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
-                    let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
-                    if let Some(menu) = self.pane_menu.as_mut() {
-                        menu.hover = Some(profiles::PaneMenuRow::step(menu.hover, forwards));
+                // `→` on a heading opens its child, and `←` inside a child
+                // shuts it. Both are guarded rather than unconditional, so an
+                // arrow that means neither falls through to the walk below —
+                // which is where `←` and `→` aim the picker's compass.
+                Key::Named(NamedKey::ArrowRight)
+                    if matches!(
+                        self.pane_menu.as_ref().and_then(|menu| menu.hover),
+                        Some(profiles::PaneMenuHover::Row(row)) if row.has_submenu()
+                    ) =>
+                {
+                    self.set_pane_submenu(true)?;
+                }
+                Key::Named(NamedKey::ArrowLeft)
+                    if matches!(
+                        self.pane_menu.as_ref().and_then(|menu| menu.hover),
+                        Some(profiles::PaneMenuHover::Submenu(_))
+                    ) =>
+                {
+                    self.set_pane_submenu(false)?;
+                }
+                Key::Named(NamedKey::ArrowDown)
+                | Key::Named(NamedKey::ArrowUp)
+                | Key::Named(NamedKey::ArrowLeft)
+                | Key::Named(NamedKey::ArrowRight) => {
+                    let step = match event.logical_key {
+                        Key::Named(NamedKey::ArrowDown) => profiles::MenuStep::Down,
+                        Key::Named(NamedKey::ArrowUp) => profiles::MenuStep::Up,
+                        Key::Named(NamedKey::ArrowLeft) => profiles::MenuStep::Left,
+                        _ => profiles::MenuStep::Right,
+                    };
+                    if let Some(menu) = self.pane_menu.as_mut()
+                        && let Some(moved) = profiles::PaneMenuHover::step(
+                            menu.hover,
+                            step,
+                            profiles::PROFILES.len(),
+                        )
+                    {
+                        menu.hover = Some(moved);
                     }
                     if self.refresh_overlay() {
                         self.present_chrome_change()?;
@@ -32664,9 +33585,24 @@ impl Runtime {
                 }
                 Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                     if !event.repeat
-                        && let Some(row) = self.pane_menu.as_ref().and_then(|menu| menu.hover)
+                        && let Some(hover) = self.pane_menu.as_ref().and_then(|menu| menu.hover)
                     {
-                        self.run_pane_menu_row(row)?;
+                        match hover {
+                            // The heading opens its child rather than running,
+                            // which is what `→` does and what a click does.
+                            profiles::PaneMenuHover::Row(row) if row.has_submenu() => {
+                                self.set_pane_submenu(true)?;
+                            }
+                            profiles::PaneMenuHover::Row(row) => {
+                                self.run_pane_menu_row(profiles::PaneMenuHit::Row(row))?;
+                            }
+                            profiles::PaneMenuHover::Zone(zone) => {
+                                self.run_pane_menu_row(profiles::PaneMenuHit::Zone(zone))?;
+                            }
+                            profiles::PaneMenuHover::Submenu(index) => {
+                                self.run_pane_menu_row(profiles::PaneMenuHit::Submenu(index))?;
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -32686,6 +33622,11 @@ impl Runtime {
                 || self.close_profile_menu()?
                 || self.close_root_menu()?)
         {
+            // Esc is a hand saying "no", which is the one input that must not be
+            // undone by a clock: a gate left armed would re-open under a pointer
+            // that has not moved, which is the version of a hover menu that
+            // cannot be dismissed at all.
+            self.chevrons.clear();
             return Ok(());
         }
         // **The float's rung of §7.1.5's ladder**: 进行中的拖拽/divider → Menu →
@@ -33941,6 +34882,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // Both `⌄` clocks, and the pane menu's own two. Above the tip's, on the
+        // layout peek's precedent and for its reason: a menu that has matured is
+        // already on screen when the tip asks whether it has anything to explain.
+        if let Err(error) = runtime.advance_chevrons(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        if let Err(error) = runtime.advance_pane_menu(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.clear_math_hover_if_due(now) {
             self.fail(event_loop, error);
             return;
@@ -34091,6 +35043,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // The preview's "Saved", on the same clock and owing the same single
             // wake-up: the instant it is due to go away.
             runtime.preview_notice_deadline(),
+            // The two chevrons' 250/150, and nothing at all while the pointer is
+            // not on one and no menu one opened is up (2026-08-16).
+            runtime.chevrons.deadline(),
+            // And the pane menu's own clock: the heading's rest while the
+            // submenu is shut, the safety triangle's cap while it is open.
+            runtime.pane_menu_deadline(),
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
@@ -52507,6 +53465,322 @@ mod tests {
             "a pane that became a tab crossed a boundary, and that is exactly \
              what the wash is for: wash {wash}, washing {washing}"
         );
+    }
+
+    // ── the `⌄` ruling (2026-08-16) ─────────────────────────────────────────
+
+    /// PIN (**the ruling's own point**) — the tab strip's `⌄` and the pane
+    /// head's `⌄` are driven by **one call, one policy and one pair of
+    /// constants**.
+    ///
+    /// The ruling is "两处 ⌄ 语义完全对齐", and the failure it guards against is
+    /// not a wrong delay: it is two implementations that agree in the build that
+    /// wrote them and drift in the one after. [`ChevronGates::observe`] is the
+    /// only function in this program that starts either clock — it takes both
+    /// buttons' states and cannot be called for one of them — so "the two agree"
+    /// is a fact about the type rather than a promise about two call sites.
+    ///
+    /// Red gate: give either gate its own `observe` at its own call site and
+    /// this test still passes, but the *shape* it is asserting is gone — so the
+    /// assertion is written against the pair, driving both through one script
+    /// and demanding identical deadlines at every step.
+    #[test]
+    fn both_chevrons_are_driven_by_one_policy_and_one_pair_of_constants() {
+        use profiles::{ChevronAction, ChevronPointer};
+        let start = Instant::now();
+        let mut gates = ChevronGates::default();
+
+        // A rest on the strip's chevron while the pointer is nowhere near the
+        // pane head's: one clock runs and the other does not.
+        gates.observe(
+            (ChevronPointer::Button, false),
+            (ChevronPointer::Away, false),
+            start,
+        );
+        assert_eq!(gates.deadline(), Some(start + profiles::CHEVRON_HOVER_OPEN));
+        assert_eq!(gates.pane.deadline(), None, "an idle chevron owes nothing");
+        assert_eq!(
+            gates.profile.due(start + profiles::CHEVRON_HOVER_OPEN),
+            Some(ChevronAction::Open)
+        );
+
+        // The mirrored situation gives the mirrored answer at the same instant,
+        // which is the whole claim.
+        let mut mirrored = ChevronGates::default();
+        mirrored.observe(
+            (ChevronPointer::Away, false),
+            (ChevronPointer::Button, false),
+            start,
+        );
+        assert_eq!(mirrored.profile, gates.pane);
+        assert_eq!(mirrored.pane, gates.profile);
+        assert_eq!(mirrored.deadline(), gates.deadline());
+
+        // Both graces run on the same 150, and the earliest deadline is the one
+        // the loop is told about.
+        let mut leaving = ChevronGates::default();
+        leaving.observe(
+            (ChevronPointer::Away, true),
+            (ChevronPointer::Away, true),
+            start,
+        );
+        assert_eq!(
+            leaving.deadline(),
+            Some(start + profiles::CHEVRON_LEAVE_GRACE)
+        );
+        assert_eq!(
+            leaving.profile.due(start + profiles::CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close)
+        );
+        assert_eq!(
+            leaving.pane.due(start + profiles::CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close)
+        );
+
+        // And a press — every door that is not a pointer move — stops both.
+        leaving.clear();
+        assert_eq!(leaving.deadline(), None);
+    }
+
+    /// PIN (**E61 — one popup at a time**, now including both `⌄` menus).
+    ///
+    /// The list is the rule: whatever is being raised, every other popup goes.
+    /// Six openers used to carry six hand-copied runs of `self.x = None` and no
+    /// two of them agreed — the pane menu left the preview switcher up, the root
+    /// menu left the file menu up — so what is pinned here is not a set of pairs
+    /// but the *completeness*: for each popup, `others()` is exactly the other
+    /// five, and adding a seventh without listing it breaks this test rather
+    /// than shipping a pair that can be up together.
+    ///
+    /// Red gate: drop one arm of `ALL` and the count assertion goes red; return
+    /// a hand-written subset from `others` and the "every other popup" assertion
+    /// names the one that got away.
+    #[test]
+    fn opening_any_popup_closes_every_other_one() {
+        assert_eq!(Popup::ALL.len(), 6, "six popups, and this list is the rule");
+        for keep in Popup::ALL {
+            let closed: Vec<Popup> = keep.others().collect();
+            assert_eq!(
+                closed.len(),
+                Popup::ALL.len() - 1,
+                "{keep:?} closes every popup but itself"
+            );
+            assert!(
+                !closed.contains(&keep),
+                "{keep:?} must not close the popup it is raising — that is what                  makes a toggle possible through the same door as an open"
+            );
+            for other in Popup::ALL {
+                assert_eq!(
+                    other != keep,
+                    closed.contains(&other),
+                    "{keep:?} against {other:?}"
+                );
+            }
+        }
+        // The two chevron menus are on the list, which is the ruling's own
+        // requirement: a hover-opening surface that could coexist with another
+        // popup would be a menu a pointer drops on top of an open one.
+        assert!(Popup::ALL.contains(&Popup::Profile));
+        assert!(Popup::ALL.contains(&Popup::Pane));
+    }
+
+    /// PIN — **the `Split direction` setting decides every split that has no
+    /// direction of its own, and `Auto` is the pane's own measurement.**
+    ///
+    /// The `auto` argument is the answer the solver gave for *this* pane, so the
+    /// two non-auto arms are asserted to ignore it: a `Right` that quietly fell
+    /// back to the longer edge on a tall pane would be a setting that works only
+    /// where it was tested.
+    #[test]
+    fn a_split_with_no_direction_of_its_own_follows_the_setting() {
+        use bt_persist::SplitDirectionV1;
+        for measured in [Axis::Row, Axis::Col] {
+            assert_eq!(
+                split_axis(SplitDirectionV1::Auto, measured),
+                measured,
+                "Auto is whatever the pane's longer side turned out to be"
+            );
+            assert_eq!(split_axis(SplitDirectionV1::Right, measured), Axis::Row);
+            assert_eq!(split_axis(SplitDirectionV1::Down, measured), Axis::Col);
+        }
+    }
+
+    /// PIN — **`Duplicate pane` carries the profile and the directory; `Split
+    /// with` carries the directory across the namespaces; the chooser's folder
+    /// carries the profile.**
+    ///
+    /// One test over [`SplitSeed`] because the three rows differ in exactly one
+    /// field each, and the interesting failure for all three is the same: a seed
+    /// that dropped a half and let the arriving shell fall back to the profile's
+    /// own default, which looks like a shell that opened somewhere odd rather
+    /// than like a bug.
+    ///
+    /// The WSL crossing is the one that cannot be got right by accident: a
+    /// Windows `D:\repo` handed to `wsl.exe` unconverted names nothing, and the
+    /// pane opens at `~` with no explanation.
+    #[test]
+    fn a_seeded_split_carries_the_profile_and_the_directory_the_row_promised() {
+        let pwsh = profiles::index_of_id("pwsh");
+        let wsl = profiles::index_of_id("wsl");
+        let here = PathBuf::from(r"D:\Developer");
+
+        // Duplicate: both halves, unchanged.
+        let same = SplitSeed::Inherit.applied(wsl, Some(Path::new("/home/me/src")));
+        assert_eq!(same.profile, wsl);
+        assert_eq!(same.cwd.as_deref(), Some(Path::new("/home/me/src")));
+
+        // Split with… : the named profile, standing where this pane stands, in
+        // the spelling the named profile can read.
+        let crossed = SplitSeed::Profile(wsl).applied(pwsh, Some(&here));
+        assert_eq!(crossed.profile, wsl);
+        assert_eq!(
+            crossed.cwd.as_deref(),
+            Some(Path::new("/mnt/d/Developer")),
+            "the directory crosses the namespace rather than being copied into it"
+        );
+
+        // A pane whose shell has never named a directory hands over nothing,
+        // which is an absence rather than a guess.
+        assert_eq!(SplitSeed::Profile(wsl).applied(pwsh, None).cwd, None);
+
+        // New terminal in folder… : this pane's own profile, in the folder the
+        // chooser answered with — and that answer is a Windows path, so it too
+        // crosses when the pane is a WSL one.
+        let folder = SplitSeed::Folder(here.clone()).applied(pwsh, None);
+        assert_eq!(folder.profile, pwsh);
+        assert_eq!(folder.cwd.as_deref(), Some(here.as_path()));
+        let folder_for_wsl = SplitSeed::Folder(here.clone()).applied(wsl, None);
+        assert_eq!(folder_for_wsl.profile, wsl);
+        assert_eq!(
+            folder_for_wsl.cwd.as_deref(),
+            Some(Path::new("/mnt/d/Developer")),
+            "the chooser speaks Windows, and a WSL pane does not"
+        );
+    }
+
+    /// PIN — **a cancelled chooser asks the window for nothing**, and neither
+    /// does one that could not be shown, nor one whose asker has gone.
+    ///
+    /// The dialog is never opened here and must not be: `IFileDialog::Show` runs
+    /// a nested message loop, so a test that reached it would need a window, a
+    /// COM apartment and a hand to press Cancel. What is testable — and what the
+    /// bug would live in — is the decision made about the *answer*, which is why
+    /// that decision is a free function taking one.
+    ///
+    /// Red gate: answer a cancel with the last-remembered path and
+    /// `New terminal in folder…` splits into whatever folder was chosen the time
+    /// before, which is the worst possible reading of "never mind".
+    #[test]
+    fn a_cancelled_folder_chooser_asks_the_window_for_nothing() {
+        let asked = Some(FolderPick::SplitInto(SeatId(3)));
+        assert_eq!(
+            folder_pick_outcome(asked, Ok(Some(PathBuf::from(r"D:\repo")))),
+            Some((FolderPick::SplitInto(SeatId(3)), PathBuf::from(r"D:\repo"))),
+            "a chosen folder is spent by the verb that asked for it"
+        );
+        assert_eq!(
+            folder_pick_outcome(asked, Ok(None)),
+            None,
+            "cancel does nothing at all — no split, no toast"
+        );
+        assert_eq!(
+            folder_pick_outcome(asked, Err("no apartment".to_owned())),
+            None,
+            "and a chooser that could not be shown leaves everything where it was"
+        );
+        assert_eq!(
+            folder_pick_outcome(None, Ok(Some(PathBuf::from(r"D:\repo")))),
+            None,
+            "an answer nobody asked for is nobody's"
+        );
+        // The two verbs are told apart by the tag, which is the whole reason it
+        // exists: a `PathBuf` says nothing about why it was wanted.
+        assert_eq!(
+            folder_pick_outcome(
+                Some(FolderPick::Reroot(SeatId(7))),
+                Ok(Some(PathBuf::from(r"D:\repo")))
+            )
+            .map(|(asked, _)| asked),
+            Some(FolderPick::Reroot(SeatId(7))),
+        );
+    }
+
+    /// PIN — **`Move pane to new tab` moves the leaf; it does not start a new
+    /// one.**
+    ///
+    /// The row's whole promise is that the shell survives: its scrollback, its
+    /// children, the program it is in the middle of running. A respawn would look
+    /// identical for the first frame and then be a pane that had lost an hour of
+    /// output, which is the failure this pins shut.
+    ///
+    /// It asserts against [`tear_pane_into_tab`] because that is what the row
+    /// runs — `run_pane_menu_row` → `move_pane_to_new_tab` →
+    /// `extract_pane_into_new_tab` → here, the same chain the drag walks. The
+    /// marker bytes are the identity: a fresh `LeafSession` says nothing, so a
+    /// tab whose pane still says `BETA` is a tab holding the object that was
+    /// there before, not a copy of it.
+    ///
+    /// Red gate: rebuild the session on the way across and the new tab comes up
+    /// blank while the assertion below still names a seat that exists.
+    #[test]
+    fn moving_a_pane_to_a_new_tab_carries_its_shell_rather_than_starting_one() {
+        let mut source = cross_tab(1, &["ALPHA", "BETA"]);
+        let before = source.sessions.len();
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            SeatId(2),
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a two-pane tab can spare one");
+        assert_eq!(
+            tab_texts(&torn),
+            vec!["BETA".to_string()],
+            "the pane arrives still saying what it said — the session moved"
+        );
+        assert_eq!(tab_texts(&source), vec!["ALPHA".to_string()]);
+        assert_eq!(
+            source.sessions.len() + torn.sessions.len(),
+            before,
+            "one shell in, one shell out: nothing was spawned and nothing killed"
+        );
+        assert!(source.sessions_match_terminals());
+        assert!(torn.sessions_match_terminals());
+    }
+
+    /// PIN — **the picker's `Left` and `Up` put the arriving pane first in the
+    /// tree**, which is the only thing about those two zones that is not free.
+    ///
+    /// `Seats::split_terminal` has taken a `leading` flag since the tree existed
+    /// and every caller passed `false`; the picker is the first to pass `true`,
+    /// so what is worth pinning is that the flag reaches the tree and reverses
+    /// the order — read off `terminals()`, which walks the tree in order (D2).
+    ///
+    /// Red gate: pass `false` for `Left` and the new pane appears on the right
+    /// while the diagram said left, which is a lie told in a picture.
+    #[test]
+    fn splitting_toward_the_leading_side_puts_the_new_pane_first_in_the_tree() {
+        let metrics = cross_metrics();
+        for zone in profiles::SplitZone::ALL {
+            let mut seats = seats::Seats::lone_terminal();
+            let source = seats.terminal();
+            let arriving = seats
+                .split_terminal(&metrics, source, zone.axis(), zone.leading())
+                .expect("a lone terminal has room to divide");
+            let order = seats.terminals();
+            let expected = if zone.leading() {
+                vec![arriving, source]
+            } else {
+                vec![source, arriving]
+            };
+            assert_eq!(
+                order, expected,
+                "{zone:?} puts the arriving pane where the diagram showed it"
+            );
+        }
     }
 
     /// **The keyboard follows the pane out, and what stays keeps a shell to type

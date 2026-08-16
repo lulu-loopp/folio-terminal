@@ -8321,6 +8321,28 @@
      the version of this feature every user has already met and hated, so the
      row waits for the slice that can afford the triangle.
 
+     ── SUPERSEDED 2026-08-16 (user ruling). QUEUE ITEM #53 IS CLOSED. ──
+     The `⊞` this comment argues against is gone: the head's slot now holds the
+     house's `⌄`, and every `⌄` in the window (this one and the tab strip's)
+     opens on a hover-rest of 250ms or a click and closes 150ms after the pointer
+     has left BOTH the button and the menu. The reason is one line of testimony —
+     the user had never discovered that a pane head had a context menu at all —
+     and the answer is not a fifth button but a rule about the one glyph that
+     already means "there is a list behind me".
+
+     The menu is now SIX ENTRIES: a Snap-Layouts-style direction picker (a 48×34
+     pane with four 10px slabs around it; the slab under the pointer washes
+     `accent` at 15%; left/up are the same two axes with the arriving leaf
+     inserted FIRST, which is `Edit::SplitSeat`'s own `leading` flag), then
+     `Split with ▸`, `New terminal in folder…`, `Duplicate pane`,
+     `Move pane to new tab`, a rule, and `Close pane`.
+
+     THE SAFETY TRIANGLE IS BUILT, so the paragraph above is history rather than
+     a deferral: apex at the pointer's LAST position, base at the submenu's near
+     vertical edge, 300ms as a cap on how long a hand may dawdle inside it rather
+     than as the mechanism. `profiles::safe_triangle_holds`, with its own tests.
+     See docs/DESIGN.md §7.1.6e for the whole ruling. ──
+
      The rule sits ABOVE `Close pane`, not under the first row as #file-menu's
      does. Same principle, different sentence boundary: two verbs that make a
      pane, then one that ends one. A destructive verb flush against constructive
@@ -8330,9 +8352,10 @@
      `×` raises this rather than closing the pane. An 18-pixel hole in a context
      bar that silently means something else is exactly the edge a hand finds by
      accident. */
-  /* One verb behind both doors — the `⊞`, which picks the axis, and the menu
-     rows, which are told it. Two copies of "make a shell and seat it" is how the
-     button and the menu come to disagree about what a split is. */
+  /* One verb behind every door — the picker's four zones, the four verbs that
+     take the `Split direction` setting's answer, and the chords. Two copies of
+     "make a shell and seat it" is how a button and a menu come to disagree about
+     what a split is. */
   function splitPane(leafId, zone) {
     const w = activeTab();
     const leaf = findLeafIn(w, leafId);

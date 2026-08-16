@@ -33,9 +33,10 @@ use std::{
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf, Prefix},
     sync::OnceLock,
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
+use bt_layout::Axis;
 use bt_pty::{ShellEnvironment, resolve_powershell_seven};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
@@ -57,7 +58,7 @@ const MENU_MIN_WIDTH_LOGICAL_PX: f32 = 180.0;
 const MENU_RADIUS_LOGICAL_PX: f32 = 8.0;
 const MENU_PADDING_LOGICAL_PX: f32 = 4.0;
 /// `menu.style.top = a.bottom + 4` — the gap between the button and its menu.
-const MENU_OFFSET_LOGICAL_PX: f32 = 4.0;
+pub const MENU_OFFSET_LOGICAL_PX: f32 = 4.0;
 /// `Math.min(a.left, win.width - mw - 8)` — the menu never touches the window's
 /// right edge, however near the edge the button that opened it sits.
 const MENU_EDGE_MARGIN_LOGICAL_PX: f32 = 8.0;
@@ -75,6 +76,35 @@ const ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 /// the strip's own 15px `.pmark`, centred, exactly as the flex box centres it.
 const ITEM_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
 const ITEM_MARK_LOGICAL_PX: f32 = 15.0;
+/// The box a `×` gets in that same column — **ten, not fifteen** (user ruling,
+/// 2026-08-16), and a deliberate deviation from the mock-up.
+///
+/// `#i-close`'s artwork runs edge to edge of its own `viewBox`: it is a bare
+/// cross with no margin, drawn that way because every other place it appears is
+/// a *button* whose padding supplies the air. A menu row has no button around
+/// it, so struck at the column's full fifteen the cross came out visibly heavier
+/// than the folder and the copy glyph beside it — two marks whose artwork is a
+/// shape inside a box with its own breathing room. Ten in a fifteen-pixel column
+/// gives it the same optical weight as its neighbours, which is what "the same
+/// size" actually means for glyphs that are not drawn to the same margins.
+///
+/// It applies to all three spellings of the cross ([`ChromeMark::WindowClose`],
+/// [`ChromeMark::TabClose`], [`ChromeMark::PaneClose`]) rather than to the one a
+/// menu happens to use today: they are one drawing under three names, and a rule
+/// that named one of them would be a rule the next menu escapes by picking a
+/// different alias. Every other mark keeps [`ITEM_MARK_LOGICAL_PX`], the
+/// split glyphs included.
+const ITEM_MARK_CLOSE_LOGICAL_PX: f32 = 10.0;
+
+/// How big this mark is drawn inside a menu row's icon column.
+fn item_mark_logical_px(mark: ChromeMark) -> f32 {
+    match mark {
+        ChromeMark::WindowClose | ChromeMark::TabClose | ChromeMark::PaneClose => {
+            ITEM_MARK_CLOSE_LOGICAL_PX
+        }
+        _ => ITEM_MARK_LOGICAL_PX,
+    }
+}
 /// `.default-hint { margin-left: auto; font-size: 11px; color: var(--ink3) }`.
 ///
 /// Two annotations ride in this one slot: the profile list's `default`, and a
@@ -1295,6 +1325,19 @@ pub struct ProfileMenuLayout {
 }
 
 impl ProfileMenuLayout {
+    /// Whether this point is on the menu at all.
+    ///
+    /// [`hit`] answers the same question and more, and cannot be used for it: it
+    /// needs the machine's profile list and the seed vault, because a *row* has
+    /// to know whether it can be chosen. The `⌄`'s leave grace asks something
+    /// much smaller — "is the pointer still on the pair" — and asking it through
+    /// the bigger question would make the grace depend on which shells are
+    /// installed.
+    #[must_use]
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        contains(self.frame, x, y)
+    }
+
     /// Every row that has something to say beyond its own caption, paired with
     /// the box it says it over.
     ///
@@ -1871,13 +1914,16 @@ fn push_row(
         ));
     }
     // The 15px mark centred on its own 14px column, which is what a flex box
-    // does with a child one pixel wider than the box it is in.
+    // does with a child one pixel wider than the box it is in — or the 10px box
+    // a `×` gets instead, centred in exactly the same column so that a row with
+    // a cross and a row with a folder still line their names up. See
+    // [`ITEM_MARK_CLOSE_LOGICAL_PX`].
     let column_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
     let column_right = column_left + px(ITEM_ICON_COLUMN_LOGICAL_PX);
-    let mark = px(ITEM_MARK_LOGICAL_PX).round();
-    let mark_left = ((column_left + column_right - mark) / 2.0).round();
-    let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
     if let Some(glyph) = row.mark {
+        let mark = px(item_mark_logical_px(glyph)).round();
+        let mark_left = ((column_left + column_right - mark) / 2.0).round();
+        let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
         let mut sprite = ChromeSprite::new(
             glyph,
             [mark_left, mark_top, mark_left + mark, mark_top + mark],
@@ -2682,7 +2728,173 @@ pub fn file_menu_build(
     }]
 }
 
-// ── the pane head's own context menu (user ruling, 2026-08-15) ──────────────
+// ── the `⌄` open policy, shared by every chevron in the house ───────────────
+//
+// **User ruling, 2026-08-16.** There are two `⌄` in this window — the tab
+// strip's, beside the `+`, and now the pane head's — and until this ruling they
+// opened by two different rules: the strip's on a click, the head's not at all
+// (its slot held a `⊞` that split without asking). The ruling makes them one
+// control with one grammar: **rest on it for 250ms, or click it, and the menu
+// comes; take the pointer off both the button and the menu and it goes after a
+// short grace.**
+//
+// The ruling's own argument for the hover half is discoverability: "用户此前从
+// 没发现 pane 头右键有菜单". A verb reachable only by right click is a verb most
+// people never learn exists, and the answer is not a fifth button — it is that
+// the one glyph in this product that already *means* "there is a list behind
+// me" should behave the way a list behind a glyph behaves everywhere else.
+//
+// And the ruling is equally firm about the boundary: `⌄` is the **only** hover-
+// opening surface. Everything else keeps the house's division of labour — hover
+// is for looking (a tip, a peek), click is for doing, right click is for
+// options. A window where any button might open a panel under a resting hand is
+// a window you cannot rest your hand in.
+//
+// The policy is a state machine and not a pair of `if`s at two call sites,
+// because "the two chevrons agree" is exactly the property that a second copy
+// cannot keep. Both doors go through [`ChevronGate`]; the constants are declared
+// once; and the test that matters is the one that drives both gates through the
+// same steps and gets the same answers.
+
+/// How long a pointer has to rest on a `⌄` before the menu behind it opens.
+///
+/// 250ms is the ruling's own number and it is chosen against the two failures at
+/// either end. Shorter, and a pointer merely *crossing* the button on its way to
+/// the `+` beside it drops a menu in its path — the classic hover-menu bug,
+/// which is why the mock-up's own menus were click-only to begin with. Longer,
+/// and the gesture stops reading as "rest here" and starts reading as "wait
+/// here", which is a different and worse instruction.
+pub const CHEVRON_HOVER_OPEN: Duration = Duration::from_millis(250);
+
+/// How long a menu a `⌄` opened stays up once the pointer has left **both** it
+/// and the button.
+///
+/// The grace exists because the button and its menu are two rectangles with a
+/// four-pixel gap between them ([`MENU_OFFSET_LOGICAL_PX`]), and a hand
+/// travelling from one to the other crosses that gap. Without a grace the menu
+/// would close in the gap it was drawn across, every time, and the ruling's
+/// "面板和图标可视为一体" would be false in exactly the pixels where it matters.
+///
+/// 150ms rather than the 250 above, and deliberately asymmetric: opening is a
+/// commitment the user is making and deserves deliberation, while closing is
+/// them having already left, and a menu that lingers a quarter of a second after
+/// the hand has gone reads as a menu that is stuck.
+pub const CHEVRON_LEAVE_GRACE: Duration = Duration::from_millis(150);
+
+/// Where the pointer stands, as far as one `⌄` and the menu it opens are
+/// concerned.
+///
+/// Three answers and not two, because the middle one is the whole of what makes
+/// the pair one object: a pointer *on the menu* is neither on the button nor
+/// away from the control, and treating it as "away" is the bug the grace above
+/// exists to paper over rather than to hide.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChevronPointer {
+    /// On the `⌄` itself.
+    Button,
+    /// On the menu the `⌄` opened — its rows, its padding, its submenu.
+    Surface,
+    /// On neither.
+    Away,
+}
+
+/// What a `⌄`'s clock says is owed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChevronAction {
+    Open,
+    Close,
+}
+
+/// One `⌄`'s two clocks: how long the pointer has rested on it, and how long it
+/// has been gone from both surfaces.
+///
+/// Two `Option<Instant>` rather than one enum, because the two are genuinely
+/// exclusive by construction — [`Self::observe`] never leaves both set — and
+/// writing them as an enum would put the proof of that in a `match` arm instead
+/// of in the one function that assigns them.
+///
+/// No `Duration` is stored and no clock is read here: an instant is handed in at
+/// each observation, which is what lets the whole policy be tested without a
+/// window and without sleeping.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ChevronGate {
+    resting_since: Option<Instant>,
+    leaving_since: Option<Instant>,
+}
+
+impl ChevronGate {
+    /// Tell the gate where the pointer is and whether the menu is up.
+    ///
+    /// Idempotent under repetition, which is the property the caller depends on:
+    /// a pointer that moves two pixels inside the button reports `Button` again,
+    /// and the rest it has already accumulated must not be thrown away. That is
+    /// why each clock is started with `get_or_insert` rather than assigned.
+    pub fn observe(&mut self, pointer: ChevronPointer, open: bool, now: Instant) {
+        match (pointer, open) {
+            // Resting on a shut chevron is the one state that earns an open.
+            (ChevronPointer::Button, false) => {
+                self.leaving_since = None;
+                self.resting_since.get_or_insert(now);
+            }
+            // On the button of a menu that is already up, or anywhere on the
+            // menu itself: nothing is owed in either direction, and both clocks
+            // are cleared so that leaving again starts a fresh grace.
+            (ChevronPointer::Button, true) | (ChevronPointer::Surface, _) => self.clear(),
+            // Gone, with a menu up: the grace runs.
+            (ChevronPointer::Away, true) => {
+                self.resting_since = None;
+                self.leaving_since.get_or_insert(now);
+            }
+            // Gone, with nothing up: there is no clock to run.
+            (ChevronPointer::Away, false) => self.clear(),
+        }
+    }
+
+    /// What the gate owes at `now`, if anything.
+    ///
+    /// Reading it does not spend it — the caller clears the gate by acting on
+    /// the answer, through [`Self::clear`] — because "what is due" and "do it"
+    /// are two questions and the second one can fail.
+    #[must_use]
+    pub fn due(&self, now: Instant) -> Option<ChevronAction> {
+        if self
+            .resting_since
+            .is_some_and(|since| now.duration_since(since) >= CHEVRON_HOVER_OPEN)
+        {
+            return Some(ChevronAction::Open);
+        }
+        if self
+            .leaving_since
+            .is_some_and(|since| now.duration_since(since) >= CHEVRON_LEAVE_GRACE)
+        {
+            return Some(ChevronAction::Close);
+        }
+        None
+    }
+
+    /// The next instant this gate has something to do, for the loop's wake set.
+    ///
+    /// `None` while neither clock is running, which is the ordinary state: a
+    /// window whose pointer is not on a chevron costs no wake-ups at all.
+    #[must_use]
+    pub fn deadline(&self) -> Option<Instant> {
+        match (self.resting_since, self.leaving_since) {
+            (Some(since), _) => Some(since + CHEVRON_HOVER_OPEN),
+            (None, Some(since)) => Some(since + CHEVRON_LEAVE_GRACE),
+            (None, None) => None,
+        }
+    }
+
+    /// Stop both clocks — what a caller does once it has acted on [`Self::due`],
+    /// and what every other door onto these menus (a click, Esc, another popup
+    /// opening) does on its way through.
+    pub fn clear(&mut self) {
+        self.resting_since = None;
+        self.leaving_since = None;
+    }
+}
+
+// ── the pane head's own menu (user rulings, 2026-08-15 and 2026-08-16) ──────
 //
 // The mouse had no way to reach a split. The chords have had three since the
 // fleet shipped — Ctrl+Shift+D and Alt+Shift+-/= — but a hand on the mouse had
@@ -2690,142 +2902,568 @@ pub fn file_menu_build(
 // three gestures for one verb, and the only one of the three that is obvious is
 // the one that makes a tab you did not want.
 //
-// Two doors, both onto the same machine: the `⊞` in the head, which takes the
-// pane's longer side and asks nothing; and this, which names both axes outright
-// and carries the pane's other verb beside them. It is `#file-menu`'s skin and
-// `push_row`'s rows, for the reason the switcher's note gives — a menu that
-// looked like its neighbours but was drawn by different code would be a second
-// popup wearing the first one's clothes.
+// The 2026-08-15 ruling answered that with two doors onto one machine: a `⊞` in
+// the head that took the pane's longer side and asked nothing, and a right-click
+// menu that named both axes outright. The 2026-08-16 ruling folds the first into
+// the second. The `⊞` is now a `⌄` — the house's one glyph for "there is a list
+// behind me" — and the list it opens is this one, which has grown from three
+// flat verbs into the whole of what a hand can ask of a pane: which way, with
+// what, from where, and where to.
+//
+// It is still `#file-menu`'s skin and `push_row`'s rows, for the reason the
+// switcher's note gives — a menu that looked like its neighbours but was drawn
+// by different code would be a second popup wearing the first one's clothes.
+// Two things here are genuinely new to the house and are built rather than
+// borrowed: the **picker**, which is a drawing you press rather than a row you
+// read, and the **submenu**, which brings the safety triangle (queue item #53)
+// with it.
 
-/// The verbs a pane head offers on a right click.
+// ── the picker (Snap Layouts' idiom, this house's geometry) ────────────────
+//
+// Windows' own Snap Layouts is the reference and the reason: a hand that knows
+// where it wants the new pane should be able to *point at* that place, not read
+// four sentences and pick the one whose adverb matches. The ruling says so in as
+// many words — "方向选择优先给图不给字".
+//
+// Drawn from quads rather than struck as a mark, and that is the one decision
+// here worth arguing. A mark is a raster keyed on a glyph and a box; this is
+// five rectangles whose *relationship* is the whole meaning, one of which lights
+// up under the pointer. As a mark it would be five marks (or one mark per
+// state, which is twenty), each cached separately, and the gap between the pane
+// and its zones — the thing that makes them read as "beside" rather than "part
+// of" — would be a fact about a bitmap instead of a number in this file.
+
+/// The little pane at the middle of the diagram: 48 × 34.
 ///
-/// **Three, and flat.** `Split with…` — the same split against a chosen profile
-/// — is the fourth the ruling names, and it is deliberately absent: it is a
-/// *submenu*, this build has never drawn one, and the first one owes the safety
-/// triangle (task #53) that keeps a pointer travelling diagonally toward a child
-/// menu from being stolen by the rows it crosses on the way. That is a slice
-/// with its own geometry and its own red tests, and the ruling that asked for
-/// this menu allows it to follow. What must not happen in the meantime is a
-/// submenu without the triangle, which is the version of this feature every
-/// user has already met and hated.
+/// A landscape rectangle rather than a square, because it stands for a terminal
+/// pane and terminal panes are wide. A square would make the up/down zones the
+/// same shape as the left/right ones, which is precisely the distinction the
+/// diagram exists to draw.
+const PICKER_PANE_WIDTH_LOGICAL_PX: f32 = 48.0;
+const PICKER_PANE_HEIGHT_LOGICAL_PX: f32 = 34.0;
+/// The pane's own round — `.pane`'s 6px read down for a drawing a third its
+/// size, on the same ladder every small rounded box in this window climbs.
+const PICKER_PANE_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// How thick a drop zone's slab is.
+const PICKER_ZONE_THICKNESS_LOGICAL_PX: f32 = 10.0;
+/// The air between the pane and a slab, which is what makes the slab read as a
+/// *place the new pane would go* rather than as a border on the old one.
+const PICKER_ZONE_GAP_LOGICAL_PX: f32 = 3.0;
+const PICKER_ZONE_RADIUS_LOGICAL_PX: f32 = 3.0;
+/// The hairline the pane and the four slabs are outlined in — one logical pixel,
+/// the same weight `#file-menu`'s own edge wears.
+const PICKER_EDGE_LOGICAL_PX: f32 = 1.0;
+/// `--accent` at 15% is the wash a zone takes under the pointer.
+///
+/// A wash and not a fill: the slab has to go on reading as an outline with
+/// something behind it, because what it means is "the new pane lands here" and a
+/// solid block means "there is already a pane here".
+const PICKER_ZONE_WASH_ALPHA: f32 = 0.15;
+/// The air above the diagram, inside the picker's own block.
+const PICKER_PADDING_TOP_LOGICAL_PX: f32 = 6.0;
+/// And below the caption.
+const PICKER_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
+/// The caption, in the section label's grammar (`.glabel`: 9.5-10.5px, tracked,
+/// upper-cased, `--ink3`).
+///
+/// Written upper-case at the source for [`RECENT_SECTION_LABEL`]'s reason and
+/// not for a different one: this pipeline has no `text-transform`, a chrome
+/// label draws the string it is given, and a lower-case constant that nothing
+/// upper-cases would be a lie about what appears on screen.
+pub const PICKER_CAPTION_TEXT: &str = "SPLIT";
+
+/// The whole height of the picker's block: the air, the diagram, the caption.
+///
+/// **Derived rather than declared.** The ruling asks for "one row, ~92px tall",
+/// and 92 is what these terms sum to — but writing `92.0` here and laying the
+/// parts out inside it would make the number the specification and the parts an
+/// arrangement that happens to fit, which is the shape in which a later change
+/// to the slab thickness silently leaves a gap at the bottom.
+fn picker_block_logical_px() -> f32 {
+    PICKER_PADDING_TOP_LOGICAL_PX
+        + picker_diagram_height_logical_px()
+        + SECTION_LABEL_PADDING_TOP_LOGICAL_PX
+        + SECTION_LABEL_LINE_LOGICAL_PX
+        + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX
+        + PICKER_PADDING_BOTTOM_LOGICAL_PX
+}
+
+/// The diagram's own box: the pane, plus a gap and a slab on each of four sides.
+fn picker_diagram_width_logical_px() -> f32 {
+    PICKER_PANE_WIDTH_LOGICAL_PX
+        + 2.0 * (PICKER_ZONE_GAP_LOGICAL_PX + PICKER_ZONE_THICKNESS_LOGICAL_PX)
+}
+
+fn picker_diagram_height_logical_px() -> f32 {
+    PICKER_PANE_HEIGHT_LOGICAL_PX
+        + 2.0 * (PICKER_ZONE_GAP_LOGICAL_PX + PICKER_ZONE_THICKNESS_LOGICAL_PX)
+}
+
+/// The four sides a pane can be split toward.
+///
+/// **Named by where the arriving pane lands**, which is how every terminal names
+/// a split: "right" puts a shell on the right, and the rule it draws is
+/// vertical. Nobody says the second half out loud, and the picker does not have
+/// to — a hand pointing at the slab on the right is not reading an adverb.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplitZone {
+    Right,
+    Down,
+    Left,
+    Up,
+}
+
+impl SplitZone {
+    /// The four in the order the keyboard's compass and the tests walk them.
+    pub const ALL: [Self; 4] = [Self::Right, Self::Down, Self::Left, Self::Up];
+
+    /// Which axis this zone cuts along — `Row` for side by side, `Col` for
+    /// stacked.
+    #[must_use]
+    pub fn axis(self) -> Axis {
+        match self {
+            Self::Right | Self::Left => Axis::Row,
+            Self::Down | Self::Up => Axis::Col,
+        }
+    }
+
+    /// Whether the arriving pane goes **first** in the run this split makes.
+    ///
+    /// The whole of what `Left` and `Up` are: the same two axes the menu has
+    /// always offered, with the new leaf inserted on the other side of the one it
+    /// came out of. `bt-layout`'s `Edit::SplitSeat` has carried a `leading` flag
+    /// since the tree existed and `Seats::split_terminal` has always taken it —
+    /// no layout work was owed here, only a caller that stops passing `false`.
+    #[must_use]
+    pub fn leading(self) -> bool {
+        matches!(self, Self::Left | Self::Up)
+    }
+}
+
+// ── the rows ───────────────────────────────────────────────────────────────
+
+/// The verbs a pane head's `⌄` offers.
 ///
 /// Closed rather than a `Vec`, for [`FileMenuRow`]'s reason: a menu whose length
 /// cannot vary is also a menu whose keyboard walk cannot go looking for a row
 /// that is not there.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PaneMenuRow {
-    /// Cut side by side and put the new shell on the right (`Axis::Row`).
-    SplitRight,
-    /// Cut top to bottom and put the new shell below (`Axis::Col`).
-    SplitDown,
+    /// The Snap-Layouts picker — a drawing, not a row of text, and the only
+    /// entry here that carries its own four answers.
+    Picker,
+    /// The submenu heading: split against a profile you name.
+    SplitWith,
+    /// Split, with the new shell rooted in a folder the system chooser names.
+    NewInFolder,
+    /// Split, with the new shell on this pane's own profile *and* this pane's
+    /// own directory.
+    Duplicate,
+    /// The pane leaves this tab and becomes a tab of its own.
+    MoveToNewTab,
     /// The same verb the `×` in the head has.
     ClosePane,
 }
 
 impl PaneMenuRow {
-    /// The rows in the order they are drawn, which is the order a keyboard
-    /// walks them.
-    pub const ALL: [Self; 3] = [Self::SplitRight, Self::SplitDown, Self::ClosePane];
+    /// Every entry, top to bottom — the order they are laid out in and the order
+    /// a keyboard walks them.
+    pub const ALL: [Self; 6] = [
+        Self::Picker,
+        Self::SplitWith,
+        Self::NewInFolder,
+        Self::Duplicate,
+        Self::MoveToNewTab,
+        Self::ClosePane,
+    ];
 
-    /// The row `steps` away, clamped at both ends — [`FileMenuRow::step`]'s
-    /// rule, and the same one for the same reason: one window, one idea of what
-    /// the bottom of a list does.
-    #[must_use]
-    pub fn step(current: Option<Self>, forwards: bool) -> Self {
-        let Some(current) = current else {
-            return if forwards {
-                Self::ALL[0]
-            } else {
-                Self::ALL[Self::ALL.len() - 1]
-            };
-        };
-        let index = Self::ALL
-            .iter()
-            .position(|row| *row == current)
-            .expect("every row is in ALL");
-        let index = if forwards {
-            (index + 1).min(Self::ALL.len() - 1)
-        } else {
-            index.saturating_sub(1)
-        };
-        Self::ALL[index]
-    }
+    /// The five that are rows of text with a mark, in order — [`Self::ALL`]
+    /// without the picker.
+    pub const TEXT_ROWS: [Self; 5] = [
+        Self::SplitWith,
+        Self::NewInFolder,
+        Self::Duplicate,
+        Self::MoveToNewTab,
+        Self::ClosePane,
+    ];
 
-    fn mark(self) -> ChromeMark {
+    /// The glyph in this row's icon column.
+    fn mark(self) -> Option<ChromeMark> {
         match self {
-            Self::SplitRight => ChromeMark::SplitRight,
-            Self::SplitDown => ChromeMark::SplitDown,
-            Self::ClosePane => ChromeMark::PaneClose,
+            // The picker is the drawing; it has no column and no glyph.
+            Self::Picker => None,
+            // The `⊞` the pane head just gave up, in the one place it still
+            // means what it always meant: "another one of these, beside this".
+            Self::SplitWith => Some(ChromeMark::Split),
+            Self::NewInFolder => Some(ChromeMark::Folder),
+            Self::Duplicate => Some(ChromeMark::Copy),
+            // `#i-float`'s own sentence is "opens outside this frame" — and a
+            // pane leaving for a tab of its own is exactly that. It is the same
+            // glyph the files head wears for undocking, which is the same idea
+            // aimed at a different container.
+            Self::MoveToNewTab => Some(ChromeMark::Float),
+            Self::ClosePane => Some(ChromeMark::TabClose),
         }
     }
 
     fn text(self) -> &'static str {
         match self {
-            Self::SplitRight => SPLIT_RIGHT_TEXT,
-            Self::SplitDown => SPLIT_DOWN_TEXT,
+            Self::Picker => PICKER_CAPTION_TEXT,
+            Self::SplitWith => SPLIT_WITH_TEXT,
+            Self::NewInFolder => NEW_IN_FOLDER_TEXT,
+            Self::Duplicate => DUPLICATE_PANE_TEXT,
+            Self::MoveToNewTab => MOVE_TO_NEW_TAB_TEXT,
             Self::ClosePane => CLOSE_PANE_TEXT,
+        }
+    }
+
+    /// Whether this row hangs a submenu off itself.
+    #[must_use]
+    pub fn has_submenu(self) -> bool {
+        self == Self::SplitWith
+    }
+}
+
+/// The submenu heading. The `▸` is drawn rather than written: see
+/// [`pane_menu_build`], which strikes the house's `⌄` turned a quarter into the
+/// row's trailing edge.
+pub const SPLIT_WITH_TEXT: &str = "Split with";
+/// The ellipsis is load-bearing: it is this window's promise that a row asks
+/// before it acts, and this row opens a system dialog you can cancel.
+pub const NEW_IN_FOLDER_TEXT: &str = "New terminal in folder…";
+pub const DUPLICATE_PANE_TEXT: &str = "Duplicate pane";
+pub const MOVE_TO_NEW_TAB_TEXT: &str = "Move pane to new tab";
+/// The `×`'s verb, spelled — a menu row has room for the word the button does
+/// not, and `Close pane` is the mock-up's own `title` for that button (4672).
+pub const CLOSE_PANE_TEXT: &str = "Close pane";
+/// What the submenu writes beside the profile this pane is already running.
+///
+/// The `.default-hint` slot, on the profile picker's own precedent: the mark
+/// column belongs to the profile's own glyph, so "this is the one you are on"
+/// has to be said in words rather than with a tick.
+pub const CURRENT_PROFILE_HINT_TEXT: &str = "current";
+
+// ── what the pointer and the keyboard are on ───────────────────────────────
+
+/// What a point in one of the menu's two surfaces is over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneMenuHit {
+    /// One of the picker's four zones.
+    Zone(SplitZone),
+    /// A row of the menu proper. Never [`PaneMenuRow::Picker`] — a point inside
+    /// the picker's block is a zone or it is nothing.
+    Row(PaneMenuRow),
+    /// A row of the open submenu, by its index into [`PROFILES`].
+    Submenu(usize),
+    /// Inside one of the two surfaces but on no control: the padding, the gap
+    /// between the picker's slabs, the rule above `Close pane`.
+    Surface,
+}
+
+/// What is lit — the pointer's hover and the keyboard's cursor, which are one
+/// thing in a menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneMenuHover {
+    /// The picker, with the zone that is lit. The picker's hover *is* a zone:
+    /// there is no state in which the block is highlighted and no direction is.
+    Zone(SplitZone),
+    /// A text row. Never [`PaneMenuRow::Picker`].
+    Row(PaneMenuRow),
+    /// A row of the open submenu.
+    Submenu(usize),
+}
+
+/// An arrow key, as the menu's walk sees it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MenuStep {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl PaneMenuHover {
+    /// Where an arrow key moves the highlight, or `None` when it moves nothing.
+    ///
+    /// **The picker is a compass inside a list**, and that is the whole of the
+    /// subtlety here. Four zones lie in four directions, so `←→↑↓` must aim at
+    /// them; but the picker is also the first entry of a vertical list, so `↓`
+    /// must eventually leave it. The rule that satisfies both: an arrow that
+    /// names a zone lights that zone, and an arrow that names the zone **already
+    /// lit** walks out of the picker in that direction. So `↓ ↓` from the picker
+    /// is "aim down, then leave downward", which is what a hand that wanted the
+    /// row below would do anyway, and `↑` from the row below comes back in
+    /// landing on `Down` — the zone nearest the row it came from.
+    ///
+    /// `→` and `←` on a row are deliberately absent: they are the submenu's open
+    /// and close, which are verbs with side effects (a menu appears, a clock
+    /// starts) rather than movements of a highlight, and they are the window's to
+    /// run. See `Runtime::step_pane_menu`.
+    #[must_use]
+    pub fn step(current: Option<Self>, step: MenuStep, submenu_rows: usize) -> Option<Self> {
+        match current {
+            // Nothing lit: the list is entered at whichever end the key names.
+            None => match step {
+                MenuStep::Down => Some(Self::Zone(SplitZone::Right)),
+                MenuStep::Up => Some(Self::Row(PaneMenuRow::ClosePane)),
+                MenuStep::Left | MenuStep::Right => None,
+            },
+            Some(Self::Zone(zone)) => {
+                let aimed = match step {
+                    MenuStep::Up => SplitZone::Up,
+                    MenuStep::Down => SplitZone::Down,
+                    MenuStep::Left => SplitZone::Left,
+                    MenuStep::Right => SplitZone::Right,
+                };
+                if aimed != zone {
+                    return Some(Self::Zone(aimed));
+                }
+                // Already aimed that way: walk out of the picker. Only downward
+                // leads anywhere — the picker is the first entry, so `↑` from
+                // `Up` is the top of the list and clamps, exactly as every other
+                // walk in this window clamps at its ends.
+                match step {
+                    MenuStep::Down => Some(Self::Row(PaneMenuRow::SplitWith)),
+                    _ => None,
+                }
+            }
+            Some(Self::Row(row)) => {
+                let index = PaneMenuRow::TEXT_ROWS
+                    .iter()
+                    .position(|it| *it == row)
+                    .expect("a hovered row is one of TEXT_ROWS");
+                match step {
+                    MenuStep::Down => Some(Self::Row(
+                        PaneMenuRow::TEXT_ROWS[(index + 1).min(PaneMenuRow::TEXT_ROWS.len() - 1)],
+                    )),
+                    MenuStep::Up if index == 0 => Some(Self::Zone(SplitZone::Down)),
+                    MenuStep::Up => Some(Self::Row(PaneMenuRow::TEXT_ROWS[index - 1])),
+                    MenuStep::Left | MenuStep::Right => None,
+                }
+            }
+            Some(Self::Submenu(index)) => match step {
+                MenuStep::Down => Some(Self::Submenu(
+                    (index + 1).min(submenu_rows.saturating_sub(1)),
+                )),
+                MenuStep::Up => Some(Self::Submenu(index.saturating_sub(1))),
+                MenuStep::Left | MenuStep::Right => None,
+            },
         }
     }
 }
 
-/// The two axes, named the way every terminal names them: by where the new pane
-/// lands, not by which way the divider lies. "Split right" puts a shell on the
-/// right; the rule it draws is vertical, and nobody says so out loud.
-pub const SPLIT_RIGHT_TEXT: &str = "Split right";
-pub const SPLIT_DOWN_TEXT: &str = "Split down";
-/// The `×`'s verb, spelled — a menu row has room for the word the button does
-/// not, and `Close pane` is the mock-up's own `title` for that button (4672).
-pub const CLOSE_PANE_TEXT: &str = "Close pane";
+// ── the safety triangle (queue item #53, closed here) ──────────────────────
+
+/// Whether a pointer that has left a submenu's heading is **still on its way to
+/// the submenu**, and must therefore not be stolen by the row it is crossing.
+///
+/// **The failure this closes.** A submenu hangs to the side of the row that owns
+/// it, so a hand travelling from that row to the submenu's first entry moves
+/// diagonally — and every row between the heading and the submenu's top edge
+/// passes under the pointer on the way. A menu that hands the highlight to
+/// whatever is under the pointer therefore closes the submenu the moment the
+/// hand starts moving toward it, which is the version of this feature every
+/// user has already met, and hated, and learned to work around by tracing an L
+/// with their wrist.
+///
+/// **The geometry.** Take the pointer's last position as the apex and the two
+/// corners of the submenu's *near* vertical edge as the base: everything a hand
+/// aiming at any part of that edge would cross lies inside that triangle. A move
+/// that lands inside it is a move toward the submenu, and the submenu holds; a
+/// move that lands outside it is a move at something else, and the row under the
+/// pointer takes over at once. It is Amazon's mega-menu trick, and it is the
+/// only one that needs no timer to be *correct* — the timer above it (300ms) is
+/// a cap on how long a hand may dawdle inside the triangle, not the mechanism.
+///
+/// The near edge is chosen by which side of the pointer the submenu is on, so
+/// this is equally right for a submenu that had to flip to the left because the
+/// window's right edge was too close.
+///
+/// A pure function of four numbers, which is what lets the whole rule be tested
+/// without a menu, a pointer or a clock.
+#[must_use]
+pub fn safe_triangle_holds(from: [f32; 2], to: [f32; 2], submenu: [f32; 4]) -> bool {
+    // A submenu with no area cannot be aimed at.
+    if submenu[2] <= submenu[0] || submenu[3] <= submenu[1] {
+        return false;
+    }
+    // The near vertical edge: the submenu's left when it stands to the right of
+    // the hand, its right when it stands to the left. A pointer already between
+    // the two edges is inside the submenu's own column, where the hit test has
+    // already answered — the left edge is as good an answer as any.
+    let near_x = if from[0] <= submenu[0] {
+        submenu[0]
+    } else {
+        submenu[2]
+    };
+    let a = from;
+    let b = [near_x, submenu[1]];
+    let c = [near_x, submenu[3]];
+    let cross = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| {
+        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    };
+    let d1 = cross(a, b, to);
+    let d2 = cross(b, c, to);
+    let d3 = cross(c, a, to);
+    // Inside, or on an edge. A degenerate triangle — the pointer standing
+    // exactly on the near edge's line — has every cross product zero, which this
+    // reads as "inside", and that is the right answer: a hand on the edge of the
+    // submenu is not a hand that has left for somewhere else.
+    let negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(negative && positive)
+}
+
+/// How long the triangle may hold the submenu open against the rows the pointer
+/// is crossing.
+///
+/// The triangle is the mechanism and this is only its cap, but the cap is owed:
+/// a hand that stops *inside* the triangle — over some other row, thinking —
+/// sends no further events, so without a clock the submenu would stay up under a
+/// pointer that has plainly stopped travelling. 300ms is long enough to cross
+/// three rows at any speed a hand actually moves and short enough that a stopped
+/// hand does not notice waiting.
+pub const SUBMENU_SAFE_HOLD: Duration = Duration::from_millis(300);
+
+// ── the geometry ───────────────────────────────────────────────────────────
 
 /// Every rectangle the pane menu draws and hit-tests.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneMenuLayout {
     scale: f32,
     frame: [f32; 4],
-    items: [[f32; 4]; 3],
-    /// The rule above `Close pane`, which separates the two verbs that *make* a
-    /// pane from the one that ends one. `#file-menu` puts its rule after the
-    /// first row for the same kind of reason (mock-up 8089): the separator is
-    /// where the sentence changes, and closing is a different sentence from
-    /// splitting.
+    /// One rectangle per entry of [`PaneMenuRow::ALL`], in that order. The
+    /// picker's is its whole block.
+    items: [[f32; 4]; 6],
+    /// The pane at the middle of the picker's diagram.
+    picker_pane: [f32; 4],
+    /// The four slabs as they are **drawn**, in [`SplitZone::ALL`] order.
+    zones: [[f32; 4]; 4],
+    /// The four slabs as they are **pressed** — each grown across its gap toward
+    /// the pane, so the three logical pixels of air between a slab and the pane
+    /// are not a dead band in a control that is already only ten wide. Disjoint
+    /// by construction: the gap belongs to exactly one slab.
+    zone_hits: [[f32; 4]; 4],
+    /// Where the caption sits.
+    caption: [f32; 4],
+    /// The rule above `Close pane`, which separates the four verbs that *make* a
+    /// pane or move one from the one that ends it.
     separator: [f32; 4],
+    /// The submenu's frame and rows, when it is open.
+    submenu: Option<PaneSubmenuLayout>,
 }
 
-/// The pane menu, hung under the point the head was right-clicked at.
+/// The `Split with` submenu's own boxes — the house's first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneSubmenuLayout {
+    frame: [f32; 4],
+    /// One row per entry of [`PROFILES`], top to bottom.
+    items: Vec<[f32; 4]>,
+}
+
+impl PaneMenuLayout {
+    /// Where one entry landed.
+    ///
+    /// Read by the tests that pin the geometry; the window walks the entries
+    /// through [`pane_menu_hit`] and never needs a named one. It is the
+    /// `SettingsLayout::row` arrangement and it is here for that function's
+    /// reason: a pin that indexed `items` directly would be a pin that silently
+    /// moved to the row below when a verb was inserted above it.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn item(&self, row: PaneMenuRow) -> [f32; 4] {
+        let index = PaneMenuRow::ALL
+            .iter()
+            .position(|it| *it == row)
+            .expect("every row is in ALL");
+        self.items[index]
+    }
+
+    /// Where one of the picker's zones is drawn. [`Self::item`]'s sibling, and
+    /// read by the same pins for the same reason.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn zone(&self, zone: SplitZone) -> [f32; 4] {
+        let index = SplitZone::ALL
+            .iter()
+            .position(|it| *it == zone)
+            .expect("every zone is in ALL");
+        self.zones[index]
+    }
+
+    /// The submenu's border box, when one is up — the triangle's base, and the
+    /// second rectangle a press has to miss.
+    #[must_use]
+    pub fn submenu_frame(&self) -> Option<[f32; 4]> {
+        self.submenu.as_ref().map(|submenu| submenu.frame)
+    }
+
+    /// Whether this point is on either surface. Two rectangles, because a menu
+    /// with a submenu open is two windows and a pointer on the second one has
+    /// not left the first.
+    #[must_use]
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        contains(self.frame, x, y)
+            || self
+                .submenu
+                .as_ref()
+                .is_some_and(|submenu| contains(submenu.frame, x, y))
+    }
+}
+
+/// The pane menu, hung under the point the head's `⌄` was pressed at.
 ///
 /// [`file_menu_layout`]'s twin, down to the both-axis clamp: a pane head can be
 /// the bottom head of a tall stack, and an unclamped drop would put every verb
-/// under the window's own edge. No `open_text` parameter — all three of these
-/// rows say the same thing on every pane, which is what lets the width be
-/// measured off constants.
+/// under the window's own edge.
+///
+/// `submenu_open` rather than a second function, because the submenu's placement
+/// is a fact about *this* menu's frame — it hangs off one of these rows and
+/// flips to the other side when this frame is already near the window's edge —
+/// and a second entry point would be a second opinion about where the parent is.
 #[must_use]
 pub fn pane_menu_layout(
     point: [f32; 2],
     surface: (f32, f32),
     scale: f32,
+    submenu_open: bool,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> PaneMenuLayout {
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
     let padding = px(MENU_PADDING_LOGICAL_PX);
     let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let picker_height = px(picker_block_logical_px()).round();
     let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
     let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
     let separator_block = 2.0 * separator_margin + separator_thickness;
 
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
-    let content = PaneMenuRow::ALL
+    // The submenu's `▸` claims the same slot the profile picker's `default` hint
+    // claims, and it is reserved on every row rather than on the one that wears
+    // it — a menu whose width depended on which rows had submenus would change
+    // width the day a second row grew one.
+    let indicator = px(SUBMENU_INDICATOR_LOGICAL_PX) + px(ITEM_GAP_LOGICAL_PX);
+    let content = PaneMenuRow::TEXT_ROWS
         .iter()
         .map(|row| {
             px(ITEM_ICON_COLUMN_LOGICAL_PX)
                 + px(ITEM_GAP_LOGICAL_PX)
                 + measure(row.text(), px(ITEM_FONT_LOGICAL_PX))
+                + indicator
         })
-        .fold(0.0_f32, f32::max);
+        // The diagram is content too, and on a narrow menu it is the widest
+        // content there is: a frame that clipped its own picker would be a
+        // drawing with a slab missing.
+        .fold(px(picker_diagram_width_logical_px()), f32::max);
     let width = (chrome + content)
         .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
         .round();
-    let height = (2.0 * (border + padding) + 3.0 * item_height + separator_block).round();
+    let height = (2.0 * (border + padding)
+        + picker_height
+        + PaneMenuRow::TEXT_ROWS.len() as f32 * item_height
+        + separator_block)
+        .round();
 
     let (surface_width, surface_height) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
@@ -2839,41 +3477,246 @@ pub fn pane_menu_layout(
     let content_left = frame[0] + border + padding;
     let content_right = frame[2] - border - padding;
     let mut cursor = frame[1] + border + padding;
-    let split_right = [content_left, cursor, content_right, cursor + item_height];
-    cursor += item_height;
-    let split_down = [content_left, cursor, content_right, cursor + item_height];
-    cursor += item_height;
-    let separator = [
-        content_left,
-        cursor + separator_margin,
-        content_right,
-        cursor + separator_margin + separator_thickness,
+
+    // One walk of [`PaneMenuRow::ALL`] lays every entry out, which is what keeps
+    // the order on screen and the order the keyboard walks from being two lists.
+    let mut items = [[0.0_f32; 4]; PaneMenuRow::ALL.len()];
+    let mut separator = [0.0_f32; 4];
+    for (index, row) in PaneMenuRow::ALL.iter().enumerate() {
+        let height = match row {
+            PaneMenuRow::Picker => picker_height,
+            _ => item_height,
+        };
+        // The rule falls where the sentence changes: four verbs that make a pane
+        // or move one, then the one that ends it. `#file-menu` puts its own rule
+        // after the first row for the same kind of reason (mock-up 8089).
+        if *row == PaneMenuRow::ClosePane {
+            separator = [
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ];
+            cursor += separator_block;
+        }
+        items[index] = [content_left, cursor, content_right, cursor + height];
+        cursor += height;
+    }
+    let picker = items[0];
+
+    // The diagram, centred in the picker's block.
+    let diagram_width = px(picker_diagram_width_logical_px());
+    let diagram_height = px(picker_diagram_height_logical_px());
+    let diagram_left = ((picker[0] + picker[2] - diagram_width) / 2.0).round();
+    let diagram_top = (picker[1] + px(PICKER_PADDING_TOP_LOGICAL_PX)).round();
+    let slab = px(PICKER_ZONE_THICKNESS_LOGICAL_PX).round().max(1.0);
+    let gap = px(PICKER_ZONE_GAP_LOGICAL_PX).round();
+    let pane_left = diagram_left + slab + gap;
+    let pane_top = diagram_top + slab + gap;
+    // On whole physical pixels: the diagram is all edges, and an edge on a
+    // subpixel is a resampled edge — the crisp hairline the drawing is made of,
+    // blurred across two rows of pixels.
+    let pane_left = pane_left.round();
+    let pane_top = pane_top.round();
+    let picker_pane = [
+        pane_left,
+        pane_top,
+        pane_left + px(PICKER_PANE_WIDTH_LOGICAL_PX).round(),
+        pane_top + px(PICKER_PANE_HEIGHT_LOGICAL_PX).round(),
     ];
-    cursor += separator_block;
-    let close_pane = [content_left, cursor, content_right, cursor + item_height];
+    let zones = [
+        // Right
+        [
+            picker_pane[2] + gap,
+            picker_pane[1],
+            picker_pane[2] + gap + slab,
+            picker_pane[3],
+        ],
+        // Down
+        [
+            picker_pane[0],
+            picker_pane[3] + gap,
+            picker_pane[2],
+            picker_pane[3] + gap + slab,
+        ],
+        // Left
+        [
+            picker_pane[0] - gap - slab,
+            picker_pane[1],
+            picker_pane[0] - gap,
+            picker_pane[3],
+        ],
+        // Up
+        [
+            picker_pane[0],
+            picker_pane[1] - gap - slab,
+            picker_pane[2],
+            picker_pane[1] - gap,
+        ],
+    ];
+    // Each slab's press area reaches back across its own gap to the pane's edge.
+    let zone_hits = [
+        [picker_pane[2], zones[0][1], zones[0][2], zones[0][3]],
+        [zones[1][0], picker_pane[3], zones[1][2], zones[1][3]],
+        [zones[2][0], zones[2][1], picker_pane[0], zones[2][3]],
+        [zones[3][0], zones[3][1], zones[3][2], picker_pane[1]],
+    ];
+
+    let caption_top = diagram_top + diagram_height + px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX);
+    let caption = [
+        picker[0] + px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
+        caption_top.round(),
+        picker[2] - px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
+        (caption_top + px(SECTION_LABEL_LINE_LOGICAL_PX)).round(),
+    ];
+
+    let submenu = submenu_open.then(|| {
+        pane_submenu_layout(
+            frame,
+            items[1],
+            surface,
+            scale,
+            border,
+            padding,
+            item_height,
+            measure,
+        )
+    });
+
     PaneMenuLayout {
         scale,
         frame,
-        items: [split_right, split_down, close_pane],
+        items,
+        picker_pane,
+        zones,
+        zone_hits,
+        caption,
         separator,
+        submenu,
     }
 }
 
-/// What a point is over, with the same three answers the other menus give.
+/// Where the `Split with` submenu hangs.
+///
+/// **To the right of the parent, level with the heading's own top padding, and
+/// flipped to the left when the window's right edge is too close** — the two
+/// rules every submenu in every product follows, and the second is not optional:
+/// a menu opened on a pane head near the right edge is a menu whose child has
+/// nowhere to go on that side, and a child clamped instead of flipped would sit
+/// *on top of* the parent it hangs from.
+#[allow(clippy::too_many_arguments)]
+fn pane_submenu_layout(
+    parent: [f32; 4],
+    heading: [f32; 4],
+    surface: (f32, f32),
+    scale: f32,
+    border: f32,
+    padding: f32,
+    item_height: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> PaneSubmenuLayout {
+    let px = |value: f32| value * scale;
+    let hint = measure(CURRENT_PROFILE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX));
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    let content = (0..PROFILES.len())
+        .map(|index| {
+            px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                + px(ITEM_GAP_LOGICAL_PX)
+                + measure(title(index), px(ITEM_FONT_LOGICAL_PX))
+                + px(ITEM_GAP_LOGICAL_PX)
+                + hint
+        })
+        .fold(0.0_f32, f32::max);
+    let width = (chrome + content)
+        .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
+        .round();
+    let height = (2.0 * (border + padding) + PROFILES.len() as f32 * item_height).round();
+
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    // Overlapping the parent's edge by its own border and padding, so the two
+    // surfaces read as one object with a fold in it rather than as two windows
+    // with a seam — and, more practically, so the corridor the safety triangle
+    // has to cover is as short as it can be.
+    let overlap = border + padding;
+    let right_of = parent[2] - overlap;
+    let left_of = parent[0] + overlap - width;
+    let left = if right_of + width + edge <= surface_width {
+        right_of
+    } else {
+        left_of.max(edge)
+    }
+    .round();
+    let top = (heading[1] - border - padding)
+        .min(surface_height - height - edge)
+        .max(edge)
+        .round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+    let mut items = Vec::with_capacity(PROFILES.len());
+    for _ in 0..PROFILES.len() {
+        items.push([content_left, cursor, content_right, cursor + item_height]);
+        cursor += item_height;
+    }
+    PaneSubmenuLayout { frame, items }
+}
+
+/// What a point is over.
+///
+/// **The submenu is asked first**, because it is drawn over the parent and
+/// overlaps it: a point in the strip where the two frames cross belongs to the
+/// child, exactly as the topmost window owns a point everywhere else in this
+/// program.
 #[must_use]
-pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<Option<PaneMenuRow>> {
+pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<PaneMenuHit> {
     let (x, y) = (x as f32, y as f32);
-    for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items) {
+    if let Some(submenu) = layout.submenu.as_ref()
+        && contains(submenu.frame, x, y)
+    {
+        for (index, rect) in submenu.items.iter().enumerate() {
+            if contains(*rect, x, y) {
+                return Some(PaneMenuHit::Submenu(index));
+            }
+        }
+        return Some(PaneMenuHit::Surface);
+    }
+    if !contains(layout.frame, x, y) {
+        return None;
+    }
+    for (zone, rect) in SplitZone::ALL.iter().zip(layout.zone_hits) {
         if contains(rect, x, y) {
-            return Some(Some(*row));
+            return Some(PaneMenuHit::Zone(*zone));
         }
     }
-    contains(layout.frame, x, y).then_some(None)
+    for (row, rect) in PaneMenuRow::TEXT_ROWS.iter().zip(layout.items[1..].iter()) {
+        if contains(*rect, x, y) {
+            return Some(PaneMenuHit::Row(*row));
+        }
+    }
+    Some(PaneMenuHit::Surface)
 }
 
-/// The pane menu as one overlay layer.
+// ── the drawing ────────────────────────────────────────────────────────────
+
+/// The trailing `▸`, at the file tree's own disclosure size.
+const SUBMENU_INDICATOR_LOGICAL_PX: f32 = 9.0;
+
+/// The pane menu and its submenu as overlay layers.
+///
+/// `current_profile` is the profile the pane is running, which the submenu marks
+/// — `None` for a pane whose profile this build cannot name, which is the same
+/// silence the profile picker keeps about a machine's missing shells.
 #[must_use]
-pub fn pane_menu_build(layout: &PaneMenuLayout, hover: Option<PaneMenuRow>) -> Vec<OverlayLayer> {
+pub fn pane_menu_build(
+    layout: &PaneMenuLayout,
+    hover: Option<PaneMenuHover>,
+    current_profile: Option<usize>,
+    programs: &ProfilePrograms,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
     let px = |value: f32| value * scale;
@@ -2897,19 +3740,23 @@ pub fn pane_menu_build(layout: &PaneMenuLayout, hover: Option<PaneMenuRow>) -> V
         alpha(palette.menu_border_alpha),
     );
 
-    for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items) {
+    push_picker(layout, hover, palette, scale, &mut quads, &mut labels);
+
+    for (row, rect) in PaneMenuRow::TEXT_ROWS.iter().zip(layout.items[1..].iter()) {
         push_row(
             &Row {
-                rect,
-                mark: Some(row.mark()),
+                rect: *rect,
+                mark: row.mark(),
                 name: row.text(),
                 hint: None,
                 hint_ink: None,
-                hovered: hover == Some(*row),
+                hovered: hover == Some(PaneMenuHover::Row(*row)),
                 // A split the solver has no room for is refused *by the solver*,
-                // after the press, exactly as the chord's is — and a pane can
-                // always be closed. Nothing here is a promise this build knows
-                // in advance it cannot keep.
+                // after the press, exactly as the chord's is; a pane can always
+                // be closed; and the chooser `New terminal in folder…` opens is
+                // Windows', which this window does not get to promise about in
+                // advance. Nothing here is a promise this build knows it cannot
+                // keep.
                 available: true,
             },
             scale,
@@ -2918,13 +3765,200 @@ pub fn pane_menu_build(layout: &PaneMenuLayout, hover: Option<PaneMenuRow>) -> V
             &mut labels,
             &mut sprites,
         );
-        if *row == PaneMenuRow::SplitDown {
+        if *row == PaneMenuRow::SplitWith {
+            // The `▸`, which is `#i-tri` **at rest**: the file tree's disclosure
+            // triangle points right until something opens it, and pointing right
+            // is the whole of what a submenu indicator says. No new glyph, no new
+            // angle, and no fifth close-enough triangle in a build that already
+            // has one — see `ChromeMark::TreeDisclosure`, whose own note argues
+            // that three marks differing by where a line falls are three marks
+            // nobody can tell apart at fourteen pixels.
+            let size = px(SUBMENU_INDICATOR_LOGICAL_PX).round().max(1.0);
+            let right = rect[2] - px(ITEM_PADDING_X_LOGICAL_PX);
+            let top = ((rect[1] + rect[3] - size) / 2.0).round();
+            sprites.push(ChromeSprite::new(
+                ChromeMark::TreeDisclosure { turned_degrees: 0 },
+                [right - size, top, right, top + size],
+                if hover == Some(PaneMenuHover::Row(*row)) {
+                    palette.menu_item_text_selected
+                } else {
+                    palette.menu_item_hint_text
+                },
+            ));
+        }
+        if *row == PaneMenuRow::MoveToNewTab {
             quads.push(OverlayQuad {
                 rect: layout.separator,
                 color: palette.menu_border,
                 alpha: separator_alpha(palette.menu_border),
             });
         }
+    }
+
+    let mut layers = vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }];
+    if let Some(submenu) = layout.submenu.as_ref() {
+        layers.extend(push_submenu(
+            submenu,
+            scale,
+            hover,
+            current_profile,
+            programs,
+            measure,
+        ));
+    }
+    layers
+}
+
+/// The picker's five rectangles and its caption.
+fn push_picker(
+    layout: &PaneMenuLayout,
+    hover: Option<PaneMenuHover>,
+    palette: ChromePalette,
+    scale: f32,
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+) {
+    let px = |value: f32| value * scale;
+    let edge = (PICKER_EDGE_LOGICAL_PX * scale).round().max(1.0);
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    // A bordered box is two fills — the whole box in the border's colour, the
+    // face laid one border in with one border less radius — which is exactly
+    // what a browser leaves for `border: 1px solid`. See `rounded_overlay_fill`.
+    let outlined = |rect: [f32; 4],
+                    radius: f32,
+                    ink: [u8; 3],
+                    ink_alpha: f32,
+                    face: [u8; 3],
+                    face_alpha: f32,
+                    quads: &mut Vec<OverlayQuad>| {
+        quads.extend(rounded_overlay_fill(rect, radius, ink, ink_alpha));
+        quads.extend(rounded_overlay_fill(
+            [
+                rect[0] + edge,
+                rect[1] + edge,
+                rect[2] - edge,
+                rect[3] - edge,
+            ],
+            (radius - edge).max(0.0),
+            face,
+            face_alpha,
+        ));
+    };
+
+    outlined(
+        layout.picker_pane,
+        px(PICKER_PANE_RADIUS_LOGICAL_PX),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+        palette.menu_surface,
+        1.0,
+        quads,
+    );
+    for (zone, rect) in SplitZone::ALL.iter().zip(layout.zones) {
+        let lit = hover == Some(PaneMenuHover::Zone(*zone));
+        outlined(
+            rect,
+            px(PICKER_ZONE_RADIUS_LOGICAL_PX),
+            if lit {
+                palette.accent
+            } else {
+                palette.menu_border
+            },
+            if lit {
+                1.0
+            } else {
+                alpha(palette.menu_border_alpha)
+            },
+            if lit {
+                palette.accent
+            } else {
+                palette.menu_surface
+            },
+            if lit { PICKER_ZONE_WASH_ALPHA } else { 1.0 },
+            quads,
+        );
+    }
+    labels.push(ChromeLabel {
+        text: PICKER_CAPTION_TEXT.to_owned(),
+        rect: layout.caption,
+        font_size_px: px(SECTION_LABEL_FONT_LOGICAL_PX),
+        color: palette.menu_item_hint_text,
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: SECTION_LABEL_TRACKING_EM,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: None,
+    });
+}
+
+/// The submenu as its own layer, above the parent's.
+///
+/// Its own layer and not more quads on the parent's, for the reason the overlay
+/// stack itself is a list: a child menu overlaps its parent, so what covers what
+/// has to be a statement rather than an accident of the order two loops happened
+/// to run in.
+fn push_submenu(
+    layout: &PaneSubmenuLayout,
+    scale: f32,
+    hover: Option<PaneMenuHover>,
+    current_profile: Option<usize>,
+    programs: &ProfilePrograms,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    for (index, rect) in layout.items.iter().enumerate() {
+        let hint = (current_profile == Some(index)).then(|| {
+            (
+                CURRENT_PROFILE_HINT_TEXT.to_owned(),
+                measure(CURRENT_PROFILE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX)),
+            )
+        });
+        push_row(
+            &Row {
+                rect: *rect,
+                mark: Some(PROFILES[index].mark),
+                name: title(index),
+                hint,
+                hint_ink: None,
+                hovered: hover == Some(PaneMenuHover::Submenu(index)),
+                // The picker's own rule, and the same fact: a profile whose
+                // program this machine does not have cannot start a shell, and a
+                // row that lights under the pointer and then does nothing is
+                // worse than one that says so.
+                available: programs.is_available(index),
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
     }
     vec![OverlayLayer {
         quads,
@@ -6208,29 +7242,184 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling, 2026-08-15): **the pane head's menu is three verbs,
-    /// two of them splits, with a rule above the one that destroys.**
+    // ── the `⌄` open policy (user ruling, 2026-08-16) ───────────────────────
+
+    /// PIN — **a rest of 250ms opens a `⌄`, and 249 does not.**
     ///
-    /// Its whole reason for existing is that the mouse had no way to reach a
-    /// split: three chords, and a pointer route of new tab → drag → drop. So the
-    /// two axes are named outright here — the `⊞` in the head takes the longer
-    /// side and asks nothing, and this is where you say which side.
+    /// The whole of the ruling's first half, stated as a boundary rather than as
+    /// "after a while": a hover menu whose threshold drifts is a hover menu that
+    /// drops itself in front of a pointer merely passing by, which is the reason
+    /// every menu in this build was click-only until now.
     ///
-    /// The separator's position is the claim about *reading*: `Split right` and
-    /// `Split down` make a pane, `Close pane` ends one, and a destructive verb
-    /// flush against two constructive ones is a verb the hand finds by
-    /// overshooting. `#file-menu` puts its rule after the first row for the same
-    /// kind of reason (mock-up 8089) — the separator is where the sentence
-    /// changes.
-    ///
-    /// Red gate: give the two split rows one mark between them and the axis a
-    /// row commits to stops being visible before the words are read; move the
-    /// rule under `Split right` and the menu claims the two splits are different
-    /// kinds of thing.
+    /// Red gate: start the clock on the frame the pointer arrives *and* fire on
+    /// `>` rather than `>=` and the menu opens a frame late for ever; clear
+    /// `resting_since` on a repeated `Button` observation and it never opens at
+    /// all, because a hand is never perfectly still.
     #[test]
-    fn the_pane_menu_draws_two_splits_and_a_close_with_a_rule_above_the_close() {
-        let layout = pane_menu_layout([300.0, 200.0], (960.0, 600.0), 1.0, &mut fake_measure);
-        let layer = one_layer(pane_menu_build(&layout, None));
+    fn a_chevron_opens_after_a_rest_of_exactly_the_ruled_delay_and_not_before() {
+        assert_eq!(CHEVRON_HOVER_OPEN, Duration::from_millis(250));
+        let start = Instant::now();
+        let mut gate = ChevronGate::default();
+        gate.observe(ChevronPointer::Button, false, start);
+        assert_eq!(gate.due(start), None);
+        assert_eq!(gate.due(start + Duration::from_millis(249)), None);
+        assert_eq!(
+            gate.due(start + CHEVRON_HOVER_OPEN),
+            Some(ChevronAction::Open)
+        );
+        assert_eq!(
+            gate.deadline(),
+            Some(start + CHEVRON_HOVER_OPEN),
+            "and the loop is told exactly when to wake for it"
+        );
+
+        // A hand that moves two pixels inside the button has not left it, and
+        // must not restart the clock.
+        let mut jittering = ChevronGate::default();
+        for step in 0..5 {
+            jittering.observe(
+                ChevronPointer::Button,
+                false,
+                start + Duration::from_millis(step * 60),
+            );
+        }
+        assert_eq!(
+            jittering.due(start + CHEVRON_HOVER_OPEN),
+            Some(ChevronAction::Open),
+            "the rest accumulates across moves inside the button"
+        );
+    }
+
+    /// PIN — **leaving both the button and the menu closes it after the grace,
+    /// and being on the menu is not leaving.**
+    ///
+    /// The middle state is the point. The button and its menu are two rectangles
+    /// with `MENU_OFFSET_LOGICAL_PX` of window between them, so a hand travelling
+    /// from one to the other is briefly on neither — which the grace covers — and
+    /// then on the menu, which must stop the grace outright rather than merely
+    /// re-arm it.
+    ///
+    /// Red gate: treat `Surface` as `Away` and the menu closes 150ms after the
+    /// pointer reaches its first row.
+    #[test]
+    fn a_chevron_menu_closes_after_the_leave_grace_and_the_menu_itself_is_not_away() {
+        assert_eq!(CHEVRON_LEAVE_GRACE, Duration::from_millis(150));
+        let start = Instant::now();
+        let mut gate = ChevronGate::default();
+        gate.observe(ChevronPointer::Away, true, start);
+        assert_eq!(gate.due(start + Duration::from_millis(149)), None);
+        assert_eq!(
+            gate.due(start + CHEVRON_LEAVE_GRACE),
+            Some(ChevronAction::Close)
+        );
+
+        // Crossing the gap and landing on the menu cancels the close outright.
+        let mut crossing = ChevronGate::default();
+        crossing.observe(ChevronPointer::Away, true, start);
+        crossing.observe(
+            ChevronPointer::Surface,
+            true,
+            start + Duration::from_millis(40),
+        );
+        assert_eq!(crossing.deadline(), None, "no clock is left running");
+        assert_eq!(crossing.due(start + Duration::from_secs(10)), None);
+
+        // And a pointer on the button of a menu that is already up owes nothing
+        // in either direction — the click is what toggles it from there.
+        let mut home = ChevronGate::default();
+        home.observe(ChevronPointer::Button, true, start);
+        assert_eq!(home.due(start + Duration::from_secs(10)), None);
+
+        // Nothing at all is owed by a window whose pointer is nowhere near a
+        // chevron, which is what keeps the loop asleep.
+        let mut idle = ChevronGate::default();
+        idle.observe(ChevronPointer::Away, false, start);
+        assert_eq!(idle.deadline(), None);
+    }
+
+    /// PIN (the ruling's own point) — **both chevrons are one policy**: the same
+    /// type, the same two constants, and the same answers to the same steps.
+    ///
+    /// The ruling is "和 tab 那边语义对齐", and the failure it guards against is
+    /// not a wrong number — it is two implementations that agree today. Driving
+    /// two independently-constructed gates through one script and demanding
+    /// identical answers is the strongest statement this level can make; the
+    /// window's own half (that both buttons actually *go through* a gate) is
+    /// `both_chevrons_are_driven_by_one_policy_and_one_pair_of_constants` in
+    /// `main.rs`.
+    #[test]
+    fn the_two_chevrons_answer_one_policy_with_one_pair_of_constants() {
+        let start = Instant::now();
+        let script = [
+            (ChevronPointer::Button, false, 0),
+            (ChevronPointer::Button, false, 100),
+            (ChevronPointer::Away, false, 300),
+            (ChevronPointer::Button, false, 320),
+            (ChevronPointer::Surface, true, 600),
+            (ChevronPointer::Away, true, 700),
+        ];
+        let mut strip = ChevronGate::default();
+        let mut head = ChevronGate::default();
+        for (pointer, open, at) in script {
+            let now = start + Duration::from_millis(at);
+            strip.observe(pointer, open, now);
+            head.observe(pointer, open, now);
+            assert_eq!(strip, head, "the two gates never diverge at {at}ms");
+            assert_eq!(strip.due(now), head.due(now));
+            assert_eq!(strip.deadline(), head.deadline());
+        }
+        assert_eq!(
+            head.deadline(),
+            Some(start + Duration::from_millis(700) + CHEVRON_LEAVE_GRACE),
+        );
+    }
+
+    // ── the pane head's own menu ────────────────────────────────────────────
+
+    fn pane_menu(submenu_open: bool) -> PaneMenuLayout {
+        pane_menu_layout(
+            [300.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            submenu_open,
+            &mut fake_measure,
+        )
+    }
+
+    /// PIN (user ruling, 2026-08-16): **the menu is a picker and five verbs,
+    /// with a rule above the one that destroys.**
+    ///
+    /// The order is the ruling's own, and it is an order of *commitment*: point
+    /// at a direction, name a profile, name a folder, repeat this pane, move this
+    /// pane, end this pane. The separator's position is the claim about reading —
+    /// five verbs that make or move a pane, then one that ends one, because a
+    /// destructive verb flush against constructive ones is a verb the hand finds
+    /// by overshooting.
+    ///
+    /// Red gate: put the rule under the picker and the menu claims the four verbs
+    /// below it are a different kind of thing from the diagram above; drop the
+    /// picker out of `ALL` and the keyboard walk silently starts at `Split with`.
+    #[test]
+    fn the_pane_menu_is_a_picker_and_five_verbs_with_a_rule_above_the_close() {
+        assert_eq!(
+            PaneMenuRow::ALL,
+            [
+                PaneMenuRow::Picker,
+                PaneMenuRow::SplitWith,
+                PaneMenuRow::NewInFolder,
+                PaneMenuRow::Duplicate,
+                PaneMenuRow::MoveToNewTab,
+                PaneMenuRow::ClosePane,
+            ]
+        );
+        let layout = pane_menu(false);
+        let layer = one_layer(pane_menu_build(
+            &layout,
+            None,
+            None,
+            &equipped(),
+            &mut fake_measure,
+        ));
         let names: Vec<&str> = layer
             .labels
             .iter()
@@ -6238,26 +7427,235 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![SPLIT_RIGHT_TEXT, SPLIT_DOWN_TEXT, CLOSE_PANE_TEXT],
-            "three rows, top to bottom, and no heading over them"
+            vec![
+                PICKER_CAPTION_TEXT,
+                SPLIT_WITH_TEXT,
+                NEW_IN_FOLDER_TEXT,
+                DUPLICATE_PANE_TEXT,
+                MOVE_TO_NEW_TAB_TEXT,
+                CLOSE_PANE_TEXT,
+            ],
+            "the caption under the diagram, then five rows, and no heading over them"
+        );
+        let close = layout.item(PaneMenuRow::ClosePane);
+        let above = layout.item(PaneMenuRow::MoveToNewTab);
+        assert!(
+            layout.separator[1] >= above[3] && layout.separator[3] <= close[1],
+            "the rule lies between the last constructive verb and `Close pane`"
         );
         assert!(
-            layout.separator[1] >= layout.items[1][3] && layout.separator[3] <= layout.items[2][1],
-            "the rule lies between the second row and the third, not the first \
-             and the second"
+            layout.item(PaneMenuRow::Picker)[3] <= layout.item(PaneMenuRow::SplitWith)[1],
+            "and the picker is the first entry, above every word"
+        );
+    }
+
+    /// PIN — **the picker is a pane with four zones around it, and the four are
+    /// disjoint and reach the pane's own edges.**
+    ///
+    /// The reach is the claim that matters. A slab is ten logical pixels thick
+    /// with three of air between it and the pane, and a hit test that answered
+    /// only the drawn slab would leave a three-pixel dead band around a control
+    /// that is already the smallest thing in the menu — so each slab's press area
+    /// crosses its own gap, and no two of them can claim the same point.
+    ///
+    /// Red gate: hit-test the drawn rectangles and the gap answers `Surface`,
+    /// which lights nothing and does nothing; grow both neighbours across one
+    /// gap and two zones claim the same pixel.
+    #[test]
+    fn the_pickers_four_zones_are_disjoint_and_leave_no_dead_band_at_the_pane() {
+        let layout = pane_menu(false);
+        let pane = layout.picker_pane;
+        for zone in SplitZone::ALL {
+            let drawn = layout.zone(zone);
+            assert!(drawn[2] > drawn[0] && drawn[3] > drawn[1]);
+            let mid = (
+                f64::from((drawn[0] + drawn[2]) / 2.0),
+                f64::from((drawn[1] + drawn[3]) / 2.0),
+            );
+            assert_eq!(
+                pane_menu_hit(&layout, mid.0, mid.1),
+                Some(PaneMenuHit::Zone(zone)),
+                "the middle of {zone:?}'s slab is {zone:?}"
+            );
+        }
+        // The air between the pane and each slab belongs to that slab.
+        let just_outside = [
+            (
+                f64::from(pane[2]) + 1.0,
+                f64::from((pane[1] + pane[3]) / 2.0),
+            ),
+            (
+                f64::from((pane[0] + pane[2]) / 2.0),
+                f64::from(pane[3]) + 1.0,
+            ),
+            (
+                f64::from(pane[0]) - 1.0,
+                f64::from((pane[1] + pane[3]) / 2.0),
+            ),
+            (
+                f64::from((pane[0] + pane[2]) / 2.0),
+                f64::from(pane[1]) - 1.0,
+            ),
+        ];
+        for (zone, (x, y)) in SplitZone::ALL.iter().zip(just_outside) {
+            assert_eq!(
+                pane_menu_hit(&layout, x, y),
+                Some(PaneMenuHit::Zone(*zone)),
+                "the gap beside the pane is {zone:?}'s, not a dead band"
+            );
+        }
+        // And the pane itself is not a zone: it stands for what is already there.
+        assert_eq!(
+            pane_menu_hit(
+                &layout,
+                f64::from((pane[0] + pane[2]) / 2.0),
+                f64::from((pane[1] + pane[3]) / 2.0),
+            ),
+            Some(PaneMenuHit::Surface),
+        );
+    }
+
+    /// PIN — **`Left` and `Up` are the same two axes with the arriving pane
+    /// first**, which is `Edit::SplitSeat`'s own `leading` flag.
+    ///
+    /// Stated here rather than only in the window, because it is the whole of
+    /// what those two zones *are*: the layout crate has carried the flag since
+    /// the tree existed, so no new tree edit was owed and the only thing that
+    /// could go wrong is this mapping.
+    #[test]
+    fn the_pickers_left_and_up_zones_put_the_arriving_pane_first() {
+        assert_eq!(SplitZone::Right.axis(), Axis::Row);
+        assert_eq!(SplitZone::Left.axis(), Axis::Row);
+        assert_eq!(SplitZone::Down.axis(), Axis::Col);
+        assert_eq!(SplitZone::Up.axis(), Axis::Col);
+        assert!(!SplitZone::Right.leading());
+        assert!(!SplitZone::Down.leading());
+        assert!(
+            SplitZone::Left.leading(),
+            "a shell on the left is a shell inserted before the one it came from"
+        );
+        assert!(SplitZone::Up.leading());
+    }
+
+    /// PIN — **the picker is a compass inside a list**: arrows aim the zones,
+    /// and the list is left by aiming twice in the same direction.
+    ///
+    /// Both halves are load-bearing. Without the compass the four zones are
+    /// unreachable from the keyboard, and the ruling's whole point is that a
+    /// direction should be *pointed at*. Without the walk-out the picker is a
+    /// trap: `↓` would aim for ever and the five verbs below would be
+    /// unreachable.
+    ///
+    /// Red gate: leave the picker on the first `↓` and the `Down` zone can never
+    /// be aimed at; never leave it and the rest of the menu is keyboard-dead.
+    #[test]
+    fn the_pane_menus_keyboard_walk_aims_the_picker_and_then_leaves_it() {
+        use PaneMenuHover as H;
+        let rows = PROFILES.len();
+        // The list is entered at whichever end the key names.
+        assert_eq!(
+            H::step(None, MenuStep::Down, rows),
+            Some(H::Zone(SplitZone::Right))
         );
         assert_eq!(
-            layer
-                .sprites
-                .iter()
-                .map(|sprite| sprite.mark)
-                .collect::<Vec<_>>(),
-            vec![
-                ChromeMark::SplitRight,
-                ChromeMark::SplitDown,
-                ChromeMark::PaneClose
-            ],
-            "each axis wears its own glyph — the two splits are not one mark twice"
+            H::step(None, MenuStep::Up, rows),
+            Some(H::Row(PaneMenuRow::ClosePane))
+        );
+        // The compass: an arrow that names a zone other than the lit one aims
+        // at it, from wherever the highlight happens to be.
+        for (from, step, zone) in [
+            (SplitZone::Right, MenuStep::Left, SplitZone::Left),
+            (SplitZone::Right, MenuStep::Up, SplitZone::Up),
+            (SplitZone::Right, MenuStep::Down, SplitZone::Down),
+            (SplitZone::Left, MenuStep::Right, SplitZone::Right),
+            (SplitZone::Up, MenuStep::Down, SplitZone::Down),
+            (SplitZone::Down, MenuStep::Up, SplitZone::Up),
+        ] {
+            assert_eq!(
+                H::step(Some(H::Zone(from)), step, rows),
+                Some(H::Zone(zone)),
+                "{step:?} from {from:?} aims at {zone:?}"
+            );
+        }
+        // Aiming where the highlight already points is not a movement: it is
+        // the request to leave, and sideways there is nowhere to go.
+        assert_eq!(
+            H::step(Some(H::Zone(SplitZone::Right)), MenuStep::Right, rows),
+            None
+        );
+        assert_eq!(
+            H::step(Some(H::Zone(SplitZone::Left)), MenuStep::Left, rows),
+            None
+        );
+        // Aiming twice in the same direction walks out — downward only, because
+        // the picker is the first entry and the top of a list clamps.
+        assert_eq!(
+            H::step(Some(H::Zone(SplitZone::Down)), MenuStep::Down, rows),
+            Some(H::Row(PaneMenuRow::SplitWith))
+        );
+        assert_eq!(
+            H::step(Some(H::Zone(SplitZone::Up)), MenuStep::Up, rows),
+            None,
+            "and the top of the list clamps, as every walk in this window does"
+        );
+        // Back in from below, landing on the zone nearest the row it came from.
+        assert_eq!(
+            H::step(Some(H::Row(PaneMenuRow::SplitWith)), MenuStep::Up, rows),
+            Some(H::Zone(SplitZone::Down))
+        );
+        // The flat part of the walk clamps at the bottom.
+        assert_eq!(
+            H::step(Some(H::Row(PaneMenuRow::ClosePane)), MenuStep::Down, rows),
+            Some(H::Row(PaneMenuRow::ClosePane))
+        );
+        // And the submenu has a walk of its own, clamped at both ends.
+        assert_eq!(
+            H::step(Some(H::Submenu(0)), MenuStep::Up, rows),
+            Some(H::Submenu(0))
+        );
+        assert_eq!(
+            H::step(Some(H::Submenu(0)), MenuStep::Down, rows),
+            Some(H::Submenu(1))
+        );
+        assert_eq!(
+            H::step(Some(H::Submenu(rows - 1)), MenuStep::Down, rows),
+            Some(H::Submenu(rows - 1))
+        );
+    }
+
+    /// PIN — a press on each entry is answered as that entry, the menu's own
+    /// padding swallows, and a point outside is nobody's.
+    ///
+    /// Red gate: hit-test the frame before the rows and every press anywhere in
+    /// the menu becomes `Surface` — a menu that lights up and does nothing.
+    #[test]
+    fn the_pane_menu_answers_a_press_on_each_of_its_verbs() {
+        let layout = pane_menu(false);
+        for row in PaneMenuRow::TEXT_ROWS {
+            let rect = layout.item(row);
+            let (x, y) = (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            );
+            assert_eq!(pane_menu_hit(&layout, x, y), Some(PaneMenuHit::Row(row)));
+        }
+        assert_eq!(
+            pane_menu_hit(
+                &layout,
+                f64::from(layout.frame[0] + 2.0),
+                f64::from(layout.frame[1] + 1.0)
+            ),
+            Some(PaneMenuHit::Surface),
+            "the border and padding swallow rather than fall through"
+        );
+        assert_eq!(
+            pane_menu_hit(
+                &layout,
+                f64::from(layout.frame[0]) - 1.0,
+                f64::from(layout.frame[1]) - 1.0
+            ),
+            None,
+            "and a point outside is the window's again"
         );
     }
 
@@ -6265,12 +7663,12 @@ mod tests {
     ///
     /// A pane head can be the bottom head of a tall stack and the right-hand
     /// head of a wide one, so both edges are reachable. An unclamped drop puts
-    /// all three verbs under the window's own edge, where the menu is visible
-    /// and unusable.
+    /// every verb under the window's own edge, where the menu is visible and
+    /// unusable.
     #[test]
     fn the_pane_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
         let surface = (960.0, 600.0);
-        let layout = pane_menu_layout([950.0, 596.0], surface, 1.0, &mut fake_measure);
+        let layout = pane_menu_layout([950.0, 596.0], surface, 1.0, false, &mut fake_measure);
         assert!(
             layout.frame[2] <= surface.0 && layout.frame[3] <= surface.1,
             "the whole menu is inside the window: {:?}",
@@ -6283,6 +7681,315 @@ mod tests {
                 "and every row it drew is on screen: {item:?}"
             );
         }
+    }
+
+    /// PIN — the picker's block is the sum of what it draws, and it lands on the
+    /// ruling's ~92px.
+    ///
+    /// The point of asserting the *derivation* rather than the number is that the
+    /// number is a consequence: change the slab thickness and this test says so,
+    /// where a hard-coded 92 would go on passing while the diagram overflowed its
+    /// own block.
+    #[test]
+    fn the_pickers_block_is_the_air_the_diagram_and_the_caption_added_up() {
+        let block = picker_block_logical_px();
+        assert_eq!(
+            block,
+            PICKER_PADDING_TOP_LOGICAL_PX
+                + picker_diagram_height_logical_px()
+                + SECTION_LABEL_PADDING_TOP_LOGICAL_PX
+                + SECTION_LABEL_LINE_LOGICAL_PX
+                + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX
+                + PICKER_PADDING_BOTTOM_LOGICAL_PX
+        );
+        assert_eq!(
+            block.round(),
+            92.0,
+            "the ruling asks for a row about 92px tall"
+        );
+        assert_eq!(picker_diagram_height_logical_px(), 60.0);
+        assert_eq!(picker_diagram_width_logical_px(), 74.0);
+    }
+
+    /// PIN — **a hovered zone is washed in the accent and outlined in it**, and
+    /// nothing else in the diagram moves.
+    ///
+    /// The wash is what says "the new pane lands here"; the outline is what says
+    /// "here". A hovered zone that only changed its outline would be invisible at
+    /// ten pixels, and one that filled solid would read as a pane that already
+    /// exists.
+    #[test]
+    fn a_hovered_zone_takes_the_accent_as_a_wash_and_as_its_outline() {
+        let layout = pane_menu(false);
+        let palette = chrome_palette();
+        let lit = one_layer(pane_menu_build(
+            &layout,
+            Some(PaneMenuHover::Zone(SplitZone::Down)),
+            None,
+            &equipped(),
+            &mut fake_measure,
+        ));
+        let zone = layout.zone(SplitZone::Down);
+        let inside = |quad: &OverlayQuad| {
+            quad.rect[0] >= zone[0] - 0.5
+                && quad.rect[2] <= zone[2] + 0.5
+                && quad.rect[1] >= zone[1] - 0.5
+                && quad.rect[3] <= zone[3] + 0.5
+        };
+        let accents: Vec<f32> = lit
+            .quads
+            .iter()
+            .filter(|quad| inside(quad) && quad.color == palette.accent)
+            .map(|quad| quad.alpha)
+            .collect();
+        assert!(
+            accents.iter().any(|alpha| *alpha > PICKER_ZONE_WASH_ALPHA),
+            "the outline is the accent at full strength: {accents:?}"
+        );
+        assert!(
+            accents
+                .iter()
+                .any(|alpha| (*alpha - PICKER_ZONE_WASH_ALPHA).abs() < 0.001),
+            "and the face is the accent at 15%: {accents:?}"
+        );
+        // The other three keep the menu's own hairline.
+        let dark = one_layer(pane_menu_build(
+            &layout,
+            None,
+            None,
+            &equipped(),
+            &mut fake_measure,
+        ));
+        assert!(
+            !dark
+                .quads
+                .iter()
+                .any(|quad| inside(quad) && quad.color == palette.accent),
+            "an unhovered zone carries no accent at all"
+        );
+    }
+
+    // ── the submenu and the safety triangle (queue item #53) ────────────────
+
+    /// PIN — **the submenu is the profile list, hung beside its heading, and the
+    /// pane's own profile is marked.**
+    ///
+    /// It is the *same* list the tab strip's `⌄` offers, because the ruling asks
+    /// for "profiles 二级菜单" and a second list would be a second answer to
+    /// "which shells does this product offer". A profile this machine cannot
+    /// start is greyed rather than dropped, on `hit`'s own precedent.
+    #[test]
+    fn the_split_with_submenu_is_the_profile_list_with_this_panes_own_marked() {
+        let layout = pane_menu(true);
+        let frame = layout
+            .submenu_frame()
+            .expect("an open submenu has a frame of its own");
+        let heading = layout.item(PaneMenuRow::SplitWith);
+        assert!(
+            frame[0] >= heading[0],
+            "it hangs beside its heading, not under it"
+        );
+        assert!(frame[1] <= heading[1] && frame[3] > heading[1]);
+
+        let layers = pane_menu_build(&layout, None, Some(1), &equipped(), &mut fake_measure);
+        let [_parent, child]: [OverlayLayer; 2] = layers
+            .try_into()
+            .expect("a menu with a child draws two layers");
+        let names: Vec<&str> = child
+            .labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .filter(|text| *text != CURRENT_PROFILE_HINT_TEXT)
+            .collect();
+        assert_eq!(
+            names,
+            (0..PROFILES.len()).map(title).collect::<Vec<_>>(),
+            "every profile the strip offers, in the strip's own order"
+        );
+        assert_eq!(
+            child
+                .labels
+                .iter()
+                .filter(|label| label.text == CURRENT_PROFILE_HINT_TEXT)
+                .count(),
+            1,
+            "and exactly one row says it is the one this pane is running"
+        );
+        assert_eq!(
+            child
+                .sprites
+                .iter()
+                .map(|sprite| sprite.mark)
+                .collect::<Vec<_>>(),
+            PROFILES
+                .iter()
+                .map(|profile| profile.mark)
+                .collect::<Vec<_>>(),
+            "each row wears its own profile's mark"
+        );
+
+        // A press on a submenu row is answered as that profile, and the child
+        // wins the pixels where the two frames overlap.
+        for index in 0..PROFILES.len() {
+            let rect = layout.submenu.as_ref().unwrap().items[index];
+            assert_eq!(
+                pane_menu_hit(
+                    &layout,
+                    f64::from((rect[0] + rect[2]) / 2.0),
+                    f64::from((rect[1] + rect[3]) / 2.0),
+                ),
+                Some(PaneMenuHit::Submenu(index)),
+            );
+        }
+    }
+
+    /// PIN — a machine with no Git Bash greys that row rather than hiding it,
+    /// and the mark greys with the word.
+    #[test]
+    fn a_submenu_row_this_machine_cannot_start_is_drawn_and_not_offered() {
+        let layout = pane_menu(true);
+        let layers = pane_menu_build(&layout, None, Some(0), &bare(), &mut fake_measure);
+        let child = layers.last().expect("the child layer");
+        assert_eq!(
+            child
+                .labels
+                .iter()
+                .filter(|l| l.text != CURRENT_PROFILE_HINT_TEXT)
+                .count(),
+            PROFILES.len(),
+            "no row is dropped — a missing row looks like a row nobody designed"
+        );
+        assert!(
+            child.sprites.iter().any(|sprite| sprite.grayscale),
+            "and the ones this machine cannot start are greyed"
+        );
+    }
+
+    /// PIN (**queue item #53, closed**) — the safety triangle holds a pointer
+    /// travelling toward the submenu and releases one going anywhere else.
+    ///
+    /// The three claims are the whole rule:
+    ///
+    /// * a move that lands inside the wedge between the pointer's last position
+    ///   and the submenu's near edge is a move *toward* the submenu, whatever row
+    ///   it happens to be over;
+    /// * a move that lands outside it is not, however close to the submenu it
+    ///   ends up;
+    /// * and the near edge is chosen by which side the submenu is on, so a child
+    ///   that had to flip left because the window's edge was close is protected
+    ///   the same way.
+    ///
+    /// Red gate: take the apex from the *current* position instead of the last
+    /// one and the triangle is a point that contains nothing, so every diagonal
+    /// steals the highlight — which is the behaviour this closes.
+    #[test]
+    fn the_safe_triangle_holds_a_pointer_aimed_at_the_submenu_and_releases_one_that_is_not() {
+        // A submenu standing to the right, its near edge from y=100 to y=200.
+        let submenu = [200.0, 100.0, 380.0, 200.0];
+        let from = [100.0, 110.0];
+        assert!(
+            safe_triangle_holds(from, [150.0, 140.0], submenu),
+            "halfway to the middle of the near edge, across whatever rows lie there"
+        );
+        assert!(
+            safe_triangle_holds(from, [199.0, 199.0], submenu),
+            "and a shallow aim at the far bottom corner is still an aim"
+        );
+        assert!(
+            !safe_triangle_holds(from, [150.0, 260.0], submenu),
+            "straight down, past the submenu's bottom, is a move at another row"
+        );
+        assert!(
+            !safe_triangle_holds(from, [120.0, 90.0], submenu),
+            "and up and away from it is not an aim at it either"
+        );
+        assert!(
+            !safe_triangle_holds(from, [150.0, 140.0], [200.0, 100.0, 200.0, 100.0]),
+            "a submenu with no area cannot be aimed at"
+        );
+
+        // The same wedge with the child flipped to the left of the hand.
+        let flipped = [20.0, 100.0, 200.0, 200.0];
+        let hand = [300.0, 110.0];
+        assert!(safe_triangle_holds(hand, [250.0, 140.0], flipped));
+        assert!(!safe_triangle_holds(hand, [250.0, 260.0], flipped));
+
+        assert_eq!(SUBMENU_SAFE_HOLD, Duration::from_millis(300));
+    }
+
+    // ── the `×` in a menu row (user ruling, 2026-08-16) ─────────────────────
+
+    /// PIN — **every `×` in a menu row is struck in a 10px box, and every other
+    /// mark keeps its 15**, in whichever menu it appears.
+    ///
+    /// A deliberate deviation from the mock-up, whose `#i-close` runs edge to
+    /// edge of its own `viewBox`: struck at the column's full fifteen the cross
+    /// out-weighs the folder and the copy glyph beside it, which are shapes
+    /// drawn inside a box with margins of their own.
+    ///
+    /// Red gate: apply the rule to `TabClose` alone and a menu that reaches for
+    /// `PaneClose` — the same drawing under another name — gets the heavy cross
+    /// back with nothing to say so.
+    #[test]
+    fn a_menu_rows_close_glyph_is_struck_ten_wide_and_every_other_mark_fifteen() {
+        assert_eq!(ITEM_MARK_CLOSE_LOGICAL_PX, 10.0);
+        for close in [
+            ChromeMark::WindowClose,
+            ChromeMark::TabClose,
+            ChromeMark::PaneClose,
+        ] {
+            assert_eq!(item_mark_logical_px(close), ITEM_MARK_CLOSE_LOGICAL_PX);
+        }
+        for other in [
+            ChromeMark::Folder,
+            ChromeMark::Copy,
+            ChromeMark::Split,
+            ChromeMark::SplitRight,
+            ChromeMark::SplitDown,
+            ChromeMark::Float,
+        ] {
+            assert_eq!(
+                item_mark_logical_px(other),
+                ITEM_MARK_LOGICAL_PX,
+                "{other:?} keeps the column's own size"
+            );
+        }
+
+        // And it is true of the drawing, not merely of the table: the `×` in the
+        // pane menu measures ten and stays centred in the same column the
+        // fifteen-pixel marks are centred in.
+        let layout = pane_menu(false);
+        let layer = one_layer(pane_menu_build(
+            &layout,
+            None,
+            None,
+            &equipped(),
+            &mut fake_measure,
+        ));
+        let cross = layer
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::TabClose)
+            .expect("`Close pane` wears a cross");
+        let folder = layer
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::Folder)
+            .expect("`New terminal in folder…` wears a folder");
+        assert_eq!(cross.rect[2] - cross.rect[0], 10.0);
+        assert_eq!(folder.rect[2] - folder.rect[0], 15.0);
+        // Within half a pixel of each other, which is as centred as two boxes of
+        // different parity can be: both are snapped to whole device pixels — a
+        // mark on a subpixel is a resampled mark — and 10 and 15 cannot both
+        // land symmetrically on the same column. Half a pixel is the rounding,
+        // not a drift.
+        let centre = |rect: [f32; 4]| (rect[0] + rect[2]) / 2.0;
+        assert!(
+            (centre(cross.rect) - centre(folder.rect)).abs() <= 0.5,
+            "both are centred in the one 14px column, so the names line up:              {} against {}",
+            centre(cross.rect),
+            centre(folder.rect),
+        );
     }
 
     // ── the commit graph's branch filter (T2/T3, v2 ③) ─────────────────────
@@ -6390,69 +8097,6 @@ mod tests {
         assert_eq!(
             git_filter_mark(&GitFilterRow::Branch("main".to_owned()), true),
             Some(ChromeMark::Check)
-        );
-    }
-
-    /// PIN — a press on each of the three rows is answered as that row, the
-    /// menu's own padding swallows, and a point outside is nobody's.
-    ///
-    /// Red gate: hit-test the frame before the rows and every press anywhere in
-    /// the menu becomes `Some(None)` — a menu that lights up and does nothing.
-    #[test]
-    fn the_pane_menu_answers_a_press_on_each_of_its_three_rows() {
-        let layout = pane_menu_layout([300.0, 200.0], (960.0, 600.0), 1.0, &mut fake_measure);
-        for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items) {
-            let (x, y) = (
-                f64::from((rect[0] + rect[2]) / 2.0),
-                f64::from((rect[1] + rect[3]) / 2.0),
-            );
-            assert_eq!(pane_menu_hit(&layout, x, y), Some(Some(*row)));
-        }
-        // The menu's own top padding: inside the frame, on no row.
-        assert_eq!(
-            pane_menu_hit(
-                &layout,
-                f64::from(layout.frame[0] + 2.0),
-                f64::from(layout.frame[1] + 1.0)
-            ),
-            Some(None),
-            "the border and padding swallow rather than fall through"
-        );
-        assert_eq!(
-            pane_menu_hit(
-                &layout,
-                f64::from(layout.frame[0]) - 1.0,
-                f64::from(layout.frame[1]) - 1.0
-            ),
-            None,
-            "and a point outside is the window's again"
-        );
-    }
-
-    /// PIN — the pane menu's keyboard walk clamps at both ends, and a fresh menu
-    /// answers Up with its last row. [`FileMenuRow::step`]'s rule, because one
-    /// window must not hold two ideas of what the bottom of a list does.
-    #[test]
-    fn the_pane_menus_keyboard_walk_clamps_at_both_ends() {
-        assert_eq!(PaneMenuRow::step(None, true), PaneMenuRow::SplitRight);
-        assert_eq!(PaneMenuRow::step(None, false), PaneMenuRow::ClosePane);
-        assert_eq!(
-            PaneMenuRow::step(Some(PaneMenuRow::SplitRight), false),
-            PaneMenuRow::SplitRight,
-            "Up on the first row stays on the first row"
-        );
-        assert_eq!(
-            PaneMenuRow::step(Some(PaneMenuRow::ClosePane), true),
-            PaneMenuRow::ClosePane,
-            "and Down on the last stays on the last"
-        );
-        assert_eq!(
-            PaneMenuRow::step(Some(PaneMenuRow::SplitRight), true),
-            PaneMenuRow::SplitDown
-        );
-        assert_eq!(
-            PaneMenuRow::step(Some(PaneMenuRow::ClosePane), false),
-            PaneMenuRow::SplitDown
         );
     }
 

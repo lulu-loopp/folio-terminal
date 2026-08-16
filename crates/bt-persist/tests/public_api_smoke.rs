@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    Debouncer, ExitState, ReadReport, SETTINGS_SCHEMA_VERSION, SettingsV1, ThemeModeV1,
-    WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_settings,
-    remove_sentinel, write_settings_atomic,
+    Debouncer, ExitState, ReadReport, SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1,
+    ThemeModeV1, WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel,
+    read_settings, remove_sentinel, write_settings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -36,6 +36,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         inline_formulas: false,
         default_profile: "gitbash".to_owned(),
         git_panel: false,
+        split_direction: SplitDirectionV1::Down,
     };
     write_settings_atomic(&path, &settings).unwrap();
 
@@ -62,6 +63,10 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     );
     assert!(
         on_disk.contains("\"git_panel\": false"),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"split_direction\": \"Down\""),
         "written file must be human-readable JSON: {on_disk}"
     );
 }

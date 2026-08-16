@@ -40,6 +40,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (2, migrate_settings_v2_to_v3),
     (3, migrate_settings_v3_to_v4),
     (4, migrate_settings_v4_to_v5),
+    (5, migrate_settings_v5_to_v6),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -104,6 +105,23 @@ fn migrate_settings_v4_to_v5(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(5));
         object.insert("git_panel".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v5 -> v6: which way a direction-less split cuts, defaulted to **`Auto`**.
+///
+/// The first of these five steps to be a plain `v1_to_v2`: a behaviour carried
+/// forward, not a product default taken for a feature shipping new. Every v5
+/// build cut a direction-less split across the pane's longer side — the
+/// duplicate chord, and later the pane head's `⊞` — and it did so with no way to
+/// ask for anything else. `Auto` is therefore not this step choosing on the
+/// user's behalf; it is the answer their build has been giving them all along,
+/// written down at the moment it became a question.
+fn migrate_settings_v5_to_v6(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(6));
+        object.insert("split_direction".to_owned(), Value::from("Auto"));
     }
     value
 }
@@ -555,6 +573,41 @@ mod tests {
         assert_eq!(migrated["schema_version"], json!(3));
         assert_eq!(migrated["added_in_v2"], json!("present"));
         assert_eq!(migrated["added_in_v3"], json!(true));
+    }
+
+    /// PIN — v5 -> v6 writes `Auto` and leaves every sibling exactly as it found
+    /// it (rule 3, "迁移函数只做结构升级").
+    ///
+    /// The value is asserted as the *string* `"Auto"` rather than through the
+    /// typed enum, because that is what this layer actually writes: a step is a
+    /// `Value -> Value` and the one way it can be wrong at this level is by
+    /// spelling the word differently from the `Serialize` impl that has to read
+    /// it back. `settings_v5_fixture_migrates_to_v6_…` in `tests/round_trip.rs`
+    /// is the other half — it reads the same step's output through the typed API,
+    /// so the two spellings are pinned to agree.
+    #[test]
+    fn real_settings_v5_to_v6_migration_adds_the_longer_edge_default() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 5,
+                "theme_mode": "Light",
+                "display_formulas": false,
+                "inline_formulas": true,
+                "default_profile": "gitbash",
+                "git_panel": false
+            }),
+            5,
+            6,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(6));
+        assert_eq!(migrated["split_direction"], json!("Auto"));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(migrated["inline_formulas"], json!(true));
+        assert_eq!(migrated["default_profile"], json!("gitbash"));
+        assert_eq!(migrated["git_panel"], json!(false));
     }
 
     #[test]

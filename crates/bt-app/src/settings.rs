@@ -24,7 +24,7 @@
 //! Nothing here is layout: the dialog is not a seat, takes no space from the
 //! solver, and is never persisted (a dialog does not survive a restart).
 
-use bt_persist::ThemeModeV1;
+use bt_persist::{SplitDirectionV1, ThemeModeV1};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
@@ -182,6 +182,15 @@ pub const SIDEBAR_OPTIONS: [RailMode; 2] = [RailMode::Expanded, RailMode::Icons]
 /// (`data-combo="wrap"`, `data-combo="attnchip"`) and the order a reader expects
 /// when the affirmative is the default.
 pub const FORMULA_OPTIONS: [bool; 2] = [true, false];
+/// The three answers to "which way does a split with no direction of its own
+/// cut" (user ruling, 2026-08-16), with the historical behaviour first — which
+/// is both the product default and the order a reader expects when the first
+/// item is what they already had.
+pub const SPLIT_DIRECTION_OPTIONS: [SplitDirectionV1; 3] = [
+    SplitDirectionV1::Auto,
+    SplitDirectionV1::Right,
+    SplitDirectionV1::Down,
+];
 
 /// The label a theme wears in the picker, matching the mock-up's own casing.
 fn theme_label(theme: ThemeModeV1) -> &'static str {
@@ -223,6 +232,42 @@ fn sidebar_label(mode: RailMode) -> &'static str {
     match mode {
         RailMode::Expanded => "Expanded",
         RailMode::Icons => "Icons",
+    }
+}
+
+/// What a split direction is called in the picker.
+///
+/// `Auto` says what it does in the parenthesis, and that is deliberate against
+/// the ruling `sidebar_label` above records: "a picker item is a name, not a
+/// sentence about it". The two are not in conflict, because `Auto` on its own is
+/// not a name of anything — every other item here names a direction, and the one
+/// that names a *rule* has to say which rule or it names nothing. `Right` and
+/// `Down` are bare for exactly the reason the ruling gives.
+fn split_direction_label(direction: SplitDirectionV1) -> &'static str {
+    match direction {
+        SplitDirectionV1::Auto => "Auto (longer edge)",
+        SplitDirectionV1::Right => "Right",
+        SplitDirectionV1::Down => "Down",
+    }
+}
+
+/// The mark a split direction wears in the picker.
+///
+/// The second row in this dialog whose items carry one, and it earns it the way
+/// `Default profile` earns its profile marks (`UI-UX.md:115`): the difference
+/// between "beside" and "below" is a *shape*, and this build already draws that
+/// shape twice — `#i-split-right` and `#i-split-down`, the pair the pane menu
+/// used to caption in words before the picker replaced them with a diagram. A
+/// picker that named two axes in text alone would be the one place in the
+/// product where they are not marks.
+///
+/// `Auto` wears the `⊞` the pane head used to: it is the glyph for "split, and
+/// do not ask me which way", which is precisely what the option means.
+fn split_direction_mark(direction: SplitDirectionV1) -> ChromeMark {
+    match direction {
+        SplitDirectionV1::Auto => ChromeMark::Split,
+        SplitDirectionV1::Right => ChromeMark::SplitRight,
+        SplitDirectionV1::Down => ChromeMark::SplitDown,
     }
 }
 
@@ -322,7 +367,22 @@ pub enum SettingsRow {
     /// would leave the reading in place, which is the half a user turning this off
     /// is actually asking about.
     GitPanel,
-    /// Mock-up 2464-2474, the Startup group's only row — and the only picker in
+    /// **Which way a split with no direction of its own cuts** (user ruling,
+    /// 2026-08-16).
+    ///
+    /// Filed under `Appearance` beside `Tab layout`, which is where the two
+    /// "where does a thing go" rows belong together — and deliberately not in a
+    /// group of its own. A `Panes` heading over one row would be a category the
+    /// dialog has to grow into rather than one it has, and the row a user goes
+    /// looking for after meeting the pane menu's picker is the row next to the
+    /// one about where tabs go.
+    ///
+    /// It governs only the verbs whose sentence stops at "split" — see
+    /// `bt_persist::SettingsV1::split_direction`, which is where the scope is
+    /// argued, and `Runtime::settings_split_axis`, which is the one place it is
+    /// read.
+    SplitDirection,
+    /// Mock-up 2464-2474, the Startup group's only row — and the first picker in
     /// this dialog whose items carry a mark (7645-7648).
     ///
     /// **The one row whose options can be unavailable.** Every other picker here
@@ -343,7 +403,7 @@ impl SettingsRow {
     #[must_use]
     pub fn group(self) -> SettingsGroup {
         match self {
-            Self::Theme | Self::Cursor | Self::TabLayout | Self::Sidebar => {
+            Self::Theme | Self::Cursor | Self::TabLayout | Self::Sidebar | Self::SplitDirection => {
                 SettingsGroup::Appearance
             }
             // The mock-up files what typesetting does to a block under "Rendered
@@ -366,6 +426,7 @@ impl SettingsRow {
             Self::TabLayout => "Tab layout",
             // Mock-up 2374.
             Self::Sidebar => "Sidebar",
+            Self::SplitDirection => "Split direction",
             // Mock-up 2467.
             Self::DefaultProfile => "Default profile",
         }
@@ -395,6 +456,12 @@ impl SettingsRow {
             Self::TabLayout => "Choose where tabs appear in the window",
             // Mock-up 2375.
             Self::Sidebar => "How the vertical tab sidebar rests",
+            // Says *which* splits, because the scope is the setting. A line
+            // reading "which way a pane splits" would promise to override the
+            // two chords that draw their own rule and the picker's four zones,
+            // and a user who then found `Alt+Shift+-` still stacking panes would
+            // conclude the switch was broken.
+            Self::SplitDirection => "Where a split with no direction of its own puts the new pane",
             // Mock-up 2468, word for word. It is also the *scope* of the setting
             // and the reason `profiles::index_of_id` does not read it: a tab and
             // a launch are the two things it answers for, and a pane coming back
@@ -412,6 +479,7 @@ impl SettingsRow {
             Self::Formulas | Self::InlineFormulas | Self::GitPanel => FORMULA_OPTIONS.len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
+            Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
             // (mock-up 7645: "the default-profile picker is built from the same
             // list the ⌄ menu uses"). Not a copy of it — the same table — so a
@@ -437,6 +505,10 @@ impl SettingsRow {
             }
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
+            Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
+                .get(index)
+                .copied()
+                .map(split_direction_label),
             Self::DefaultProfile => {
                 (index < profiles::PROFILES.len()).then(|| profiles::title(index))
             }
@@ -458,6 +530,10 @@ impl SettingsRow {
     pub fn option_mark(self, index: usize) -> Option<ChromeMark> {
         match self {
             Self::DefaultProfile => profiles::PROFILES.get(index).map(|profile| profile.mark),
+            Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
+                .get(index)
+                .copied()
+                .map(split_direction_mark),
             _ => None,
         }
     }
@@ -499,6 +575,9 @@ impl SettingsRow {
                 .iter()
                 .position(|it| *it == values.tab_layout),
             Self::Sidebar => SIDEBAR_OPTIONS.iter().position(|it| *it == values.sidebar),
+            Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
+                .iter()
+                .position(|it| *it == values.split_direction),
             // The *resolved* default, which is why the caller hands over an index
             // rather than the stored id. **Mock-up bug not copied** (2471): its
             // combo button is born with the literal text `PowerShell` and only
@@ -533,6 +612,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     if tab_layout == TabLayoutMode::Vertical {
         rows.push(SettingsRow::Sidebar);
     }
+    rows.push(SettingsRow::SplitDirection);
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
     rows.push(SettingsRow::GitPanel);
@@ -555,6 +635,8 @@ pub struct SettingsValues {
     pub inline_formulas: bool,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
+    /// Which way a split with no direction of its own cuts.
+    pub split_direction: SplitDirectionV1,
     /// The resolved default profile — an index into `profiles::PROFILES`, never
     /// the stored id.
     ///
@@ -592,6 +674,7 @@ impl SettingsValues {
             display_formulas: true,
             inline_formulas: true,
             git_panel: true,
+            split_direction: SplitDirectionV1::Auto,
             default_profile: profiles::FALLBACK_PROFILE,
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
@@ -836,6 +919,17 @@ pub fn inline_formulas_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::InlineFormulas, index) => {
             FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The split direction a press asks for, if it asks at all.
+#[must_use]
+pub fn split_direction_requested(target: SettingsTarget) -> Option<SplitDirectionV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::SplitDirection, index) => {
+            SPLIT_DIRECTION_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -2743,9 +2837,10 @@ mod tests {
         }
         assert_eq!(
             ellipsised,
-            vec![SettingsRow::DefaultProfile],
-            "the long profile title is the one value that cannot fit, and every \
-             other row's option is one short word that must be left alone"
+            vec![SettingsRow::SplitDirection, SettingsRow::DefaultProfile],
+            "the long profile title and `Auto (longer edge)` are the two \
+             values that cannot fit the 118px button, and every other row's \
+             option is one short word that must be left alone"
         );
     }
 
@@ -3528,15 +3623,42 @@ mod tests {
                  the table being reordered"
             );
         }
-        // The only one. Every other picker's items are words.
+        // **One of two**, and the second one arrived for this one's reason
+        // (user ruling, 2026-08-16): `Split direction` names two axes, and the
+        // difference between "beside" and "below" is a shape this build already
+        // draws. Every other picker's items are words, because every other
+        // picker's items *are* words — `Light`, `Bar`, `On` name no object.
         for row in visible_rows(TabLayoutMode::Vertical) {
-            if row == SettingsRow::DefaultProfile {
+            if matches!(
+                row,
+                SettingsRow::DefaultProfile | SettingsRow::SplitDirection
+            ) {
                 continue;
             }
             for index in 0..row.option_count() {
                 assert_eq!(row.option_mark(index), None, "{row:?} draws no marks");
             }
         }
+        for (index, direction) in SPLIT_DIRECTION_OPTIONS.iter().enumerate() {
+            assert_eq!(
+                SettingsRow::SplitDirection.option_mark(index),
+                Some(split_direction_mark(*direction)),
+                "{direction:?} wears the glyph the rest of the product draws it with"
+            );
+            assert_eq!(
+                split_direction_requested(SettingsTarget::Choice(
+                    SettingsRow::SplitDirection,
+                    index
+                )),
+                Some(*direction),
+            );
+        }
+        assert_eq!(
+            SettingsRow::SplitDirection
+                .option_labels()
+                .collect::<Vec<_>>(),
+            vec!["Auto (longer edge)", "Right", "Down"],
+        );
     }
 
     /// PIN — the combo reads the app's state, and the app's state is the
@@ -3920,6 +4042,7 @@ mod tests {
                 SettingsRow::Theme,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
+                SettingsRow::SplitDirection,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::GitPanel,
@@ -3933,14 +4056,16 @@ mod tests {
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::Sidebar,
+                SettingsRow::SplitDirection,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile
             ],
-            "Sidebar still lands directly under the row it depends on, the two \
-             formula rows stay together as the whole of the second group, and \
-             Startup's one row is last"
+            "Sidebar still lands directly under the row it depends on, Split \
+             direction under the pair of them as the Appearance group's last \
+             row, the two formula rows stay together as the whole of the \
+             second group, and Startup's one row is last"
         );
     }
 
