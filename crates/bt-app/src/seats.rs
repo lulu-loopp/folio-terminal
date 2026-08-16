@@ -11038,133 +11038,17 @@ pub fn preview_table_geometry(
 
 // ── the markdown render (mock-up 608-609, 1201-1211) ────────────────────────
 
-/// `.pv-md { font-size: 13px }`.
-pub const PREVIEW_MD_FONT_LOGICAL_PX: f32 = 13.0;
-/// `.pv-md { padding: 12px 16px }`.
-pub const PREVIEW_MD_PADDING_X_LOGICAL_PX: f32 = 16.0;
-pub const PREVIEW_MD_PADDING_Y_LOGICAL_PX: f32 = 12.0;
-/// `.md-code .lang { font-size: 9.5px; letter-spacing: .08em }`.
-pub const PREVIEW_MD_LANG_FONT_LOGICAL_PX: f32 = 9.5;
-pub const PREVIEW_MD_LANG_TRACKING_EM: f32 = 0.08;
-
-/// The metrics a rendered markdown body is set in.
-///
-/// **Two of these are not in the mock-up**, and are chosen here rather than
-/// inherited: `paragraph_gap` is a `<p>`'s `1em` margin and `list_indent` is a
-/// `<ul>`'s indent, both of which the prototype gets free from a browser's
-/// default stylesheet and neither of which this window has one of. They are
-/// written down at the values that reproduce what the mock-up draws, so that the
-/// day they are wrong there is a number to argue with.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PreviewMarkdownMetrics {
-    pub font_size: f32,
-    pub line_height: f32,
-    pub padding_x: f32,
-    pub padding_y: f32,
-    /// `.pv-md .md-h { margin: 2px 0 2px }` — the 8px top of `.md-h` (1201) is
-    /// overridden to 2px inside a preview (609), which is the one place the two
-    /// rules disagree and the more specific one wins.
-    pub heading_margin: f32,
-    /// `.md-code { margin: 6px 0 }`.
-    pub code_margin: f32,
-    /// `.md-code { padding: 8px 12px }`.
-    pub code_padding_x: f32,
-    pub code_padding_y: f32,
-    /// `.md-code { border-radius: 7px }`, carried for the day the fill pass
-    /// grows rounded corners; the fence is a square block today.
-    pub code_radius: f32,
-    pub code_border: f32,
-    pub lang_font: f32,
-    /// `.md-code .lang { top: 5px; right: 9px }`.
-    pub lang_inset_top: f32,
-    pub lang_inset_right: f32,
-    /// A `<p>`'s `1em` margin, collapsed between siblings. Chosen, see above.
-    pub paragraph_gap: f32,
-    /// A `<ul>`'s indent, with room for the bullet. Chosen, see above.
-    pub list_indent: f32,
-    /// `blockquote`'s accent bar. Chosen: 3px, the width a bar has to be before
-    /// it reads as a bar rather than as a hairline that failed.
-    pub quote_bar: f32,
-    /// Where a quoted line's text starts: the bar plus a 10px gutter, which is
-    /// the same air the bullet gets inside `list_indent`.
-    pub quote_indent: f32,
-    /// The quote's own breathing room above and below its first and last line,
-    /// so the bar overshoots the text a little at both ends rather than being
-    /// exactly as tall as it. Chosen: 2px.
-    pub quote_padding_y: f32,
-    /// `<hr>` — one device pixel of `--border`, whatever the scale.
-    pub rule_thickness: f32,
-    /// A markdown table's chrome, borrowed whole from the `.csv` grid beside it
-    /// (mock-up 610-613) so the two tables in this product look like one table.
-    pub table_border: f32,
-    pub table_padding_x: f32,
-    pub table_padding_y: f32,
-    /// The narrowest a column may be squeezed to, however short its cells are:
-    /// four characters' worth, below which a wrapped cell breaks every word.
-    pub table_min_column: f32,
-}
-
-impl PreviewMarkdownMetrics {
-    /// The size a heading of this level is set at.
-    ///
-    /// **A deviation from the mock-up, recorded.** `.md-h { font-weight: 600 }`
-    /// sets no size at all (1201), so the prototype's headings are emphasis and
-    /// not scale — a defensible choice in a panel three levels deep. It stopped
-    /// being defensible when the renderer learned levels four to six: six levels
-    /// of identical type is six levels of nothing, and the user's report against
-    /// `docs/DESIGN.md` (2026-08-13) is exactly that the structure of a real
-    /// document did not come through.
-    ///
-    /// The ladder is `1.45 / 1.28 / 1.14 / 1.05 / 1.00 / 0.92` of body size —
-    /// chosen, like `paragraph_gap` and `list_indent` above, so that the day one
-    /// of them is wrong there is a number to argue with. It is a *ratio* ladder
-    /// rather than a table of pixels so it survives the font size changing, and
-    /// `####` lands one step above body text, which is the ruling: a fourth-level
-    /// heading is bold body text one notch up, and five and six step down past
-    /// it into bold-and-smaller.
-    pub fn heading_font(&self, level: u8) -> f32 {
-        const LADDER: [f32; 6] = [1.45, 1.28, 1.14, 1.05, 1.00, 0.92];
-        self.font_size * LADDER[(level.clamp(1, 6) - 1) as usize]
-    }
-
-    /// The line box a heading of this level sits in — its own size, not the
-    /// body's, or a large heading would overprint the paragraph under it.
-    pub fn heading_line_height(&self, level: u8) -> f32 {
-        (self.heading_font(level) * CHROME_LINE_HEIGHT)
-            .round()
-            .max(1.0)
-    }
-}
-
-pub fn preview_markdown_metrics(scale: f32) -> PreviewMarkdownMetrics {
-    let font_size = PREVIEW_MD_FONT_LOGICAL_PX * scale;
-    let quote_bar = (3.0 * scale).round().max(1.0);
-    PreviewMarkdownMetrics {
-        font_size,
-        line_height: (font_size * CHROME_LINE_HEIGHT).round().max(1.0),
-        padding_x: (PREVIEW_MD_PADDING_X_LOGICAL_PX * scale).round(),
-        padding_y: (PREVIEW_MD_PADDING_Y_LOGICAL_PX * scale).round(),
-        heading_margin: (2.0 * scale).round(),
-        code_margin: (6.0 * scale).round(),
-        code_padding_x: (12.0 * scale).round(),
-        code_padding_y: (8.0 * scale).round(),
-        code_radius: (7.0 * scale).round(),
-        code_border: scale.round().max(1.0),
-        lang_font: PREVIEW_MD_LANG_FONT_LOGICAL_PX * scale,
-        lang_inset_top: (5.0 * scale).round(),
-        lang_inset_right: (9.0 * scale).round(),
-        paragraph_gap: font_size.round(),
-        list_indent: (20.0 * scale).round(),
-        quote_bar,
-        quote_indent: quote_bar + (10.0 * scale).round(),
-        quote_padding_y: (2.0 * scale).round(),
-        rule_thickness: scale.round().max(1.0),
-        table_border: scale.round().max(1.0),
-        table_padding_x: (PREVIEW_TABLE_CELL_PADDING_X_LOGICAL_PX * scale).round(),
-        table_padding_y: (PREVIEW_TABLE_CELL_PADDING_Y_LOGICAL_PX * scale).round(),
-        table_min_column: (font_size * 4.0).round(),
-    }
-}
+/// **The rendered page's metrics moved out of this file on 2026-08-16**, to
+/// [`crate::preview`] — the module that already owns the document model they
+/// describe. What lived here was seat geometry only by accident of history: a
+/// heading's ladder and a blockquote's gutter are facts about *a document*, and
+/// the pane, the preview float and the hover peek card all set the same one. The
+/// old names are re-exported at their old address so that every call site reads
+/// exactly as it did; see `docs/DESIGN.md` §7.1.3i for the numbers themselves.
+pub use crate::preview::{
+    PREVIEW_MD_LANG_TRACKING_EM, PreviewMarkdownMetrics,
+    markdown_metrics as preview_markdown_metrics,
+};
 
 // ── the "no preview" card (mock-up 614-623, 4984-4988) ──────────────────────
 

@@ -814,6 +814,354 @@ fn flush_list(list: &mut Vec<String>, ordered: &mut Option<u64>, blocks: &mut Ve
     *ordered = None;
 }
 
+// ── the rendered page's measure (mock-up 608-609, 1201-1211; re-proportioned
+//    against Typora's GitHub theme, user report 2026-08-16) ──────────────────
+
+/// `.pv-md { font-size: 13px }` (mock-up 629).
+///
+/// **Unchanged by the Typora pass, and deliberately.** Everything below is
+/// expressed as a ratio of *this* number rather than as one of Typora's own
+/// pixels, because Typora sets a document at 16px in a window and this is a
+/// document in a pane three levels deep, beside a terminal grid at 12.5px. The
+/// user's report was that the page reads dense — it was not that the letters
+/// are small — so what is ported here is the **proportions**, and the base they
+/// are proportional to stays the house's.
+pub const PREVIEW_MD_FONT_LOGICAL_PX: f32 = 13.0;
+/// `.pv-md { padding: 12px 16px }` (mock-up 629).
+pub const PREVIEW_MD_PADDING_X_LOGICAL_PX: f32 = 16.0;
+pub const PREVIEW_MD_PADDING_Y_LOGICAL_PX: f32 = 12.0;
+/// `.md-code .lang { font-size: 9.5px; letter-spacing: .08em }` (mock-up 1290).
+pub const PREVIEW_MD_LANG_FONT_LOGICAL_PX: f32 = 9.5;
+pub const PREVIEW_MD_LANG_TRACKING_EM: f32 = 0.08;
+
+/// How wide the prose column is allowed to get, in ems of the body.
+///
+/// github.css: `#write { max-width: 860px }` on a 16px body — 53.75em, written
+/// as 54 because a measure is a reading decision and not a pixel count. It is
+/// the single number the user's report is really about: at 1600 physical pixels
+/// a paragraph of Chinese ran a hundred and forty characters to the line, and
+/// nobody's eye finds the start of the next line after that. Every typographic
+/// manual in print puts the comfortable measure between 45 and 75 characters
+/// and Typora's 860px lands in the middle of it.
+///
+/// The column is **centred** when the pane can hold it, which is `#write`'s own
+/// `margin: 0 auto`; a pane narrower than the measure wraps at the pane exactly
+/// as it did before, because a measure enforced on a 300px pane is a 300px pane
+/// with a hole down one side.
+pub const PREVIEW_PROSE_MEASURE_EM: f32 = 54.0;
+/// github.css: `body { line-height: 1.6 }`.
+///
+/// The old value was the window's own `CHROME_LINE_HEIGHT` of 1.4, which is a
+/// *chrome* number — a tab strip, a row of a file tree, a button — where a line
+/// is a label and never has a line under it to find. Prose is the opposite case
+/// and 1.4 is what the report called tight.
+pub const PREVIEW_MD_LINE_HEIGHT: f32 = 1.6;
+/// github.css: `p, blockquote, ul, ol, dl, table, pre { margin: 0 0 16px }` — a
+/// flat 1em of the body between every pair of block siblings.
+pub const PREVIEW_MD_PARAGRAPH_GAP_EM: f32 = 1.0;
+/// github.css `h1 … h6 { font-size: 2em / 1.5em / 1.25em / 1em / .875em / .85em }`.
+///
+/// **This replaces a ladder this house chose for itself** on 2026-08-13
+/// (`1.45 / 1.28 / 1.14 / 1.05 / 1.00 / 0.92`), which was a compression of the
+/// same shape — every step present, every step smaller. Compressing it was the
+/// mistake the report names: at 1.45 an `#` is a bold line of text and not a
+/// title, so a long document arrived as one undifferentiated column. Typora's
+/// h1 is twice the body and the structure is visible from across the room.
+pub const PREVIEW_MD_HEADING_LADDER: [f32; 6] = [2.0, 1.5, 1.25, 1.0, 0.875, 0.85];
+/// github.css: `h1 … h6 { line-height: 1.25 }` — tighter than the body's 1.6,
+/// because a two-line heading set at 1.6 reads as two headings.
+pub const PREVIEW_MD_HEADING_LINE_HEIGHT: f32 = 1.25;
+/// github.css: `h1 … h6 { margin: 24px 0 16px }` — 1.5em above, 1em below, of
+/// the *body* and not of the heading's own size, so an h1 and an h6 sit the
+/// same distance off the paragraph above them.
+pub const PREVIEW_MD_HEADING_MARGIN_TOP_EM: f32 = 1.5;
+pub const PREVIEW_MD_HEADING_MARGIN_BOTTOM_EM: f32 = 1.0;
+/// github.css: `h1, h2 { padding-bottom: .3em; border-bottom: 1px solid }`.
+///
+/// An em of the **heading's own** size, which is what CSS `padding` means and
+/// what makes the rule under an h1 stand further off its letters than the rule
+/// under an h2 stands off its.
+pub const PREVIEW_MD_HEADING_RULE_PADDING_EM: f32 = 0.3;
+/// How deep the underlined levels go: `h1, h2` and no further.
+pub const PREVIEW_MD_HEADING_RULE_LEVELS: u8 = 2;
+/// github.css: `ul, ol { padding-left: 30px }` on a 16px body — 1.875em.
+pub const PREVIEW_MD_LIST_INDENT_EM: f32 = 1.875;
+/// github.css: `li + li { margin-top: .25em }` — above the second item and
+/// every one after it, never above the first, which is why the list's own top
+/// margin is not this number.
+pub const PREVIEW_MD_LIST_ITEM_GAP_EM: f32 = 0.25;
+/// github.css: `blockquote { border-left: .25em solid }` (4px on 16px).
+///
+/// **The bar does not move**: .25em of 13px rounds to the 3px this window
+/// already drew, chosen in 2026-08-13 as "the width a bar has to be before it
+/// reads as a bar". The two arrived at the same pixel from opposite directions,
+/// which is the strongest evidence either of them was right.
+pub const PREVIEW_MD_QUOTE_BAR_EM: f32 = 0.25;
+/// github.css: `blockquote { padding: 0 15px }` — .9375em beside the bar.
+pub const PREVIEW_MD_QUOTE_PADDING_X_EM: f32 = 0.9375;
+/// github.css says `0`; this house keeps 2px.
+///
+/// **A recorded deviation, and the reason is the bar.** In a browser a
+/// blockquote's border runs the height of its line boxes and the leading above
+/// the first line and below the last comes free from `line-height`. Here the bar
+/// is a quad drawn to the block's measured height, so a zero here draws a bar
+/// that begins exactly at the cap of the first letter and stops exactly at the
+/// baseline of the last — an accent that looks cut rather than drawn.
+pub const PREVIEW_MD_QUOTE_PADDING_Y_LOGICAL_PX: f32 = 2.0;
+/// github.css: `code, pre { font-size: 85% }` — inline spans and fences alike.
+///
+/// The report's "inline code the same size as prose" in one number. A monospace
+/// face at the same nominal size as the sans beside it *looks* a size larger,
+/// because its x-height and its stems are built for a grid; 85% is the ratio
+/// GitHub, Typora and every editor theme derived from them settled on.
+pub const PREVIEW_MD_CODE_FONT_RATIO: f32 = 0.85;
+/// github.css: `pre { line-height: 1.45 }` — a fence is code, and code does not
+/// want prose leading between its lines.
+pub const PREVIEW_MD_CODE_LINE_HEIGHT: f32 = 1.45;
+/// github.css: `pre { padding: 16px }` — 1em of the body, on all four sides.
+/// The mock-up drew `8px 12px` (1284); the fence was cramped and the report says
+/// so, so the mock-up loses this one and the divergence is written down.
+pub const PREVIEW_MD_CODE_PADDING_EM: f32 = 1.0;
+/// github.css: `pre { margin: 0 0 16px }` — a fence is a block sibling and gets
+/// a block sibling's air, not the mock-up's 6px (1284).
+pub const PREVIEW_MD_CODE_MARGIN_EM: f32 = 1.0;
+/// `.md-code { border-radius: 7px }` (mock-up 1284), carried for the day the
+/// fill pass grows rounded corners; the fence is a square block today.
+pub const PREVIEW_MD_CODE_RADIUS_LOGICAL_PX: f32 = 7.0;
+/// github.css: `hr { margin: 24px 0 }` — 1.5em, a heading's own top margin,
+/// because a rule and a heading are the same gesture at different volumes.
+pub const PREVIEW_MD_RULE_MARGIN_EM: f32 = 1.5;
+/// github.css: `table th, table td { padding: 6px 13px }` — .375em by .8125em.
+///
+/// The old numbers were the `.csv` grid's `4px 10px` (mock-up 610-613), borrowed
+/// whole so "the two tables in this product look like one table". They still
+/// nearly do: at 13px these come out one pixel larger on each axis, and the csv
+/// grid is set at 12px, so the two remain within a pixel of each other while the
+/// markdown table now carries the ratio its own theme states.
+pub const PREVIEW_MD_TABLE_PADDING_X_EM: f32 = 0.8125;
+pub const PREVIEW_MD_TABLE_PADDING_Y_EM: f32 = 0.375;
+
+/// The metrics a rendered markdown body is set in.
+///
+/// **Every field is a ratio of [`PREVIEW_MD_FONT_LOGICAL_PX`] resolved at one
+/// scale**, and the ratios are Typora's default GitHub theme — see the constants
+/// above, each of which cites the `github.css` rule it comes from. Nothing here
+/// is chosen freehand any more: the two fields that were (`paragraph_gap` and
+/// `list_indent`, written down in 2026-08-13 as "chosen, so that the day they
+/// are wrong there is a number to argue with") are now the theme's 1em and
+/// 1.875em, and the day arrived on 2026-08-16.
+///
+/// It lives here rather than beside the seat geometry because it is a property
+/// of **the document**, not of the furniture around it: the same numbers set the
+/// page in a pane, in a preview float and in a hover peek card.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewMarkdownMetrics {
+    pub font_size: f32,
+    pub line_height: f32,
+    pub padding_x: f32,
+    pub padding_y: f32,
+    /// The widest the prose column may be drawn, before the page's own padding.
+    /// See [`PREVIEW_PROSE_MEASURE_EM`] and [`markdown_measure_box`].
+    pub measure: f32,
+    /// A heading's air above and below — asymmetric, unlike everything the
+    /// mock-up inherited, because `24px 0 16px` is asymmetric.
+    pub heading_margin_top: f32,
+    pub heading_margin_bottom: f32,
+    /// The hairline under an `h1`/`h2`: one device pixel of `--border`.
+    pub heading_rule_thickness: f32,
+    pub code_margin: f32,
+    pub code_padding_x: f32,
+    pub code_padding_y: f32,
+    /// A fence's own size and leading — 85% and 1.45, not the body's.
+    pub code_font: f32,
+    pub code_line_height: f32,
+    /// `.md-code { border-radius: 7px }`, carried for the day the fill pass
+    /// grows rounded corners; the fence is a square block today.
+    pub code_radius: f32,
+    pub code_border: f32,
+    pub lang_font: f32,
+    /// `.md-code .lang { top: 5px; right: 9px }` (mock-up 1290).
+    pub lang_inset_top: f32,
+    pub lang_inset_right: f32,
+    /// A block sibling's 1em, collapsed between neighbours.
+    pub paragraph_gap: f32,
+    /// `ul, ol { padding-left: 30px }`, with room for the bullet inside it.
+    pub list_indent: f32,
+    /// `li + li { margin-top: .25em }`.
+    pub list_item_gap: f32,
+    /// `blockquote`'s accent bar.
+    pub quote_bar: f32,
+    /// `blockquote { padding: 0 15px }`, beside the bar.
+    pub quote_padding_x: f32,
+    /// Where a quoted line's text starts: the bar plus that padding.
+    pub quote_indent: f32,
+    /// See [`PREVIEW_MD_QUOTE_PADDING_Y_LOGICAL_PX`] — the house's own 2px, kept.
+    pub quote_padding_y: f32,
+    /// `<hr>` — one device pixel of `--border`, whatever the scale.
+    ///
+    /// **github.css says `height: .25em` and this house says one pixel**, which
+    /// is the deviation the mock-up already implies: every other divider this
+    /// window draws is a hairline (`--border`, one device pixel), and a rule four
+    /// pixels thick in the middle of a document would be the heaviest mark on the
+    /// page. The *margin* around it is Typora's; only the weight is the house's.
+    pub rule_thickness: f32,
+    pub rule_margin: f32,
+    pub table_border: f32,
+    pub table_padding_x: f32,
+    pub table_padding_y: f32,
+    /// The narrowest a column may be squeezed to, however short its cells are:
+    /// four characters' worth, below which a wrapped cell breaks every word.
+    pub table_min_column: f32,
+}
+
+impl PreviewMarkdownMetrics {
+    /// The size a heading of this level is set at — [`PREVIEW_MD_HEADING_LADDER`].
+    pub fn heading_font(&self, level: u8) -> f32 {
+        self.font_size * PREVIEW_MD_HEADING_LADDER[(level.clamp(1, 6) - 1) as usize]
+    }
+
+    /// The line box a heading of this level sits in — its own size at
+    /// [`PREVIEW_MD_HEADING_LINE_HEIGHT`], not the body's 1.6.
+    pub fn heading_line_height(&self, level: u8) -> f32 {
+        (self.heading_font(level) * PREVIEW_MD_HEADING_LINE_HEIGHT)
+            .round()
+            .max(1.0)
+    }
+
+    /// The `.3em` of air between an underlined heading's last line and its rule.
+    /// Zero for the levels that carry no rule.
+    pub fn heading_rule_padding(&self, level: u8) -> f32 {
+        if level > PREVIEW_MD_HEADING_RULE_LEVELS {
+            return 0.0;
+        }
+        (self.heading_font(level) * PREVIEW_MD_HEADING_RULE_PADDING_EM).round()
+    }
+
+    /// How much taller than its text an underlined heading's box is: the padding
+    /// and the hairline together. **One number, read by the pass that measures
+    /// the block and by the pass that paints it** — the rule this file's
+    /// neighbour states in as many words, applied to the one piece of chrome a
+    /// heading owns.
+    pub fn heading_rule_extent(&self, level: u8) -> f32 {
+        if level > PREVIEW_MD_HEADING_RULE_LEVELS {
+            return 0.0;
+        }
+        self.heading_rule_padding(level) + self.heading_rule_thickness
+    }
+}
+
+/// The metrics at one scale.
+pub fn markdown_metrics(scale: f32) -> PreviewMarkdownMetrics {
+    let font_size = PREVIEW_MD_FONT_LOGICAL_PX * scale;
+    let em = |ratio: f32| (font_size * ratio).round();
+    let hairline = scale.round().max(1.0);
+    let quote_bar = em(PREVIEW_MD_QUOTE_BAR_EM).max(1.0);
+    let quote_padding_x = em(PREVIEW_MD_QUOTE_PADDING_X_EM);
+    let code_font = font_size * PREVIEW_MD_CODE_FONT_RATIO;
+    PreviewMarkdownMetrics {
+        font_size,
+        line_height: (font_size * PREVIEW_MD_LINE_HEIGHT).round().max(1.0),
+        padding_x: (PREVIEW_MD_PADDING_X_LOGICAL_PX * scale).round(),
+        padding_y: (PREVIEW_MD_PADDING_Y_LOGICAL_PX * scale).round(),
+        measure: em(PREVIEW_PROSE_MEASURE_EM),
+        heading_margin_top: em(PREVIEW_MD_HEADING_MARGIN_TOP_EM),
+        heading_margin_bottom: em(PREVIEW_MD_HEADING_MARGIN_BOTTOM_EM),
+        heading_rule_thickness: hairline,
+        code_margin: em(PREVIEW_MD_CODE_MARGIN_EM),
+        code_padding_x: em(PREVIEW_MD_CODE_PADDING_EM),
+        code_padding_y: em(PREVIEW_MD_CODE_PADDING_EM),
+        code_font,
+        code_line_height: (code_font * PREVIEW_MD_CODE_LINE_HEIGHT).round().max(1.0),
+        code_radius: (PREVIEW_MD_CODE_RADIUS_LOGICAL_PX * scale).round(),
+        code_border: hairline,
+        lang_font: PREVIEW_MD_LANG_FONT_LOGICAL_PX * scale,
+        lang_inset_top: (5.0 * scale).round(),
+        lang_inset_right: (9.0 * scale).round(),
+        paragraph_gap: em(PREVIEW_MD_PARAGRAPH_GAP_EM),
+        list_indent: em(PREVIEW_MD_LIST_INDENT_EM),
+        list_item_gap: em(PREVIEW_MD_LIST_ITEM_GAP_EM),
+        quote_bar,
+        quote_padding_x,
+        quote_indent: quote_bar + quote_padding_x,
+        quote_padding_y: (PREVIEW_MD_QUOTE_PADDING_Y_LOGICAL_PX * scale).round(),
+        rule_thickness: hairline,
+        rule_margin: em(PREVIEW_MD_RULE_MARGIN_EM),
+        table_border: hairline,
+        table_padding_x: em(PREVIEW_MD_TABLE_PADDING_X_EM),
+        table_padding_y: em(PREVIEW_MD_TABLE_PADDING_Y_EM),
+        table_min_column: (font_size * 4.0).round(),
+    }
+}
+
+/// Where the prose column stands inside a pane's body: `(left, right)`.
+///
+/// **`#write { max-width: 860px; margin: 0 auto }`, in two numbers.** A pane
+/// narrower than the measure gets what it always got — the body inset by the
+/// page's padding, prose folding at the pane — because a measure imposed on a
+/// narrow column is a narrow column with a stripe of nothing beside it. A pane
+/// wider than the measure gets the column *centred*, with the leftover split
+/// evenly, which is the whole of the readability report: prose stops running the
+/// width of a maximised window and starts running the width of a page.
+///
+/// **Markdown only.** A source file, a diff and a csv keep the pane's full width
+/// — they are `pre`, their line breaks are the author's, and a measure applied
+/// to them would be a claim about a document that the document never made.
+///
+/// One derivation, read by the painter, by the layout pass and by the scroll-bar
+/// geometry alike: three places computing "where does the column start" is three
+/// chances for a fence's scrollbar to be tested where it is not drawn.
+pub fn markdown_measure_box(body: [f32; 4], metrics: PreviewMarkdownMetrics) -> (f32, f32) {
+    let inner = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+    if inner <= metrics.measure {
+        let left = body[0] + metrics.padding_x;
+        return (left, left + inner);
+    }
+    // Rounded, not floored: an odd number of leftover pixels would otherwise
+    // put the column half a pixel left of centre and blur every glyph on it.
+    let left = (body[0] + (body[2] - body[0] - metrics.measure) / 2.0).round();
+    (left, left + metrics.measure)
+}
+
+/// The vertical margin one markdown block asks for above and below itself.
+///
+/// **A pair rather than one number, which is the change** — every rule the
+/// mock-up inherited was symmetric, and github.css's headings are not:
+/// `margin: 24px 0 16px` puts more air above a heading than below it, and that
+/// asymmetry is what glues a heading to the paragraph it introduces instead of
+/// to the one it follows. The report's "headings glued to the paragraph above"
+/// is exactly a symmetric margin seen from the outside.
+///
+/// `previous` is the block before this one, and it answers the two `:first-child`
+/// rules github.css states: the first block of a document has no top margin (it
+/// would push the whole page down off its own padding), and neither does a
+/// heading that follows another heading (`## Section` directly under `# Title`
+/// is one masthead, not two).
+pub fn markdown_block_margins(
+    block: &MarkdownBlock,
+    previous: Option<&MarkdownBlock>,
+    metrics: PreviewMarkdownMetrics,
+) -> (f32, f32) {
+    let (top, bottom) = match block {
+        MarkdownBlock::Heading { .. } => {
+            let top = if matches!(previous, Some(MarkdownBlock::Heading { .. })) {
+                0.0
+            } else {
+                metrics.heading_margin_top
+            };
+            (top, metrics.heading_margin_bottom)
+        }
+        MarkdownBlock::Code { .. } => (metrics.code_margin, metrics.code_margin),
+        MarkdownBlock::Rule => (metrics.rule_margin, metrics.rule_margin),
+        // A list, a quote and a table all ask for a `<p>`'s own air: github.css
+        // names them in the same rule and nothing about them argues for more.
+        MarkdownBlock::List { .. }
+        | MarkdownBlock::Paragraph(_)
+        | MarkdownBlock::Quote(_)
+        | MarkdownBlock::Table { .. } => (metrics.paragraph_gap, metrics.paragraph_gap),
+    };
+    (if previous.is_none() { 0.0 } else { top }, bottom)
+}
+
 /// Split a comma-separated file into rows of cells.
 ///
 /// **Quote-aware**, which the mock-up's `r.split(",")` is not. The prototype's
@@ -4123,6 +4471,297 @@ mod tests {
             refused.refusal(),
             None,
             "and the card, with its file-shaped way out, stays down"
+        );
+    }
+
+    // ── slice: the page's measure (Typora's GitHub theme, 2026-08-16) ────────
+
+    /// PIN — **the page is set at Typora's proportions of *our* body size**, not
+    /// at Typora's pixels.
+    ///
+    /// The user's report on 2026-08-16 was that a long Chinese/English document
+    /// reads dense beside Typora: tight leading, paragraphs that touch, headings
+    /// glued to the prose above them, inline code the size of the words around
+    /// it. Every one of those is a ratio, and the ratios are `github.css`'s. This
+    /// test is the mapping table in executable form — if a number here moves, the
+    /// table in `docs/DESIGN.md` §7.1.3i moved with it or one of the two is
+    /// lying.
+    ///
+    /// MUTATION: put `line_height` back on the window's chrome constant of 1.4
+    /// and the first assertion goes red, which is the reported density in one
+    /// number.
+    #[test]
+    fn the_rendered_page_carries_typoras_ratios_of_the_houses_own_body_size() {
+        let metrics = markdown_metrics(1.0);
+        assert_eq!(
+            metrics.font_size, 13.0,
+            "the base is unchanged, deliberately"
+        );
+
+        // body { line-height: 1.6 } — was CHROME_LINE_HEIGHT, 1.4.
+        assert_eq!(metrics.line_height, 21.0);
+        // p, blockquote, ul, ol, table, pre { margin: 0 0 16px } — 1em.
+        assert_eq!(metrics.paragraph_gap, 13.0);
+        // #write { max-width: 860px } on a 16px body.
+        assert_eq!(metrics.measure, 702.0);
+
+        // h1 … h6 { font-size: 2 / 1.5 / 1.25 / 1 / .875 / .85 em }.
+        assert_eq!(metrics.heading_font(1), 26.0);
+        assert_eq!(metrics.heading_font(2), 19.5);
+        assert_eq!(metrics.heading_font(3), 16.25);
+        assert_eq!(metrics.heading_font(4), 13.0);
+        assert_eq!(metrics.heading_font(5), 13.0 * 0.875);
+        assert_eq!(metrics.heading_font(6), 13.0 * 0.85);
+        // … { line-height: 1.25 }, tighter than the body's 1.6.
+        assert_eq!(metrics.heading_line_height(1), 33.0);
+        assert_eq!(metrics.heading_line_height(4), 16.0);
+        // … { margin: 24px 0 16px } — 1.5em above, 1em below.
+        assert_eq!(metrics.heading_margin_top, 20.0);
+        assert_eq!(metrics.heading_margin_bottom, 13.0);
+
+        // ul, ol { padding-left: 30px } and li + li { margin-top: .25em }.
+        assert_eq!(metrics.list_indent, 24.0);
+        assert_eq!(metrics.list_item_gap, 3.0);
+
+        // blockquote { border-left: 4px; padding: 0 15px }.
+        assert_eq!(metrics.quote_bar, 3.0, "4px on 16 is 3px on 13 — unmoved");
+        assert_eq!(metrics.quote_padding_x, 12.0);
+        assert_eq!(metrics.quote_indent, 15.0);
+
+        // code, pre { font-size: 85% }; pre { line-height: 1.45; padding: 16px }.
+        assert_eq!(metrics.code_font, 13.0 * 0.85);
+        assert_eq!(metrics.code_line_height, 16.0);
+        assert_eq!(metrics.code_padding_x, 13.0);
+        assert_eq!(metrics.code_padding_y, 13.0);
+        assert_eq!(metrics.code_margin, 13.0);
+
+        // hr { margin: 24px 0 }, one hairline tall — the house's own weight.
+        assert_eq!(metrics.rule_margin, 20.0);
+        assert_eq!(metrics.rule_thickness, 1.0);
+
+        // table th, td { padding: 6px 13px; border: 1px }.
+        assert_eq!(metrics.table_padding_x, 11.0);
+        assert_eq!(metrics.table_padding_y, 5.0);
+        assert_eq!(metrics.table_border, 1.0);
+    }
+
+    /// PIN — **every one of those is a ratio and survives the scale**, which is
+    /// the whole reason they are written as ems rather than as pixels.
+    ///
+    /// At 150% nothing may be pinned to a logical pixel it happened to measure
+    /// once; the measure in particular has to grow with the type, or a document
+    /// on a 4K monitor would hold a column of 702 physical pixels with a mile of
+    /// nothing beside it.
+    ///
+    /// MUTATION: write any of these as a `* scale` of a hard pixel count instead
+    /// of a ratio of `font_size` and the multiples below stop lining up.
+    #[test]
+    fn the_measure_and_its_metrics_are_ratios_and_therefore_scale() {
+        let one = markdown_metrics(1.0);
+        let half = markdown_metrics(1.5);
+        assert_eq!(half.font_size, one.font_size * 1.5);
+        assert_eq!(
+            half.measure,
+            (13.0f32 * 1.5 * PREVIEW_PROSE_MEASURE_EM).round()
+        );
+        assert_eq!(
+            half.line_height,
+            (half.font_size * PREVIEW_MD_LINE_HEIGHT).round()
+        );
+        assert_eq!(half.paragraph_gap, half.font_size.round());
+        assert_eq!(half.code_font, half.font_size * PREVIEW_MD_CODE_FONT_RATIO);
+        assert!(half.list_indent > one.list_indent);
+        assert!(half.quote_indent > one.quote_indent);
+        assert!(half.heading_margin_top > one.heading_margin_top);
+    }
+
+    /// PIN — **a wide pane centres the prose column; a narrow one keeps the
+    /// pane** (`#write { max-width: 860px; margin: 0 auto }`).
+    ///
+    /// This is the report's headline complaint in two rectangles. A maximised
+    /// window used to set a paragraph of Chinese a hundred and forty characters
+    /// to the line, which is well past the width at which an eye finds the start
+    /// of the next one. Past the measure the leftover is split evenly and the
+    /// column stops growing; below it nothing changes, because a measure imposed
+    /// on a 400px pane is a 400px pane with a stripe of nothing down one side.
+    ///
+    /// MUTATION: drop the `inner <= measure` arm and the narrow case centres a
+    /// column it cannot afford; drop the centring and the wide case pins the
+    /// column to the left edge with the whole surplus on the right.
+    #[test]
+    fn a_pane_wider_than_the_measure_centres_the_column_and_a_narrower_one_does_not() {
+        let metrics = markdown_metrics(1.0);
+
+        let narrow = [0.0, 0.0, 400.0, 600.0];
+        let (left, right) = markdown_measure_box(narrow, metrics);
+        assert_eq!(left, metrics.padding_x, "the page's own padding, as before");
+        assert_eq!(right, 400.0 - metrics.padding_x);
+        assert_eq!(right - left, 368.0);
+
+        let wide = [100.0, 0.0, 1300.0, 600.0];
+        let (left, right) = markdown_measure_box(wide, metrics);
+        assert_eq!(
+            right - left,
+            metrics.measure,
+            "the column stops at the measure"
+        );
+        assert_eq!(
+            left - wide[0],
+            wide[2] - right,
+            "and what is left over is split evenly — `margin: 0 auto`"
+        );
+        assert_eq!(left, 349.0);
+        assert_eq!(right, 1051.0);
+
+        // The hinge is exactly the measure plus the two paddings; a pane one
+        // pixel narrower than that is still a pane and gets the pane's rule.
+        let hinge = metrics.measure + metrics.padding_x * 2.0;
+        let (left, right) = markdown_measure_box([0.0, 0.0, hinge, 600.0], metrics);
+        assert_eq!(
+            (left, right),
+            (metrics.padding_x, hinge - metrics.padding_x)
+        );
+        let (left, _) = markdown_measure_box([0.0, 0.0, hinge + 2.0, 600.0], metrics);
+        assert_eq!(
+            left,
+            metrics.padding_x + 1.0,
+            "one pixel over and it centres"
+        );
+    }
+
+    /// PIN — **a heading gets more air above it than below, and none at all when
+    /// it is the first thing on the page or the second heading in a row.**
+    ///
+    /// `h1 … h6 { margin: 24px 0 16px }` plus github.css's two `:first-child`
+    /// rules. The asymmetry is the fix for "headings glued to the paragraph
+    /// above": a symmetric margin puts a heading exactly as far from the prose it
+    /// follows as from the prose it introduces, so it belongs to neither.
+    ///
+    /// MUTATION: return `(heading_margin_top, heading_margin_top)` for a heading
+    /// and the third assertion goes red; drop the `previous.is_none()` clamp and
+    /// the first block of every document starts one and a half ems below its own
+    /// padding.
+    #[test]
+    fn a_heading_takes_its_air_from_above_and_the_first_block_takes_none() {
+        let metrics = markdown_metrics(1.0);
+        let heading = |level: u8| MarkdownBlock::Heading {
+            level,
+            spans: parse_inline("Title"),
+        };
+        let prose = MarkdownBlock::Paragraph(parse_inline("Body."));
+
+        // `:first-child` — nothing above the first block, whatever it is.
+        assert_eq!(markdown_block_margins(&heading(1), None, metrics).0, 0.0);
+        assert_eq!(markdown_block_margins(&prose, None, metrics).0, 0.0);
+
+        let (top, bottom) = markdown_block_margins(&heading(2), Some(&prose), metrics);
+        assert_eq!((top, bottom), (20.0, 13.0), "24px 0 16px, in ems of 13");
+        assert!(top > bottom, "which is what binds it to the prose below it");
+
+        // `## Section` directly under `# Title` is one masthead, not two.
+        assert_eq!(
+            markdown_block_margins(&heading(2), Some(&heading(1)), metrics).0,
+            0.0
+        );
+
+        // Every other block is a block sibling and gets a block sibling's 1em;
+        // a fence gets one too now, where the mock-up gave it 6px, and a rule
+        // gets a heading's own 1.5em.
+        for block in [
+            MarkdownBlock::Paragraph(parse_inline("x")),
+            MarkdownBlock::Quote(vec![parse_inline("x")]),
+            MarkdownBlock::List {
+                ordered: None,
+                items: vec![parse_inline("x")],
+            },
+            MarkdownBlock::Table {
+                rows: vec![vec![parse_inline("x")]],
+            },
+        ] {
+            assert_eq!(
+                markdown_block_margins(&block, Some(&prose), metrics),
+                (metrics.paragraph_gap, metrics.paragraph_gap),
+                "{block:?} is a block sibling"
+            );
+        }
+        let fence = MarkdownBlock::Code {
+            lang: None,
+            text: "x".to_owned(),
+        };
+        assert_eq!(
+            markdown_block_margins(&fence, Some(&prose), metrics),
+            (metrics.code_margin, metrics.code_margin)
+        );
+        assert_eq!(
+            markdown_block_margins(&MarkdownBlock::Rule, Some(&prose), metrics),
+            (metrics.rule_margin, metrics.rule_margin)
+        );
+    }
+
+    /// PIN — **only `h1` and `h2` carry a rule, and it is a hairline.**
+    ///
+    /// `h1, h2 { padding-bottom: .3em; border-bottom: 1px solid }`. The padding
+    /// is an em of the *heading's own* size, which is why the rule under an `h1`
+    /// stands further off its letters than the one under an `h2` — and the extent
+    /// is one number so the pass that reserves the space and the pass that paints
+    /// the quad can never disagree about it.
+    ///
+    /// MUTATION: raise `PREVIEW_MD_HEADING_RULE_LEVELS` to 3 and an `###` grows a
+    /// line under it, which is four rules to a page in any real document.
+    #[test]
+    fn the_first_two_heading_levels_are_underlined_and_no_others_are() {
+        let metrics = markdown_metrics(1.0);
+        assert_eq!(metrics.heading_rule_padding(1), 8.0, ".3em of 26");
+        assert_eq!(metrics.heading_rule_padding(2), 6.0, ".3em of 19.5");
+        assert_eq!(metrics.heading_rule_extent(1), 9.0);
+        assert_eq!(metrics.heading_rule_extent(2), 7.0);
+        for level in 3..=6 {
+            assert_eq!(metrics.heading_rule_padding(level), 0.0);
+            assert_eq!(metrics.heading_rule_extent(level), 0.0);
+        }
+        assert_eq!(
+            metrics.heading_rule_thickness, 1.0,
+            "a hairline, like every other divider this window draws"
+        );
+    }
+
+    /// PIN — the fixture the report was made against still carries every block
+    /// the new metrics have an opinion about.
+    ///
+    /// A guard rather than a measurement: `stress.md` grew a list section on
+    /// 2026-08-16 so the item gap and the 30px indent have something to be
+    /// asserted against, and the rest of the suite reads this file for the blocks
+    /// that refuse to reflow. If a later edit takes one of them out, the tests
+    /// that depend on it fail somewhere far less obvious than here.
+    #[test]
+    fn the_stress_sample_carries_every_block_the_measure_has_a_rule_for() {
+        let source = include_str!("../../../test-assets/preview-samples/stress.md");
+        let blocks = parse_markdown(source);
+        let count = |f: fn(&MarkdownBlock) -> bool| blocks.iter().filter(|b| f(b)).count();
+        assert!(count(|b| matches!(b, MarkdownBlock::Heading { level: 1, .. })) >= 1);
+        assert!(count(|b| matches!(b, MarkdownBlock::Heading { level: 2, .. })) >= 4);
+        assert!(count(|b| matches!(b, MarkdownBlock::Paragraph(_))) >= 2);
+        assert!(count(|b| matches!(b, MarkdownBlock::Code { .. })) >= 1);
+        assert!(count(|b| matches!(b, MarkdownBlock::Table { .. })) == 2);
+        assert!(count(|b| matches!(b, MarkdownBlock::Quote(_))) >= 1);
+        assert!(count(|b| matches!(b, MarkdownBlock::Rule)) >= 1);
+        let lists: Vec<&MarkdownBlock> = blocks
+            .iter()
+            .filter(|b| matches!(b, MarkdownBlock::List { .. }))
+            .collect();
+        assert_eq!(lists.len(), 2, "a bulleted list and an ordered one");
+        let Some(MarkdownBlock::List { items, .. }) = lists.first().copied() else {
+            unreachable!("filtered above")
+        };
+        assert!(
+            items.len() >= 3,
+            "enough items for `li + li` to mean something"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.iter().any(|span| span.style == SpanStyle::Code)),
+            "and one of them carries an inline code span, which is set at 85%"
         );
     }
 }

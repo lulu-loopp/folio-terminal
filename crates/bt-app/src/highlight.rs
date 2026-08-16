@@ -263,6 +263,7 @@ impl Highlighting {
             color: token.ink(ink),
             mono: true,
             bold: false,
+            font_scale: 1.0,
         };
         let spans = self.lines.get(line).filter(|spans| !spans.is_empty());
         let Some(spans) = spans else {

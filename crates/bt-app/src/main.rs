@@ -1043,33 +1043,12 @@ const PREVIEW_IMAGE_GAP_LOGICAL_PX: f32 = 10.0;
 const PREVIEW_IMAGE_FIT_WIDTH_FRACTION: f32 = 0.86;
 const PREVIEW_IMAGE_FIT_HEIGHT_FRACTION: f32 = 0.70;
 
-/// The vertical margin one markdown block asks for on each side.
-///
-/// One number per block rather than a top and a bottom, because every rule the
-/// mock-up inherits is symmetric — `.md-h { margin: 2px 0 2px }` inside a
-/// preview (609), `.md-code { margin: 6px 0 }` (1203), and a browser's `1em` on
-/// `<p>` and `<ul>`.
-fn markdown_block_margin(
-    block: &preview::MarkdownBlock,
-    metrics: seats::PreviewMarkdownMetrics,
-) -> f32 {
-    match block {
-        preview::MarkdownBlock::Heading { .. } => metrics.heading_margin,
-        preview::MarkdownBlock::Code { .. } => metrics.code_margin,
-        // A rule, a quote and a table all ask for a `<p>`'s own air: they are
-        // block siblings of a paragraph and nothing about them argues for more.
-        preview::MarkdownBlock::List { .. }
-        | preview::MarkdownBlock::Paragraph(_)
-        | preview::MarkdownBlock::Quote(_)
-        | preview::MarkdownBlock::Table { .. }
-        | preview::MarkdownBlock::Rule => metrics.paragraph_gap,
-    }
-}
-
 /// One markdown block's spans, as runs the shaper can set.
 ///
 /// `heading` is the level's font weight decision and nothing else — *which* size
-/// a heading is set at belongs to the rectangle, because a run carries no size.
+/// a heading is set at belongs to the rectangle, because a run carries no size
+/// of its own. It carries a *ratio* of the rectangle's, which is the one thing
+/// an inline code span needs and the only caller that asks for it.
 fn markdown_runs(
     spans: &[preview::Span],
     palette: &bt_render::ChromePalette,
@@ -1084,24 +1063,32 @@ fn markdown_runs(
                 color: palette.preview_body_text,
                 mono: false,
                 bold: true,
+                font_scale: 1.0,
             },
             preview::SpanStyle::Plain => bt_render::PreviewRun {
                 text: span.text.clone(),
                 color: palette.files_row_text,
                 mono: false,
                 bold: false,
+                font_scale: 1.0,
             },
             preview::SpanStyle::Bold => bt_render::PreviewRun {
                 text: span.text.clone(),
                 color: palette.preview_body_text,
                 mono: false,
                 bold: true,
+                font_scale: 1.0,
             },
+            // github.css `code { font-size: 85% }` — the one run in a markdown
+            // document that is not set at its paragraph's own size. See
+            // [`preview::PREVIEW_MD_CODE_FONT_RATIO`] for why a monospace face
+            // beside a sans one has to be asked to be smaller.
             preview::SpanStyle::Code => bt_render::PreviewRun {
                 text: span.text.clone(),
                 color: palette.preview_code_text,
                 mono: true,
                 bold: heading,
+                font_scale: preview::PREVIEW_MD_CODE_FONT_RATIO,
             },
             // The accent, and no underline: the accent alone is what every
             // reader already reads as a link, and an underline under text that
@@ -1111,6 +1098,7 @@ fn markdown_runs(
                 color: palette.accent,
                 mono: false,
                 bold: heading,
+                font_scale: 1.0,
             },
         })
         .collect()
@@ -1135,6 +1123,7 @@ fn markdown_list_marker(
         color: palette.files_row_muted,
         mono: false,
         bold: false,
+        font_scale: 1.0,
     }
 }
 
@@ -1220,6 +1209,7 @@ fn mono_paragraph(
             color,
             mono: true,
             bold: false,
+            font_scale: 1.0,
         }],
         rect,
         font_size_px,
@@ -1688,6 +1678,7 @@ fn build_preview_table_body(
                     },
                     mono: true,
                     bold: index == 0,
+                    font_scale: 1.0,
                 }],
                 rect: text_box,
                 font_size_px: geometry.font_size,
@@ -1766,8 +1757,13 @@ fn build_preview_markdown_body(
     // width in the extent with no way to spend it: a wide table simply could not
     // be scrolled at all. Both are the same mistake, and the answer both times is
     // that the scrolling region is the block. It is what GitHub and Typora do.
-    let left = body[0] + metrics.padding_x;
-    let right = left + (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+    //
+    // **And the column has a maximum width** (user report, 2026-08-16): the same
+    // `#write { max-width: 860px; margin: 0 auto }` Typora sets its own page in.
+    // A fence and a table are constrained to this box exactly as the prose is —
+    // they scroll inside it, which is what keeps a wide table from being the one
+    // block on the page that ignores the measure.
+    let (left, right) = preview::markdown_measure_box(body, metrics);
     let origin = body[1] + metrics.padding_y - scroll[1];
     let mut quads = Vec::new();
     let mut paragraphs = Vec::new();
@@ -1842,9 +1838,26 @@ fn build_preview_markdown_body(
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
                 note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
+                // `h1, h2 { border-bottom: 1px solid }` — the hairline sits at
+                // the very bottom of the block's box, `.3em` of the heading's own
+                // size below its last line. The extent is asked of the metrics
+                // rather than added up here, because the measuring pass reserved
+                // the same number and the two must not be able to disagree.
+                let rule = metrics.heading_rule_extent(*level);
+                if rule > 0.0 {
+                    quads.push(bt_render::PreviewQuad {
+                        rect: [
+                            left,
+                            top + height - metrics.heading_rule_thickness,
+                            right,
+                            top + height,
+                        ],
+                        color: palette.preview_grid_line,
+                    });
+                }
                 paragraphs.push(bt_render::PreviewParagraph {
                     runs: markdown_runs(spans, palette, true),
-                    rect: [left, top, right, top + height],
+                    rect: [left, top, right, top + height - rule],
                     font_size_px: metrics.heading_font(*level),
                     line_height_px: metrics.heading_line_height(*level),
                     wrap: true,
@@ -1880,11 +1893,20 @@ fn build_preview_markdown_body(
                     // The marker rides in front of the spans as a run of its
                     // own, so the first span is the paragraph's *second* run.
                     note_link_sites(&mut links, spans, (region, paragraphs.len(), 1));
+                    // `li + li { margin-top: .25em }`: the gap the measuring
+                    // pass put in the *top* of every row after the first is
+                    // spent here, so the text starts below it rather than the
+                    // air ending up under the item instead of over it.
+                    let gap = if index == 0 {
+                        0.0
+                    } else {
+                        metrics.list_item_gap
+                    };
                     paragraphs.push(bt_render::PreviewParagraph {
                         runs: markdown_item_runs(spans, *ordered, index, palette),
                         rect: [
                             left + metrics.list_indent,
-                            item_top,
+                            item_top + gap,
                             right,
                             item_top + item_height,
                         ],
@@ -1914,8 +1936,27 @@ fn build_preview_markdown_body(
                         .copied()
                         .unwrap_or(metrics.line_height);
                     note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
+                    // `blockquote { color: var(--ink3) }` — a quote is somebody
+                    // else talking and is set a shade back from the page's own
+                    // voice, which is github.css's rule and the reason the bar
+                    // alone was never enough to make a quote read as a quote.
+                    // The bar keeps the accent; only the ink steps back.
+                    // The runs map one to one onto the spans, which is what lets
+                    // the ink be decided from the *style* rather than sniffed
+                    // off the colour already there — a code span keeps the
+                    // fence's ink and a link keeps the accent, exactly as `th`
+                    // recolours its own row one arm further down.
+                    let mut runs = markdown_runs(spans, palette, false);
+                    for (run, span) in runs.iter_mut().zip(spans) {
+                        if matches!(
+                            span.style,
+                            preview::SpanStyle::Plain | preview::SpanStyle::Bold
+                        ) {
+                            run.color = palette.files_row_muted;
+                        }
+                    }
                     paragraphs.push(bt_render::PreviewParagraph {
-                        runs: markdown_runs(spans, palette, false),
+                        runs,
                         rect: [
                             left + metrics.quote_indent,
                             line_top,
@@ -1989,16 +2030,18 @@ fn build_preview_markdown_body(
                             fence[0] + metrics.code_border + metrics.code_padding_x,
                             line_top,
                             fence[2],
-                            line_top + metrics.line_height,
+                            line_top + metrics.code_line_height,
                         ],
-                        font_size_px: metrics.font_size,
-                        line_height_px: metrics.line_height,
+                        // `pre { font-size: 85%; line-height: 1.45 }`, the same
+                        // two numbers the block's height was reserved from.
+                        font_size_px: metrics.code_font,
+                        line_height_px: metrics.code_line_height,
                         wrap: false,
                         letter_spacing_em: 0.0,
                         align_right: false,
                         align_center: false,
                     });
-                    line_top += metrics.line_height;
+                    line_top += metrics.code_line_height;
                 }
                 if let Some(lang) = lang {
                     // `.md-code .lang { position: absolute; top: 5px; right: 9px }`
@@ -2008,6 +2051,7 @@ fn build_preview_markdown_body(
                             color: palette.preview_code_lang,
                             mono: false,
                             bold: false,
+                            font_scale: 1.0,
                         }],
                         rect: [
                             fence[0],
@@ -2278,8 +2322,7 @@ fn preview_wide_blocks<'a>(
     scroll: [f32; 2],
     (blocks, layout): (&'a [preview::MarkdownBlock], &'a [MarkdownBlockLayout]),
 ) -> impl Iterator<Item = (usize, [f32; 4], f32)> + 'a {
-    let left = body[0] + metrics.padding_x;
-    let right = left + (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+    let (left, right) = preview::markdown_measure_box(body, metrics);
     let origin = body[1] + metrics.padding_y - scroll[1];
     blocks
         .iter()
@@ -2368,6 +2411,7 @@ fn markdown_fence_width(
                 color: [0, 0, 0],
                 mono: true,
                 bold: false,
+                font_scale: 1.0,
             }];
             measure(&runs)
         })
@@ -19240,7 +19284,12 @@ impl Runtime {
             } = std::mem::take(&mut pane.doc)
         {
             let metrics = seats::preview_markdown_metrics(scale);
-            let width = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+            // **The width blocks are laid out in is the measure box's**, not the
+            // pane's: past `PREVIEW_PROSE_MEASURE_EM` the two differ, and a
+            // paragraph wrapped to the pane and painted into the column would
+            // reserve fewer rows than it draws.
+            let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
+            let width = (measure_right - measure_left).max(1.0);
             let _ = layout;
             let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics);
             self.preview_pane_mut(surface).doc = PreviewDocument::Markdown {
@@ -19334,7 +19383,8 @@ impl Runtime {
             preview::PreviewView::Markdown => {
                 let metrics = seats::preview_markdown_metrics(scale);
                 let blocks = preview::parse_markdown(&content);
-                let width = (body[2] - body[0] - metrics.padding_x * 2.0).max(1.0);
+                let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
+                let width = (measure_right - measure_left).max(1.0);
                 let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics);
                 let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics);
                 PreviewDocument::Markdown {
@@ -19396,11 +19446,14 @@ impl Runtime {
                     }
                 }
                 preview::MarkdownBlock::Code { lang, text } => MarkdownBlockIntrinsic {
+                    // The fence's own 85% and its own 1.45, not the body's: a
+                    // longest line measured at the prose size would reserve a
+                    // scroll extent the fence never uses.
                     width: markdown_fence_width(text, metrics, |runs| {
                         self.renderer.measure_preview_paragraph_width(
                             runs,
-                            metrics.font_size,
-                            metrics.line_height,
+                            metrics.code_font,
+                            metrics.code_line_height,
                         )
                     }),
                     rows: text.lines().count().max(1),
@@ -19456,19 +19509,27 @@ fn lay_markdown_out(
     {
         let mut layout = Vec::with_capacity(blocks.len());
         let mut top = 0.0_f32;
-        let mut previous_margin = 0.0_f32;
+        let mut previous_bottom = 0.0_f32;
+        let mut previous: Option<&preview::MarkdownBlock> = None;
         for (block, intrinsic) in blocks.iter().zip(intrinsic) {
             let mut measured = measure_markdown_block(block, intrinsic, width, metrics, measure);
-            let margin = markdown_block_margin(block, metrics);
+            // **Asymmetric since 2026-08-16**: github.css gives a heading more
+            // air above it than below (`margin: 24px 0 16px`), which is what
+            // binds a heading to the paragraph it introduces instead of to the
+            // one it follows. `previous` is what answers the two `:first-child`
+            // rules; see [`preview::markdown_block_margins`].
+            let (margin_top, margin_bottom) =
+                preview::markdown_block_margins(block, previous, metrics);
             // **Adjacent margins collapse**, which is the rule the prototype gets
             // free from a browser and this window has to keep on purpose. Without
             // it a list's bottom margin and a heading's top margin add up, and —
             // worse in practice — whichever of the two is omitted leaves the
             // heading sitting on the last bullet.
-            top += previous_margin.max(margin);
+            top += previous_bottom.max(margin_top);
             measured.top = top;
             top += measured.height;
-            previous_margin = margin;
+            previous_bottom = margin_bottom;
+            previous = Some(block);
             layout.push(measured);
         }
         layout
@@ -19497,7 +19558,12 @@ fn measure_markdown_block(
                 let runs = markdown_runs(spans, &palette, true);
                 let font = metrics.heading_font(*level);
                 let line = metrics.heading_line_height(*level);
-                MarkdownBlockLayout::solid(measure(&runs, width, font, line))
+                // `h1, h2 { padding-bottom: .3em; border-bottom: 1px solid }` —
+                // the padding and the hairline are part of the block's own box,
+                // so the paragraph under it starts below the rule and not on it.
+                MarkdownBlockLayout::solid(
+                    measure(&runs, width, font, line) + metrics.heading_rule_extent(*level),
+                )
             }
             preview::MarkdownBlock::List { ordered, items } => {
                 let inner = (width - metrics.list_indent).max(1.0);
@@ -19506,7 +19572,16 @@ fn measure_markdown_block(
                     .enumerate()
                     .map(|(index, spans)| {
                         let runs = markdown_item_runs(spans, *ordered, index, &palette);
-                        measure(&runs, inner, metrics.font_size, metrics.line_height)
+                        let gap = if index == 0 {
+                            0.0
+                        } else {
+                            metrics.list_item_gap
+                        };
+                        // `li + li { margin-top: .25em }` — the gap rides in the
+                        // *row*, above its text, because the painter walks these
+                        // heights and a gap it had to add itself is a gap the
+                        // measuring pass did not reserve.
+                        gap + measure(&runs, inner, metrics.font_size, metrics.line_height)
                     })
                     .collect();
                 MarkdownBlockLayout::rows(rows, 0.0)
@@ -19556,7 +19631,11 @@ fn measure_markdown_block(
                     ..MarkdownBlockLayout::solid(
                         metrics.code_border * 2.0
                             + metrics.code_padding_y * 2.0
-                            + metrics.line_height * intrinsic.rows as f32,
+                            // `pre { font-size: 85%; line-height: 1.45 }` — a
+                            // fence has its own leading, tighter than the prose
+                            // around it, because code does not want prose air
+                            // between its lines.
+                            + metrics.code_line_height * intrinsic.rows as f32,
                     )
                 }
             }
@@ -19934,6 +20013,7 @@ impl Runtime {
                     color: palette.files_row_muted,
                     mono: false,
                     bold: false,
+                    font_scale: 1.0,
                 }],
                 rect: [body[0], top, body[2], top + line_height],
                 font_size_px: font_size,
@@ -49043,8 +49123,15 @@ mod tests {
 
         // Three items that wrap to one, three and two lines. Uneven on purpose:
         // equal rows would let the buggy painter answer right by accident.
+        //
+        // **The rows carry `li + li { margin-top: .25em }` since 2026-08-16**
+        // (§7.1.3i): the gap lives in the *top* of every row after the first,
+        // exactly as `measure_markdown_block` now reserves it, so the property
+        // being asserted is unchanged — the box is what the measurement asked
+        // for — and the text inside it starts below its own margin.
         let blocks = preview::parse_markdown("- one\n- two\n- three\n");
-        let heights = vec![line, line * 3.0, line * 2.0];
+        let gap = metrics.list_item_gap;
+        let heights = vec![line, gap + line * 3.0, gap + line * 2.0];
         let layout = vec![MarkdownBlockLayout::rows(heights.clone(), 0.0)];
         let built = markdown_body(
             body,
@@ -49066,12 +49153,15 @@ mod tests {
         assert_eq!(items.len(), 3, "one paragraph per item");
         let mut expected_top = origin;
         for (index, item) in items.iter().enumerate() {
+            let margin = if index == 0 { 0.0 } else { gap };
             assert_eq!(
-                item.rect[1], expected_top,
-                "item {index} starts where the items above it ended"
+                item.rect[1],
+                expected_top + margin,
+                "item {index} starts where the items above it ended, plus its own \
+                 `li + li` margin"
             );
             assert_eq!(
-                item.rect[3] - item.rect[1],
+                item.rect[3] - expected_top,
                 heights[index],
                 "item {index} is given the box its own wrap was measured into"
             );
@@ -50293,7 +50383,8 @@ mod tests {
         let cell = 8.0_f32;
         let mut layout = Vec::with_capacity(blocks.len());
         let mut top = 0.0_f32;
-        let mut previous = 0.0_f32;
+        let mut previous_bottom = 0.0_f32;
+        let mut previous_block: Option<&preview::MarkdownBlock> = None;
         for block in &blocks {
             let mut measured = match block {
                 preview::MarkdownBlock::Code { text, .. } => MarkdownBlockLayout {
@@ -50340,11 +50431,16 @@ mod tests {
                 preview::MarkdownBlock::Rule => MarkdownBlockLayout::solid(metrics.rule_thickness),
                 _ => MarkdownBlockLayout::solid(metrics.line_height * 2.0),
             };
-            let margin = markdown_block_margin(block, metrics);
-            top += previous.max(margin);
+            // Updated 2026-08-16 with the metrics: margins are a top and a
+            // bottom now, and the block before this one is what answers the two
+            // `:first-child` rules. See `preview::markdown_block_margins`.
+            let (margin_top, margin_bottom) =
+                preview::markdown_block_margins(block, previous_block, metrics);
+            top += previous_bottom.max(margin_top);
             measured.top = top;
             top += measured.height;
-            previous = margin;
+            previous_bottom = margin_bottom;
+            previous_block = Some(block);
             layout.push(measured);
         }
         let widest = layout.iter().map(|b| b.width).fold(0.0_f32, f32::max);
@@ -50974,6 +51070,240 @@ mod tests {
     /// Whether one rectangle is wholly inside another.
     fn inside(rect: [f32; 4], outer: [f32; 4]) -> bool {
         rect[0] >= outer[0] && rect[1] >= outer[1] && rect[2] <= outer[2] && rect[3] <= outer[3]
+    }
+
+    /// PIN — **the painter puts the document in the measure's column**, centred
+    /// when the pane can afford it and flush to the pane when it cannot
+    /// (§7.1.3i; user report 2026-08-16).
+    ///
+    /// The geometry itself is `preview::markdown_measure_box`'s and is pinned
+    /// beside it; what is asserted here is that the *painter* asks — a body that
+    /// went on computing `body[0] + padding_x` for itself would draw the prose
+    /// across a maximised window while the layout pass wrapped it at 702, which
+    /// is a paragraph that reserves four rows and paints two.
+    ///
+    /// MUTATION: put `let left = body[0] + metrics.padding_x` back at the top of
+    /// `build_preview_markdown_body` and the wide case goes red.
+    #[test]
+    fn a_pane_wider_than_the_measure_is_painted_into_a_centred_column() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let blocks = preview::parse_markdown("Prose enough to have an edge.\n");
+        let layout = vec![MarkdownBlockLayout::solid(metrics.line_height)];
+        let column = |body: [f32; 4]| {
+            let built = markdown_body(
+                body,
+                metrics,
+                [0.0, 0.0],
+                rested_bars(&[]),
+                (&blocks, &layout),
+                &palette,
+            );
+            let rect = built.paragraphs[0].rect;
+            (rect[0], rect[2])
+        };
+
+        let narrow = [0.0, 0.0, 500.0, 600.0];
+        assert_eq!(
+            column(narrow),
+            (metrics.padding_x, 500.0 - metrics.padding_x),
+            "a pane under the measure keeps the pane, exactly as before"
+        );
+
+        let wide = [0.0, 0.0, 1600.0, 600.0];
+        let (left, right) = column(wide);
+        assert_eq!(right - left, metrics.measure, "the column stops growing");
+        assert_eq!(
+            left - wide[0],
+            wide[2] - right,
+            "and it is centred in the pane"
+        );
+    }
+
+    /// PIN — **`h1` and `h2` are painted with a hairline under them, and no
+    /// other level is** (`h1, h2 { border-bottom: 1px solid }`, §7.1.3i).
+    ///
+    /// The rule is a quad in `--border`, drawn at the very bottom of the block's
+    /// own box, and the heading's text box stops short of it by exactly the
+    /// extent the measuring pass reserved — a rule painted into space nobody
+    /// reserved is a rule printed over the first line of the next paragraph.
+    ///
+    /// MUTATION: drop the `- rule` from the heading's text rectangle and the
+    /// last assertion goes red, which is a title sitting on its own underline.
+    #[test]
+    fn the_first_two_heading_levels_are_painted_with_a_rule_under_them() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 600.0, 900.0];
+        let blocks = preview::parse_markdown("# One\n\n## Two\n\n### Three\n");
+        assert_eq!(blocks.len(), 3, "three headings and nothing else");
+        let mut layout = Vec::new();
+        let mut top = 0.0_f32;
+        for level in 1..=3u8 {
+            let height = metrics.heading_line_height(level) + metrics.heading_rule_extent(level);
+            layout.push(MarkdownBlockLayout {
+                top,
+                ..MarkdownBlockLayout::solid(height)
+            });
+            top += height + metrics.heading_margin_bottom;
+        }
+        let built = markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &layout),
+            &palette,
+        );
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        let origin = body[1] + metrics.padding_y;
+
+        let rules: Vec<&bt_render::PreviewQuad> = built
+            .quads
+            .iter()
+            .filter(|quad| quad.color == palette.preview_grid_line)
+            .collect();
+        assert_eq!(
+            rules.len(),
+            2,
+            "one under the h1, one under the h2, and no more"
+        );
+        for (index, rule) in rules.iter().enumerate() {
+            let placed = &layout[index];
+            let bottom = origin + placed.top + placed.height;
+            assert_eq!(
+                rule.rect,
+                [left, bottom - metrics.heading_rule_thickness, right, bottom],
+                "the rule for level {} runs the column's own width at the foot of \
+                 its block",
+                index + 1
+            );
+        }
+        for (index, paragraph) in built.paragraphs.iter().enumerate() {
+            let level = index as u8 + 1;
+            let placed = &layout[index];
+            assert_eq!(
+                paragraph.rect[3],
+                origin + placed.top + placed.height - metrics.heading_rule_extent(level),
+                "level {level}'s text stops above its own rule, not on it"
+            );
+            assert_eq!(paragraph.font_size_px, metrics.heading_font(level));
+            assert_eq!(paragraph.line_height_px, metrics.heading_line_height(level));
+        }
+    }
+
+    /// PIN — **a quoted line steps back to the muted ink; its bar keeps the
+    /// accent, and the styles that carry their own ink keep theirs**
+    /// (`blockquote { color: muted }`, §7.1.3i).
+    ///
+    /// The ink is decided from the *span's style*, not from the colour already on
+    /// the run, which is what lets a code span inside a quote stay the fence's
+    /// own ink and a link stay the accent — a blanket recolour of the paragraph
+    /// would swallow both.
+    ///
+    /// MUTATION: recolour every run and the code span's assertion goes red;
+    /// recolour none and the first two go red, which is the report's "quotes read
+    /// like body text with a stripe beside them".
+    #[test]
+    fn a_quoted_line_steps_back_to_the_muted_ink_and_keeps_its_accent_bar() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 600.0, 600.0];
+        let blocks = preview::parse_markdown("> quoted **strongly** with `code` in it\n");
+        let layout = vec![MarkdownBlockLayout::rows(
+            vec![metrics.line_height],
+            metrics.quote_padding_y * 2.0,
+        )];
+        let built = markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &layout),
+            &palette,
+        );
+        let (left, _) = preview::markdown_measure_box(body, metrics);
+
+        let bar = built.quads.first().expect("a quote draws its bar first");
+        assert_eq!(bar.color, palette.accent, "the bar keeps the accent");
+        assert_eq!(bar.rect[2] - bar.rect[0], metrics.quote_bar);
+        assert_eq!(bar.rect[0], left);
+
+        let line = &built.paragraphs[0];
+        assert_eq!(
+            line.rect[0],
+            left + metrics.quote_indent,
+            "the text starts beside the bar, `padding: 0 15px` away from it"
+        );
+        let plain: Vec<[u8; 3]> = line
+            .runs
+            .iter()
+            .filter(|run| !run.mono)
+            .map(|run| run.color)
+            .collect();
+        assert!(
+            plain.iter().all(|color| *color == palette.files_row_muted),
+            "prose and emphasis alike step back: {plain:?}"
+        );
+        let code = line
+            .runs
+            .iter()
+            .find(|run| run.mono)
+            .expect("the fixture quotes a code span");
+        assert_eq!(
+            code.color, palette.preview_code_text,
+            "and code keeps its own"
+        );
+        assert_eq!(code.font_scale, preview::PREVIEW_MD_CODE_FONT_RATIO);
+    }
+
+    /// PIN — **a fence is set at 85% of the body on its own 1.45 leading**
+    /// (`pre { font-size: 85%; line-height: 1.45; padding: 16px }`, §7.1.3i).
+    ///
+    /// The height the layout pass reserved is `code_line_height` a row, so a
+    /// painter still stepping by the body's `line_height` would draw the last
+    /// line of a long fence outside its own ground.
+    ///
+    /// MUTATION: put `metrics.line_height` back on either the paragraph or the
+    /// step and the rows stop landing on the reservation.
+    #[test]
+    fn a_fence_is_set_at_its_own_size_and_stepped_at_its_own_leading() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 600.0, 600.0];
+        let blocks = preview::parse_markdown("```\nfn a() {}\nfn b() {}\n```\n");
+        let rows = 2.0;
+        let layout = vec![MarkdownBlockLayout::solid(
+            metrics.code_border * 2.0
+                + metrics.code_padding_y * 2.0
+                + metrics.code_line_height * rows,
+        )];
+        let built = markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &layout),
+            &palette,
+        );
+        assert_eq!(built.paragraphs.len(), 2, "one paragraph per fenced line");
+        assert!(metrics.code_font < metrics.font_size, "85%, not 100%");
+        for paragraph in &built.paragraphs {
+            assert_eq!(paragraph.font_size_px, metrics.code_font);
+            assert_eq!(paragraph.line_height_px, metrics.code_line_height);
+            assert!(!paragraph.wrap, "and it still refuses to reflow");
+        }
+        assert_eq!(
+            built.paragraphs[1].rect[1] - built.paragraphs[0].rect[1],
+            metrics.code_line_height,
+            "the rows are stepped at the fence's own leading"
+        );
+        let ground = built.paragraphs[0].rect[1];
+        assert_eq!(
+            ground,
+            body[1] + metrics.padding_y + metrics.code_border + metrics.code_padding_y,
+            "and the first one starts inside a 1em pad"
+        );
     }
 
     /// PIN — a code fence is a box with a ground, and its language rides the

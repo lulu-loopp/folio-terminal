@@ -910,6 +910,20 @@ pub struct PreviewRun {
     /// Set in the monospace face — a file's own bytes, or an inline code span.
     pub mono: bool,
     pub bold: bool,
+    /// How large this run is set **relative to its paragraph's own size** — CSS
+    /// `font-size: 85%` on an inline element, and nothing more general than that.
+    ///
+    /// `1.0` for every run that agrees with the paragraph around it, which is
+    /// almost all of them. The caller that does not is markdown's inline code
+    /// span (github.css `code { font-size: 85% }`): a monospace face at the same
+    /// nominal size as the sans beside it reads a size *larger*, because its
+    /// x-height and its stems are cut for a grid.
+    ///
+    /// **The line height does not follow it.** A paragraph's leading is the
+    /// paragraph's; a code span that dragged its own line box down would make
+    /// the row it landed on taller than its neighbours, and prose whose leading
+    /// changes line by line is exactly the density this metric exists to undo.
+    pub font_scale: f32,
 }
 
 /// One paragraph of a preview body: styled text with a box to sit in.
@@ -3304,7 +3318,12 @@ impl Renderer {
         );
         buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_size(Some(width_px.max(1.0)), None);
-        set_preview_runs(&mut buffer, runs, 0.0);
+        set_preview_runs(
+            &mut buffer,
+            runs,
+            0.0,
+            Metrics::new(font_size_px, line_height_px),
+        );
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer.layout_runs().count().max(1) as f32 * line_height_px
     }
@@ -3334,7 +3353,12 @@ impl Renderer {
         );
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, Some(line_height_px));
-        set_preview_runs(&mut buffer, runs, 0.0);
+        set_preview_runs(
+            &mut buffer,
+            runs,
+            0.0,
+            Metrics::new(font_size_px, line_height_px),
+        );
         buffer.shape_until_scroll(&mut self.font_system, false);
         buffer
             .layout_runs()
@@ -3370,7 +3394,12 @@ impl Renderer {
             buffer.set_wrap(Wrap::None);
             buffer.set_size(None, Some(paragraph.line_height_px));
         }
-        set_preview_runs(&mut buffer, &paragraph.runs, paragraph.letter_spacing_em);
+        set_preview_runs(
+            &mut buffer,
+            &paragraph.runs,
+            paragraph.letter_spacing_em,
+            Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
+        );
         buffer.shape_until_scroll(&mut self.font_system, false);
         let left = preview_paragraph_left(paragraph, &buffer);
         let top = paragraph.rect[1];
@@ -5789,16 +5818,28 @@ fn preview_run_attrs(mono: bool, bold: bool, letter_spacing_em: f32) -> Attrs<'s
 /// One buffer per paragraph and not per run, which is what lets the shaper wrap
 /// a mixed line: `a **bold** word` may break between any two of its words, and
 /// three buffers butted together could only ever break between the three.
-fn set_preview_runs(buffer: &mut Buffer, runs: &[PreviewRun], letter_spacing_em: f32) {
+fn set_preview_runs(
+    buffer: &mut Buffer,
+    runs: &[PreviewRun],
+    letter_spacing_em: f32,
+    metrics: Metrics,
+) {
     let default = preview_run_attrs(false, false, letter_spacing_em);
     buffer.set_rich_text(
         runs.iter().map(|run| {
             let [r, g, b] = run.color;
-            (
-                run.text.as_str(),
-                preview_run_attrs(run.mono, run.bold, letter_spacing_em)
-                    .color(Color::rgba(r, g, b, 255)),
-            )
+            let mut attrs = preview_run_attrs(run.mono, run.bold, letter_spacing_em)
+                .color(Color::rgba(r, g, b, 255));
+            // The size is the run's own; the *leading* stays the paragraph's,
+            // so a line carrying a code span is exactly as tall as the line
+            // above it. See [`PreviewRun::font_scale`].
+            if run.font_scale != 1.0 {
+                attrs = attrs.metrics(Metrics::new(
+                    (metrics.font_size * run.font_scale).max(1.0),
+                    metrics.line_height,
+                ));
+            }
+            (run.text.as_str(), attrs)
         }),
         &default,
         Shaping::Advanced,
@@ -5919,7 +5960,12 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
                 buffer.set_wrap(Wrap::None);
                 buffer.set_size(None, Some(paragraph.line_height_px));
             }
-            set_preview_runs(&mut buffer, &paragraph.runs, paragraph.letter_spacing_em);
+            set_preview_runs(
+                &mut buffer,
+                &paragraph.runs,
+                paragraph.letter_spacing_em,
+                Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
+            );
             buffer.shape_until_scroll(font_system, false);
             let left = preview_paragraph_left(paragraph, &buffer);
             let [r, g, b] = paragraph.runs.first().map_or([0, 0, 0], |run| run.color);
@@ -12236,5 +12282,59 @@ mod tests {
         let (mut placement, geometry, _) = fade_case(1200, 0);
         placement.display = MathBlockDisplay::Source;
         assert!(math_overflow_fade_slabs(fade_metrics(), &placement, &geometry).is_empty());
+    }
+
+    /// PIN — **a run's `font_scale` shrinks its glyphs and leaves its paragraph's
+    /// leading alone** (markdown's `code { font-size: 85% }`, `DESIGN.md`
+    /// §7.1.3i).
+    ///
+    /// Both halves matter and only one of them is obvious. A code span that came
+    /// out the same size as the prose around it is the reported complaint; a code
+    /// span that dragged the line box down with it would make one line of a
+    /// paragraph taller than its neighbours, which is a worse density problem
+    /// than the one being fixed.
+    ///
+    /// MUTATION: pass `Metrics::new(size * scale, line_height * scale)` instead
+    /// of keeping the paragraph's leading and the second assertion goes red.
+    #[test]
+    fn a_runs_font_scale_shrinks_its_glyphs_and_not_its_line() {
+        let mut font_system = terminal_font_system();
+        let metrics = Metrics::new(13.0, 21.0);
+        let mut width = |scale: f32| {
+            let mut buffer = Buffer::new(&mut font_system, metrics);
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(None, Some(metrics.line_height));
+            set_preview_runs(
+                &mut buffer,
+                &[PreviewRun {
+                    text: "monospaced_identifier".to_owned(),
+                    color: [0, 0, 0],
+                    mono: true,
+                    bold: false,
+                    font_scale: scale,
+                }],
+                0.0,
+                metrics,
+            );
+            buffer.shape_until_scroll(&mut font_system, false);
+            let runs: Vec<_> = buffer.layout_runs().collect();
+            assert_eq!(runs.len(), 1, "one unwrapped line");
+            (runs[0].line_w, runs[0].line_height)
+        };
+        let (full, full_line) = width(1.0);
+        let (small, small_line) = width(0.85);
+        assert!(
+            small < full,
+            "85% of the paragraph's size is narrower than all of it: {small} against {full}"
+        );
+        assert!(
+            (small / full - 0.85).abs() < 0.05,
+            "and narrower by about the ratio asked for: {}",
+            small / full
+        );
+        assert_eq!(
+            small_line, full_line,
+            "the line box is the paragraph's, whatever the run is set at"
+        );
     }
 }
