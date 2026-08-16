@@ -977,7 +977,13 @@ fn push_row_ground(
     ));
 }
 
-/// One commit row: the lanes, the names it wears, and the four columns of R21.
+/// One commit row: the lanes, the names it wears, and R21's columns.
+///
+/// **Graph / refs / message / time / hash**, and since 2026-08-16 this is not
+/// merely one of two orders: R21 was ruled in this surface's favour and the Git
+/// page's own commit row was changed to match ([`crate::git_panel::push_commit`]).
+/// The two are now one row drawn in two widths, and a change to either without
+/// the other re-opens the ticket.
 #[allow(clippy::too_many_arguments)]
 fn push_commit_row(
     commit: &GraphCommitRow,

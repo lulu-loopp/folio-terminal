@@ -27,10 +27,13 @@
 //! belong to the terminal beside it.* So this page stages, unstages and discards,
 //! and there is no commit box on it and never will be.
 //!
-//! **What is deliberately not here yet**, so that a reader does not go looking:
-//! the branch list and `checkout` (R9/R10), the ref pills and the full lane graph
-//! (R22/R18, G-4), a change row opening its diff and a commit expanding its files
-//! (R15/R25, G-3). Each is named at the place it will attach.
+//! **What is deliberately not here**, so that a reader does not go looking: the
+//! full lane graph (R18/G-4) lives in [`crate::git_graph`], because a DAG needs
+//! the width of a document and this column has 240 pixels. What *is* here and
+//! looks like it belongs elsewhere is the last section of this file: the status
+//! letters a **files tree** row wears (R32). They are here because they are the
+//! same alphabet and the same four inks this page draws, and a second copy of
+//! either would be two answers to "what colour is a deleted file".
 
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad};
 
@@ -165,7 +168,12 @@ pub const GIT_GRAPH_DOT_RADIUS_LOGICAL_PX: f32 = 3.1;
 /// `.ggr line { stroke: color-mix(in srgb, var(--ink3) 55%, transparent) }`.
 pub const GIT_GRAPH_LINE_ALPHA: i32 = 550;
 
-/// `.gcommit code { font: 10.5px mono }` — the short hash (R21).
+/// `.gcommit code { font: 10.5px mono }` — the short hash, **on both surfaces**.
+///
+/// R21's smaller half: the mock-up drew it at 10.5 here and at 11 in the full
+/// graph, and one size is what one fact gets. The full graph reads this constant
+/// rather than declaring its own, which is what stops the pair from drifting
+/// apart again the next time either is touched.
 pub const GIT_HASH_FONT_LOGICAL_PX: f32 = 10.5;
 /// `.gtime { font-size: 10px }`.
 pub const GIT_TIME_FONT_LOGICAL_PX: f32 = 10.0;
@@ -438,6 +446,32 @@ pub enum GitBadgeInk {
     Untracked,
 }
 
+/// The letters one status entry wears, in git's own column order.
+///
+/// **One function and not two**, because the Git page and the files tree behind
+/// it (R32) show the same file's state and would otherwise be two readings of one
+/// porcelain line: the index's letter first, then the working tree's. A space is
+/// an absence and draws nothing.
+#[must_use]
+pub fn badges_of(entry: &GitStatusEntry) -> Vec<GitBadge> {
+    [entry.staged, entry.unstaged]
+        .into_iter()
+        .flatten()
+        .filter(|code| !matches!(code, StatusCode::Ignored))
+        .map(|code| GitBadge {
+            letter: code.letter(),
+            ink: if entry.is_conflict() {
+                // A conflict outranks its letters: `AA` is two additions that
+                // are a disagreement, and drawing it green would be the picture
+                // of a bug (R29).
+                GitBadgeInk::Gone
+            } else {
+                GitBadgeInk::of(code)
+            },
+        })
+        .collect()
+}
+
 impl GitBadgeInk {
     /// R29's mapping, in one place.
     #[must_use]
@@ -567,9 +601,16 @@ pub struct GitCommitRow {
     /// that opens the wrong commit's files on the day the repository gets big
     /// enough.
     pub hash: String,
-    /// git's own abbreviation (R21 puts it at 10.5, before the subject).
+    /// git's own abbreviation, at 10.5 and **last** on the row (R21).
     pub short: String,
     pub short_width: f32,
+    /// The local branches standing on this commit (R22), in git's own order.
+    ///
+    /// The same pills the full graph wears, on the same page of the same row —
+    /// R21 again. A 240-pixel column will run out of room for them long before
+    /// the graph does, and the one that does not fit is dropped rather than cut,
+    /// which is [`push_commit`]'s own rule and the graph's.
+    pub refs: Vec<GitRefPill>,
     pub subject: String,
     pub time: String,
     pub time_width: f32,
@@ -589,6 +630,22 @@ pub struct GitCommitRow {
     /// and the time, and there is no column left for one — so *being open* is
     /// said by the row keeping the ground its hover gave it.
     pub expanded: bool,
+}
+
+/// One `.gref` on a commit row (R22).
+///
+/// **No lane on it, unlike the graph's own pill.** The graph gives a pill its
+/// lane's colour because it has lanes; this page draws *one* honest lane in the
+/// accent (mock-up 1596-1599, `.ggr circle { fill: var(--accent) }`), so every
+/// pill here is that lane's, and a field holding a number that could only ever be
+/// zero would be a lane algorithm this page does not have.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitRefPill {
+    pub name: String,
+    pub text_width: f32,
+    /// Whether `HEAD` is this ref — the one that wears the ring at full strength
+    /// (R22).
+    pub head: bool,
 }
 
 /// One file an expanded commit touched (R15).
@@ -1183,24 +1240,7 @@ fn group_act(group: GitGroup) -> Option<GitAct> {
 
 fn change_row(entry: &GitStatusEntry, group: GitGroup, cache: &GitCache) -> GitChangeRow {
     let untracked = group == GitGroup::Untracked;
-    // Both letters, in git's own column order: what happened to the index, then
-    // what happened to the working tree. A space is an absence and draws nothing.
-    let badges: Vec<GitBadge> = [entry.staged, entry.unstaged]
-        .into_iter()
-        .flatten()
-        .filter(|code| !matches!(code, StatusCode::Ignored))
-        .map(|code| GitBadge {
-            letter: code.letter(),
-            ink: if entry.is_conflict() {
-                // A conflict outranks its letters: `AA` is two additions that
-                // are a disagreement, and drawing it green would be the picture
-                // of a bug (R29).
-                GitBadgeInk::Gone
-            } else {
-                GitBadgeInk::of(code)
-            },
-        })
-        .collect();
+    let badges = badges_of(entry);
     GitChangeRow {
         tooltip: match &entry.renamed_from {
             Some(from) => format!("{} — renamed from {from}", entry.path),
@@ -1227,9 +1267,19 @@ fn commit_row(
     let merge = commit.parents.len() > 1;
     let hash_font = GIT_HASH_FONT_LOGICAL_PX * scale;
     let time_font = GIT_TIME_FONT_LOGICAL_PX * scale;
+    let ref_font = crate::git_graph::GRAPH_REF_FONT_LOGICAL_PX * scale;
     GitCommitRow {
         short_width: measure(&commit.short, hash_font),
         time_width: measure(&commit.time_relative, time_font),
+        refs: commit
+            .refs
+            .iter()
+            .map(|reference| GitRefPill {
+                text_width: measure(&reference.name, ref_font),
+                name: reference.name.clone(),
+                head: reference.head,
+            })
+            .collect(),
         // R16 puts the author in the tooltip and never in the row: a 240-pixel
         // column has room for the message or for who wrote it, and on a machine
         // where almost every commit is yours the message is the one that varies.
@@ -2394,15 +2444,32 @@ fn push_commit(
         palette.accent,
     ));
 
-    // ── the four columns (R21): graph, hash, subject, time ──
-    let hash_left = rect[0] + pad_left + column + gap;
-    let hash_rect = [hash_left, rect[1], hash_left + commit.short_width, rect[3]];
+    // ── the columns (R21): graph, refs, message, time, hash ──
+    //
+    // **This is the order the full graph draws, and it is now the only order.**
+    // R21 was filed against the mock-up because the two surfaces disagreed: the
+    // panel put the hash before the message (mock-up 4886-4889) and the graph put
+    // it last (4837-4843). It is ruled in the graph's favour (2026-08-16), and
+    // the reason is what the columns are for rather than which draft came first —
+    // the message is the one thing a reader is scanning for, and a fixed-width
+    // hash standing in front of it indents every message on the page by seven
+    // characters of something nobody reads down a list. Right-aligned at the far
+    // edge it is a column you can look *across* when you want one, and out of the
+    // way when you do not. The time follows it inward for the same reason it does
+    // in the graph: both are addresses, and addresses live at the end of a line.
+    let hash_right = rect[2] - pad_right;
+    let hash_rect = [
+        (hash_right - commit.short_width).max(rect[0]),
+        rect[1],
+        hash_right,
+        rect[3],
+    ];
     labels.push(ChromeLabel {
         text: commit.short.clone(),
         rect: hash_rect,
         font_size_px: GIT_HASH_FONT_LOGICAL_PX * scale,
         color: muted,
-        align_right: false,
+        align_right: true,
         align_center: false,
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
@@ -2410,8 +2477,13 @@ fn push_commit(
         clip: Some(crop(hash_rect)),
     });
 
-    let time_left = (rect[2] - pad_right - commit.time_width).max(hash_rect[2]);
-    let time_rect = [time_left, rect[1], rect[2] - pad_right, rect[3]];
+    let time_right = hash_rect[0] - gap;
+    let time_rect = [
+        (time_right - commit.time_width).max(rect[0]),
+        rect[1],
+        time_right,
+        rect[3],
+    ];
     labels.push(ChromeLabel {
         text: commit.time.clone(),
         rect: time_rect,
@@ -2425,13 +2497,77 @@ fn push_commit(
         clip: Some(crop(time_rect)),
     });
 
-    let subject_left = hash_rect[2] + gap;
-    let subject_rect = [
-        subject_left,
-        rect[1],
-        (time_rect[0] - gap).max(subject_left),
-        rect[3],
-    ];
+    // The pills, left to right after the graph column — **the graph's own
+    // arithmetic and the graph's own numbers** (`GRAPH_REF_*`), because R21 asks
+    // for one row and not for two that look alike. One that would cross the time
+    // stops the run rather than being cut: half a branch name is a different
+    // branch name.
+    let mut cursor = rect[0] + pad_left + column + gap;
+    let pill_height = (crate::git_graph::GRAPH_REF_HEIGHT_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let pill_pad = (crate::git_graph::GRAPH_REF_PADDING_X_LOGICAL_PX * scale).round();
+    let pill_radius = (crate::git_graph::GRAPH_REF_RADIUS_LOGICAL_PX * scale)
+        .round()
+        .max(1.0) as u32;
+    let pill_edge = (crate::git_graph::GRAPH_REF_EDGE_LOGICAL_PX * scale)
+        .round()
+        .max(1.0) as u32;
+    let pill_top = ((rect[1] + rect[3] - pill_height) / 2.0).round();
+    for pill in &commit.refs {
+        let width = pill.text_width + pill_pad * 2.0;
+        if cursor + width > time_rect[0] - gap {
+            break;
+        }
+        let box_ = [cursor, pill_top, cursor + width, pill_top + pill_height];
+        // The one lane this page has (G58): its dot is the accent, so its names
+        // are the accent's too.
+        let lane = palette.accent;
+        sprites.push(
+            ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: pill_radius,
+                },
+                crop(box_),
+                lane,
+            )
+            .with_opacity(ref_alpha(crate::git_graph::GRAPH_REF_GROUND_ALPHA)),
+        );
+        // **`HEAD` wears the ring at full strength** (R22). In the graph the ring
+        // also changes colour, because a lane's hue is not the accent; here every
+        // pill is already accent-coloured and what separates "you are standing
+        // here" from "a name lives here" is the edge going solid.
+        sprites.push(
+            ChromeSprite::new(
+                ChromeMark::ControlPillRing {
+                    radius_px: pill_radius,
+                    stroke_px: pill_edge,
+                },
+                crop(box_),
+                lane,
+            )
+            .with_opacity(if pill.head {
+                1.0
+            } else {
+                ref_alpha(crate::git_graph::GRAPH_REF_EDGE_ALPHA)
+            }),
+        );
+        labels.push(ChromeLabel {
+            text: pill.name.clone(),
+            rect: box_,
+            font_size_px: crate::git_graph::GRAPH_REF_FONT_LOGICAL_PX * scale,
+            color: lane,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::SemiBold,
+            tabular_numerals: false,
+            clip: Some(crop(box_)),
+        });
+        cursor += width + gap;
+    }
+
+    let subject_rect = [cursor, rect[1], (time_rect[0] - gap).max(cursor), rect[3]];
     labels.push(ChromeLabel {
         text: commit.subject.clone(),
         rect: subject_rect,
@@ -2448,6 +2584,215 @@ fn push_commit(
         tabular_numerals: false,
         clip: Some(crop(subject_rect)),
     });
+}
+
+/// A thousandth-alpha as the opacity a sprite takes — [`crate::git_graph`]'s own
+/// `alpha`, which is private to it.
+fn ref_alpha(thousandths: i32) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let value = thousandths as f32 / 1000.0;
+    value.clamp(0.0, 1.0)
+}
+
+// ── the files tree's own badges (R32) ──────────────────────────────────────
+//
+// `PROBLEM-LIST` P3-6 asked for this and the mock-up never drew it: *the cheap
+// reading of "sparse" — a sensible narrow default width plus **inline badges
+// (git status / size filling the right-hand whitespace)**, without swapping the
+// whole interaction.* So the numbers below are not transcribed from a stylesheet
+// the way the rest of this file's are; they are chosen here, and each one says
+// why.
+//
+// **The ruling that shapes all of it is R32**: a badge is shown only while a
+// column of this tab is *standing on* its Git page, because that is the only
+// state in which the status is being kept true (R31). A tree that kept drawing
+// letters after the page was closed would be showing a photograph of a
+// repository and calling it the repository. Nothing here ever asks git anything:
+// this reads a cache somebody else's open page already paid for, and when there
+// is no such page it is empty.
+
+/// The status letter on a tree row: `.gst`'s glyph without `.gst`'s chip.
+///
+/// The chip is 17 pixels on a 27-pixel row and it is the *subject* of that row.
+/// A tree row is 24 pixels and its subject is a file name; seventeen pixels of
+/// tinted ground per changed file would turn the tree into the change list it is
+/// standing next to. The letter alone carries the whole signal, which is what the
+/// four inks are for.
+pub const FILES_BADGE_FONT_LOGICAL_PX: f32 = GIT_BADGE_FONT_LOGICAL_PX;
+/// How wide one letter's cell is.
+///
+/// **Reserved and not measured**, for `.gact`'s reason (*appearing must not nudge
+/// the row*) and for one more: the tree painter holds no font, so a letter placed
+/// by its own advance would need a measurer threaded through two hosts to draw
+/// nine known glyphs. Nine logical pixels holds any of them at 10px mono with air
+/// on both sides, and two of them side by side stay one object.
+pub const FILES_BADGE_CELL_LOGICAL_PX: f32 = 9.0;
+/// The air between the name and the first letter.
+pub const FILES_BADGE_GAP_LOGICAL_PX: f32 = 6.0;
+/// A folder's aggregate mark, across.
+///
+/// **A dot and not a letter**, because a folder has no status: git says nothing
+/// about directories, and what is true of one is only that something under it is
+/// changed. A letter would be this page inventing a claim git never made; a dot
+/// says the one thing that is so, and the folder can be opened to read the rest.
+pub const FILES_BADGE_DOT_LOGICAL_PX: f32 = 5.0;
+
+/// What each row of one files tree wears, keyed by that tree's own row ids.
+///
+/// **The arithmetic is done once, here.** A column may be rooted anywhere inside
+/// its repository, so a status path (`crates/bt-app/src/main.rs`, repo-relative)
+/// and a row id (`/src/main.rs`, column-relative) are two spellings of one file.
+/// Translating at build time means the painter looks a row up by the id it
+/// already has, and the prefix cannot be forgotten by one of the two hosts that
+/// draw trees.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GitTreeBadges {
+    /// Row id → its letters, for the files git named.
+    files: std::collections::BTreeMap<String, Vec<GitBadge>>,
+    /// Every ancestor row id of every named file.
+    ///
+    /// Walked once into a set rather than asked per folder per frame: a
+    /// thousand-entry status against thirty visible folder rows is thirty
+    /// thousand prefix comparisons a frame, and this is one pass over the status
+    /// and a lookup.
+    dirs: std::collections::BTreeSet<String>,
+}
+
+impl GitTreeBadges {
+    /// **R32's gate, and the whole of it.**
+    ///
+    /// `columns` is every Files column of the tab, each with the page it is
+    /// standing on and what it knows about the repository under it. A column
+    /// contributes only while it is on its Git page *and* the status has
+    /// arrived — the two halves of "the data is already there and is being kept
+    /// true". Everything else answers with an empty set, and an empty set draws
+    /// nothing.
+    ///
+    /// When more than one open page covers this tree, the **deepest** repository
+    /// wins: a submodule's own page is a truer account of a file inside it than
+    /// the outer repository's, which does not track it at all.
+    #[must_use]
+    pub fn of(columns: &[(crate::seats::FilesView, &GitCache)], tree_root: &Path) -> Self {
+        let mut best: Option<(usize, String, &crate::git::GitStatus)> = None;
+        for (view, cache) in columns {
+            if *view != crate::seats::FilesView::Git {
+                continue;
+            }
+            let (Some(repo), Some(status)) = (cache.root(), cache.status().ready()) else {
+                continue;
+            };
+            let Some(prefix) = repo_prefix(repo, tree_root) else {
+                continue;
+            };
+            let depth = repo.components().count();
+            if best.as_ref().is_none_or(|(deepest, ..)| depth > *deepest) {
+                best = Some((depth, prefix, status));
+            }
+        }
+        let Some((_, prefix, status)) = best else {
+            return Self::default();
+        };
+        let mut badges = Self::default();
+        for entry in &status.entries {
+            // A rename's *old* name is not a row: it is gone from the disk, so
+            // there is nothing in the tree to hang a letter on. The new name
+            // carries the `R`, which is where a reader looking for the file will
+            // be looking.
+            let Some(key) = row_key(&prefix, &entry.path) else {
+                continue;
+            };
+            let letters = badges_of(entry);
+            if letters.is_empty() {
+                continue;
+            }
+            let mut cut = key.as_str();
+            while let Some(at) = cut.rfind('/') {
+                if at == 0 {
+                    break;
+                }
+                cut = &cut[..at];
+                if !badges.dirs.insert(cut.to_owned()) {
+                    // This whole spine is already marked, and so is everything
+                    // above it.
+                    break;
+                }
+            }
+            badges.files.insert(key, letters);
+        }
+        badges
+    }
+
+    /// The letters this file row wears, if git named it.
+    #[must_use]
+    pub fn letters(&self, key: &str) -> &[GitBadge] {
+        self.files.get(key).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether anything under this folder is changed.
+    #[must_use]
+    pub fn touched(&self, key: &str) -> bool {
+        self.dirs.contains(key)
+    }
+
+    /// Whether git named nothing in this tree at all.
+    ///
+    /// Read only by the tests, and kept because "nothing at all" is the state
+    /// R32's gate exists to produce — a test that could only ask about rows it
+    /// had thought to name would pass on a badge appearing somewhere it had not.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.dirs.is_empty()
+    }
+}
+
+/// Where `dir` stands inside `repo`, as a repo-relative prefix ending in `/`, or
+/// `None` when it does not stand inside it at all.
+///
+/// Component by component and not `strip_prefix`, because on Windows two
+/// spellings of one folder differ in case and `Path`'s own comparison is exact:
+/// a column rooted at `d:\repo\src` and a `rev-parse --show-toplevel` that
+/// answered `D:\repo` are the same place, and a tree that drew no badges because
+/// of a drive letter would be a bug nobody could see the cause of.
+fn repo_prefix(repo: &Path, dir: &Path) -> Option<String> {
+    let mut steps = dir.components();
+    for want in repo.components() {
+        let have = steps.next()?;
+        if !same_step(want.as_os_str(), have.as_os_str()) {
+            return None;
+        }
+    }
+    let mut prefix = String::new();
+    for step in steps {
+        prefix.push_str(&step.as_os_str().to_string_lossy());
+        prefix.push('/');
+    }
+    Some(prefix)
+}
+
+fn same_step(want: &std::ffi::OsStr, have: &std::ffi::OsStr) -> bool {
+    if cfg!(windows) {
+        want.to_string_lossy()
+            .eq_ignore_ascii_case(&have.to_string_lossy())
+    } else {
+        want == have
+    }
+}
+
+/// The tree row id a repo-relative path has, seen from a column at `prefix`.
+///
+/// `None` when the file is somewhere else in the repository — which is most of
+/// them when a column is rooted at a subdirectory, and is why this is a filter
+/// and not a translation.
+fn row_key(prefix: &str, path: &str) -> Option<String> {
+    let head = path.get(..prefix.len())?;
+    let rest = path.get(prefix.len()..)?;
+    let matched = if cfg!(windows) {
+        head.eq_ignore_ascii_case(prefix)
+    } else {
+        head == prefix
+    };
+    (matched && !rest.is_empty()).then(|| format!("/{rest}"))
 }
 
 #[cfg(test)]
@@ -3516,6 +3861,288 @@ mod tests {
                 name: "renamed.txt.diff".to_owned(),
                 renamed_from: Some("was.txt".to_owned()),
             })
+        );
+    }
+
+    // ── R21: one column order for both surfaces ────────────────────────────
+
+    /// Everything one call of the painter put on the glass.
+    #[derive(Default)]
+    struct Painted {
+        labels: Vec<ChromeLabel>,
+        sprites: Vec<ChromeSprite>,
+    }
+
+    /// Draw a page into a 240-pixel column — the width the design gives it.
+    fn painted(content: &GitPanelContent, height: f32) -> Painted {
+        let mut quads = Vec::new();
+        let mut out = Painted::default();
+        push_git_panel(
+            [0.0, 0.0, 240.0, height],
+            content,
+            GitHover::default(),
+            1.0,
+            &bt_render::chrome_palette(),
+            (&mut quads, &mut out.labels, &mut out.sprites),
+        );
+        out
+    }
+
+    /// Where a piece of text was drawn: its left and its right edge.
+    fn at(painted: &Painted, text: &str) -> (f32, f32) {
+        let label = painted
+            .labels
+            .iter()
+            .find(|label| label.text == text)
+            .unwrap_or_else(|| panic!("`{text}` was drawn"));
+        (label.rect[0], label.rect[2])
+    }
+
+    /// **R21, ruled 2026-08-16** — the panel's commit row is the graph's:
+    /// graph, refs, message, time, hash.
+    ///
+    /// The mock-up drew two orders for one row (4886-4889 against 4837-4843) and
+    /// this is the one that survived. The assertion is on *pixels* and not on a
+    /// list of fields, because a column order is a fact about where things are:
+    /// a row that built the four labels in the right sequence and laid them out
+    /// in the old one would pass any test that only read the content.
+    ///
+    /// MUTATION: put the hash back where the mock-up's panel had it — laid from
+    /// `rect[0] + pad + column + gap` with the subject after it. The first
+    /// assertion fails, because the hash then starts left of the message.
+    #[test]
+    fn a_commit_row_reads_graph_refs_message_time_hash() {
+        let content = rows_of(&answered(
+            b"## main\0",
+            vec![commit("abc1234", "the newest thing", 1)],
+            false,
+        ));
+        let glass = painted(&content, 600.0);
+        let (subject_left, _) = at(&glass, "the newest thing");
+        let (time_left, time_right) = at(&glass, "2h");
+        let (hash_left, hash_right) = at(&glass, "abc1234");
+
+        assert!(
+            subject_left < time_left,
+            "the message comes before the time ({subject_left} < {time_left})"
+        );
+        assert!(
+            time_right <= hash_left,
+            "the time comes before the hash ({time_right} <= {hash_left})"
+        );
+        assert!(
+            hash_right <= 240.0 - GIT_ROW_PADDING_X_LOGICAL_PX,
+            "and the hash ends at the row's own right inset, not past it"
+        );
+    }
+
+    /// R22 in the panel — the branch standing on a commit wears its pill there
+    /// too, between the graph and the message.
+    ///
+    /// MUTATION: leave `GitCommitRow::refs` empty in `commit_row`. The pill's
+    /// text is never drawn and `at` panics.
+    #[test]
+    fn a_commit_that_carries_a_branch_wears_it_before_the_message() {
+        let mut carried = commit("abc1234", "the newest thing", 1);
+        carried.refs = vec![
+            crate::git::GitRef {
+                name: "main".to_owned(),
+                head: true,
+            },
+            crate::git::GitRef {
+                name: "spike".to_owned(),
+                head: false,
+            },
+        ];
+        let content = rows_of(&answered(b"## main\0", vec![carried], false));
+        let glass = painted(&content, 600.0);
+        let (head_left, head_right) = at(&glass, "main");
+        let (other_left, _) = at(&glass, "spike");
+        let (subject_left, _) = at(&glass, "the newest thing");
+
+        assert!(
+            head_right <= other_left,
+            "git's own order, left to right ({head_right} <= {other_left})"
+        );
+        assert!(
+            other_left < subject_left,
+            "and both stand before the message ({other_left} < {subject_left})"
+        );
+        assert!(
+            head_left > GIT_COMMIT_PADDING_LEFT_LOGICAL_PX + GIT_GRAPH_WIDTH_LOGICAL_PX,
+            "the graph column keeps its gutter"
+        );
+    }
+
+    /// A name too long for what is left of the row is **dropped and not cut** —
+    /// half a branch name is a different branch name.
+    #[test]
+    fn a_pill_with_no_room_is_left_off_rather_than_trimmed() {
+        let mut carried = commit("abc1234", "s", 1);
+        carried.refs = vec![crate::git::GitRef {
+            name: "a-branch-name-far-longer-than-two-hundred-and-forty-pixels".to_owned(),
+            head: false,
+        }];
+        let content = rows_of(&answered(b"## main\0", vec![carried], false));
+        let glass = painted(&content, 600.0);
+        assert!(
+            !glass
+                .labels
+                .iter()
+                .any(|label| label.text.starts_with("a-branch-name")),
+            "no half a name anywhere on the row"
+        );
+        // And the row is still a row: the hash it ends with is still there.
+        at(&glass, "abc1234");
+    }
+
+    // ── R32: the tree's own badges ─────────────────────────────────────────
+
+    /// The tab's columns, as [`GitTreeBadges::of`] wants them.
+    fn sources(
+        columns: &[(crate::seats::FilesView, GitCache)],
+    ) -> Vec<(crate::seats::FilesView, &GitCache)> {
+        columns.iter().map(|(view, cache)| (*view, cache)).collect()
+    }
+
+    const PORCELAIN: &[u8] =
+        b"## main\0 M src/main.rs\0A  src/new.rs\0D  docs/gone.md\0?? junk.tmp\0MM both.rs\0";
+
+    /// **R32's gate.** A repository that nobody is looking at lends its letters
+    /// to nobody: the column holding the cache is on its *tree*, so the status in
+    /// it is a photograph, and a photograph is not shown as if it were live.
+    ///
+    /// **The other half of R32 — "and no extra read" — is structural and is held
+    /// elsewhere**: this function takes caches by reference and can ask nothing,
+    /// and the one place a question is born is pinned by
+    /// `a_repository_is_read_only_for_a_column_that_is_showing_it`. A badge
+    /// spends what an open page already spent, or it draws nothing.
+    ///
+    /// MUTATION: drop the `view != Git` guard in `GitTreeBadges::of`. Every
+    /// assertion here fails at once, and the tree starts drawing letters from a
+    /// status nothing is keeping true.
+    #[test]
+    fn a_tree_wears_no_badges_while_no_column_stands_on_its_git_page() {
+        let columns = [(
+            crate::seats::FilesView::Files,
+            answered(PORCELAIN, Vec::new(), false),
+        )];
+        let badges = GitTreeBadges::of(&sources(&columns), Path::new(ROOT));
+        assert!(badges.is_empty(), "nothing at all, not merely no letters");
+        assert!(badges.letters("/src/main.rs").is_empty());
+        assert!(!badges.touched("/src"));
+    }
+
+    /// And with a page open, every letter reaches the row it is about — in git's
+    /// own alphabet and git's own column order.
+    #[test]
+    fn every_status_letter_reaches_the_row_it_names() {
+        let columns = [(
+            crate::seats::FilesView::Git,
+            answered(PORCELAIN, Vec::new(), false),
+        )];
+        let badges = GitTreeBadges::of(&sources(&columns), Path::new(ROOT));
+        let letters = |key: &str| -> String {
+            badges
+                .letters(key)
+                .iter()
+                .map(|badge| badge.letter)
+                .collect()
+        };
+        assert_eq!(letters("/src/main.rs"), "M");
+        assert_eq!(letters("/src/new.rs"), "A");
+        assert_eq!(letters("/docs/gone.md"), "D");
+        // `??` occupies both of porcelain's columns, so it wears both — the same
+        // two letters the Git page draws for it. One would be this module
+        // deciding that git's own record is too wide for a tree.
+        assert_eq!(letters("/junk.tmp"), "??");
+        assert_eq!(letters("/both.rs"), "MM", "index first, then working tree");
+        assert_eq!(
+            badges.letters("/src/new.rs")[0].ink,
+            GitBadgeInk::Added,
+            "and it is the page's own ink, not a second table"
+        );
+    }
+
+    /// **The prefix, which is the whole of the arithmetic.** A column rooted at a
+    /// subdirectory sees repo-relative paths it must shorten, and files outside
+    /// its root that it must not draw at all.
+    ///
+    /// MUTATION: use the status path as the row key unchanged. `/main.rs` is
+    /// never found, and `/src/main.rs` is claimed for a tree that has no such
+    /// row.
+    #[test]
+    fn a_column_rooted_below_the_repository_shortens_every_path_by_its_own() {
+        let columns = [(
+            crate::seats::FilesView::Git,
+            answered(PORCELAIN, Vec::new(), false),
+        )];
+        let badges = GitTreeBadges::of(&sources(&columns), &PathBuf::from(ROOT).join("src"));
+        assert_eq!(
+            badges.letters("/main.rs").len(),
+            1,
+            "seen from inside `src`"
+        );
+        assert!(
+            badges.letters("/src/main.rs").is_empty(),
+            "and never under the name the repository knows it by"
+        );
+        assert!(
+            badges.letters("/junk.tmp").is_empty(),
+            "a file outside this column's root is not this column's row"
+        );
+        assert!(
+            !badges.touched("/docs"),
+            "nor is a folder outside it a folder of this tree"
+        );
+    }
+
+    /// A folder says only that something under it changed — one mark, however
+    /// deep and however many.
+    #[test]
+    fn a_folder_is_marked_when_anything_beneath_it_is() {
+        let columns = [(
+            crate::seats::FilesView::Git,
+            answered(b"## main\0 M a/b/c/deep.rs\0", Vec::new(), false),
+        )];
+        let badges = GitTreeBadges::of(&sources(&columns), Path::new(ROOT));
+        assert!(badges.touched("/a"));
+        assert!(badges.touched("/a/b"));
+        assert!(badges.touched("/a/b/c"));
+        assert!(!badges.touched("/a/b/c/deep.rs"), "a file is not a folder");
+        assert!(!badges.touched("/other"));
+    }
+
+    /// Windows spells one folder two ways and means one folder.
+    ///
+    /// MUTATION: compare the components with `==`. A column rooted at the
+    /// lower-cased drive letter finds no repository above it and the tree goes
+    /// bare, which is a bug with no visible cause.
+    #[test]
+    #[cfg(windows)]
+    fn a_drive_letter_in_the_other_case_is_the_same_place() {
+        let columns = [(
+            crate::seats::FilesView::Git,
+            answered(PORCELAIN, Vec::new(), false),
+        )];
+        let badges = GitTreeBadges::of(&sources(&columns), Path::new(r"d:\REPO\src"));
+        assert_eq!(badges.letters("/main.rs").len(), 1);
+    }
+
+    /// A tree in another repository entirely — or in none — gets nothing.
+    #[test]
+    fn a_tree_outside_the_open_repository_is_not_its_business() {
+        let columns = [(
+            crate::seats::FilesView::Git,
+            answered(PORCELAIN, Vec::new(), false),
+        )];
+        assert!(
+            GitTreeBadges::of(&sources(&columns), Path::new(r"D:\elsewhere")).is_empty(),
+            "a neighbouring folder is not a subdirectory of this repository"
+        );
+        assert!(
+            GitTreeBadges::of(&sources(&columns), Path::new(r"D:\repository")).is_empty(),
+            "and neither is one whose name merely starts the same way"
         );
     }
 }

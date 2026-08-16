@@ -8962,6 +8962,16 @@ pub fn hit_files_root(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FilesTreeContent {
     pub rows: Vec<crate::files::TreeRow>,
+    /// The git status letters these rows wear (R32).
+    ///
+    /// **Content and not a pointer state**, for `selected`'s reason: what a file
+    /// is doing in its repository is a fact about the tree, true whether or not
+    /// this column has the pointer or the keyboard. Empty is the ordinary case
+    /// and the whole of R32's gate — see [`crate::git_panel::GitTreeBadges::of`],
+    /// which is where the deciding is done. Nothing in this module asks whether a
+    /// Git page is open; it draws the letters it is handed, and it is handed none
+    /// when there is no open page to have read them.
+    pub badges: crate::git_panel::GitTreeBadges,
     /// How far the list is scrolled, in physical pixels.
     ///
     /// Already clamped, and clamped by whoever *wrote* it — see
@@ -9894,14 +9904,75 @@ pub(crate) fn push_files_tree(
         let content_left = rect[0] + row_pad + indent * row.depth as f32;
         let name_left = content_left + tri + gap + icon + gap;
         let middle = |size: f32| ((rect[1] + rect[3] - size) / 2.0).round();
+        // **The right-hand margin, before the name is placed** (R32) — because
+        // what the badge costs is width the name does not get, and a name laid
+        // out first and then covered would be a letter drawn over a letter.
+        let mut name_right = rect[2] - row_pad;
+        match row.kind {
+            crate::files::RowKind::File => {
+                let letters = tree.badges.letters(&row.key);
+                let cell = (crate::git_panel::FILES_BADGE_CELL_LOGICAL_PX * scale).round();
+                let badge_font = crate::git_panel::FILES_BADGE_FONT_LOGICAL_PX * scale;
+                for (place, badge) in letters.iter().rev().enumerate() {
+                    // Right to left, so that a file wearing both its letters
+                    // keeps git's own column order (index first, then working
+                    // tree) reading left to right.
+                    let right = name_right - cell * place as f32;
+                    let cell_rect = [right - cell, rect[1], right, rect[3]];
+                    labels.push(ChromeLabel {
+                        text: badge.letter.to_string(),
+                        rect: cell_rect,
+                        font_size_px: badge_font,
+                        color: badge.ink.colour(palette),
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        // `.gst { font: 600 10px/1 var(--mono) }` — the weight is
+                        // what lets ten pixels carry a colour at all.
+                        weight: ChromeLabelWeight::SemiBold,
+                        tabular_numerals: true,
+                        clip: Some(crop(cell_rect)),
+                    });
+                }
+                if !letters.is_empty() {
+                    name_right -= cell * letters.len() as f32
+                        + crate::git_panel::FILES_BADGE_GAP_LOGICAL_PX * scale;
+                }
+            }
+            crate::files::RowKind::Directory { .. } | crate::files::RowKind::Cycle => {
+                if tree.badges.touched(&row.key) {
+                    let dot = (crate::git_panel::FILES_BADGE_DOT_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0);
+                    let dot_rect = [name_right - dot, middle(dot), name_right, middle(dot) + dot];
+                    if wholly_inside(dot_rect) {
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: (dot / 2.0).round().max(1.0) as u32,
+                            },
+                            dot_rect,
+                            // One ink for the aggregate, and it is *changed*:
+                            // "different from what git has" is the only claim a
+                            // folder can make, and the four inks say four
+                            // different things about a file rather than four
+                            // degrees of one thing.
+                            crate::git_panel::GitBadgeInk::Changed.colour(palette),
+                        ));
+                    }
+                    name_right -= dot + crate::git_panel::FILES_BADGE_GAP_LOGICAL_PX * scale;
+                }
+            }
+            crate::files::RowKind::Notice(_) => {}
+        }
         match row.kind {
             RowKind::Notice(_) => {
                 // A notice sits in the name column so the list still reads as a
                 // list, and in the body's own quiet ink so it is never mistaken
                 // for a file called "Loading…".
+                let notice_rect = [name_left, rect[1], name_right, rect[3]];
                 labels.push(ChromeLabel {
                     text: row.name.clone(),
-                    rect: [name_left, rect[1], rect[2] - row_pad, rect[3]],
+                    rect: notice_rect,
                     font_size_px: font,
                     color: ink.hint,
                     align_right: false,
@@ -9909,7 +9980,7 @@ pub(crate) fn push_files_tree(
                     letter_spacing_em: 0.0,
                     weight: ChromeLabelWeight::Regular,
                     tabular_numerals: false,
-                    clip: Some(crop([name_left, rect[1], rect[2] - row_pad, rect[3]])),
+                    clip: Some(crop(notice_rect)),
                 });
                 continue;
             }
@@ -9980,7 +10051,7 @@ pub(crate) fn push_files_tree(
                 }
             }
         }
-        let name_rect = [name_left, rect[1], rect[2] - row_pad, rect[3]];
+        let name_rect = [name_left, rect[1], name_right.max(name_left), rect[3]];
         labels.push(ChromeLabel {
             text: row.name.clone(),
             rect: name_rect,
@@ -14977,6 +15048,7 @@ mod tests {
                 tree_row("/src/main.rs", "main.rs", 1, crate::files::RowKind::File),
                 tree_row("/a.txt", "a.txt", 0, crate::files::RowKind::File),
             ],
+            badges: crate::git_panel::GitTreeBadges::default(),
             scroll_px: 0.0,
             selected: None,
             turns: BTreeMap::new(),
@@ -15014,6 +15086,125 @@ mod tests {
         assert_eq!(
             sibling.rect[0], shallow.rect[0],
             "two rows at the same depth start in the same column"
+        );
+    }
+
+    // ── R32: the letters a tree wears when a Git page is open beside it ─────
+
+    const BADGE_REPO: &str = r"D:\repo";
+
+    /// What one column's open Git page would lend this tree, built through the
+    /// door every real answer comes through.
+    fn badges_from(porcelain: &[u8]) -> crate::git_panel::GitTreeBadges {
+        let root = std::path::PathBuf::from(BADGE_REPO);
+        let mut cache = crate::git::GitCache::default();
+        cache.retarget(&root);
+        assert!(cache.accept(crate::git::GitAnswer::Repo {
+            dir: root.clone(),
+            outcome: Ok(root.clone()),
+        }));
+        assert!(cache.accept(crate::git::GitAnswer::Status {
+            root: root.clone(),
+            outcome: Ok(crate::git::parse_status(porcelain)),
+        }));
+        crate::git_panel::GitTreeBadges::of(&[(FilesView::Git, &cache)], &root)
+    }
+
+    fn label_named<'a>(chrome: &'a TreeChrome, text: &str) -> &'a ChromeLabel {
+        chrome
+            .labels
+            .iter()
+            .find(|label| label.text == text)
+            .unwrap_or_else(|| panic!("{text} is drawn"))
+    }
+
+    /// **P3-6's inline badge, and R32's gate on it.** A file git has something to
+    /// say about wears its letter in the row's own right-hand whitespace, and the
+    /// name gives up exactly that much width — the badge is never drawn *over* a
+    /// name.
+    ///
+    /// MUTATION: leave `name_right` at `rect[2] - row_pad` when a badge is drawn.
+    /// The last assertion fails: the name keeps the full row and the letter
+    /// stands on top of whatever is at the end of it.
+    #[test]
+    fn a_changed_file_wears_its_letter_in_the_rows_own_right_margin() {
+        let bare = files_chrome(three_row_tree(), None).3;
+        let bare_name = label_named(&bare, "main.rs").rect[2];
+
+        let content = FilesTreeContent {
+            badges: badges_from(b"## main\0 M src/main.rs\0"),
+            ..three_row_tree()
+        };
+        let (_, layout, column, chrome) = files_chrome(content, None);
+        let body = files_pane_geometry(
+            files_pane_rect(&layout, column).expect("the column has a rectangle"),
+            1.0,
+            false,
+        )
+        .body;
+
+        // The row `main.rs` is, taken from the geometry the painter used.
+        let row = files_tree_geometry(body, 3, 0.0, 1.0).row_rect(1);
+        let letter = label_named(&chrome, "M");
+        assert!(
+            (letter.rect[2] - (row[2] - FILES_ROW_PADDING_X_LOGICAL_PX)).abs() < 0.5,
+            "the letter ends at the row's own right inset, at {} against {}",
+            letter.rect[2],
+            row[2] - FILES_ROW_PADDING_X_LOGICAL_PX
+        );
+        assert!(
+            label_named(&chrome, "main.rs").rect[2] < bare_name,
+            "and the name gave up the width it took"
+        );
+    }
+
+    /// **R32 the other way round: with no Git page open, a tree is exactly the
+    /// tree it was.** The default badges are what every caller hands in when no
+    /// column of the tab is standing on its page, and this is the whole of "the
+    /// badge fades when the panel closes".
+    ///
+    /// MUTATION: make `GitTreeBadges::of` ignore which page a column is on. The
+    /// column in `files_chrome` is on its tree, so this test still passes — but
+    /// its twin in `git_panel` fails at once, which is why both exist.
+    #[test]
+    fn a_tree_with_no_open_page_beside_it_draws_no_letters_at_all() {
+        let (_, _, _, chrome) = files_chrome(three_row_tree(), None);
+        assert!(
+            !chrome
+                .labels
+                .iter()
+                .any(|label| label.text.chars().count() == 1
+                    && "MADRCUT?".contains(label.text.as_str())),
+            "no status letter anywhere in the picture"
+        );
+    }
+
+    /// A folder says one thing and one thing only: something under here is
+    /// changed. It is a dot because git makes no claim about directories.
+    #[test]
+    fn a_folder_over_a_change_wears_one_dot_and_no_letter() {
+        let content = FilesTreeContent {
+            badges: badges_from(b"## main\0 M src/main.rs\0"),
+            ..three_row_tree()
+        };
+        let (_, _, _, chrome) = files_chrome(content, None);
+        let dots: Vec<&ChromeSprite> = chrome
+            .sprites
+            .iter()
+            .filter(|sprite| {
+                matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                    && (sprite.rect[2]
+                        - sprite.rect[0]
+                        - crate::git_panel::FILES_BADGE_DOT_LOGICAL_PX)
+                        .abs()
+                        < 0.5
+            })
+            .collect();
+        assert_eq!(dots.len(), 1, "one folder is over the change, and only one");
+        let src = label_named(&chrome, "src");
+        assert!(
+            dots[0].rect[0] > src.rect[2],
+            "and it stands past the end of the folder's own name column"
         );
     }
 

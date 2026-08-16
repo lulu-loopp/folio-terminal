@@ -4429,6 +4429,27 @@ impl TabState {
         self.files.get(&seat).cloned().unwrap_or_default()
     }
 
+    /// Every column of this tab paired with what it knows about a repository —
+    /// **R32's whole supply**, and the only thing any tree badge is ever built
+    /// from.
+    ///
+    /// The page each column is on travels *with* its cache rather than being
+    /// looked up later, because the pairing is the ruling: a cache counts only
+    /// while the column holding it is standing on its Git page. Splitting the two
+    /// apart would leave a reader of either half unable to see that.
+    fn git_badge_sources(&self) -> Vec<(seats::FilesView, &git::GitCache)> {
+        self.git_trees
+            .iter()
+            .map(|(seat, cache)| {
+                let view = self
+                    .files
+                    .get(seat)
+                    .map_or(seats::FilesView::Files, |state| state.view);
+                (view, cache)
+            })
+            .collect()
+    }
+
     /// Walk every files column of this tab, asking nothing.
     ///
     /// The read-only half of `Runtime::files_trees`, and it exists because the
@@ -4452,6 +4473,15 @@ impl TabState {
                 (
                     seats::FilesTreeContent {
                         rows: view.rows,
+                        // Left empty and filled by the caller for a **fourth**
+                        // reason, and it is a cost one: a badge changes no
+                        // rectangle, so the hit test — which is this walk's other
+                        // caller and runs on **every pointer move** — has no use
+                        // for one. Deriving a repository's whole status into row
+                        // ids is a thousand allocations on a big repository, and
+                        // a thousand allocations per mouse move is the shape red
+                        // line R-i already forbids for `read_dir`.
+                        badges: crate::git_panel::GitTreeBadges::default(),
                         scroll_px: cache.scroll_px,
                         selected: state.sel,
                         // Left empty here and filled by the caller that has a
@@ -19691,10 +19721,32 @@ impl Runtime {
         // that took the keyboard from a press shows its selection without one.
         let ringed = self.files_ring_seat();
         let walked = self.files_tree_walk();
+        // **R32's one input, gathered once for the whole tab**: which page each
+        // column is standing on, and what it knows about the repository under it.
+        // A column with no cache is not in it and cannot be — there is no entry
+        // until a Git page has asked something, which is the gate saying "no
+        // extra read" in the only way that cannot be forgotten. Nothing here asks
+        // git anything; every answer in it was paid for by an open page.
+        let pages = self.tabs[active].git_badge_sources();
+        let badges: BTreeMap<SeatId, git_panel::GitTreeBadges> = walked
+            .keys()
+            .map(|seat| {
+                let root = self.tabs[active]
+                    .files
+                    .get(seat)
+                    .map(|state| state.root.clone())
+                    .unwrap_or_default();
+                (
+                    *seat,
+                    git_panel::GitTreeBadges::of(&pages, std::path::Path::new(&root)),
+                )
+            })
+            .collect();
         let mut views = BTreeMap::new();
         let mut asks = Vec::new();
         for (seat, (mut content, wanted)) in walked {
             content.focus_ring = Some(seat) == ringed;
+            content.badges = badges.get(&seat).cloned().unwrap_or_default();
             let root = self.tabs[active]
                 .files
                 .get(&seat)
@@ -23618,6 +23670,15 @@ impl Runtime {
                 files.files.root.clone(),
                 seats::FilesTreeContent {
                     rows: view.rows,
+                    // **None, and R2 is why** — a float has no Git page (the
+                    // flyout was never given the switch), and a badge is
+                    // subordinate to a page: it shows what an open one is already
+                    // keeping true. There is a second reason in the type itself,
+                    // and it is the harder one: `FloatFiles` names no tab, so
+                    // "this tab's open Git page" is a question this window cannot
+                    // ask. Both would have to change together, and R2 is booked
+                    // for observation rather than for building.
+                    badges: crate::git_panel::GitTreeBadges::default(),
                     scroll_px: files.cache.scroll_px,
                     selected: files.files.sel.clone(),
                     turns,

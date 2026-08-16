@@ -4942,6 +4942,15 @@
     ],
   };
   const LANE_W = 16, GROW_H = 30;
+  /* NATIVE (R18, ruled 2026-08-15): three colours is a bug, not a spec. A real
+     DAG has no ceiling on concurrent lanes, so LANE_COLOR[3] here is `undefined`
+     and paints `stroke="undefined"`. The native line carries an **eight-hue
+     wheel** taken modulo the lane number — anchored on this house's own four
+     (accent / ok / warn / err) plus four derived low-saturation siblings, every
+     one of them walked for contrast over both the pane body and a section card,
+     in both themes. `laneCount` below is hand-set to 2 for the same reason and
+     is likewise computed from the real DAG natively, with hysteresis so the
+     graph column's width cannot jitter row to row. */
   const LANE_COLOR = ["var(--accent)", "var(--ok)", "var(--warn)"];
   function graphCellSvg(row, laneCount) {
     const x = (l) => l * LANE_W + LANE_W / 2, mid = GROW_H / 2;
@@ -4949,6 +4958,12 @@
     for (const l of row.thr || []) parts.push(
       `<line x1="${x(l)}" y1="0" x2="${x(l)}" y2="${GROW_H}" stroke="${LANE_COLOR[l]}"/>`);
     /* the dot's own lane runs through unless this row opens/closes it */
+    /* NATIVE (R19, ruled 2026-08-15): **the comment is the spec and this line is
+       the bug.** It draws the full height unconditionally, so a row that opens
+       or closes its own lane still paints a straight run through the very half
+       the curve is supposed to own, and the two overlap. The native line honours
+       the "unless": the upper half is skipped on a row that closes into this
+       lane, the lower half on a row that opens out of it. */
     parts.push(`<line x1="${x(row.d)}" y1="0" x2="${x(row.d)}" y2="${GROW_H}" stroke="${LANE_COLOR[row.d]}"/>`);
     for (const l of row.open || []) parts.push(
       `<path d="M ${x(row.d)} ${mid} C ${x(l)} ${mid}, ${x(l)} ${mid}, ${x(l)} ${GROW_H}" stroke="${LANE_COLOR[l]}" fill="none"/>`);
@@ -5018,6 +5033,17 @@
       ${g.commits.map(([h, m, t, files, kind], i) => `
         <div class="gcommit ${cur === h ? "open" : ""}" data-hash="${h}" title="${kind === "merge" ? "Merge commit — another branch's history joins here&#10;" : ""}${escAttr(m)}">
           ${graph(kind, i === 0, i === g.commits.length - 1)}
+          <!-- NATIVE (R21, ruled 2026-08-16): **this order lost.** The mock-up
+               draws one commit row two ways — here the code element comes before
+               the message, and the full graph puts it last, after the time.
+               The graph's order won and the panel now matches it: **graph / ref
+               pills / message / time / short hash**. The reason is what the
+               columns are for and not which draft came first — the message is
+               the one thing a reader scans for, and a fixed-width hash standing
+               in front of it indents every message on the page by seven
+               characters nobody reads down a list; right-aligned at the far edge
+               it is a column you can look across when you want one and out of
+               the way when you do not. The hash stays 10.5px on both surfaces. -->
           <code>${h.slice(0, 7)}</code><span class="gmsg">${esc(m)}</span><span class="gtime">${t}</span>
         </div>
         ${cur === h ? `<div class="gcfiles">${(files || []).map(f => `<bdi>${esc(f)}</bdi>`).join("")}</div>` : ""}`).join("")}
