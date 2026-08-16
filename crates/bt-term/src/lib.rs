@@ -2,6 +2,7 @@
 
 mod adapter;
 mod cell_capture;
+mod command_marks;
 mod diagnostics;
 mod inline_image;
 mod lifecycle;
@@ -18,6 +19,7 @@ pub use bt_detect::DetectionTask;
 pub use bt_doc::LayoutKey;
 #[doc(hidden)]
 pub use bt_math::MathEngine;
+pub use command_marks::{CommandMark, CommandMarkId, CommandMarkLedger};
 pub use diagnostics::{
     FormulaFlashOracle, FormulaFrameObservation, FormulaFrameState, band_owns_its_rows,
     is_banded_artifact, observe_formula_frame,

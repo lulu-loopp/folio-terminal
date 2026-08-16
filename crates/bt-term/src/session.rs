@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     error::Error,
     fmt::{self, Write as _},
@@ -46,6 +47,7 @@ use crate::{
         TerminalModes,
     },
     cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
+    command_marks::{CommandMark, CommandMarkId, CommandMarkLedger},
     inline_image::{
         DecodedInlineImage, ImageReferenceShape, InlineImageDecodeError, InlineImageScaleTask,
         InlineImageSource, InlineImageTask, ScaledInlineImage, ShellIntegrationMarker,
@@ -746,6 +748,12 @@ pub struct DualPlaneSession {
     published_revision: u64,
     semantic_input_regions: Vec<SemanticInputRegion>,
     semantic_output_regions: Vec<SemanticOutputRegion>,
+    /// One record per command the shell reported, in order (DESIGN §7.1.5c). Fed by exactly the
+    /// same `A/B/C/D` stream the two region tables above are fed by, and kept separate from them
+    /// because it answers a different question — "which commands ran and how did each end", not
+    /// "may this decoration be drawn here". Empty for the whole life of a session whose shell never
+    /// emits OSC 133, which is the honest state and not a degraded one.
+    command_marks: CommandMarkLedger,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
@@ -1103,6 +1111,7 @@ impl DualPlaneSession {
             published_revision: 0,
             semantic_input_regions: Vec::new(),
             semantic_output_regions: Vec::new(),
+            command_marks: CommandMarkLedger::default(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
@@ -2798,9 +2807,18 @@ impl DualPlaneSession {
             ShellIntegrationMarker::PromptStart => {
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
+                    // A command abandoned at the prompt — Ctrl+C, or a shell that never says `D`.
+                    // Its text is still worth recording; how it ended is not something we were
+                    // told, so the mark keeps `finished: None` and says nothing about it.
+                    self.absorb_command_text(screen, region);
                 }
                 // A prompt means output ended, whether or not `D` ever arrived.
                 self.close_open_semantic_output_region(screen, point);
+                if screen == ScreenId::Primary {
+                    self.command_marks.release_open_command();
+                    let prompt = self.register_command_mark_anchor(screen, point);
+                    self.command_marks.note_prompt(prompt);
+                }
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Prompt);
             }
@@ -2836,6 +2854,11 @@ impl DualPlaneSession {
                     written_rows: BTreeSet::new(),
                     witness: String::new(),
                 });
+                // The mark and the region share this one registration; see `CommandMark::start`.
+                if screen == ScreenId::Primary {
+                    let anchor = self.semantic_input_regions[region].start;
+                    self.command_marks.open_command(anchor);
+                }
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
@@ -2845,6 +2868,11 @@ impl DualPlaneSession {
                 self.progress = None;
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
+                    self.absorb_command_text(screen, region);
+                }
+                if screen == ScreenId::Primary && self.command_marks.has_open_command() {
+                    let executed = self.register_command_mark_anchor(screen, point);
+                    self.command_marks.note_executed(executed);
                 }
                 // A repeated `C` with no `D` between them closes the stale region before opening
                 // the new one, so at most one output region per screen is ever open and none can
@@ -2861,13 +2889,161 @@ impl DualPlaneSession {
                 }
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
+                    // `B` straight to `D`, no `C`: the region closes here, so this is the one and
+                    // only moment its text can be read.
+                    self.absorb_command_text(screen, region);
                 }
                 self.close_open_semantic_output_region(screen, point);
+                if screen == ScreenId::Primary && self.command_marks.has_open_command() {
+                    let finished = self.register_command_mark_anchor(screen, point);
+                    self.command_marks.note_finished(finished, exit_code);
+                }
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Finished);
             }
         }
         self.reconcile_decorations_against_semantic_input();
+    }
+
+    /// Register one of a command mark's own coordinates in the document's anchor registry.
+    ///
+    /// `A`, `C` and `D` have no semantic region of their own to borrow a registration from the way
+    /// `B` borrows the input region's start, so they get their own — through the same
+    /// `register_anchor` entry point every other durable coordinate in this session uses, and never
+    /// through a private table. That is what makes a mark survive scroll-out, freezing and
+    /// eviction without one line of migration code in the ledger.
+    fn register_command_mark_anchor(&mut self, screen: ScreenId, point: GridPoint) -> AnchorId {
+        self.document.register_anchor(ContentAnchor::Live {
+            screen,
+            point,
+            bias: Bias::Before,
+            generation: self.grid_generation,
+        })
+    }
+
+    /// Copy the just-closed input region's content witness into the open mark as its command text.
+    ///
+    /// The witness is the exact visible text between `B` and the region's end, already captured by
+    /// `refresh_semantic_input_witness` at the authoritative close — so this reads a fact the
+    /// session had already established rather than scanning the grid a second time with slightly
+    /// different rules. Trimmed, because the witness includes whatever padding the line editor left
+    /// between the prompt and the cursor, and the rail's glance card is a one-liner.
+    ///
+    /// **The one case that yields nothing, stated so nobody debugs it twice.** The witness is read
+    /// off the *live grid*, and the session applies a parse quantum's directives after the vendor
+    /// has already consumed the whole quantum — so if a single PTY read carries `C` **and** enough
+    /// output to scroll the command's own prompt row off the grid, the start anchor has already
+    /// migrated to staging by the time this runs and there is nothing left to read. The text is
+    /// then empty, and empty is what the ledger reports: a glance card that says nothing is a
+    /// smaller failure than one that says the wrong command. Ordinary delivery does not hit it —
+    /// the read that carries `C` cannot also carry output the command has not produced yet — and
+    /// `a_command_whose_output_arrives_in_the_same_read_keeps_its_mark_and_admits_it_has_no_text`
+    /// pins both halves.
+    fn absorb_command_text(&mut self, screen: ScreenId, region_index: usize) {
+        if screen != ScreenId::Primary {
+            return;
+        }
+        let Some(region) = self.semantic_input_regions.get(region_index) else {
+            return;
+        };
+        let text = region.witness.trim().to_owned();
+        self.command_marks.note_command_text(text);
+    }
+
+    /// Every command this session has been told about, oldest first.
+    ///
+    /// Every mark in here is live: the ones whose content was deleted were dropped at the moment of
+    /// deletion (`retire_command_marks`), because afterwards their anchors have been degraded onto
+    /// a surviving neighbour and no longer say anything true about themselves.
+    pub fn command_marks(&self) -> &[CommandMark] {
+        self.command_marks.marks()
+    }
+
+    pub fn command_mark(&self, id: CommandMarkId) -> Option<&CommandMark> {
+        self.command_marks.get(id)
+    }
+
+    /// Bumps on every ledger change and on nothing else, so a rail painter can cache its geometry
+    /// across frames and rebuild only when this number moves.
+    pub fn command_marks_revision(&self) -> u64 {
+        self.command_marks.revision()
+    }
+
+    /// Resolve one of a mark's registered anchors to the coordinate it names right now.
+    ///
+    /// This is the only way to read a `CommandMark`'s position, and that is deliberate: a caller
+    /// that could hold a `ContentAnchor` would be holding a copy that stops being true at the next
+    /// reflow, whereas one that has to come back here gets the document's current answer every
+    /// time.
+    pub fn command_mark_anchor(&self, anchor: AnchorId) -> Option<&ContentAnchor> {
+        self.document.anchor(anchor).ok()
+    }
+
+    /// Which command is the given position looking at — the newest mark that begins at or before
+    /// it. `None` when the position precedes every mark, or when there are no marks at all.
+    ///
+    /// The input is a `ContentAnchor` because that is how the viewport addresses content:
+    /// `ScrollAnchor { source: ContentAnchor, local_offset }` is what `ViewportProjection` stores
+    /// for a scrolled viewport, so a caller asking "which command is on screen" hands over exactly
+    /// the `source` it already has. Ordering is `bt_doc::compare_anchors`, DESIGN §3.2's total
+    /// order over the primary document — which is also why an alternate-screen position answers
+    /// `None` rather than something: it is in an isolated namespace and genuinely is not before or
+    /// after any of these marks.
+    pub fn command_mark_at_or_before(&self, anchor: &ContentAnchor) -> Option<CommandMarkId> {
+        let mut best: Option<(&ContentAnchor, CommandMarkId)> = None;
+        for mark in self.command_marks.marks() {
+            let Some(start) = self.command_mark_anchor(mark.start) else {
+                continue;
+            };
+            // An unorderable pair is not a "no" that can be overruled — it is the absence of an
+            // answer, and the only honest thing to do with it is to leave the mark out. The case
+            // that reaches here is `AnchorError::IsolatedScreen`: the alternate screen has its own
+            // namespace, so a position on it is neither before nor after any primary mark.
+            let Ok(ordering) = compare_anchors(start, anchor) else {
+                continue;
+            };
+            if ordering.is_gt() {
+                continue;
+            }
+            // Ties go to the later mark: two commands can share a start coordinate once both have
+            // been degraded onto the same successor line, and "the one the viewport is looking at"
+            // is the most recent of those.
+            if best.is_none_or(|(candidate, _)| {
+                compare_anchors(start, candidate).is_ok_and(Ordering::is_ge)
+            }) {
+                best = Some((start, mark.id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// Drop the marks whose content is being deleted, *before* the document degrades their anchors.
+    ///
+    /// The polarity matters and is the reason this is a separate step rather than a check inside
+    /// the ledger: `delete_transaction` re-seats a deleted anchor onto the next surviving line (or
+    /// onto live row zero when nothing survives), so a mark asked after the fact resolves happily
+    /// to a line that has nothing to do with the command it names. Read the doomed set here, while
+    /// the anchors still point at what is about to go.
+    ///
+    /// The rule is character-for-character the one `delete_history` already applies to inline
+    /// images: a `History` anchor among the removed ids goes, a `Staging` anchor goes when staging
+    /// is being cleared, and a `Live` anchor stays — ED3 deletes scrollback, not the screen. This
+    /// is also how the transcript's frozen quota bounds the ledger: the eviction that drops the
+    /// oldest frozen line arrives here as an ordinary removal, and the mark anchored to it goes
+    /// with it.
+    fn retire_command_marks(&mut self, removed: &BTreeSet<TranscriptId>, clear_staging: bool) {
+        let doomed = self
+            .command_marks
+            .marks()
+            .iter()
+            .filter(|mark| match self.document.anchor(mark.start).ok() {
+                Some(ContentAnchor::History { id, .. }) => removed.contains(id),
+                Some(ContentAnchor::Staging { .. }) => clear_staging,
+                _ => false,
+            })
+            .map(|mark| mark.id)
+            .collect::<BTreeSet<_>>();
+        self.command_marks.retire(&doomed);
     }
 
     fn close_semantic_input_region(
@@ -6973,6 +7149,7 @@ impl DualPlaneSession {
                         })
                         .collect::<BTreeSet<_>>();
                     self.retire_inline_images(&retired);
+                    self.retire_command_marks(&BTreeSet::new(), true);
                     self.document
                         .delete_transaction(&[], true, self.grid_generation);
                 }
@@ -8156,6 +8333,7 @@ impl DualPlaneSession {
             })
             .collect::<BTreeSet<_>>();
         self.retire_inline_images(&retired_images);
+        self.retire_command_marks(&removed_set, clear_staging);
         self.document
             .delete_transaction(removed, clear_staging, self.grid_generation);
         if clear_staging {
@@ -22714,6 +22892,424 @@ mod tests {
             .unwrap();
         session.feed(b"\x1b[?1049l").unwrap();
         assert_eq!(session.window_title(), Some("alternate 标题"));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The command-mark ledger (DESIGN §7.1.5c, slice S1-data).
+    // ---------------------------------------------------------------------------------------
+
+    /// One full `A/B/C/D` cycle, fed the way a PTY actually delivers one: the prompt, the typed
+    /// command and `C` in the read that carries the Enter, and the output and `D` in the read (or
+    /// reads) that follow once the command has produced something. Splitting them is not a
+    /// convenience — a single read cannot carry both `C` and output that does not exist yet, and
+    /// the session's grid reads at `C` depend on that ordering (see `absorb_command_text`).
+    fn run_command(session: &mut DualPlaneSession, command: &str, output: &str, status: &str) {
+        session
+            .feed(format!("\x1b]133;A\x07PS> \x1b]133;B\x07{command}\x1b]133;C\x07").as_bytes())
+            .unwrap();
+        session
+            .feed(format!("\r\n{output}\r\n\x1b]133;D;{status}\x07").as_bytes())
+            .unwrap();
+    }
+
+    /// The logical line a mark's `B` anchor currently names, read back through the document the
+    /// same way a rail would. `None` when the anchor has not reached frozen history yet.
+    fn mark_history_text(session: &DualPlaneSession, mark: &CommandMark) -> Option<String> {
+        let ContentAnchor::History { id, .. } = session.command_mark_anchor(mark.start)? else {
+            return None;
+        };
+        session
+            .document
+            .entries()
+            .get(id)
+            .map(|entry| entry.line.text.clone())
+    }
+
+    fn command_texts(session: &DualPlaneSession) -> Vec<String> {
+        session
+            .command_marks()
+            .iter()
+            .map(|mark| mark.command_text.clone())
+            .collect()
+    }
+
+    /// The shape everything else is a variation on: markers in, one record out, carrying the text
+    /// that was typed and the status the shell reported.
+    #[test]
+    fn a_prompt_a_command_and_an_exit_status_become_one_mark() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        run_command(&mut session, "echo ok", "ok", "0");
+
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].command_text, "echo ok");
+        assert_eq!(marks[0].exit_code, Some(0));
+        assert!(!marks[0].is_running());
+        assert!(!marks[0].failed(), "zero is not a failure");
+        assert!(
+            marks[0].prompt.is_some(),
+            "`A` was reported, so it is recorded"
+        );
+        assert!(marks[0].executed.is_some());
+        assert_eq!(session.command_mark(marks[0].id).unwrap(), &marks[0]);
+    }
+
+    /// The boundary of what the command text can know, pinned from both sides.
+    ///
+    /// The session applies a parse quantum's directives after the vendor has consumed the whole
+    /// quantum, so a read that carries `C` *and* a screenful of output has already scrolled the
+    /// command's own prompt row away before the ledger gets to look at it. The mark is still there,
+    /// still ordered, still carrying its exit status — it simply has no text, and says so. The
+    /// third session below is the control: identical bytes, a grid tall enough not to scroll, and
+    /// the text is there. Nothing about this is a fallback; it is one fact the terminal was in no
+    /// position to observe.
+    #[test]
+    fn a_command_whose_output_arrives_in_the_same_read_keeps_its_mark_and_admits_it_has_no_text() {
+        let coalesced =
+            b"\x1b]133;A\x07PS> \x1b]133;B\x07echo ok\x1b]133;C\x07\r\none\r\ntwo\r\nthree\r\nfour\r\n\x1b]133;D;7\x07";
+
+        let mut scrolled = DualPlaneSession::new(nz(40), nz(4));
+        scrolled.feed(coalesced).unwrap();
+        assert_eq!(command_texts(&scrolled), vec![String::new()]);
+        assert_eq!(
+            scrolled.command_marks()[0].exit_code,
+            Some(7),
+            "everything the shell actually reported is still recorded"
+        );
+
+        let mut roomy = DualPlaneSession::new(nz(40), nz(40));
+        roomy.feed(coalesced).unwrap();
+        assert_eq!(command_texts(&roomy), vec!["echo ok".to_owned()]);
+
+        let mut delivered = DualPlaneSession::new(nz(40), nz(4));
+        run_command(
+            &mut delivered,
+            "echo ok",
+            "one\r\ntwo\r\nthree\r\nfour",
+            "7",
+        );
+        assert_eq!(
+            command_texts(&delivered),
+            vec!["echo ok".to_owned()],
+            "the ordering a real PTY produces reads the text on a four-row grid too"
+        );
+    }
+
+    /// The `.cmdtick.fail` datum. Before this ledger the only exit code in the session was a single
+    /// scalar every command overwrote, so a rail could never have said *which* tick was red.
+    #[test]
+    fn a_non_zero_status_belongs_to_its_own_command_and_not_to_the_session() {
+        let mut session = DualPlaneSession::new(nz(80), nz(12));
+        run_command(&mut session, "good", "fine", "0");
+        run_command(&mut session, "bad", "boom", "1");
+        run_command(&mut session, "good again", "fine", "0");
+
+        let failed = session
+            .command_marks()
+            .iter()
+            .map(|mark| (mark.command_text.clone(), mark.failed()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failed,
+            vec![
+                ("good".to_owned(), false),
+                ("bad".to_owned(), true),
+                ("good again".to_owned(), false),
+            ]
+        );
+        assert_eq!(
+            session.failure_exit_code, None,
+            "the session-wide scalar has already been overwritten by the last success — which is \
+             exactly why the rail cannot be built on it"
+        );
+    }
+
+    /// A command that has begun and not ended is in the ledger, visibly unfinished. The rail draws
+    /// its tick immediately; it simply has no ending to colour.
+    #[test]
+    fn a_command_still_running_is_present_with_no_ending() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        session
+            .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07sleep 30\x1b]133;C\x07\r\n")
+            .unwrap();
+
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].command_text, "sleep 30");
+        assert!(marks[0].is_running());
+        assert_eq!(marks[0].finished, None);
+        assert_eq!(marks[0].exit_code, None);
+        assert!(!marks[0].failed(), "unknown is not failed");
+    }
+
+    /// C13, stated as a test. `cmd.exe` emits no OSC 133 and neither does a PowerShell whose
+    /// profile never installed the integration; both produce an empty ledger and no complaint.
+    /// There is no prompt-shaped-line heuristic here to accidentally rescue them.
+    #[test]
+    fn a_shell_that_never_speaks_osc_133_leaves_the_ledger_empty() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        session
+            .feed(b"C:\\Users\\me>dir\r\n Volume in drive C has no label.\r\nC:\\Users\\me>")
+            .unwrap();
+        assert!(session.command_marks().is_empty());
+        assert_eq!(session.command_marks_revision(), 0);
+
+        session
+            .feed(b"PS D:\\Developer> cargo test\r\n   Compiling bt-term\r\nPS D:\\Developer> ")
+            .unwrap();
+        assert!(
+            session.command_marks().is_empty(),
+            "a prompt-looking line is not evidence of a command"
+        );
+    }
+
+    /// DESIGN §3.2's spirit: the alternate screen is an isolated namespace, so a TUI emitting the
+    /// same markers for its own redraws is describing its canvas, not this session's history.
+    #[test]
+    fn markers_on_the_alternate_screen_are_not_this_sessions_command_history() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        run_command(&mut session, "echo before", "before", "0");
+        let before = session.command_marks_revision();
+
+        session.feed(b"\x1b[?1049h").unwrap();
+        run_command(&mut session, "inside vim", "redraw", "1");
+        assert_eq!(
+            session.command_marks().len(),
+            1,
+            "the TUI's own markers add nothing"
+        );
+        assert_eq!(session.command_marks_revision(), before);
+
+        session.feed(b"\x1b[?1049l").unwrap();
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].command_text, "echo before");
+        assert_eq!(
+            marks[0].exit_code,
+            Some(0),
+            "the alternate screen's failing command must not have leaked into the primary's mark"
+        );
+    }
+
+    /// Clear scrollback (`ESC [ 3 J`, which is what `Clear-Host` sends) deletes the lines the marks
+    /// were anchored to, so the marks go with them.
+    #[test]
+    fn clearing_the_scrollback_takes_the_marks_whose_lines_it_deleted() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        for index in 0..4 {
+            run_command(
+                &mut session,
+                &format!("command {index}"),
+                "one\r\ntwo\r\nthree\r\nfour",
+                "0",
+            );
+        }
+        assert_eq!(session.command_marks().len(), 4);
+        assert!(
+            session
+                .command_marks()
+                .iter()
+                .any(|mark| mark_history_text(&session, mark).is_some()),
+            "the earliest prompts must have reached frozen history for this test to mean anything"
+        );
+        let before = session.command_marks_revision();
+
+        session.feed(b"\x1b[3J").unwrap();
+        assert!(
+            session.command_marks().len() < 4,
+            "the marks whose lines were deleted are gone"
+        );
+        assert!(session.command_marks_revision() > before);
+        for mark in session.command_marks() {
+            assert!(
+                !matches!(
+                    session.command_mark_anchor(mark.start),
+                    Some(ContentAnchor::History { .. })
+                ),
+                "no surviving mark may still claim a deleted history line"
+            );
+        }
+    }
+
+    /// The migration promise: a mark is a registration in the document's anchor registry, so a
+    /// resize that reflows every line still leaves each mark naming the command it named.
+    #[test]
+    fn a_resize_keeps_every_mark_pointing_at_the_line_it_named() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        for index in 0..20 {
+            let output = (0..8)
+                .map(|line| format!("out {index} {line}"))
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            run_command(&mut session, &format!("command {index}"), &output, "0");
+        }
+        assert_eq!(session.command_marks().len(), 20);
+        let before = session
+            .command_marks()
+            .iter()
+            .map(|mark| (mark.id, mark_history_text(&session, mark)))
+            .collect::<Vec<_>>();
+        assert!(
+            before.iter().all(|(_, text)| text.is_some()),
+            "every mark should have reached frozen history: {before:?}"
+        );
+
+        session.resize(nz(24), nz(6)).unwrap();
+        session.resize(nz(60), nz(6)).unwrap();
+
+        let after = session
+            .command_marks()
+            .iter()
+            .map(|mark| (mark.id, mark_history_text(&session, mark)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "narrower then wider must leave every mark on the same logical line"
+        );
+    }
+
+    /// The ledger is bounded by the transcript's own frozen quota and carries no second quota of
+    /// its own: the eviction that drops the oldest frozen line arrives as an ordinary deletion, and
+    /// the mark anchored to that line leaves with it.
+    #[test]
+    fn a_mark_leaves_when_the_frozen_quota_evicts_the_line_it_named() {
+        let mut session = DualPlaneSession::with_quotas(
+            nz(40),
+            nz(4),
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::new(12).unwrap(),
+        );
+        for index in 0..8 {
+            run_command(
+                &mut session,
+                &format!("command {index}"),
+                "one\r\ntwo\r\nthree\r\nfour",
+                "0",
+            );
+        }
+        let texts = command_texts(&session);
+        assert!(
+            texts.len() < 8,
+            "a twelve-line frozen quota cannot hold eight commands' prompts: {texts:?}"
+        );
+        assert!(
+            !texts.contains(&"command 0".to_owned()),
+            "the oldest command's line was evicted, so its mark is gone: {texts:?}"
+        );
+        assert!(texts.contains(&"command 7".to_owned()), "{texts:?}");
+    }
+
+    /// The revision is a cache key for a painter, so it must move on change and only on change.
+    #[test]
+    fn the_revision_moves_when_the_ledger_does_and_not_when_frames_go_by() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        assert_eq!(session.command_marks_revision(), 0);
+
+        session.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07").unwrap();
+        let opened = session.command_marks_revision();
+        assert!(opened > 0, "`B` created a mark");
+
+        let mut projection = session.new_projection(session.layout_key());
+        publish_one_frame(&mut session, &mut projection);
+        publish_one_frame(&mut session, &mut projection);
+        assert_eq!(
+            session.command_marks_revision(),
+            opened,
+            "painting is not a change to the ledger"
+        );
+
+        session
+            .feed(b"plain output with no markers in it\r\n")
+            .unwrap();
+        assert_eq!(
+            session.command_marks_revision(),
+            opened,
+            "output is not a change to the ledger either"
+        );
+
+        session.feed(b"echo hi\x1b]133;C\x07\r\nhi\r\n").unwrap();
+        let executed = session.command_marks_revision();
+        assert!(executed > opened, "`C` recorded the text and the boundary");
+
+        session.feed(b"\x1b]133;D;3\x07").unwrap();
+        assert!(
+            session.command_marks_revision() > executed,
+            "`D` recorded the status"
+        );
+    }
+
+    /// "Which command is this viewport looking at" — the query the rail asks to know which tick to
+    /// draw as selected. The input is a `ContentAnchor` because that is what a `ScrollAnchor`
+    /// carries, so the viewport hands over the coordinate it already has.
+    #[test]
+    fn the_ledger_answers_which_command_a_position_is_looking_at() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        for index in 0..4 {
+            run_command(
+                &mut session,
+                &format!("command {index}"),
+                "one\r\ntwo\r\nthree\r\nfour",
+                "0",
+            );
+        }
+        let marks = session
+            .command_marks()
+            .iter()
+            .map(|mark| (mark.id, mark.command_text.clone()))
+            .collect::<Vec<_>>();
+        assert!(marks.len() >= 2, "{marks:?}");
+
+        for (id, _) in &marks {
+            let start = session
+                .command_mark_anchor(session.command_mark(*id).unwrap().start)
+                .unwrap()
+                .clone();
+            assert_eq!(
+                session.command_mark_at_or_before(&start),
+                Some(*id),
+                "a mark's own start belongs to that mark"
+            );
+        }
+
+        let first = session.command_mark(marks[0].0).unwrap();
+        let ContentAnchor::History { id, generation, .. } =
+            session.command_mark_anchor(first.start).unwrap().clone()
+        else {
+            panic!("the oldest prompt has frozen by now");
+        };
+        assert_eq!(
+            session.command_mark_at_or_before(&ContentAnchor::History {
+                id: TranscriptId(id.0 - 1),
+                offset: GraphemeOffset(0),
+                bias: Bias::Before,
+                generation,
+            }),
+            None,
+            "a position above every mark belongs to no command"
+        );
+
+        let bottom = ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row: 3, column: 0 },
+            bias: Bias::Before,
+            generation: session.grid_generation,
+        };
+        assert_eq!(
+            session.command_mark_at_or_before(&bottom),
+            Some(marks.last().unwrap().0),
+            "the bottom of the grid is looking at the newest command"
+        );
+
+        assert_eq!(
+            session.command_mark_at_or_before(&ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                point: GridPoint { row: 0, column: 0 },
+                bias: Bias::Before,
+                generation: session.grid_generation,
+            }),
+            None,
+            "the alternate screen is not ordered against the primary document at all"
+        );
     }
 }
 
