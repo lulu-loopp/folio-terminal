@@ -891,9 +891,22 @@ pub struct PreviewImage {
     pub width_px: u32,
     pub height_px: u32,
     /// Draw dimensions inside the latest seat. They may briefly differ from the texture dimensions
-    /// while a resize is in flight; the sampler provides the intentionally soft transition.
+    /// while a resize is in flight; the sampler provides the intentionally soft transition. Once a
+    /// surface has been zoomed they differ *permanently* and on purpose: above 100% the CPU
+    /// resample stops at the decode's native pixels and this pair carries the magnification, which
+    /// is the whole reason a picture eight times its own size costs one texture rather than sixty
+    /// megabytes of one.
     pub display_width_px: u32,
     pub display_height_px: u32,
+    /// How far the drawn picture is carried from the **centre** of [`Self::seat`], in physical
+    /// pixels (ticket #60).
+    ///
+    /// A displacement rather than an origin, and that is deliberate: at rest it is `[0.0, 0.0]` and
+    /// the picture is centred exactly as it always was, so the resting geometry has one author and
+    /// not two. It also survives a pane FLIP for free — [`Renderer::place_preview_image`] moves the
+    /// seat under a picture that has already been laid out, and an offset from that seat's centre
+    /// travels with it where an absolute corner would have stayed behind.
+    pub pan_px: [f32; 2],
 }
 
 /// One styled run inside a preview paragraph.
@@ -4828,8 +4841,14 @@ impl Renderer {
         }) else {
             return (Some((image.seat, image.clip)), Vec::new(), Vec::new());
         };
-        let left_inset = (image.seat.width.saturating_sub(image.display_width_px) / 2) as f32;
-        let top_inset = (image.seat.height.saturating_sub(image.display_height_px) / 2) as f32;
+        // Signed, because a zoomed picture is wider than the box it is seen through and its left
+        // edge is then off the left of the seat; the saturating unsigned subtraction this replaced
+        // would have pinned it to zero and drawn the *left* of the picture whatever the pan said.
+        // Floored so that the resting, unzoomed case is the integer division it has always been.
+        let left_inset = ((image.seat.width as f32 - image.display_width_px as f32) / 2.0).floor()
+            + image.pan_px[0];
+        let top_inset = ((image.seat.height as f32 - image.display_height_px as f32) / 2.0).floor()
+            + image.pan_px[1];
         let scale_x = image.display_width_px as f32 / image.width_px as f32;
         let scale_y = image.display_height_px as f32 / image.height_px as f32;
         let mut draws = Vec::new();

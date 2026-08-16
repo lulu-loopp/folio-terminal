@@ -872,6 +872,18 @@ struct PreviewPane {
     /// edge, and a body that can only be scrolled downward would leave the end
     /// of every long line permanently out of reach.
     scroll: [f32; 2],
+    /// How this surface is looking at the **picture** it is showing, if it is
+    /// showing one (ticket #60) — [`Self::scroll`]'s opposite number, and here
+    /// for the same reason it is: a document's scroll and a picture's zoom are
+    /// the two answers to "where in this content are you", and both belong to
+    /// the surface rather than to the thing being looked at.
+    ///
+    /// Not persisted and not on the buffer. It is also not cleared when a
+    /// picture is replaced by another — [`Runtime::open_preview_image_on`] resets
+    /// it explicitly, because a new file arriving at 250% because the last one
+    /// was left there is the surface remembering something about a picture it
+    /// has never seen.
+    zoom: ImageZoom,
     /// How far each markdown block that is wider than the page has been scrolled
     /// inside itself (user ruling, 2026-08-13). One entry per block, by index.
     md_block_scroll: Vec<f32>,
@@ -3418,6 +3430,11 @@ struct TabState {
     preview_views: PreviewViewStore,
     /// Which surface the pointer is drawing a selection across.
     preview_selecting: Option<PreviewSurface>,
+    /// The picture in the hand, and the press that may still become a double
+    /// click on one (ticket #60). Beside the drags above and singletons for
+    /// their reason: there is one pointer.
+    preview_image_drag: Option<ImageDrag>,
+    preview_image_clicks: ImageClicks,
     /// The arc's easing toward the reading it is now showing, if it is moving.
     ring_tween: Option<SweepTween>,
     /// The sweep the ring is displaying, which is also what a state change
@@ -5803,6 +5820,64 @@ fn live_viewport_mouse_hit(frame: &ViewportFrame, hit: bt_render::GridHit) -> bt
     }
 }
 
+/// What the window itself has recognised in the cell a press landed on.
+///
+/// Two values and not a `bool`, because the thing being expressed is not "some
+/// flag is set": it is **whose target this cell is**, and the only answer that
+/// takes a press away from a tracking program is the one this window can defend
+/// — a file a worker actually opened and decoded, or an OSC 8 URI the program
+/// itself wrote. Everything else, including path-*looking* text, is
+/// [`Self::Ordinary`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PressedCellTarget {
+    /// A cell with nothing of ours under it — which is almost every cell.
+    #[default]
+    Ordinary,
+    /// A verified local image reference ([`Runtime::local_image_path_hit`]) or a
+    /// hyperlink ([`Runtime::hyperlink_hit`]) — the two things this window draws
+    /// a mark on and therefore owes a verb.
+    Ours,
+}
+
+/// Whether a press in a mouse-tracking pane is the window's rather than the
+/// program's (user ruling, 2026-08-16 — ticket #59).
+///
+/// **The underline is a promise.** Claude Code turns on 1000/1002/1003/1006 and
+/// then keeps printing paths on the *primary* screen; a file path it printed
+/// wears our solid underline the moment the pointer crosses it, hover-peeks a
+/// picture, and — until this ruling — swallowed the click that underline just
+/// promised, because the pane reported tracking and every left press went to the
+/// child. A mark that answers a hover and not a click is the window lying about
+/// what it can do, so the mark decides: where there is a verified target of ours,
+/// the press and its release are ours; everywhere else the program keeps the
+/// whole mouse.
+///
+/// **Three guards, and each of them is the ruling's own wording.**
+///
+/// * *A verified target of ours.* Not "the text looks like a path" — the same
+///   `verified` bit the underline is painted from, so the promise and the verb
+///   are one fact rather than two agreeing lists.
+/// * *Left only.* Right and middle carry no local verb, so taking them would be
+///   a hole in the program's mouse bought for nothing.
+/// * *Primary screen only.* vim, yazi and lazygit live on the alternate screen
+///   and want the mouse whole; there is no detection there to argue with anyway
+///   (nothing scans an alt screen for image references), but the rule is written
+///   rather than left to fall out of an absence, because an absence is not a
+///   decision and the next slice that teaches the scanner about alt screens
+///   would silently repeal it.
+///
+/// Shift is untouched above all of this: it has always meant "this press is the
+/// window's", and it still does on every cell and on both screens.
+fn press_belongs_to_the_window(
+    button: input::MouseProtocolButton,
+    target: PressedCellTarget,
+    modes: TerminalModes,
+) -> bool {
+    button == input::MouseProtocolButton::Left
+        && target == PressedCellTarget::Ours
+        && !modes.alternate_screen
+}
+
 fn route_forwarded_mouse_button(
     route: &mut Option<MouseRoute>,
     state: ElementState,
@@ -5810,8 +5885,11 @@ fn route_forwarded_mouse_button(
     hit: bt_render::GridHit,
     modes: TerminalModes,
     modifiers: ModifiersState,
+    target: PressedCellTarget,
 ) -> Option<Vec<u8>> {
-    let forward = !modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off;
+    let forward = !modifiers.shift_key()
+        && modes.mouse_tracking != MouseTracking::Off
+        && !press_belongs_to_the_window(button, target, modes);
     match state {
         ElementState::Pressed if forward => {
             *route = Some(MouseRoute::Forward(button));
@@ -6909,6 +6987,469 @@ impl PreviewImageState {
             false
         }
     }
+}
+
+// ── how a picture is being looked at (ticket #60, user ruling 2026-08-16) ──
+//
+// A preview that could only ever be fit-to-body is a preview you cannot read: a
+// screenshot of a terminal, a diagram, a photograph with small type in it are all
+// things whose whole point is the pixels, and "here is the whole of it, too small"
+// is the one thing every image viewer on the desk stopped saying in about 1995.
+// So the picture gains the two verbs an image has: a scale and a place to stand.
+//
+// **This is a view, not a document.** It lives beside [`PreviewPane::scroll`] and
+// is exactly as durable: it belongs to the *surface*, so two panes on one file
+// disagree about it freely (the 8⑧ ruling, applied to pixels instead of lines);
+// it is not on the buffer, because two panes on one picture are one picture; and
+// it is **not persisted**, because a zoom is where you were looking a moment ago
+// and not a property of the file — the same reason a scroll offset is restored
+// per-buffer and a magnification is not restored at all.
+
+/// The multiplicative step one wheel notch spends, and the ends of the road.
+///
+/// Multiplicative because zoom is perceptually logarithmic — an additive step is
+/// a crawl at 800% and a leap at 10% — and ×1.25 is the step every browser, every
+/// PDF reader and Windows Photos use, so a notch feels like the notch the hand
+/// already knows. The clamp is stated in **native pixels**: 10% of the picture's
+/// own resolution at the bottom, 800% at the top. Below the first a photograph is
+/// a smudge and there is nothing to look at; above the second a pixel is eighty
+/// pixels wide and the sampler is drawing rectangles.
+const IMAGE_ZOOM_STEP: f32 = 1.25;
+const IMAGE_ZOOM_MIN: f32 = 0.10;
+const IMAGE_ZOOM_MAX: f32 = 8.0;
+
+/// Whether the picture is sized by the body or by a number the user chose.
+///
+/// **Fit is a mode and never a stored scale**, and that distinction is the whole
+/// reason this is an enum rather than an `f32` with a flag beside it: a pane
+/// dragged wider must re-fit, and a fit remembered as "0.43" would keep the old
+/// pane's answer in the new pane's body. A `Scale`, conversely, is a number the
+/// user asked for and survives every resize untouched — only its *pan* is
+/// re-clamped, because the body it was clamped against has changed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ImageZoomMode {
+    Fit,
+    /// A multiple of the decode's **native** pixels. 1.0 is one image pixel per
+    /// physical screen pixel, which is what "100%" has to mean or the number is
+    /// about the window instead of about the picture.
+    Scale(f32),
+}
+
+/// One surface's view of one picture: how large, and how far off centre.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ImageZoom {
+    mode: ImageZoomMode,
+    /// How far the picture has been carried from the body's centre, in physical
+    /// pixels. Meaningful only while the drawn picture is larger than the body on
+    /// that axis; [`image_destination`] clamps it to nothing on any axis where it
+    /// is not, which is what makes "let go of the mouse" and "resize the pane"
+    /// arrive at the same place.
+    pan: [f32; 2],
+}
+
+impl ImageZoom {
+    const FIT: Self = Self {
+        mode: ImageZoomMode::Fit,
+        pan: [0.0, 0.0],
+    };
+
+    /// A scale the user asked for, clamped to the road and centred.
+    fn scaled(scale: f32) -> Self {
+        Self {
+            mode: ImageZoomMode::Scale(scale.clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX)),
+            pan: [0.0, 0.0],
+        }
+    }
+
+    fn is_fit(self) -> bool {
+        matches!(self.mode, ImageZoomMode::Fit)
+    }
+}
+
+impl Default for ImageZoom {
+    fn default() -> Self {
+        Self::FIT
+    }
+}
+
+/// The scale a mode resolves to against a given body — the one place `Fit`
+/// becomes a number.
+///
+/// Fit is `object-fit: contain` inside the body's **image column**, which is
+/// [`PREVIEW_IMAGE_FIT_WIDTH_FRACTION`] × [`PREVIEW_IMAGE_FIT_HEIGHT_FRACTION`]
+/// of the body and not the body: the 30% of height it gives up is where the meta
+/// line under it stands (mock-up 606, and the note beside the constants). It also
+/// never enlarges — a 32px icon in a 900px pane is drawn at 32px, because a Fit
+/// that upscaled would make "fit" and "100%" mean different things on small
+/// pictures and there would be no way back to the true pixels.
+fn image_zoom_scale(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> f32 {
+    match zoom.mode {
+        ImageZoomMode::Fit => image_fit_scale(body, image_px),
+        ImageZoomMode::Scale(scale) => scale.clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX),
+    }
+}
+
+fn image_fit_scale(body: [f32; 4], image_px: [u32; 2]) -> f32 {
+    let (width, height) = (image_px[0] as f32, image_px[1] as f32);
+    if width <= 0.0 || height <= 0.0 {
+        return 1.0;
+    }
+    let column_width = ((body[2] - body[0]) * PREVIEW_IMAGE_FIT_WIDTH_FRACTION).max(1.0);
+    let column_height = ((body[3] - body[1]) * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION).max(1.0);
+    (column_width / width).min(column_height / height).min(1.0)
+}
+
+/// **The one rectangle.** Where the picture lands inside a body, given how it is
+/// being looked at — the same answer for the painter, for the resample target,
+/// for the foot's arithmetic and for every clamp.
+///
+/// `body` is left/top/right/bottom in physical pixels; the returned rectangle is
+/// in the same coordinates and may extend past the body on either side, which is
+/// exactly what "zoomed in" looks like and what the seat's own scissor is for.
+///
+/// The picture is always **the body's centre plus the pan**, and the pan is
+/// always clamped by the scroller's rule: an axis where the picture is smaller
+/// than the body has no pan at all (it is centred, because a small picture
+/// pinned to a corner reads as a layout bug), and an axis where it is larger may
+/// travel only until its own edge reaches the body's — never far enough to open
+/// a gap. That single sentence is what makes a drag, a wheel, a resize and a
+/// double click all leave the picture somewhere legal without any of them
+/// knowing about the others.
+fn image_destination(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> [f32; 4] {
+    let scale = image_zoom_scale(body, image_px, zoom);
+    let drawn = [image_px[0] as f32 * scale, image_px[1] as f32 * scale];
+    let mut rect = [0.0f32; 4];
+    for axis in 0..2 {
+        let (near, far) = (body[axis], body[axis + 2]);
+        let centre = (near + far) / 2.0;
+        let pan = clamp_image_pan(far - near, drawn[axis], zoom.pan[axis]);
+        rect[axis] = centre - drawn[axis] / 2.0 + pan;
+        rect[axis + 2] = rect[axis] + drawn[axis];
+    }
+    rect
+}
+
+/// The pan a zoom actually gets to keep against this body, read out of the one
+/// rectangle rather than recomputed — what the painter is handed and what a
+/// resize writes back so the stored pan and the drawn one never drift apart.
+fn image_clamped_pan(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> [f32; 2] {
+    let rect = image_destination(body, image_px, zoom);
+    [
+        (rect[0] + rect[2] - body[0] - body[2]) / 2.0,
+        (rect[1] + rect[3] - body[1] - body[3]) / 2.0,
+    ]
+}
+
+/// How far the picture may be carried on one axis: nowhere while it fits, and at
+/// most half the overflow once it does not.
+fn clamp_image_pan(body_extent: f32, drawn_extent: f32, pan: f32) -> f32 {
+    let slack = (drawn_extent - body_extent) / 2.0;
+    if slack <= 0.0 {
+        0.0
+    } else {
+        pan.clamp(-slack, slack)
+    }
+}
+
+/// The pan that keeps the point under the pointer under the pointer while the
+/// scale changes from `old` to `new`.
+///
+/// `point` is the pointer measured **from the body's centre**, because that is
+/// where [`image_destination`] hangs the picture from; expressing it any other
+/// way would make this function depend on the body rectangle it deliberately
+/// does not take.
+///
+/// The derivation is one line. A picture point `u` (from the picture's own
+/// centre, in native pixels) is drawn at `pan + u·s`. Asking for the same `u`
+/// under the same `point` before and after gives `u = (point − pan)/old` and
+/// `point = pan′ + u·new`, so `pan′ = point − (point − pan)·new/old`. Clamping
+/// is deliberately **not** done here: the clamp needs the body and the drawn
+/// extent, [`image_destination`] already owns both, and a second copy of it here
+/// is a second place for the two to disagree.
+fn zoom_about(point: [f32; 2], old: f32, new: f32, pan: [f32; 2]) -> [f32; 2] {
+    if old <= 0.0 {
+        return pan;
+    }
+    let ratio = new / old;
+    [
+        point[0] - (point[0] - pan[0]) * ratio,
+        point[1] - (point[1] - pan[1]) * ratio,
+    ]
+}
+
+/// One wheel notch over the picture (or several, for a free-spinning wheel).
+///
+/// **No `Ctrl` required, and `Ctrl` changes nothing** (user ruling, 2026-08-16).
+/// A preview body showing a picture has no other axis for a notch to be spent
+/// on: it does not scroll, because the picture is not a document — so making the
+/// wheel mean "zoom" is not stealing a gesture, it is giving one back. Every
+/// image viewer on the desk does exactly this; the `Ctrl` in a *browser*'s zoom
+/// exists only because the page underneath does scroll.
+///
+/// The step is applied to the **resolved** scale, so the first notch out of `Fit`
+/// starts from the size on screen rather than jumping to 100%, and the mode
+/// becomes `Scale` at that moment — which is the point after which resizing the
+/// pane stops re-fitting.
+fn image_zoom_notch(
+    zoom: ImageZoom,
+    notches: f32,
+    body: [f32; 4],
+    image_px: [u32; 2],
+    pointer: [f32; 2],
+) -> ImageZoom {
+    if notches == 0.0 {
+        return zoom;
+    }
+    let old = image_zoom_scale(body, image_px, zoom);
+    let new = (old * IMAGE_ZOOM_STEP.powf(notches)).clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX);
+    if new == old {
+        return zoom;
+    }
+    let centre = [(body[0] + body[2]) / 2.0, (body[1] + body[3]) / 2.0];
+    let point = [pointer[0] - centre[0], pointer[1] - centre[1]];
+    ImageZoom {
+        mode: ImageZoomMode::Scale(new),
+        pan: zoom_about(point, old, new, zoom.pan),
+    }
+}
+
+/// The travel one wheel detent reports when a driver speaks in pixels instead of
+/// notches — Win32's `WHEEL_DELTA`, and the number every touchpad shim on this
+/// platform is written against.
+const WHEEL_PIXELS_PER_NOTCH: f32 = 120.0;
+
+/// How many zoom steps one wheel event is worth.
+///
+/// Deliberately **not** [`Runtime::vertical_wheel_travel`]: that turns a notch
+/// into document pixels through the shell's lines-per-notch setting, and a zoom
+/// has no lines to be measured in — a user who set "one screen per notch" for
+/// reading long logs did not ask for 800% in a single flick. So a detent is one
+/// step, and a driver reporting travel is divided by the height of a detent.
+fn wheel_zoom_notches(delta: MouseScrollDelta) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => y,
+        MouseScrollDelta::PixelDelta(position) => position.y as f32 / WHEEL_PIXELS_PER_NOTCH,
+    }
+}
+
+/// Whether the picture is bigger than the body it is seen through, on either
+/// axis — the condition for a drag to have anywhere to go.
+///
+/// It is also the condition for the *cursor* to become a hand, because those two
+/// must be the same fact: a grab cursor over a picture that cannot move is the
+/// window advertising a gesture it will then ignore.
+fn image_is_pannable(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> bool {
+    let rect = image_destination(body, image_px, zoom);
+    rect[2] - rect[0] > body[2] - body[0] || rect[3] - rect[1] > body[3] - body[1]
+}
+
+/// What a pannable picture puts in the hand — K113's vocabulary, borrowed
+/// wholesale because it is the same gesture: `grab` says *this can be carried*,
+/// `grabbing` says *you are carrying it*, and the float's header has been saying
+/// exactly that since the chassis was written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageGrasp {
+    Open,
+    Closed,
+}
+
+/// A picture being carried: which surface, and where the hand was last seen.
+///
+/// The delta is taken from the previous *move* rather than from the press, so a
+/// drag that runs past the end of the road and comes back moves the moment it
+/// comes back — the pan is clamped every step and the overshoot is simply not
+/// accumulated, which is the same feel every scrollbar thumb on this desk has.
+#[derive(Clone, Copy)]
+struct ImageDrag {
+    surface: PreviewSurface,
+    last: [f32; 2],
+}
+
+/// The press that may still turn out to be the second half of a double click.
+///
+/// Kept as one slot rather than a counter because there is exactly one pointer,
+/// and keyed on the **surface plus a few pixels** rather than on a cell: a
+/// picture has no grid to name a repeat in, and the hand moves between the two
+/// halves of a real double click. The slop is generous enough for that and far
+/// too small to join two deliberate clicks at opposite corners.
+const IMAGE_DOUBLE_CLICK_SLOP_PX: f32 = 6.0;
+
+#[derive(Default)]
+struct ImageClicks {
+    last: Option<(PreviewSurface, [f32; 2], Instant)>,
+}
+
+impl ImageClicks {
+    /// Register a press and say whether it completed a double click. A double
+    /// click **consumes** the record, so a third press in the same place starts
+    /// counting again rather than firing the toggle twice.
+    fn register(&mut self, surface: PreviewSurface, point: [f32; 2], now: Instant) -> bool {
+        let doubled = self.last.is_some_and(|(at, was, when)| {
+            at == surface
+                && now.saturating_duration_since(when) <= MULTI_CLICK_INTERVAL
+                && (point[0] - was[0]).abs() <= IMAGE_DOUBLE_CLICK_SLOP_PX
+                && (point[1] - was[1]).abs() <= IMAGE_DOUBLE_CLICK_SLOP_PX
+        });
+        self.last = (!doubled).then_some((surface, point, now));
+        doubled
+    }
+}
+
+/// A double click on the picture, and the `0` / `1` keys' shared destination.
+///
+/// **Fit ↔ 100%, and the 100% is centred rather than about the pointer** (ruling
+/// 2026-08-16). The two candidates are honest and this one is chosen because a
+/// double click is *two* clicks: the pointer is wherever the second one landed,
+/// which is within a few pixels of the first but not at it, and anchoring a jump
+/// of up to 8× to a point that moved between the halves of one gesture puts the
+/// picture somewhere the hand did not ask for. A wheel notch is a single event
+/// aimed at a single point and keeps its anchor; a toggle is a command and lands
+/// on the middle. Going the other way — 100% back to Fit — has no anchor to
+/// argue about at all.
+fn image_zoom_toggled(zoom: ImageZoom) -> ImageZoom {
+    if zoom.is_fit() {
+        ImageZoom::scaled(1.0)
+    } else {
+        ImageZoom::FIT
+    }
+}
+
+/// The keyboard's four verbs while a preview seat holds the keyboard.
+///
+/// `+`/`=` and `-` step by the same notch the wheel spends, **about the body's
+/// centre** — a key has no pointer, and the centre is the only point on screen a
+/// keyboard gesture can be said to be aimed at. `0` is Fit and `1` is 100%, which
+/// is the pair every viewer binds and the same two ends the double click swings
+/// between.
+///
+/// `=` is bound beside `+` because on a US layout `+` is a shifted `=`, so a hand
+/// reaching for "bigger" without shift lands there; binding only `+` makes the
+/// key work or not depending on how hard you pressed it.
+fn image_zoom_key(
+    zoom: ImageZoom,
+    key: &Key,
+    body: [f32; 4],
+    image_px: [u32; 2],
+) -> Option<ImageZoom> {
+    let Key::Character(text) = key else {
+        return None;
+    };
+    let centre = [(body[0] + body[2]) / 2.0, (body[1] + body[3]) / 2.0];
+    match text.as_str() {
+        "+" | "=" => Some(image_zoom_notch(zoom, 1.0, body, image_px, centre)),
+        "-" | "_" => Some(image_zoom_notch(zoom, -1.0, body, image_px, centre)),
+        "0" => Some(ImageZoom::FIT),
+        "1" => Some(ImageZoom::scaled(1.0)),
+        _ => None,
+    }
+}
+
+/// What the meta line under the picture says about how it is being looked at —
+/// the last field of "1280 × 800 · PNG · 214 KB · Fit".
+///
+/// It is on the sentence that was already there rather than in a corner of its
+/// own, because it is the same kind of fact as the other three: *what you are
+/// looking at*. A percentage is rounded to whole percent — the wheel's own steps
+/// land on 78%, 98%, 122% and nobody is served by a second decimal — and `Fit`
+/// says the word instead of the number it currently happens to be, because that
+/// is the difference the mode makes: one of them follows the pane and one does
+/// not.
+fn image_zoom_caption(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> String {
+    if zoom.is_fit() {
+        return "Fit".to_owned();
+    }
+    let percent = (image_zoom_scale(body, image_px, zoom) * 100.0).round();
+    format!("{percent}%")
+}
+
+/// How much of the shared GPU texture budget one preview picture may hold.
+///
+/// A half rather than the whole, because the budget is *shared*: formula bands,
+/// pane icons and the glance card's thumbnail all live in the same `ByteLru`,
+/// and a picture that filled it would evict every one of them and then be
+/// evicted by the next band in turn — a thrash where an honest limit produces a
+/// slightly softer picture.
+const PREVIEW_IMAGE_TEXTURE_SHARE: f64 = 0.5;
+
+/// The largest raster this picture may keep resident, in native pixels.
+///
+/// **Zooming to 100% asks for the decode's own pixels, and some decodes are
+/// enormous.** Before a picture could be magnified this never came up: the
+/// display raster was a fit inside a pane and therefore bounded by the *screen*.
+/// A 6000×4000 photograph at 100% is 91 MiB of RGBA against a 64 MiB shared
+/// budget, and the LRU's answer to one texture larger than the whole budget is
+/// to refuse it outright — the picture would simply vanish at the moment it was
+/// zoomed in on, which is the worst possible time for it to.
+///
+/// So the resident raster is capped, by area, at this picture's share of the
+/// budget, and the magnification above that point is carried by the sampler.
+/// What the user sees is a very large picture going soft at high zoom, which is
+/// what every viewer that does not implement tiled decoding does, and what they
+/// do *not* see is it disappearing. The cap preserves the aspect ratio, so the
+/// box handed to [`bt_render::preview_image_extent`] is still a box that picture
+/// fits exactly.
+fn image_raster_cap(image_px: [u32; 2]) -> (u32, u32) {
+    let (width, height) = (f64::from(image_px[0]), f64::from(image_px[1]));
+    let bytes = width * height * 4.0;
+    let allowance =
+        bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES as f64 * PREVIEW_IMAGE_TEXTURE_SHARE;
+    if bytes <= allowance || bytes <= 0.0 {
+        return (image_px[0], image_px[1]);
+    }
+    let scale = (allowance / bytes).sqrt();
+    (
+        (width * scale).floor().max(1.0) as u32,
+        (height * scale).floor().max(1.0) as u32,
+    )
+}
+
+/// `.pv-meta`'s whole text: what the file is, and how it is being looked at.
+///
+/// Everything it can say and nothing it cannot — a field the window has not been
+/// told yet is left out rather than printed as a placeholder, which is what lets
+/// the line *grow* as the decoder and the worker answer instead of flickering
+/// through three shapes. The zoom is last because it is the only field that is
+/// not about the file: the first three would travel with a copy of the picture
+/// to another machine, and this one is a fact about this pane at this moment, so
+/// it stands where the eye leaves the sentence. It is also never alone — a bare
+/// "Fit" under a picture the window cannot yet name the size of would be a word
+/// with no sentence around it.
+fn image_meta_sentence(
+    native: Option<(u32, u32)>,
+    extension: Option<&str>,
+    bytes: Option<u64>,
+    zoom: Option<&str>,
+) -> Option<String> {
+    let mut fields = Vec::new();
+    if let Some((width, height)) = native {
+        fields.push(format!("{width} \u{00d7} {height}"));
+    }
+    if let Some(extension) = extension {
+        fields.push(extension.to_owned());
+    }
+    if let Some(bytes) = bytes {
+        fields.push(preview::format_byte_size(bytes));
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    if let Some(zoom) = zoom {
+        fields.push(zoom.to_owned());
+    }
+    Some(fields.join(" \u{b7} "))
+}
+
+/// Whether a surface may be zoomed at all.
+///
+/// **The glance card mirrors and never zooms** (P143's read-only, and the
+/// 2026-08-13 ruling that made the card a `PreviewSurface` in the first place).
+/// It has its own [`PreviewPane`] and therefore its own zoom field, and this is
+/// what keeps that field at `Fit` forever: the read door answers `Fit` for it
+/// whatever is stored, and the write doors decline. Said once, here, rather than
+/// as a condition repeated at each of the five gestures — one of which would
+/// eventually be written without it.
+fn surface_takes_image_zoom(surface: PreviewSurface) -> bool {
+    !matches!(surface, PreviewSurface::Peek)
 }
 
 impl PeekThumbnail {
@@ -9250,10 +9791,23 @@ fn pointer_cursor(
     float: Option<FloatGrasp>,
     divider_axis: Option<bt_layout::Axis>,
     over_link: bool,
+    image: Option<ImageGrasp>,
 ) -> winit::window::CursorIcon {
     use winit::window::CursorIcon;
     if dragging_tab {
         return CursorIcon::Default;
+    }
+    // A picture larger than the body it is seen through can be carried, and the
+    // hand says so with the same two shapes the float's header already uses
+    // (ticket #60). Under the float's grasps for the link's reason below, and
+    // above the link because a body showing a picture has no prose to hold one.
+    if float.is_none()
+        && let Some(grasp) = image
+    {
+        return match grasp {
+            ImageGrasp::Open => CursorIcon::Grab,
+            ImageGrasp::Closed => CursorIcon::Grabbing,
+        };
     }
     // A markdown link is the one thing in the preview's body that answers a
     // press, and the pointing finger is how every reader on the desk says so.
@@ -11815,6 +12369,8 @@ fn assemble_tab_state(
         preview_edit_focus: None,
         preview_views: PreviewViewStore::default(),
         preview_selecting: None,
+        preview_image_drag: None,
+        preview_image_clicks: ImageClicks::default(),
         preview_block_drag: None,
         preview_block_hover: None,
         preview_body_drag: None,
@@ -17281,6 +17837,12 @@ impl Runtime {
         // pane — so switching back finds it whole, and so does the view of it.
         self.leave_preview_buffer(surface);
         self.preview_pane_mut(surface).image = Some(PreviewImageState::new(path));
+        // A new picture arrives fit to the pane. The zoom is the *view of one
+        // picture* and not a setting of the surface: inheriting 250% and a pan
+        // from the screenshot you were reading a moment ago would open the next
+        // file somewhere in its own top-left corner for no reason anybody could
+        // reconstruct.
+        self.preview_pane_mut(surface).zoom = ImageZoom::FIT;
         self.preview_raster = Some(surface);
         self.renderer.set_preview_image(None);
         self.refresh_preview_for_layout();
@@ -18658,6 +19220,23 @@ impl Runtime {
         {
             return Ok(true);
         }
+        // **A picture answers the keyboard with its own four verbs** (ticket
+        // #60), and answers before the scroll below for the graph's reason: what
+        // the keys mean on this surface is "larger" and "smaller", not "twenty
+        // pixels down", and a picture has nothing to scroll anyway. A key it does
+        // not claim falls through and is swallowed by the scroll exactly as every
+        // other key on a focused preview is.
+        if let Some((body, image_px)) = self.preview_image_geometry(surface)
+            && let Some(zoomed) = image_zoom_key(
+                self.preview_image_zoom(surface),
+                &event.logical_key,
+                body,
+                image_px,
+            )
+        {
+            self.set_preview_image_zoom(surface, zoomed)?;
+            return Ok(true);
+        }
         let scale = self.renderer.metrics().scale_factor as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             // A seat with no body to scroll still owns the key: there is no
@@ -19119,6 +19698,75 @@ impl Runtime {
         self.preview_edit_focus = Some(surface);
         self.preview_selecting = Some(surface);
         self.repaint_preview()?;
+        Ok(true)
+    }
+
+    /// A press inside a picture: the second half of a double click, or the start
+    /// of a pan (ticket #60).
+    ///
+    /// Both verbs are armed here rather than one of them at release, because
+    /// they are decided by the *press*: a double click is a press that arrives
+    /// soon enough after another one, and a pan is every press that is not. The
+    /// alternative — waiting for the release to see whether the hand travelled —
+    /// would mean the picture does not move until you let go of it.
+    ///
+    /// A picture is never editable and has no links, so this consumes the press
+    /// whole; it lands where [`Self::press_preview_body`] would have refused and
+    /// the press would have died as "inside a seat with no grid" anyway.
+    fn press_preview_image(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((surface, _)) = self.preview_surface_at(position) else {
+            return Ok(false);
+        };
+        if !surface_takes_image_zoom(surface) || self.preview_image_geometry(surface).is_none() {
+            return Ok(false);
+        }
+        let point = [position.x as f32, position.y as f32];
+        if self
+            .preview_image_clicks
+            .register(surface, point, Instant::now())
+        {
+            let toggled = image_zoom_toggled(self.preview_image_zoom(surface));
+            self.set_preview_image_zoom(surface, toggled)?;
+        } else {
+            self.preview_image_drag = Some(ImageDrag {
+                surface,
+                last: point,
+            });
+        }
+        self.apply_pointer_cursor();
+        Ok(true)
+    }
+
+    /// The pointer travelling with a picture in hand.
+    ///
+    /// The gesture's own surface, not the one under the pointer — the rule every
+    /// drag on this desk follows, and the reason a pan that outruns the pane
+    /// keeps panning instead of jumping to whatever is next door.
+    fn drag_preview_image(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.preview_image_drag else {
+            return Ok(false);
+        };
+        let Some((body, image_px)) = self.preview_image_geometry(drag.surface) else {
+            return Ok(true);
+        };
+        let point = [position.x as f32, position.y as f32];
+        let zoom = self.preview_image_zoom(drag.surface);
+        let carried = ImageZoom {
+            pan: [
+                zoom.pan[0] + point[0] - drag.last[0],
+                zoom.pan[1] + point[1] - drag.last[1],
+            ],
+            ..zoom
+        };
+        self.preview_image_drag = Some(ImageDrag {
+            last: point,
+            ..drag
+        });
+        let clamped = ImageZoom {
+            pan: image_clamped_pan(body, image_px, carried),
+            ..carried
+        };
+        self.set_preview_image_zoom(drag.surface, clamped)?;
         Ok(true)
     }
 
@@ -19969,25 +20617,25 @@ impl Runtime {
         body: [f32; 4],
         scale: f32,
     ) -> Option<bt_render::PreviewBody> {
+        let zoom = self.preview_image_zoom(surface);
         let image = self.preview_pane(surface)?.image.as_ref()?;
-        let mut fields = Vec::new();
-        if let Some((width, height)) = image.native {
-            fields.push(format!("{width} \u{00d7} {height}"));
-        }
         let extension = image
             .path
             .extension()
             .map(|ext| ext.to_string_lossy().to_uppercase())
             .filter(|ext| !ext.is_empty());
-        if let Some(extension) = extension {
-            fields.push(extension);
-        }
-        if let Some(bytes) = image.bytes {
-            fields.push(preview::format_byte_size(bytes));
-        }
-        if fields.is_empty() {
-            return None;
-        }
+        // The zoom is said only once the decode has answered: a percentage is a
+        // multiple of native pixels, and there is no such thing to be a multiple
+        // of until somebody has opened the file.
+        let caption = image
+            .native
+            .map(|(width, height)| image_zoom_caption(body, [width, height], zoom));
+        let sentence = image_meta_sentence(
+            image.native,
+            extension.as_deref(),
+            image.bytes,
+            caption.as_deref(),
+        )?;
         let palette = bt_render::chrome_palette();
         let font_size = PREVIEW_META_FONT_LOGICAL_PX * scale;
         let line_height = (font_size * 1.4).round().max(1.0);
@@ -19997,19 +20645,32 @@ impl Runtime {
         // pinned to the fit would float half a pane below the thing it is about;
         // `.pv-image` is a centred *column* of two items, so the gap belongs
         // between them and not between one of them and a margin.
-        let drawn_height = image
-            .raster
-            .as_ref()
-            .map(|raster| raster.height_px as f32)
-            .unwrap_or((body[3] - body[1]) * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION);
-        let top = (body[1] + body[3] + drawn_height) / 2.0 + gap;
+        //
+        // **The rectangle, not the raster** (ticket #60). Those were the same
+        // number while the only mode was Fit; once a picture can be magnified
+        // they part company — above 100% the texture stops at the decode's own
+        // pixels and the drawn height is the one that grew — and it is the drawn
+        // one this sentence stands under, because that is the thing on screen.
+        //
+        // Clamped to stay inside the body, because a picture zoomed past the
+        // pane's height has no "under" left: the line then rests on the body's
+        // last row, over the picture, which is what every viewer with an info
+        // bar does and the only alternative to it being nowhere at all.
+        let drawn_height = match image.native {
+            Some((width, height)) if width > 0 && height > 0 => {
+                let rect = image_destination(body, [width, height], zoom);
+                rect[3] - rect[1]
+            }
+            _ => (body[3] - body[1]) * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION,
+        };
+        let top = ((body[1] + body[3] + drawn_height) / 2.0 + gap).min(body[3] - line_height);
         Some(bt_render::PreviewBody {
             clip: body,
             quads: Vec::new(),
             blocks: Vec::new(),
             paragraphs: vec![bt_render::PreviewParagraph {
                 runs: vec![bt_render::PreviewRun {
-                    text: fields.join(" \u{b7} "),
+                    text: sentence,
                     color: palette.files_row_muted,
                     mono: false,
                     bold: false,
@@ -20040,6 +20701,53 @@ impl Runtime {
     fn preview_raster_image_mut(&mut self) -> Option<&mut PreviewImageState> {
         let surface = self.preview_raster?;
         self.preview_pane_mut(surface).image.as_mut()
+    }
+
+    /// How one surface is looking at its picture (ticket #60).
+    ///
+    /// The glance card is answered `Fit` whatever it happens to be storing —
+    /// [`surface_takes_image_zoom`] is the whole of that rule and this is one of
+    /// its two readers, the other being the door below that declines to write.
+    fn preview_image_zoom(&self, surface: PreviewSurface) -> ImageZoom {
+        if !surface_takes_image_zoom(surface) {
+            return ImageZoom::FIT;
+        }
+        self.preview_pane(surface)
+            .map_or(ImageZoom::FIT, |pane| pane.zoom)
+    }
+
+    /// Put a new zoom on a surface and repaint if it moved.
+    ///
+    /// Returns whether anything changed, so the gestures above can stay silent
+    /// on a notch spent at the end of the road — a wheel at 800% that
+    /// republished the frame would be a repaint per notch for no pixels.
+    fn set_preview_image_zoom(&mut self, surface: PreviewSurface, zoom: ImageZoom) -> Result<bool> {
+        if !surface_takes_image_zoom(surface) || self.preview_image_zoom(surface) == zoom {
+            return Ok(false);
+        }
+        self.preview_pane_mut(surface).zoom = zoom;
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        // The zoom is the only thing that decides whether the picture can be
+        // carried, so a notch is the one event that changes the hand's shape
+        // under a pointer that never moved — the chrome hover, which is what
+        // ordinarily reapplies it, has nothing new to notice here.
+        self.apply_pointer_cursor();
+        self.present_chrome_change()?;
+        Ok(true)
+    }
+
+    /// The picture one surface is showing and the body it is shown in — the pair
+    /// every zoom gesture needs and none of them may invent for itself.
+    ///
+    /// `None` when the surface is showing a document, or a picture whose decode
+    /// has not landed: a zoom about a size nobody knows yet would be arithmetic
+    /// on a guess, and the gesture is better spent on nothing than on that.
+    fn preview_image_geometry(&self, surface: PreviewSurface) -> Option<([f32; 4], [u32; 2])> {
+        let (width, height) = self.preview_pane(surface)?.image.as_ref()?.native?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let body = self.preview_surface_body_rect(surface, scale)?;
+        (width > 0 && height > 0).then_some((body, [width, height]))
     }
 
     fn defer_preview_resample(&mut self, observed_at: Instant) {
@@ -20078,6 +20786,7 @@ impl Runtime {
             self.renderer.set_preview_image(None);
             return;
         };
+        let surface = PreviewSurface::Seat(preview_seat);
         let scale = self.renderer.metrics().scale_factor as f32;
         // U8 — fitted against the solve and *placed* through the tween. The two
         // are the same rectangle at rest and at the end of every flight; while
@@ -20164,19 +20873,67 @@ impl Runtime {
         // picture. A body too small to afford the fractions still gets them:
         // they are fractions, so they cannot starve it the way a fixed inset
         // could.
+        //
+        // **All of that is the `Fit` mode's, and `Fit` is only one of two.** Once
+        // a surface has been zoomed the rectangle comes from
+        // [`image_destination`] instead and may be many times the body; what does
+        // not change is that the picture is the body's centre plus a pan, which
+        // is why the painter is handed a displacement and not a corner.
         let _ = PREVIEW_BODY_INSET_LOGICAL_PX;
-        let fit_width = ((body.width as f32 * PREVIEW_IMAGE_FIT_WIDTH_FRACTION) as u32).max(1);
-        let fit_height = ((body.height as f32 * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION) as u32).max(1);
-        let Some((display_width, display_height)) =
-            preview_image_extent(fit_width, fit_height, native_width, native_height)
-        else {
+        // A body or a decode with no extent has no rectangle to argue about, and
+        // the arithmetic below would answer with a one-pixel smear rather than
+        // with the refusal this has always been.
+        if body.width == 0 || body.height == 0 || native_width == 0 || native_height == 0 {
+            if let Some(preview) = self.preview_raster_image_mut() {
+                preview.failure = Some("Preview failed: preview seat is too small".to_owned());
+            }
+            self.renderer.set_preview_image(None);
+            return;
+        }
+        let body_rect = [
+            body.x as f32,
+            body.y as f32,
+            (body.x + body.width) as f32,
+            (body.y + body.height) as f32,
+        ];
+        let image_px = [native_width, native_height];
+        // **Re-clamped on the way out, and written back.** A pane made narrower
+        // under a zoomed picture leaves a pan that is now past the end of its own
+        // road; storing the clamped value here — rather than clamping only at
+        // paint time — is what keeps the *next* gesture (a drag, a notch about a
+        // pointer) starting from the place the eye is actually looking at.
+        let zoom = self.preview_image_zoom(surface);
+        let clamped_pan = image_clamped_pan(body_rect, image_px, zoom);
+        if clamped_pan != zoom.pan {
+            self.preview_pane_mut(surface).zoom.pan = clamped_pan;
+        }
+        let zoom = ImageZoom {
+            pan: clamped_pan,
+            ..zoom
+        };
+        let drawn = image_destination(body_rect, image_px, zoom);
+        let display_width = (drawn[2] - drawn[0]).round().max(1.0) as u32;
+        let display_height = (drawn[3] - drawn[1]).round().max(1.0) as u32;
+        // **The CPU never upsamples.** Above 100% the resample target stops at
+        // the decode's own pixels and the magnification is carried by
+        // `display_*_px`, which the sampler already stretches; asking the worker
+        // for an 8× raster would be sixty megabytes of RGBA for a picture whose
+        // extra pixels do not exist. `preview_image_extent`'s `.min(1.0)` is
+        // exactly that cap, which is why the target is still asked of it.
+        let (cap_width, cap_height) = image_raster_cap(image_px);
+        let Some((raster_width, raster_height)) = preview_image_extent(
+            display_width.min(cap_width),
+            display_height.min(cap_height),
+            native_width,
+            native_height,
+        ) else {
             if let Some(preview) = self.preview_raster_image_mut() {
                 preview.failure = Some("Preview failed: preview seat is too small".to_owned());
             }
             self.renderer.set_preview_image(None);
             return;
         };
-        let target = (content_key.clone(), display_width, display_height);
+        let target = (content_key.clone(), raster_width, raster_height);
         let exact_raster = self
             .preview_raster_image()
             .and_then(|preview| preview.raster.as_ref())
@@ -20197,6 +20954,7 @@ impl Runtime {
                 height_px: raster.height_px,
                 display_width_px: display_width,
                 display_height_px: display_height,
+                pan_px: [clamped_pan[0].round(), clamped_pan[1].round()],
             }));
         } else {
             self.renderer.set_preview_image(None);
@@ -28885,6 +29643,22 @@ impl Runtime {
         .then(|| reference.path.clone())
     }
 
+    /// Whether the cell a press landed on carries a target this window has verified for itself
+    /// — the question [`press_belongs_to_the_window`] asks of the grid (ticket #59).
+    ///
+    /// One reading of two lists, in the order their verbs are spent: an image reference first
+    /// because it is the one that must have been *opened* to count, then the OSC 8 span. Both are
+    /// asked of the pane the pointer is standing in and of the frame that pane last drew, which is
+    /// the same frame [`Runtime::begin_local_selection`] will read a moment later — so a press that
+    /// this says is ours cannot then find nothing to do.
+    fn pressed_cell_target(&self, hit: bt_render::GridHit) -> PressedCellTarget {
+        if self.local_image_path_hit(hit).is_some() || self.hyperlink_hit(hit).is_some() {
+            PressedCellTarget::Ours
+        } else {
+            PressedCellTarget::Ordinary
+        }
+    }
+
     /// The verified image reference the pointer is currently standing on, and the pane that draws
     /// it — the cells whose resting dots become a solid underline for as long as the pointer is
     /// there.
@@ -29760,6 +30534,13 @@ impl Runtime {
         if self.drag_preview_selection(position)? {
             return Ok(());
         }
+        // A picture in hand owns the pointer on exactly the same terms, and
+        // outside its own body for the same reason: a pan that stopped the
+        // moment the hand crossed the pane's edge would make the last corner of
+        // a zoomed screenshot unreachable.
+        if self.drag_preview_image(position)? {
+            return Ok(());
+        }
         // A thumb in hand owns the pointer for the same reason, and outside its
         // own band for the same reason. The body's bar before the block's, the
         // order they are drawn in and the order their presses are taken in.
@@ -30520,7 +31301,26 @@ impl Runtime {
             grasp,
             divider_axis,
             self.preview_link_hover.is_some(),
+            self.image_grasp(),
         ));
+    }
+
+    /// What the pointer is being offered over a picture, if anything (ticket
+    /// #60).
+    ///
+    /// The gesture in flight before the thing under the pointer, exactly as
+    /// [`float_grasp`] reads it: a picture carried past its own pane keeps the
+    /// closed hand, because the shape changing mid-drag would say something
+    /// happened when nothing did (K113, and the mock-up's own line 1710).
+    fn image_grasp(&self) -> Option<ImageGrasp> {
+        if self.preview_image_drag.is_some() {
+            return Some(ImageGrasp::Closed);
+        }
+        let position = self.pointer_position?;
+        let (surface, _) = self.preview_surface_at(position)?;
+        let (body, image_px) = self.preview_image_geometry(surface)?;
+        image_is_pannable(body, image_px, self.preview_image_zoom(surface))
+            .then_some(ImageGrasp::Open)
     }
 
     /// Put the frame already on screen back in the slot so a pure chrome change
@@ -31732,6 +32532,13 @@ impl Runtime {
                 self.repaint_preview()?;
                 return Ok(true);
             }
+            // A carried picture is let go wherever the hand lets go of it, and
+            // the pan it wrote on the way is already the answer — this only puts
+            // the closed hand away.
+            if self.preview_image_drag.take().is_some() {
+                self.apply_pointer_cursor();
+                return Ok(true);
+            }
             // A selection drawn across the edit surface ends wherever the button
             // comes up. The release is consumed because the press was: a gesture
             // belongs to the surface it began on, whatever it is let go over.
@@ -31847,6 +32654,12 @@ impl Runtime {
             // stands over the block it scrolls, so a press on it was never a
             // press in the content beneath.
             if self.press_preview_block_thumb(position)? {
+                return Ok(true);
+            }
+            // A picture answers before the edit surface does, and answers
+            // instead of it: the two are alternatives on one body, and a body
+            // showing a picture has nothing to put a caret in.
+            if self.press_preview_image(position)? {
                 return Ok(true);
             }
             // A press inside the edit surface puts the caret where the pointer
@@ -32617,6 +33430,14 @@ impl Runtime {
         let Some(forwarded_hit) = self.forwarded_mouse_hit() else {
             return Ok(());
         };
+        // Asked of the *pressed* cell rather than the forwarded one: the two are
+        // the same cell seen through two maps — `hit` is where the pointer is in
+        // this pane's own presented frame, which is the frame the underline was
+        // painted on and the frame the scan named its references in, while
+        // `forwarded_hit` has already been folded onto the live grid for the
+        // child's benefit. The mark and the verb must be read off the same map or
+        // a press one row from the underline could claim it.
+        let target = self.pressed_cell_target(hit);
         if let Some(bytes) = route_forwarded_mouse_button(
             &mut self.mouse_route,
             state,
@@ -32624,6 +33445,7 @@ impl Runtime {
             forwarded_hit,
             modes,
             self.modifiers,
+            target,
         ) {
             return self.send_user_input(
                 &bytes,
@@ -33203,6 +34025,31 @@ impl Runtime {
             && self.git_graphs_shown.contains_key(&seat)
         {
             return self.scroll_git_graph(seat, body, delta);
+        }
+        // **A notch over a picture is a zoom** (user ruling 2026-08-16, ticket
+        // #60). It is asked beside the document's branch and not inside it,
+        // because the two are alternatives and not a special case of one
+        // another: a body showing a picture has no scroll to spend a notch on,
+        // and a body showing a document has no zoom.
+        //
+        // The card is not reachable here — a notch over it was answered at the
+        // very top of this method and went down the document's door — which is
+        // half of what keeps the glance at `Fit`; the other half is
+        // [`surface_takes_image_zoom`], which would decline anyway.
+        if let Some(position) = self.pointer_position
+            && let Some((surface, _)) = self.preview_surface_at(position)
+            && let Some((body, image_px)) = self.preview_image_geometry(surface)
+        {
+            let notches = wheel_zoom_notches(delta);
+            let zoom = image_zoom_notch(
+                self.preview_image_zoom(surface),
+                notches,
+                body,
+                image_px,
+                [position.x as f32, position.y as f32],
+            );
+            self.set_preview_image_zoom(surface, zoom)?;
+            return Ok(());
         }
         // `.preview-body { overflow: auto }` (mock-up 597) — and the same
         // sentence again. Asked here, beside the tree's, because it is the same
@@ -43219,6 +44066,426 @@ mod tests {
         assert!(!preview.finish_resize_scale_if_quiet(last + WINDOW_RESIZE_QUIET));
     }
 
+    // ── ticket #60: the picture zooms and pans ──────────────────────────────
+
+    /// A 1000×500 body is a convenient one to read the fractions off: the image
+    /// column is 860 × 350, so a 2000×1000 picture fits to 350 tall and a
+    /// 100×50 one is drawn at its own size rather than blown up to fill it.
+    const ZOOM_BODY: [f32; 4] = [100.0, 200.0, 1100.0, 700.0];
+
+    fn rect_size(rect: [f32; 4]) -> (f32, f32) {
+        (rect[2] - rect[0], rect[3] - rect[1])
+    }
+
+    fn assert_close(left: f32, right: f32, what: &str) {
+        assert!((left - right).abs() < 0.01, "{what}: {left} is not {right}");
+    }
+
+    #[test]
+    fn fit_contains_the_picture_in_the_image_column_and_never_enlarges_it() {
+        let fitted = image_destination(ZOOM_BODY, [2000, 1000], ImageZoom::FIT);
+        let (width, height) = rect_size(fitted);
+        assert_close(height, 350.0, "height fills the column's 70%");
+        assert_close(width, 700.0, "and the aspect ratio decides the width");
+        assert_close(
+            (fitted[0] + fitted[2]) / 2.0,
+            600.0,
+            "centred on the whole body, not on the column",
+        );
+        assert_close((fitted[1] + fitted[3]) / 2.0, 450.0, "vertically too");
+
+        let small = image_destination(ZOOM_BODY, [100, 50], ImageZoom::FIT);
+        assert_eq!(
+            rect_size(small),
+            (100.0, 50.0),
+            "a small picture is drawn at its own size; Fit contains, it does not stretch"
+        );
+    }
+
+    #[test]
+    fn a_hundred_percent_draws_one_image_pixel_per_screen_pixel_and_centres_it() {
+        let drawn = image_destination(ZOOM_BODY, [400, 300], ImageZoom::scaled(1.0));
+        assert_eq!(rect_size(drawn), (400.0, 300.0));
+        assert_close((drawn[0] + drawn[2]) / 2.0, 600.0, "centred");
+        assert_close((drawn[1] + drawn[3]) / 2.0, 450.0, "centred");
+        assert_eq!(
+            image_destination(ZOOM_BODY, [400, 300], ImageZoom::FIT),
+            drawn,
+            "and this picture's Fit happens to be 100% too, because Fit never enlarges"
+        );
+    }
+
+    #[test]
+    fn a_zoomed_picture_may_be_carried_only_until_its_own_edge_reaches_the_bodys() {
+        let image = [400_u32, 300];
+        // 250% of 400×300 is 1000×750: one axis exactly the body's width, the
+        // other 250px taller than its 500.
+        let centred = image_destination(ZOOM_BODY, image, ImageZoom::scaled(2.5));
+        assert_eq!(rect_size(centred), (1000.0, 750.0));
+
+        let carried = image_destination(
+            ZOOM_BODY,
+            image,
+            ImageZoom {
+                mode: ImageZoomMode::Scale(2.5),
+                pan: [40.0, 60.0],
+            },
+        );
+        assert_close(
+            carried[0],
+            centred[0],
+            "an axis with no overflow does not move at all",
+        );
+        assert_close(carried[1], centred[1] + 60.0, "the other one does");
+
+        let overrun = image_destination(
+            ZOOM_BODY,
+            image,
+            ImageZoom {
+                mode: ImageZoomMode::Scale(2.5),
+                pan: [0.0, 9000.0],
+            },
+        );
+        assert_close(
+            overrun[1],
+            ZOOM_BODY[1],
+            "and stops when its own top edge reaches the body's, never opening a gap",
+        );
+        assert_close(overrun[3], ZOOM_BODY[1] + 750.0, "the far edge follows it");
+
+        let under = image_destination(
+            ZOOM_BODY,
+            image,
+            ImageZoom {
+                mode: ImageZoomMode::Scale(0.5),
+                pan: [500.0, 500.0],
+            },
+        );
+        assert_eq!(
+            under,
+            image_destination(ZOOM_BODY, image, ImageZoom::scaled(0.5)),
+            "a picture smaller than the body is centred whatever the pan says"
+        );
+    }
+
+    #[test]
+    fn the_scale_is_clamped_to_a_tenth_and_eight_times_the_native_pixels() {
+        let image = [400_u32, 300];
+        assert_eq!(
+            rect_size(image_destination(
+                ZOOM_BODY,
+                image,
+                ImageZoom::scaled(1000.0)
+            )),
+            (400.0 * IMAGE_ZOOM_MAX, 300.0 * IMAGE_ZOOM_MAX)
+        );
+        assert_eq!(
+            rect_size(image_destination(ZOOM_BODY, image, ImageZoom::scaled(0.0))),
+            (400.0 * IMAGE_ZOOM_MIN, 300.0 * IMAGE_ZOOM_MIN)
+        );
+    }
+
+    /// The whole point of zooming about the pointer: whatever pixel of the
+    /// picture the hand was on stays under the hand.
+    #[test]
+    fn zooming_about_a_point_leaves_that_point_where_it_was() {
+        // Read off `image_destination`'s own arithmetic: a picture point `u`
+        // from the picture's centre lands at `centre + pan + u * scale`.
+        let anchor_at =
+            |scale: f32, pan: [f32; 2], u: [f32; 2]| [pan[0] + u[0] * scale, pan[1] + u[1] * scale];
+        let (old, new) = (0.4_f32, 1.7_f32);
+        let pan = [37.0, -12.0];
+        // The pointer, measured from the body's centre.
+        let point = [180.0, -95.0];
+        let u = [(point[0] - pan[0]) / old, (point[1] - pan[1]) / old];
+        assert_eq!(anchor_at(old, pan, u), point);
+
+        let moved = zoom_about(point, old, new, pan);
+        let after = anchor_at(new, moved, u);
+        assert_close(after[0], point[0], "the anchor did not move sideways");
+        assert_close(after[1], point[1], "nor down");
+
+        assert_eq!(
+            zoom_about(point, old, old, pan),
+            pan,
+            "and a zoom that changes nothing moves nothing"
+        );
+    }
+
+    #[test]
+    fn a_wheel_notch_over_the_picture_zooms_about_the_pointer() {
+        let image = [400_u32, 300];
+        // Fit for this picture is 100%, so the first notch out of Fit is 125%.
+        let pointer = [900.0, 300.0];
+        let one = image_zoom_notch(ImageZoom::FIT, 1.0, ZOOM_BODY, image, pointer);
+        assert_eq!(one.mode, ImageZoomMode::Scale(IMAGE_ZOOM_STEP));
+
+        // The anchor is asked of a picture that is *already* larger than the
+        // body on both axes, because that is the only state in which an anchor
+        // can be honoured at all: on an axis with no overflow the clamp centres
+        // the picture, and centring is a stronger promise than the pointer's.
+        let held = ImageZoom::scaled(3.0);
+        let before = image_destination(ZOOM_BODY, image, held);
+        let zoomed = image_zoom_notch(held, 1.0, ZOOM_BODY, image, pointer);
+        let after = image_destination(ZOOM_BODY, image, zoomed);
+        for axis in 0..2 {
+            // Where the pointer sat inside the picture, as a fraction of it.
+            let was = (pointer[axis] - before[axis]) / (before[axis + 2] - before[axis]);
+            let now = (pointer[axis] - after[axis]) / (after[axis + 2] - after[axis]);
+            assert_close(now, was, "the same point of the picture is under the hand");
+        }
+
+        let down = image_zoom_notch(one, -1.0, ZOOM_BODY, image, pointer);
+        assert_eq!(
+            down.mode,
+            ImageZoomMode::Scale(1.0),
+            "and the notch is multiplicative, so one back is exactly where it started"
+        );
+
+        assert_eq!(
+            image_zoom_notch(
+                ImageZoom::scaled(IMAGE_ZOOM_MAX),
+                1.0,
+                ZOOM_BODY,
+                image,
+                pointer
+            ),
+            ImageZoom::scaled(IMAGE_ZOOM_MAX),
+            "a notch at the end of the road is spent on nothing and moves nothing"
+        );
+    }
+
+    #[test]
+    fn a_wheel_event_is_counted_in_detents_however_the_driver_reports_it() {
+        assert_eq!(
+            wheel_zoom_notches(MouseScrollDelta::LineDelta(0.0, 1.0)),
+            1.0
+        );
+        assert_eq!(
+            wheel_zoom_notches(MouseScrollDelta::LineDelta(0.0, -2.0)),
+            -2.0
+        );
+        assert_eq!(
+            wheel_zoom_notches(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                0.0, 120.0
+            ))),
+            1.0
+        );
+    }
+
+    #[test]
+    fn a_double_click_swings_between_fit_and_a_hundred_percent_and_lands_centred() {
+        let hundred = image_zoom_toggled(ImageZoom::FIT);
+        assert_eq!(hundred.mode, ImageZoomMode::Scale(1.0));
+        assert_eq!(
+            hundred.pan,
+            [0.0, 0.0],
+            "a toggle is a command and lands on the middle, not on wherever the second click fell"
+        );
+        assert_eq!(image_zoom_toggled(hundred), ImageZoom::FIT);
+        assert_eq!(
+            image_zoom_toggled(ImageZoom {
+                mode: ImageZoomMode::Scale(3.0),
+                pan: [90.0, 4.0],
+            }),
+            ImageZoom::FIT,
+            "and from anywhere else it goes home"
+        );
+    }
+
+    #[test]
+    fn two_presses_in_one_place_are_a_double_click_and_a_third_starts_over() {
+        let surface = PreviewSurface::Seat(SeatId(2));
+        let now = Instant::now();
+        let mut clicks = ImageClicks::default();
+        assert!(!clicks.register(surface, [400.0, 300.0], now));
+        assert!(clicks.register(surface, [403.0, 302.0], now + Duration::from_millis(90)));
+        assert!(
+            !clicks.register(surface, [403.0, 302.0], now + Duration::from_millis(120)),
+            "the pair was spent; a third press begins a new one"
+        );
+
+        let mut slow = ImageClicks::default();
+        assert!(!slow.register(surface, [400.0, 300.0], now));
+        assert!(!slow.register(
+            surface,
+            [400.0, 300.0],
+            now + MULTI_CLICK_INTERVAL + Duration::from_millis(1)
+        ));
+
+        let mut wandered = ImageClicks::default();
+        assert!(!wandered.register(surface, [400.0, 300.0], now));
+        assert!(!wandered.register(surface, [480.0, 300.0], now + Duration::from_millis(90)));
+
+        let mut elsewhere = ImageClicks::default();
+        assert!(!elsewhere.register(surface, [400.0, 300.0], now));
+        assert!(!elsewhere.register(
+            PreviewSurface::Seat(SeatId(3)),
+            [400.0, 300.0],
+            now + Duration::from_millis(90)
+        ));
+    }
+
+    #[test]
+    fn the_four_zoom_keys_step_about_the_body_centre_and_name_the_two_ends() {
+        let image = [400_u32, 300];
+        let key = |text: &str| Key::Character(text.into());
+        assert_eq!(
+            image_zoom_key(ImageZoom::FIT, &key("+"), ZOOM_BODY, image),
+            Some(ImageZoom::scaled(IMAGE_ZOOM_STEP)),
+            "a key has no pointer, so its anchor is the centre and the pan stays nothing"
+        );
+        assert_eq!(
+            image_zoom_key(ImageZoom::FIT, &key("="), ZOOM_BODY, image),
+            image_zoom_key(ImageZoom::FIT, &key("+"), ZOOM_BODY, image),
+            "`=` is the unshifted `+` and means the same thing"
+        );
+        assert_eq!(
+            image_zoom_key(ImageZoom::scaled(1.0), &key("-"), ZOOM_BODY, image),
+            Some(ImageZoom::scaled(1.0 / IMAGE_ZOOM_STEP))
+        );
+        assert_eq!(
+            image_zoom_key(ImageZoom::scaled(3.0), &key("0"), ZOOM_BODY, image),
+            Some(ImageZoom::FIT)
+        );
+        assert_eq!(
+            image_zoom_key(ImageZoom::FIT, &key("1"), ZOOM_BODY, image),
+            Some(ImageZoom::scaled(1.0))
+        );
+        assert_eq!(
+            image_zoom_key(ImageZoom::FIT, &key("j"), ZOOM_BODY, image),
+            None,
+            "and every other key falls through to whatever the surface does with it"
+        );
+        assert_eq!(
+            image_zoom_key(
+                ImageZoom::FIT,
+                &Key::Named(NamedKey::ArrowDown),
+                ZOOM_BODY,
+                image
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_meta_line_says_how_the_picture_is_being_looked_at() {
+        assert_eq!(
+            image_meta_sentence(Some((1280, 800)), Some("PNG"), Some(219_136), Some("Fit")),
+            Some("1280 × 800 · PNG · 214 KB · Fit".to_owned())
+        );
+        assert_eq!(
+            image_zoom_caption(ZOOM_BODY, [400, 300], ImageZoom::FIT),
+            "Fit"
+        );
+        assert_eq!(
+            image_zoom_caption(ZOOM_BODY, [400, 300], ImageZoom::scaled(1.5)),
+            "150%"
+        );
+        assert_eq!(
+            image_zoom_caption(ZOOM_BODY, [400, 300], ImageZoom::scaled(1.0 / 3.0)),
+            "33%",
+            "rounded to whole percent; the wheel's own steps land nowhere round"
+        );
+        assert_eq!(
+            image_meta_sentence(None, None, None, Some("Fit")),
+            None,
+            "and the word is never said alone — there would be no sentence around it"
+        );
+    }
+
+    #[test]
+    fn fit_follows_a_resize_and_a_chosen_scale_does_not() {
+        let image = [2000_u32, 1000];
+        let narrow = [0.0, 0.0, 500.0, 250.0];
+        assert_ne!(
+            rect_size(image_destination(ZOOM_BODY, image, ImageZoom::FIT)),
+            rect_size(image_destination(narrow, image, ImageZoom::FIT)),
+            "Fit is a mode: it is re-solved against whatever body it is asked about"
+        );
+        let chosen = ImageZoom {
+            mode: ImageZoomMode::Scale(0.6),
+            pan: [400.0, 0.0],
+        };
+        assert_eq!(
+            rect_size(image_destination(ZOOM_BODY, image, chosen)),
+            rect_size(image_destination(narrow, image, chosen)),
+            "a chosen scale is a number the user asked for and survives the resize"
+        );
+        assert_close(
+            image_clamped_pan(narrow, image, chosen)[0],
+            (1200.0 - 500.0) / 2.0,
+            "only the pan is re-clamped, to the road the new body leaves it",
+        );
+    }
+
+    #[test]
+    fn a_picture_too_large_for_the_shared_budget_goes_soft_instead_of_vanishing() {
+        assert_eq!(
+            image_raster_cap([1920, 1200]),
+            (1920, 1200),
+            "an ordinary decode is 9 MiB and keeps every one of its pixels"
+        );
+        let (width, height) = image_raster_cap([6000, 4000]);
+        assert!(
+            u64::from(width) * u64::from(height) * 4
+                <= (bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES as f64
+                    * PREVIEW_IMAGE_TEXTURE_SHARE) as u64,
+            "91 MiB of RGBA is capped to this picture's share of the shared budget"
+        );
+        assert!(
+            ((width as f32 / height as f32) - 1.5).abs() < 0.01,
+            "and the cap is a box the picture still fits exactly"
+        );
+        assert_eq!(image_raster_cap([0, 0]), (0, 0), "and nothing is nothing");
+    }
+
+    #[test]
+    fn the_hand_is_offered_exactly_when_the_picture_has_somewhere_to_go() {
+        let image = [400_u32, 300];
+        assert!(!image_is_pannable(ZOOM_BODY, image, ImageZoom::FIT));
+        assert!(!image_is_pannable(ZOOM_BODY, image, ImageZoom::scaled(1.0)));
+        assert!(
+            image_is_pannable(ZOOM_BODY, image, ImageZoom::scaled(2.5)),
+            "250% of 400×300 is 750 tall inside a 500 tall body"
+        );
+    }
+
+    #[test]
+    fn the_glance_card_mirrors_at_fit_and_cannot_be_zoomed() {
+        assert!(!surface_takes_image_zoom(PreviewSurface::Peek));
+        assert!(surface_takes_image_zoom(PreviewSurface::Seat(SeatId(1))));
+        assert!(surface_takes_image_zoom(PreviewSurface::Float(7)));
+    }
+
+    #[test]
+    fn two_surfaces_of_one_buffer_hold_their_own_zoom() {
+        let mut panes = PreviewPanes::default();
+        let (left, right) = (
+            PreviewSurface::Seat(SeatId(4)),
+            PreviewSurface::Seat(SeatId(5)),
+        );
+        panes.entry(left).zoom = ImageZoom {
+            mode: ImageZoomMode::Scale(2.5),
+            pan: [30.0, -12.0],
+        };
+        assert_eq!(
+            panes.entry(right).zoom,
+            ImageZoom::FIT,
+            "the zoom is the surface's, exactly as the scroll is (ruling 8⑧)"
+        );
+        assert_eq!(
+            panes.get(left).map(|pane| pane.zoom.mode),
+            Some(ImageZoomMode::Scale(2.5)),
+            "and the one that was set kept it"
+        );
+        assert_eq!(
+            PreviewPane::default().zoom,
+            ImageZoom::FIT,
+            "a surface that has never been looked at is looking at Fit"
+        );
+    }
+
     /// A scale worker may spend arbitrarily long inside Lanczos3; validation still reaches the
     /// independent decoration receiver instead of sitting behind that raster in one FIFO.
     #[test]
@@ -45849,6 +47116,7 @@ mod tests {
             forwarded,
             session.terminal_modes(),
             ModifiersState::empty(),
+            PressedCellTarget::Ordinary,
         )
         .unwrap();
 
@@ -45860,7 +47128,7 @@ mod tests {
     }
 
     #[test]
-    fn tracked_tui_mouse_keeps_priority_over_ctrl_link_gesture() {
+    fn a_tracked_pane_keeps_a_press_on_an_ordinary_cell_and_shift_still_takes_it_back() {
         let mut session =
             DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
         session.feed(b"\x1b[?1000h\x1b[?1006h").unwrap();
@@ -45873,6 +47141,7 @@ mod tests {
             hit,
             session.terminal_modes(),
             ModifiersState::CONTROL,
+            PressedCellTarget::Ordinary,
         );
         assert!(forwarded.is_some());
         assert!(matches!(route, Some(MouseRoute::Forward(_))));
@@ -45886,10 +47155,159 @@ mod tests {
                 hit,
                 session.terminal_modes(),
                 ModifiersState::CONTROL | ModifiersState::SHIFT,
+                PressedCellTarget::Ordinary,
             )
             .is_none()
         );
         assert!(shifted_route.is_none());
+    }
+
+    #[test]
+    fn a_verified_target_under_a_tracked_press_is_ours_on_the_primary_screen() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        // Exactly what Claude Code turns on, on the screen it prints its paths to.
+        session
+            .feed(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+            .unwrap();
+        let modes = session.terminal_modes();
+        assert!(!modes.alternate_screen);
+        assert_ne!(modes.mouse_tracking, MouseTracking::Off);
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+
+        for modifiers in [ModifiersState::empty(), ModifiersState::CONTROL] {
+            let mut route = None;
+            assert!(
+                route_forwarded_mouse_button(
+                    &mut route,
+                    ElementState::Pressed,
+                    input::MouseProtocolButton::Left,
+                    hit,
+                    modes,
+                    modifiers,
+                    PressedCellTarget::Ours,
+                )
+                .is_none(),
+                "a press on a mark this window painted writes nothing to the child"
+            );
+            assert!(
+                route.is_none(),
+                "and leaves the route for `begin_local_selection` to claim"
+            );
+            // The release of that pair is the local drag's, and finds no forward
+            // latched to answer either.
+            assert!(
+                route_forwarded_mouse_button(
+                    &mut route,
+                    ElementState::Released,
+                    input::MouseProtocolButton::Left,
+                    hit,
+                    modes,
+                    modifiers,
+                    PressedCellTarget::Ours,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn a_tracked_press_on_a_plain_cell_is_still_the_programs() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
+        let mut route = None;
+        assert_eq!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                bt_render::GridHit { row: 1, column: 2 },
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            ),
+            Some(b"\x1b[<0;3;2M".to_vec())
+        );
+        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+    }
+
+    #[test]
+    fn the_same_verified_target_on_the_alternate_screen_belongs_to_the_program() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session
+            .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+            .unwrap();
+        let modes = session.terminal_modes();
+        assert!(modes.alternate_screen);
+        let mut route = None;
+        assert!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                bt_render::GridHit { row: 1, column: 2 },
+                modes,
+                ModifiersState::empty(),
+                PressedCellTarget::Ours,
+            )
+            .is_some(),
+            "vim and yazi keep the whole mouse whatever a scan thinks it sees"
+        );
+        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+    }
+
+    #[test]
+    fn shift_keeps_a_tracked_press_local_on_every_cell_and_on_both_screens() {
+        for enter_alt in [b"".as_slice(), b"\x1b[?1049h"] {
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+            session.feed(enter_alt).unwrap();
+            session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
+            for target in [PressedCellTarget::Ordinary, PressedCellTarget::Ours] {
+                let mut route = None;
+                assert!(
+                    route_forwarded_mouse_button(
+                        &mut route,
+                        ElementState::Pressed,
+                        input::MouseProtocolButton::Left,
+                        bt_render::GridHit { row: 1, column: 2 },
+                        session.terminal_modes(),
+                        ModifiersState::SHIFT,
+                        target,
+                    )
+                    .is_none()
+                );
+                assert!(route.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_left_press_can_be_taken_from_a_tracking_program() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
+        for button in [
+            input::MouseProtocolButton::Right,
+            input::MouseProtocolButton::Middle,
+        ] {
+            let mut route = None;
+            assert!(
+                route_forwarded_mouse_button(
+                    &mut route,
+                    ElementState::Pressed,
+                    button,
+                    bt_render::GridHit { row: 1, column: 2 },
+                    session.terminal_modes(),
+                    ModifiersState::empty(),
+                    PressedCellTarget::Ours,
+                )
+                .is_some(),
+                "there is no local verb on the other two buttons to trade the hole for"
+            );
+        }
     }
 
     #[test]
@@ -45918,6 +47336,7 @@ mod tests {
                         live_hit,
                         session.terminal_modes(),
                         ModifiersState::empty(),
+                        PressedCellTarget::Ordinary,
                     )
                     .expect("tracked click must produce one PTY write per edge"),
                 );
@@ -48285,15 +49704,15 @@ mod tests {
         // when nothing did" (mock-up 1710-1711).
         use winit::window::CursorIcon;
         assert_eq!(
-            pointer_cursor(false, None, None, false),
+            pointer_cursor(false, None, None, false, None),
             CursorIcon::Default
         );
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Row), false),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Row), false, None),
             CursorIcon::EwResize
         );
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Col), false),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Col), false, None),
             CursorIcon::NsResize
         );
         for axis in [None, Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
@@ -48305,7 +49724,7 @@ mod tests {
             ] {
                 for over_link in [false, true] {
                     assert_eq!(
-                        pointer_cursor(true, grasp, axis, over_link),
+                        pointer_cursor(true, grasp, axis, over_link, None),
                         CursorIcon::Default,
                         "a tab drag crossing a divider, a float or a link must \
                          not flicker into another shape"
@@ -48321,14 +49740,17 @@ mod tests {
     #[test]
     fn a_markdown_link_wears_the_pointing_finger() {
         use winit::window::CursorIcon;
-        assert_eq!(pointer_cursor(false, None, None, true), CursorIcon::Pointer);
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Row), true),
+            pointer_cursor(false, None, None, true, None),
+            CursorIcon::Pointer
+        );
+        assert_eq!(
+            pointer_cursor(false, None, Some(bt_layout::Axis::Row), true, None),
             CursorIcon::Pointer,
             "and over a divider it is still the link the pointer is on"
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Head), None, true),
+            pointer_cursor(false, Some(FloatGrasp::Head), None, true, None),
             CursorIcon::Grab,
             "but a window over the document takes the pointer with it"
         );
@@ -48342,20 +49764,20 @@ mod tests {
     fn a_pinned_float_wears_the_diagonal_arrow_on_its_grip() {
         use winit::window::CursorIcon;
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Grip), None, false),
+            pointer_cursor(false, Some(FloatGrasp::Grip), None, false, None),
             CursorIcon::NwseResize
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Head), None, false),
+            pointer_cursor(false, Some(FloatGrasp::Head), None, false, None),
             CursorIcon::Grab
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Carrying), None, false),
+            pointer_cursor(false, Some(FloatGrasp::Carrying), None, false, None),
             CursorIcon::Grabbing
         );
         for axis in [Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
             assert_eq!(
-                pointer_cursor(false, Some(FloatGrasp::Grip), axis, false),
+                pointer_cursor(false, Some(FloatGrasp::Grip), axis, false, None),
                 CursorIcon::NwseResize,
                 "the window is drawn over the divider, so the divider is not what you are aiming at"
             );
