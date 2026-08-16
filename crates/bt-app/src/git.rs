@@ -111,7 +111,15 @@ pub const GIT_WORKER_STOPPED_NOTICE: &str =
     "Git reading stopped; terminal input and output remain available";
 
 /// What [`GitFault::GitMissing`] says when there is no `git.exe` at all.
-pub const GIT_NOT_FOUND: &str = "git.exe was not found on this machine";
+///
+/// It says what to do about it, not only what is wrong (user ruling,
+/// 2026-08-16): the Git page is on by default so that it can be *found*, and a
+/// page found on a machine without git must turn the discovery into a next
+/// step rather than a dead end. Kept in one sentence because it stands where
+/// the rows would, in the muted ink, and a paragraph there would read as an
+/// error page.
+pub const GIT_NOT_FOUND: &str =
+    "git.exe was not found on this machine — install Git for Windows to use this page";
 
 // ── The questions ──────────────────────────────────────────────────────────
 
@@ -1756,13 +1764,6 @@ pub struct GitCache {
     /// in flight at once — a group's "stage all" while one row's `+` is still
     /// running — and a flag could only unpend both when the first came back.
     pending_writes: std::collections::BTreeSet<String>,
-    /// git's own words for the last write that would not go through (W3).
-    ///
-    /// Kept until the next write is *started* rather than until the next one
-    /// finishes, so the sentence outlives the frame it arrived in and can be
-    /// read. It is cleared by a new attempt because that is the moment the user
-    /// has said they know.
-    write_error: Option<String>,
     /// The ref a checkout is in flight for (R10) — the branch row that is dimmed
     /// while git works, and the guard that makes a second click on it do
     /// nothing rather than start a second `git checkout`.
@@ -1877,12 +1878,6 @@ impl GitCache {
         self.pending_writes.contains(path)
     }
 
-    /// The last refusal, in git's own words (W3).
-    #[must_use]
-    pub fn write_error(&self) -> Option<&str> {
-        self.write_error.as_deref()
-    }
-
     /// Build the write, and dim its rows.
     ///
     /// Returns `None` — and starts nothing — when there is no repository, when
@@ -1896,10 +1891,6 @@ impl GitCache {
         if paths.is_empty() || paths.iter().any(|path| self.pending_writes.contains(path)) {
             return None;
         }
-        // Cleared here and not on the receipt: the banner is answering "did the
-        // thing I just asked for happen", and the moment a new thing is asked
-        // for is the moment the old answer stops being about anything.
-        self.write_error = None;
         self.pending_writes.extend(paths.iter().cloned());
         Some(GitQuestion::Write { root, verb, paths })
     }
@@ -1928,7 +1919,6 @@ impl GitCache {
         if self.checkout.is_some() {
             return None;
         }
-        self.write_error = None;
         self.checkout = Some(target.clone());
         Some(GitQuestion::Checkout {
             root,
@@ -2101,11 +2091,19 @@ impl GitCache {
                 }
                 true
             }
-            // **The receipt** (R13). Three things happen and their order is the
-            // point: the rows stop being dimmed, a refusal takes git's own words,
-            // and — only on success — everything is asked again. Re-asking on a
-            // *failure* would be spending three subprocesses to re-learn a status
-            // that by definition did not change.
+            // **The receipt** (R13). Two things happen and their order is the
+            // point: the rows stop being dimmed, and — only on success —
+            // everything is asked again. Re-asking on a *failure* would be
+            // spending three subprocesses to re-learn a status that by definition
+            // did not change.
+            //
+            // The refusal itself is no longer filed here (toast ruling,
+            // 2026-08-16). It used to be kept as `write_error` until the *next*
+            // attempt, which the panel printed as a red strip across its own top
+            // — a page holding a grudge about something that had already
+            // finished happening. The runtime raises a notice straight off this
+            // answer instead, so git's sentence is said once, over the column
+            // that asked, and then leaves on its own.
             GitAnswer::Write {
                 root,
                 paths,
@@ -2118,9 +2116,8 @@ impl GitCache {
                 for path in &paths {
                     self.pending_writes.remove(path);
                 }
-                match outcome {
-                    Ok(()) => self.refresh(),
-                    Err(fault) => self.write_error = Some(write_refusal(&fault)),
+                if outcome.is_ok() {
+                    self.refresh();
                 }
                 true
             }
@@ -2165,9 +2162,8 @@ impl GitCache {
                     return false;
                 }
                 self.checkout = None;
-                match outcome {
-                    Ok(()) => self.refresh(),
-                    Err(fault) => self.write_error = Some(write_refusal(&fault)),
+                if outcome.is_ok() {
+                    self.refresh();
                 }
                 true
             }
@@ -2180,15 +2176,20 @@ impl GitCache {
     }
 }
 
-/// One line for a write that would not go through.
+/// One line for a write that would not go through — **the words a notice
+/// carries** (toast ruling, 2026-08-16).
 ///
 /// git's own sentence wherever there is one, and this module's only wording
 /// otherwise — a killed child and a missing executable have no sentence of their
 /// own to pass through, so the two of them are the whole of what is written here.
 /// [`GitFault::NotARepository`] cannot reach this function: a write is only
 /// offered from a page that already found a repository.
+///
+/// Public since the ruling, because the caller moved rather than the words: it
+/// used to be read by the cache filing a refusal, and it is now read by the
+/// runtime raising a toast off the same answer.
 #[must_use]
-fn write_refusal(fault: &GitFault) -> String {
+pub fn write_refusal(fault: &GitFault) -> String {
     match fault {
         GitFault::Refused(words) => words.clone(),
         GitFault::GitMissing(words) => words.clone(),
@@ -3193,7 +3194,13 @@ mod tests {
             target: "side".to_owned(),
             outcome: Err(GitFault::Refused(refusal.to_owned())),
         }));
-        assert_eq!(cache.write_error(), Some(refusal), "gits own words");
+        // git's own words are carried by the *answer*, and the runtime raises a
+        // notice from it (toast ruling, 2026-08-16). The cache keeps no copy: a
+        // refusal is a thing that happened, not a state this repository is in.
+        assert_eq!(
+            write_refusal(&GitFault::Refused(refusal.to_owned())),
+            refusal
+        );
         assert_eq!(cache.checkout_pending(), None, "the row stops waiting");
         // The list is untouched: the refusal changed nothing, so nothing is
         // re-asked and `main` is still the branch.
@@ -3216,7 +3223,6 @@ mod tests {
             target: "side".to_owned(),
             outcome: Ok(()),
         }));
-        assert_eq!(cache.write_error(), None);
         assert_eq!(cache.pending_questions().len(), 3, "status, branches, log");
     }
 

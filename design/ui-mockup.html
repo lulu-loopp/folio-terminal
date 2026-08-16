@@ -40,8 +40,13 @@
        four, never a literal: failure red, its deepened crest, attention orange
        (bell/awaiting/deny), paused amber. Declared once in :root so both
        themes share them until a walkthrough proves a theme needs its own. */
-    --err: #c50f1f;
-    --err-deep: #a30d19;
+    /* A rose, not GitHub's danger red (user ruling, 2026-08-16): #c50f1f read as
+       a fire alarm over sentences that only mean "git would not do that", and it
+       could not clear 4.5:1 on the dark canvas. Tailwind rose-600 here, rose-400
+       in body.dark — so --err is the second token, after --ok, that a walkthrough
+       proved needs one value per theme. */
+    --err: #e11d48;
+    --err-deep: #be123c;
     --warn: #d9822b;
     --pause: #c19c00;
     --ok: #1a7f37;
@@ -72,6 +77,8 @@
     --termbg: #1B1B1B;
     --cursor: #D4D4D4;
     --ok: #57ab5a;
+    --err: #fb7185;
+    --err-deep: #f43f5e;
     --shadow: 0 16px 48px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
     --menu: #2A2A2A;
   }

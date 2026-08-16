@@ -178,10 +178,6 @@ pub const GIT_HASH_FONT_LOGICAL_PX: f32 = 10.5;
 /// `.gtime { font-size: 10px }`.
 pub const GIT_TIME_FONT_LOGICAL_PX: f32 = 10.0;
 
-/// The failure banner: one line, at the top, in the error ink.
-pub const GIT_BANNER_HEIGHT_LOGICAL_PX: f32 = 22.0;
-pub const GIT_BANNER_FONT_LOGICAL_PX: f32 = 11.0;
-
 /// How far a row is faded while a write about it is in flight (R13).
 ///
 /// Not hidden and not removed: the row is still the truth until git says
@@ -206,6 +202,16 @@ pub const GIT_NOT_A_REPOSITORY: &str = "Not a git repository";
 /// list with nothing in it and a list that has not been read yet look identical,
 /// and only one of them means the repository is clean.
 pub const GIT_READING: &str = "Reading the repository…";
+
+/// Who is speaking, on a notice raised by a refused verb (toast ruling,
+/// 2026-08-16).
+///
+/// One word and a proper noun, because the sentence under it is git's own and a
+/// title that paraphrased it would be this window putting words in git's mouth.
+/// What the title is *for* is provenance: the card can be standing over a column
+/// or in the corner of the window, and "Git" is what tells you the paragraph
+/// under it came from a program and not from us.
+pub const GIT_TOAST_TITLE: &str = "Git";
 
 /// A repository with no commits yet (R7).
 ///
@@ -882,13 +888,19 @@ pub struct GitPanelContent {
     /// wrote it — [`clamp_git_scroll`] — on `FilesTreeContent::scroll_px`'s own
     /// ruling.
     pub scroll_px: f32,
-    /// The whole page is one sentence: there is no repository here (R17), or the
-    /// answer has not arrived yet. Drawn centred, and the rows are then empty.
-    pub empty: Option<&'static str>,
-    /// One line at the top, in git's own words, about something that would not
-    /// go through (W3/R13). It does **not** replace the list: a `git add` that
-    /// failed leaves everything else on the page true.
-    pub banner: Option<String>,
+    /// The whole page is one sentence: there is no repository here (R17), the
+    /// answer has not arrived yet, or git would not read this repository at all.
+    /// Drawn centred, and the rows are then empty.
+    ///
+    /// **A `String` and not a `&'static str`** since the toast ruling
+    /// (2026-08-16). Two of the three sentences are constants; the third is
+    /// git's own words about a repository it refused to open, which used to be
+    /// printed in a red strip above a page that then said "Reading the
+    /// repository…" forever. A persistent read fault is not a transient notice —
+    /// nothing about it will change until the machine does — so it is not a
+    /// toast, and it is not red either: it is simply what this page has to say,
+    /// standing in the muted ink where the rows would have been.
+    pub empty: Option<String>,
 }
 
 // ── building one from a cache ──────────────────────────────────────────────
@@ -924,35 +936,37 @@ pub fn build(
     // has, there is no root to ask anything else about.
     match cache.repo() {
         GitSlot::Idle | GitSlot::Pending => {
-            content.empty = Some(GIT_READING);
+            content.empty = Some(GIT_READING.to_owned());
             return content;
         }
         GitSlot::Failed(GitFault::NotARepository) => {
-            content.empty = Some(GIT_NOT_A_REPOSITORY);
+            content.empty = Some(GIT_NOT_A_REPOSITORY.to_owned());
             return content;
         }
         // A machine with no git, a repository git refuses to read, a question it
         // would not finish: three different sentences, none of them "not a
-        // repository", and all three are git's own words on one line.
+        // repository", and all three are git's own words — **standing where the
+        // rows would be** rather than in a red strip over a page that then
+        // claimed to be still reading (toast ruling, 2026-08-16). None of these
+        // is transient: nothing about a machine with no git will change while
+        // you look at it, so none of them is a toast either.
         GitSlot::Failed(fault) => {
-            content.empty = Some(GIT_READING);
-            content.banner = Some(fault_sentence(fault));
+            content.empty = Some(fault_sentence(fault));
             return content;
         }
         GitSlot::Ready(_) => {}
     }
 
-    if let Some(words) = cache.write_error() {
-        content.banner = Some(words.to_owned());
-    }
-
-    let status = match cache.status() {
-        GitSlot::Ready(status) => Some(status),
-        GitSlot::Failed(fault) => {
-            content.banner.get_or_insert_with(|| fault_sentence(fault));
-            None
-        }
-        GitSlot::Idle | GitSlot::Pending => None,
+    // The same ruling, one level down: a status git would not read is a fact
+    // about this page and not a thing that just happened, so its sentence goes
+    // in a [`GitRow::Notice`] where that status's groups would have stood — the
+    // row kind the open-commit expansion already reports its own faults with.
+    // The page around it is still true and still drawn, which is what a banner
+    // over the whole column could never say.
+    let (status, status_fault) = match cache.status() {
+        GitSlot::Ready(status) => (Some(status), None),
+        GitSlot::Failed(fault) => (None, Some(fault_sentence(fault))),
+        GitSlot::Idle | GitSlot::Pending => (None, None),
     };
 
     content
@@ -983,12 +997,18 @@ pub fn build(
             }
         }
         GitSlot::Failed(fault) => {
-            content.banner.get_or_insert_with(|| fault_sentence(fault));
+            content.rows.push(GitRow::Notice(fault_sentence(fault)));
         }
         // A repository with no local branches at all is an unborn one, and the
         // masthead has already said so — a heading over nothing would be a
         // second, quieter way of saying the same thing.
         GitSlot::Ready(_) | GitSlot::Idle | GitSlot::Pending => {}
+    }
+
+    // Where the three groups would have stood, when there is no status to build
+    // them from.
+    if let Some(words) = status_fault {
+        content.rows.push(GitRow::Notice(words));
     }
 
     // The three groups, in the order the design fixes: what is packed, what is
@@ -1055,7 +1075,7 @@ pub fn build(
             }
         }
         GitSlot::Failed(fault) => {
-            content.banner.get_or_insert_with(|| fault_sentence(fault));
+            content.rows.push(GitRow::Notice(fault_sentence(fault)));
         }
         GitSlot::Idle | GitSlot::Pending => {}
     }
@@ -1338,10 +1358,12 @@ pub fn fault_sentence(fault: &GitFault) -> String {
 /// second derivation would get wrong.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GitPanelGeometry {
-    /// The body less the banner — what the rows are laid into and clipped to.
+    /// What the rows are laid into and clipped to — the body, whole.
+    ///
+    /// It used to be the body *less a banner strip*, and the strip is gone (toast
+    /// ruling, 2026-08-16): a transient failure no longer costs the page twenty-two
+    /// permanent pixels and no longer moves every row down while it is on screen.
     pub viewport: [f32; 4],
-    /// The banner's own strip, when there is one.
-    pub banner: Option<[f32; 4]>,
     pub scroll_px: f32,
     pub content_height: f32,
     pub max_scroll: f32,
@@ -1385,27 +1407,18 @@ impl GitPanelGeometry {
 
 /// Lay the page out inside a body.
 ///
-/// **The banner is carved off the top and the rows never see it** — a banner that
-/// scrolled away with the list would be a sentence about a failure that a user
-/// scrolls past and never reads, and this one is the only report a refused write
-/// gets.
+/// **The whole body is the viewport.** It once had a strip carved off the top for
+/// a failure banner; the toast ruling (2026-08-16) took the strip away, and with
+/// it the one thing on this page whose height depended on whether something had
+/// just gone wrong. A notice now stands *over* the body — see [`crate::toast`] —
+/// so the rows are laid out in the same rectangle whatever git last said.
 #[must_use]
 pub fn git_panel_geometry(
     body: [f32; 4],
     content: &GitPanelContent,
     scale: f32,
 ) -> GitPanelGeometry {
-    let banner_height = (GIT_BANNER_HEIGHT_LOGICAL_PX * scale).round();
-    let (banner, viewport) = match content.banner {
-        Some(_) => {
-            let bottom = (body[1] + banner_height).min(body[3]);
-            (
-                Some([body[0], body[1], body[2], bottom]),
-                [body[0], bottom, body[2], body[3]],
-            )
-        }
-        None => (None, body),
-    };
+    let viewport = body;
 
     let pad_x = (GIT_VIEW_PADDING_X_LOGICAL_PX * scale).round();
     let pad_top = (GIT_VIEW_PADDING_TOP_LOGICAL_PX * scale).round();
@@ -1466,7 +1479,6 @@ pub fn git_panel_geometry(
 
     GitPanelGeometry {
         viewport,
-        banner,
         scroll_px: content.scroll_px,
         content_height,
         max_scroll,
@@ -1648,13 +1660,9 @@ pub fn push_git_panel(
     let (quads, labels, sprites) = out;
     let geometry = git_panel_geometry(body, content, scale);
 
-    if let (Some(strip), Some(words)) = (geometry.banner, content.banner.as_ref()) {
-        push_git_banner(strip, words, scale, palette, labels);
-    }
-
-    if let Some(sentence) = content.empty {
+    if let Some(sentence) = content.empty.as_ref() {
         labels.push(ChromeLabel {
-            text: sentence.to_owned(),
+            text: sentence.clone(),
             rect: geometry.viewport,
             font_size_px: GIT_EMPTY_FONT_LOGICAL_PX * scale,
             color: palette.git_head_muted,
@@ -1815,32 +1823,6 @@ fn inset(rect: [f32; 4], by: f32) -> [f32; 4] {
         (rect[2] - by).max(rect[0] + by),
         rect[3],
     ]
-}
-
-pub fn push_git_banner(
-    strip: [f32; 4],
-    words: &str,
-    scale: f32,
-    palette: &ChromePalette,
-    labels: &mut Vec<ChromeLabel>,
-) {
-    let pad = (GIT_VIEW_PADDING_X_LOGICAL_PX * scale).round();
-    let box_ = inset(strip, pad);
-    labels.push(ChromeLabel {
-        text: words.to_owned(),
-        rect: box_,
-        font_size_px: GIT_BANNER_FONT_LOGICAL_PX * scale,
-        // The error ink and no fill: a fail-soft banner in this product is a
-        // sentence, not a dialog, and a filled strip would read as a state the
-        // page is stuck in rather than as the last thing that happened.
-        color: palette.status_err,
-        align_right: false,
-        align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: Some(box_),
-    });
 }
 
 fn push_row_ground(
@@ -3132,14 +3114,21 @@ mod tests {
         );
     }
 
-    /// PIN (R17) — **there is one empty state and it is the only one.**
+    /// PIN (R17, amended by the toast ruling 2026-08-16) — **a repository this
+    /// machine cannot read says so where the rows would be, and says it quietly.**
     ///
-    /// The mock-up had a second, "No graph for this folder", and it was struck
-    /// for saying the same thing in words that sound like a missing feature.
-    /// Every other reason a page has nothing to show is a *banner* over a page,
-    /// not a sentence instead of one.
+    /// R17's original claim was that "Not a git repository" is the only *empty*
+    /// sentence and every other reason is a red banner over a page. The banner is
+    /// gone: it was permanent furniture for a transient fact, and these three
+    /// faults were never transient in the first place — a machine with no git
+    /// will still have no git in six seconds. So each keeps git's own words, and
+    /// each of them now stands in the muted ink in the middle of the page, which
+    /// is where a page with nothing to show has always said so.
+    ///
+    /// What is *not* here is the important half: none of these raises a notice.
+    /// The notice is for what just happened, and none of this just happened.
     #[test]
-    fn not_a_repository_is_the_only_empty_state() {
+    fn a_repository_that_cannot_be_read_says_so_where_the_rows_would_be() {
         let mut cache = GitCache::default();
         cache.retarget(Path::new(ROOT));
         assert!(cache.accept(GitAnswer::Repo {
@@ -3147,16 +3136,12 @@ mod tests {
             outcome: Err(GitFault::NotARepository),
         }));
         let content = rows_of(&cache);
-        assert_eq!(content.empty, Some(GIT_NOT_A_REPOSITORY));
+        assert_eq!(content.empty.as_deref(), Some(GIT_NOT_A_REPOSITORY));
         assert!(content.rows.is_empty(), "and nothing else at all");
-        assert_eq!(
-            content.banner, None,
-            "a folder that is not a repository is not a failure"
-        );
 
-        // The other three faults keep git's own words and say them in a banner.
+        // The other three faults keep git's own words, in the same place.
         for fault in [
-            GitFault::GitMissing("git.exe was not found on this machine".to_owned()),
+            GitFault::GitMissing(crate::git::GIT_NOT_FOUND.to_owned()),
             GitFault::Refused("fatal: detected dubious ownership".to_owned()),
             GitFault::TimedOut,
         ] {
@@ -3168,15 +3153,64 @@ mod tests {
             }));
             let content = rows_of(&cache);
             assert_ne!(
-                content.empty,
+                content.empty.as_deref(),
                 Some(GIT_NOT_A_REPOSITORY),
                 "{fault:?} is not the same claim as 'there is no repository here'"
             );
             assert_eq!(
-                content.banner.as_deref(),
+                content.empty.as_deref(),
                 Some(fault_sentence(&fault).as_str())
             );
+            assert!(content.rows.is_empty(), "and the page is otherwise bare");
         }
+    }
+
+    /// PIN (the same ruling) — a *part* of the page git would not read reports
+    /// itself in a notice row where that part's rows would have stood, and
+    /// everything else on the page is still drawn.
+    ///
+    /// This is what the banner could never do: it was one strip for the whole
+    /// column, so a branch list that failed made the page look as though the
+    /// history had too.
+    #[test]
+    fn a_slot_that_failed_leaves_a_notice_where_its_own_rows_would_be() {
+        let words = "fatal: bad object HEAD";
+        let mut cache = answered(
+            b"## main\0 M work.rs\0",
+            vec![commit("aaaaaaa", "first", 1)],
+            false,
+        );
+        assert!(cache.accept(GitAnswer::Branches {
+            root: PathBuf::from(ROOT),
+            outcome: Err(GitFault::Refused(words.to_owned())),
+        }));
+        let content = rows_of(&cache);
+        assert_eq!(
+            content.empty, None,
+            "the page is not empty — only that list is"
+        );
+        let notices: Vec<&str> = content
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                GitRow::Notice(said) => Some(said.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices, vec![words]);
+        assert!(
+            change_rows(&content)
+                .iter()
+                .any(|row| row.path == "work.rs"),
+            "and the changed files are still there"
+        );
+        assert!(
+            content
+                .rows
+                .iter()
+                .any(|row| matches!(row, GitRow::Commit(_))),
+            "and so is the history"
+        );
     }
 
     /// PIN (R16) — the "Load more" row is drawn exactly when there is more, and
@@ -3393,10 +3427,17 @@ mod tests {
         );
     }
 
-    /// PIN (R13/W3) — a refused write says git's own words, once, over a page
-    /// that is otherwise untouched.
+    /// PIN (R13/W3, amended 2026-08-16) — **a refused write leaves the page
+    /// exactly as it was**, and says nothing on it.
+    ///
+    /// The words used to be a red strip carved off the top of this column. They
+    /// are now a notice raised by the runtime from the answer itself
+    /// ([`crate::git::write_refusal`]), so what this test pins is the *silence*
+    /// here: no empty state, no row moved, no dimming left behind, and — the
+    /// point of the whole ruling — no permanent evidence of a thing that has
+    /// finished happening.
     #[test]
-    fn a_refused_write_is_one_line_of_gits_own_words_over_a_whole_page() {
+    fn a_refused_write_leaves_the_page_exactly_as_it_was() {
         let mut cache = answered(
             b"## main\0 M work.rs\0",
             vec![commit("aaaaaaa", "x", 1)],
@@ -3415,12 +3456,15 @@ mod tests {
         }));
         let content = rows_of(&cache);
         assert_eq!(
-            content.banner.as_deref(),
-            Some("fatal: Unable to create '.git/index.lock': File exists.")
-        );
-        assert_eq!(
             content.empty, None,
             "a failed write does not empty the page"
+        );
+        assert!(
+            !content
+                .rows
+                .iter()
+                .any(|row| matches!(row, GitRow::Notice(_))),
+            "and it does not leave a sentence lying in the list either"
         );
         assert!(
             change_rows(&content)
@@ -3432,11 +3476,13 @@ mod tests {
             matches!(cache.status(), GitSlot::Ready(_)),
             "nothing is re-read: the status is exactly as true as it was"
         );
-
-        // The banner is cleared by the *next attempt*, which is the moment the
-        // user has said they know.
-        let _ = cache.begin_write(GitWriteVerb::Stage, vec!["work.rs".to_owned()]);
-        assert_eq!(cache.write_error(), None);
+        // The words the notice will carry are the answer's, and they are git's.
+        assert_eq!(
+            crate::git::write_refusal(&GitFault::Refused(
+                "fatal: Unable to create '.git/index.lock': File exists.".to_owned()
+            )),
+            "fatal: Unable to create '.git/index.lock': File exists."
+        );
     }
 
     /// PIN (R7/R5) — the three states of a head each get their own sentence, and
@@ -3485,6 +3531,42 @@ mod tests {
             panic!("the first row is the masthead");
         };
         assert_eq!(head.branch, format!("main — {GIT_UNBORN}"));
+    }
+
+    /// PIN (toast ruling, 2026-08-16) — **the page's rows stand in the same
+    /// rectangle whatever git last said.**
+    ///
+    /// The body used to lose twenty-two pixels off its top the moment a verb was
+    /// refused, and get them back at the next attempt: every row on the page
+    /// moved down and then up again because of something that had already
+    /// finished happening. There is nothing left that can carve the viewport, and
+    /// this is the assertion that keeps it that way — the viewport *is* the body,
+    /// for every content this page can hold.
+    #[test]
+    fn the_viewport_is_the_whole_body_whatever_the_page_is_saying() {
+        let body = [0.0, 0.0, 240.0, 600.0];
+        let busy = rows_of(&answered(
+            b"## main\0 M work.rs\0",
+            vec![commit("aaaaaaa", "x", 1)],
+            false,
+        ));
+        let mut refused = GitCache::default();
+        refused.retarget(Path::new(ROOT));
+        assert!(refused.accept(GitAnswer::Repo {
+            dir: PathBuf::from(ROOT),
+            outcome: Err(GitFault::GitMissing("no git.exe here".to_owned())),
+        }));
+        let bare = rows_of(&refused);
+        assert!(bare.empty.is_some(), "and it does have something to say");
+
+        for content in [&busy, &bare, &GitPanelContent::default()] {
+            assert_eq!(
+                git_panel_geometry(body, content, 1.0).viewport,
+                body,
+                "no strip is carved off the top: {:?}",
+                content.empty
+            );
+        }
     }
 
     /// PIN — the page's rectangles are one derivation, and the buttons are inside

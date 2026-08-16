@@ -569,6 +569,15 @@ fn break_word(
         // always advances even when a single glyph is wider than the bound.
         let mut cut = 0;
         let mut cut_width = 0.0;
+        // A word too wide for the line is nearly always a path or a URL, and a
+        // path has joints: breaking *after* a separator keeps each segment
+        // whole (`BetterTerminal/` then `.claude/`) where a break between
+        // letters gives `BetterTermin` and `al/` — which the real machine
+        // showed on the first refused checkout it drew. The joint that fits is
+        // preferred; the character cut below is only for a segment that is
+        // itself wider than the line.
+        let mut joint = 0;
+        let mut joint_width = 0.0;
         for (at, ch) in rest.char_indices() {
             let end = at + ch.len_utf8();
             let candidate = measure(&rest[..end]);
@@ -577,13 +586,29 @@ fn break_word(
             }
             cut = end;
             cut_width = candidate;
+            if is_word_joint(ch) && end < rest.len() {
+                joint = end;
+                joint_width = candidate;
+            }
         }
         if cut >= rest.len() {
             return (rest.to_owned(), cut_width);
         }
+        let (cut, _) = if joint > 0 {
+            (joint, joint_width)
+        } else {
+            (cut, cut_width)
+        };
         lines.push(rest[..cut].to_owned());
         rest = &rest[cut..];
     }
+}
+
+/// The characters after which an over-wide word may be broken without cutting
+/// a segment in two: path separators, and the hyphen and underscore that
+/// compound words and identifiers are joined with.
+fn is_word_joint(ch: char) -> bool {
+    matches!(ch, '/' | '\\' | '-' | '_')
 }
 
 /// Lay the tip out: the box, and one row per line.
@@ -793,6 +818,18 @@ mod tests {
             lines.concat(),
             hash,
             "and every character is still there, in order"
+        );
+
+        // A path breaks at its joints, not between letters, when a joint fits.
+        let path = "D:/Developer/BetterTerminal/.claude/worktrees/t1-tab-basics";
+        let broken = wrap(path, 200.0, ten_per_char);
+        assert!(broken.iter().all(|line| ten_per_char(line) <= 200.0));
+        assert_eq!(broken.concat(), path);
+        assert!(
+            broken[..broken.len() - 1]
+                .iter()
+                .all(|line| line.ends_with('/') || line.ends_with('-')),
+            "every line but the last ends at a joint: {broken:?}"
         );
 
         assert_eq!(

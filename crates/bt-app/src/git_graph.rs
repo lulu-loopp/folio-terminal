@@ -350,8 +350,14 @@ pub struct GraphContent {
     /// How wide the graph column is drawn, in lanes (R18's hysteresis).
     pub lane_width: usize,
     pub scroll_px: f32,
-    pub empty: Option<&'static str>,
-    pub banner: Option<String>,
+    /// The whole page in one sentence, in the muted ink, where the rows would be.
+    ///
+    /// A `String` since the toast ruling (2026-08-16), for
+    /// [`crate::git_panel::GitPanelContent::empty`]'s reason: the third sentence
+    /// this can carry is git's own words about a history it would not read, and
+    /// that is a persistent fact rather than a notice — so it stands here instead
+    /// of in the red strip this page used to carve off its own top.
+    pub empty: Option<String>,
     /// The last row index the held width was needed for — see [`LaneWidthHold`].
     pub lane_width_until: usize,
     /// The reader is near the end and there is more history (R23's auto-paging).
@@ -434,10 +440,13 @@ pub fn toggled_expansion(current: Option<&str>, hash: &str) -> Option<String> {
 /// rects because it holds a page; this one is asked about a repository.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GraphGeometry {
-    /// The rows' own box — the body less the head and less any banner.
+    /// The rows' own box — the body less the head.
+    ///
+    /// It was once "less any banner" too; the strip is gone with the toast ruling
+    /// (2026-08-16), so a graph's rows stand in the same rectangle whether or not
+    /// a checkout was just refused.
     pub viewport: [f32; 4],
     pub head: Option<[f32; 4]>,
-    pub banner: Option<[f32; 4]>,
     pub row_height: f32,
     pub scroll_px: f32,
     pub content_height: f32,
@@ -507,17 +516,7 @@ impl GraphGeometry {
 /// Lay a graph out inside a preview body.
 #[must_use]
 pub fn graph_geometry(body: [f32; 4], content: &GraphContent, scale: f32) -> GraphGeometry {
-    let banner_height = (crate::git_panel::GIT_BANNER_HEIGHT_LOGICAL_PX * scale).round();
-    let (banner, rest) = match content.banner {
-        Some(_) => {
-            let bottom = (body[1] + banner_height).min(body[3]);
-            (
-                Some([body[0], body[1], body[2], bottom]),
-                [body[0], bottom, body[2], body[3]],
-            )
-        }
-        None => (None, body),
-    };
+    let rest = body;
     let pad_x = (GRAPH_PADDING_X_LOGICAL_PX * scale).round();
     let head_height = ((GRAPH_HEAD_PADDING_Y_LOGICAL_PX * 2.0
         + crate::git_panel::GIT_HEAD_FONT_LOGICAL_PX
@@ -549,7 +548,6 @@ pub fn graph_geometry(body: [f32; 4], content: &GraphContent, scale: f32) -> Gra
     GraphGeometry {
         viewport,
         head,
-        banner,
         row_height,
         scroll_px: content.scroll_px,
         content_height,
@@ -620,25 +618,24 @@ pub fn build(
 
     let log = match cache.log() {
         crate::git::GitSlot::Ready(log) => log,
+        // git's own words, standing where the commits would be. Persistent, so
+        // not a toast (2026-08-16): a history git refuses to read stays refused
+        // until something outside this window changes.
         crate::git::GitSlot::Failed(fault) => {
-            content.empty = Some(crate::git_panel::GIT_READING);
-            content.banner = Some(crate::git_panel::fault_sentence(fault));
+            content.empty = Some(crate::git_panel::fault_sentence(fault));
             return content;
         }
         crate::git::GitSlot::Idle | crate::git::GitSlot::Pending => {
-            content.empty = Some(crate::git_panel::GIT_READING);
+            content.empty = Some(crate::git_panel::GIT_READING.to_owned());
             return content;
         }
     };
 
     // The head is the panel's own sentence about the same repository (R20).
     content.head = Some(crate::git_panel::head_of(cache, scale, measure));
-    if let Some(words) = cache.write_error() {
-        content.banner = Some(words.to_owned());
-    }
 
     if log.commits.is_empty() {
-        content.empty = Some(crate::git_panel::GIT_NO_COMMITS);
+        content.empty = Some(crate::git_panel::GIT_NO_COMMITS.to_owned());
         return content;
     }
 
@@ -867,16 +864,13 @@ pub fn push_graph(
     let geometry = graph_geometry(body, content, scale);
     let _ = quads;
 
-    if let (Some(strip), Some(words)) = (geometry.banner, content.banner.as_ref()) {
-        crate::git_panel::push_git_banner(strip, words, scale, palette, labels);
-    }
     if let (Some(rect), Some(head)) = (geometry.head, content.head.as_ref()) {
         crate::git_panel::push_git_masthead(head, rect, scale, palette, (labels, sprites), &|r| r);
     }
 
-    if let Some(sentence) = content.empty {
+    if let Some(sentence) = content.empty.as_ref() {
         labels.push(ChromeLabel {
-            text: sentence.to_owned(),
+            text: sentence.clone(),
             rect: geometry.viewport,
             font_size_px: crate::git_panel::GIT_EMPTY_FONT_LOGICAL_PX * scale,
             color: palette.git_head_muted,

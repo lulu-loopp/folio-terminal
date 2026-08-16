@@ -31,6 +31,7 @@ mod seed;
 mod settings;
 mod shell_integration;
 mod shortcuts;
+mod toast;
 mod tooltip;
 mod wsl;
 
@@ -3518,6 +3519,32 @@ struct Runtime {
     /// instant and it is the one that matters — the frame the fade lands on,
     /// which "is it still fading" answers `false` for and therefore never draws.
     tooltip_drawn_opacity: Option<f32>,
+    /// Every notice this window is showing (user ruling, 2026-08-16).
+    ///
+    /// One host for the window, with each card carrying the surface it belongs
+    /// to — see [`toast::ToastAnchor`]. It is beside the tooltip rather than
+    /// inside any page because a notice outlives the thing that raised it: a
+    /// `git checkout` that git refused is a fact about the last two hundred
+    /// milliseconds, not about the column, and a column that re-derives its
+    /// content every frame has nowhere to keep one.
+    toasts: toast::ToastHost,
+    /// Where each card was laid out on the last frame that painted them.
+    ///
+    /// [`Self::tooltip_anchors`]' own arrangement and its reason: the pointer
+    /// arrives between frames, and a hit test that re-measured the text on every
+    /// `pointer_moved` would be a second derivation of the same boxes — which is
+    /// the one thing that turns a `×` into an invisible button.
+    toast_layouts: Vec<toast::ToastLayout>,
+    /// What the cards looked like on the frame that was last *painted*, as
+    /// `(id, opacity)` — [`Self::tooltip_drawn_opacity`] for a list of them.
+    toasts_drawn: Vec<(toast::ToastId, f32)>,
+    /// Which rung of the `×`'s reveal ladder was last painted.
+    ///
+    /// Beside the opacities rather than folded into them, because it is the one
+    /// thing about a card that changes without any clock moving: the pointer
+    /// crossing from the card into its own dismiss button repaints nothing that
+    /// [`Self::toasts_drawn`] can see.
+    toast_pointer_drawn: toast::ToastPointer,
     /// Rasterized chrome marks, held across frames so a hover repaint costs a
     /// hash lookup rather than eight SVG renders.
     chrome_marks: marks::ChromeMarkRasters,
@@ -8478,6 +8505,23 @@ struct OverlayStack {
     /// the opener closes the others), so their order between themselves is
     /// bookkeeping rather than a claim.
     pane_menu: Vec<marks::OverlayLayer>,
+    /// The notices (user ruling, 2026-08-16) — **above every menu and below the
+    /// tip.**
+    ///
+    /// Above the menus because a notice is anchored to the top of a *pane's*
+    /// body, which is exactly where a pane-head menu drops into, and a card
+    /// covered by the menu whose verb raised it would be a report nobody sees.
+    /// Below the tip because a toast is a surface you can point at — its `×` has
+    /// a tip of its own — and the one rule the tip's level exists for is that
+    /// the thing explaining what is under it is never itself covered.
+    ///
+    /// **The router disagrees on purpose, in the modal family's direction only.**
+    /// Presses reach the toast *after* the settings dialog, the gate and the
+    /// restore prompt, exactly as [`Self::file_menu`] does and for the same
+    /// reason [`Self::modal`] spells out: a modal means MODAL, and the two
+    /// surfaces that are painted over it are surfaces that cannot be open while
+    /// it is.
+    toast: Vec<marks::OverlayLayer>,
     /// `.tip { z-index: 60 }` — the one surface in this window that is never
     /// covered, because it is the only one whose whole job is to explain what is
     /// under it.
@@ -8511,6 +8555,7 @@ impl OverlayStack {
             modal,
             file_menu,
             pane_menu,
+            toast,
             tooltip,
             file_peek,
             drag_ghost,
@@ -8524,6 +8569,7 @@ impl OverlayStack {
             modal,
             file_menu,
             pane_menu,
+            toast,
             tooltip,
             file_peek,
             drag_ghost,
@@ -11726,6 +11772,40 @@ fn revealable_preview_file(source: &preview::PreviewSource) -> Option<PathBuf> {
     }
 }
 
+/// **Which git answers raise a notice** (user ruling, 2026-08-16), and what it
+/// says.
+///
+/// The whole of the transient/persistent split, in one function so that it is
+/// one rule rather than a decision repeated at every arm of the filing match.
+///
+/// A **write** and a **checkout** are the two things this window *asks a
+/// repository to do*, and a refusal of either is a thing that just happened to
+/// something you just pressed: transient, worth one card, gone in six seconds.
+///
+/// Everything else here is a **read**. A repository probe, a status, a branch
+/// list, a history: when one of those fails, nothing about it will be different
+/// in six seconds — no git on the machine, a repository git will not open, a
+/// question it would not finish. A card that appeared and left would say "this
+/// just went wrong" about a condition that has been wrong since before you
+/// looked, and would then take the report away again. Those keep the page's own
+/// quiet sentence instead, standing where the rows would be (`git_panel::build`).
+///
+/// The words are always git's own, through [`git::write_refusal`] — this window
+/// does not paraphrase a program that has already explained itself.
+fn git_answer_notice(answer: &git::GitAnswer) -> Option<String> {
+    match answer {
+        git::GitAnswer::Write {
+            outcome: Err(fault),
+            ..
+        }
+        | git::GitAnswer::Checkout {
+            outcome: Err(fault),
+            ..
+        } => Some(git::write_refusal(fault)),
+        _ => None,
+    }
+}
+
 /// **Which git answers are documents, and which buffer each belongs in** (G-3).
 ///
 /// The one place the two lanes part. Four of the seven answers are a column's —
@@ -12100,6 +12180,10 @@ impl Runtime {
             layout_peek: peek_strip::PeekHost::default(),
             tooltip_anchors: tooltip::TooltipAnchors::default(),
             tooltip_drawn_opacity: None,
+            toasts: toast::ToastHost::default(),
+            toast_layouts: Vec::new(),
+            toasts_drawn: Vec::new(),
+            toast_pointer_drawn: toast::ToastPointer::default(),
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
             settings_scroll: 0.0,
@@ -13603,6 +13687,194 @@ impl Runtime {
             .map(|anchor| anchor.id)
     }
 
+    /// Raise a notice (user ruling, 2026-08-16).
+    ///
+    /// The one door. Everything that wants to say "this just happened" comes
+    /// through here, so that the timing, the cap and the z-order are decided
+    /// once — and so that the thing raising it has to name the **surface** it is
+    /// about, which is what the ruling is: a notice appears where the attention
+    /// already is, not in a corner of the window.
+    fn toast(
+        &mut self,
+        kind: toast::ToastKind,
+        anchor: toast::ToastAnchor,
+        title: Option<String>,
+        body: impl Into<String>,
+    ) -> Result<()> {
+        self.toasts.raise(
+            kind,
+            anchor,
+            title,
+            body,
+            self.motion == Motion::Reduced,
+            Instant::now(),
+        );
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        // A card born under a still pointer is a card the pointer is on: the
+        // real machine raised one over the very row that was clicked, drew it
+        // with its `×` lit — the paint reads the pointer afresh — and then let
+        // its clock run, because the hold is a *hover* and no hover event had
+        // arrived. Asked here, the way `drive_rail_zone` is asked after a float
+        // opens: the answer changed without the pointer moving.
+        if let Some(position) = self.pointer_position {
+            self.drive_toast_hover(position)?;
+        }
+        Ok(())
+    }
+
+    /// Where a notice's surface is this frame, or `None` when it has gone.
+    ///
+    /// Resolved afresh every time it is asked, exactly as a tip's text is: a
+    /// column can be dragged wider and a seat can be split while a card is
+    /// standing on it, and a card holding the rectangle it was born with would be
+    /// a confident sentence over somewhere else. `None` is what sends it to the
+    /// window's corner — the fallback, and only that.
+    fn toast_anchor_rect(&self, anchor: toast::ToastAnchor) -> Option<[f32; 4]> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        match anchor {
+            // The column's page body, whichever page it is showing. A notice
+            // about what this column was asked to do does not move to the corner
+            // because the reader glanced at the tree.
+            toast::ToastAnchor::FilesColumn(seat) => {
+                let rect = seats::files_pane_rect(&self.seat_layout, seat)?;
+                Some(seats::files_pane_geometry(rect, scale, self.git_panel_on()).body)
+            }
+            toast::ToastAnchor::PreviewSeat(seat) => {
+                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
+            }
+            toast::ToastAnchor::Window => None,
+        }
+    }
+
+    /// The notices' own layer, and the boxes the pointer will be tested against.
+    ///
+    /// Both come out of one call for [`Self::tooltip_layer`]'s reason: the text
+    /// is measured here, beside the renderer, because only the font can say how
+    /// wide a line is — and measuring it twice is how the drawn `×` and the
+    /// pressable `×` drift apart.
+    fn toast_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        // Recorded at the end and only on the path that paints, so the debt is
+        // against what is *on screen* — [`Self::tooltip_layer`]'s own note.
+        self.toasts_drawn = Vec::new();
+        self.toast_layouts = Vec::new();
+        self.toast_pointer_drawn = toast::ToastPointer::default();
+        if self.toasts.is_empty() {
+            return Vec::new();
+        }
+        let now = Instant::now();
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        // The rectangles first, while nothing is borrowed: `place` needs both the
+        // anchor resolver (which reads the layout) and the measurer (which holds
+        // the renderer), and the two cannot both borrow `self`.
+        let anchors: Vec<(toast::ToastAnchor, Option<[f32; 4]>)> = self
+            .toasts
+            .toasts()
+            .iter()
+            .map(|toast| (toast.anchor(), self.toast_anchor_rect(toast.anchor())))
+            .collect();
+        let renderer = &mut self.renderer;
+        let layouts = toast::place(
+            self.toasts.toasts(),
+            |anchor| {
+                anchors
+                    .iter()
+                    .find(|(id, _)| *id == anchor)
+                    .and_then(|(_, rect)| *rect)
+            },
+            (width as f32, height as f32),
+            scale,
+            &mut |run, size| renderer.measure_chrome_text(run, size),
+        );
+        let pointer = self.toast_pointer(&layouts);
+        let palette = bt_render::chrome_palette();
+        let layers = toast::build(&layouts, &self.toasts, pointer, &palette, scale, now);
+        self.toasts_drawn = self.toasts.frame_state(now);
+        self.toast_pointer_drawn = pointer;
+        self.toast_layouts = layouts;
+        layers
+    }
+
+    /// Which card and which `×` the pointer is on, for the reveal ladder.
+    fn toast_pointer(&self, layouts: &[toast::ToastLayout]) -> toast::ToastPointer {
+        let Some(position) = self.pointer_position else {
+            return toast::ToastPointer::default();
+        };
+        match toast::at(layouts, position.x as f32, position.y as f32) {
+            Some(toast::ToastHit::Close(id)) => toast::ToastPointer {
+                card: Some(id),
+                close: Some(id),
+            },
+            Some(toast::ToastHit::Card(id)) => toast::ToastPointer {
+                card: Some(id),
+                close: None,
+            },
+            None => toast::ToastPointer::default(),
+        }
+    }
+
+    /// Whether the cards on screen differ from the cards last painted.
+    fn toasts_owe_frame(&self, now: Instant) -> bool {
+        self.toasts_drawn != self.toasts.frame_state(now)
+    }
+
+    /// When this window next has notice work: an entrance landing, a life running
+    /// out, an exit finishing — or this instant, when a frame is already owed.
+    fn toast_deadline(&self, now: Instant) -> Option<Instant> {
+        if self.toasts_owe_frame(now) {
+            return Some(now);
+        }
+        self.toasts.deadline(now)
+    }
+
+    /// Move every card's clock on, and pay the frames the movement owes.
+    fn advance_toasts(&mut self, now: Instant) -> Result<()> {
+        let moved = self.toasts.advance(now);
+        if (moved || self.toasts_owe_frame(now)) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Note which card the pointer is on — the hover that holds a card's clock,
+    /// and the one that lights its `×`. Returns whether the press should stop
+    /// here.
+    fn drive_toast_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let hit = toast::at(&self.toast_layouts, position.x as f32, position.y as f32);
+        let card = hit.map(|hit| match hit {
+            toast::ToastHit::Close(id) | toast::ToastHit::Card(id) => id,
+        });
+        // Two questions, and both have to be asked: the clock stops for the card
+        // under the pointer, and the ladder's rung changes when the pointer
+        // crosses into the `×` *without* changing which card it is on.
+        let moved = self.toast_pointer(&self.toast_layouts) != self.toast_pointer_drawn;
+        let held = self.toasts.hover(card, Instant::now());
+        if (held || moved) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(hit.is_some())
+    }
+
+    /// A press on a card: the `×` sends it away, and anywhere else is swallowed.
+    ///
+    /// **Swallowed, not ignored.** A toast stands over a list of files with a
+    /// verb on every row; a press that fell through it would stage whatever
+    /// happened to be under the card you were reaching for.
+    fn press_toast(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(hit) = toast::at(&self.toast_layouts, position.x as f32, position.y as f32) else {
+            return Ok(false);
+        };
+        if let toast::ToastHit::Close(id) = hit
+            && self.toasts.dismiss(id, Instant::now())
+            && self.refresh_overlay()
+        {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
     /// Show a settled tip, and keep paying the fade's frames until it lands.
     fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
         let promoted = self.tooltip.activate_if_due(now);
@@ -14333,6 +14605,7 @@ impl Runtime {
         stack.float = self.float_layer(now);
         stack.file_menu = self.file_menu_layer();
         stack.pane_menu = self.pane_menu_layer();
+        stack.toast = self.toast_layer();
         stack.tooltip = self.tooltip_layer();
         stack.file_peek = self.file_peek_layer();
         stack.drag_ghost = self.drag_ghost_layer();
@@ -19510,6 +19783,30 @@ impl Runtime {
                         } => Some(root.clone()),
                         _ => None,
                     };
+                    // **A verb git refused is a notice** (user ruling,
+                    // 2026-08-16), raised here and nowhere else: this is the one
+                    // instant the refusal *happens*, so it is raised once per
+                    // answer rather than re-derived on every frame from a
+                    // remembered sentence — which is what the red banner was, and
+                    // why it outstayed the thing it was about.
+                    //
+                    // The two verbs and only those two: a repository, a status, a
+                    // branch list or a history that would not read is a persistent
+                    // fault, and those keep the page's own quiet sentence (see
+                    // `git_panel::build`). Nothing about a machine with no git is
+                    // going to change in six seconds.
+                    if let Some(words) = git_answer_notice(&answer) {
+                        let anchor = self.git_toast_anchor(&host);
+                        self.toast(
+                            toast::ToastKind::Error,
+                            anchor,
+                            Some(git_panel::GIT_TOAST_TITLE.to_owned()),
+                            words,
+                        )?;
+                        // `self` was borrowed mutably above; the tab has to be
+                        // taken again for the filing below.
+                    }
+                    let tab = &mut self.tabs[index];
                     let filed = match &host {
                         git::GitHost::Column(leaf) => tab
                             .git_trees
@@ -19559,6 +19856,36 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// Which surface a repository answer's notice belongs over.
+    ///
+    /// A column names its own seat. A graph names none — [`git::GitHost::Graph`]
+    /// is keyed by tab and root, because the *document* is the repository's and
+    /// not the pane's — so the pane showing it is looked up the same way
+    /// [`Self::git_graphs`] finds it: the preview seat whose buffer is that
+    /// graph. When neither can be found this frame (another tab is in front, the
+    /// pane was closed while git worked) the notice falls to the window's corner,
+    /// which is what [`toast::ToastAnchor::Window`] is for — and it will find its
+    /// column again on the frame that column comes back, because the anchor is
+    /// resolved afresh every time it is drawn.
+    fn git_toast_anchor(&self, host: &git::GitHost) -> toast::ToastAnchor {
+        match host {
+            git::GitHost::Column(leaf) => toast::ToastAnchor::FilesColumn(leaf.seat),
+            git::GitHost::Graph { root, .. } => self
+                .seats
+                .preview_seats()
+                .into_iter()
+                .find(|seat| {
+                    matches!(
+                        self.preview_buffer_on(PreviewSurface::Seat(*seat))
+                            .map(|buffer| &buffer.source),
+                        Some(preview::PreviewSource::GitGraph { root: showing })
+                            if showing == root
+                    )
+                })
+                .map_or(toast::ToastAnchor::Window, toast::ToastAnchor::PreviewSeat),
+        }
     }
 
     /// Put everything the repository under this column has not been asked yet.
@@ -27138,6 +27465,18 @@ impl Runtime {
                 self.present_chrome_change()?;
             }
         }
+        // **A hand on a notice holds its clock** (user ruling, 2026-08-16), and
+        // lights the `×` it is reaching for. Asked unconditionally, because
+        // *leaving* a card is what starts its clock again and that happens
+        // wherever the pointer goes next; the answer is then whether the card
+        // also owns this hover, in which case nothing below it hears about the
+        // pointer at all — a card is a surface, and the rows under it are not
+        // being pointed at.
+        if self.drive_toast_hover(position)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         // The picker is not modal, so it takes the pointer only where it is: over
         // its own box the rows answer, and everywhere else the window carries on.
         if let Some(layout) = self.profile_menu_layout() {
@@ -29502,6 +29841,21 @@ impl Runtime {
             }
             return Ok(());
         }
+        // **A notice takes its own presses** (user ruling, 2026-08-16), after the
+        // modal family and before everything a card can stand over.
+        //
+        // After the modal family for [`OverlayStack::modal`]'s own reason — a
+        // modal means MODAL, and nothing behind the scrim answers a press,
+        // whatever is painted over it. Before the seats for the reason the card
+        // exists: it hangs over the top of a files column, which is a list of
+        // rows with a verb on each, and a press that fell through it would stage
+        // whatever the card you were reaching for happened to be covering.
+        if let Some(position) = self.pointer_position
+            && state == ElementState::Pressed
+            && self.press_toast(position)?
+        {
+            return Ok(());
+        }
         // The file menu, above the float and above the other two popups, for the
         // reason `refresh_overlay` gives: it is drawn over the floating window
         // because it is very often *about a row inside it*, and a press has to
@@ -30329,6 +30683,16 @@ impl Runtime {
         // strip and the rail are already answering below.
         if let Some(layout) = self.settings_layout() {
             return self.scroll_settings(&layout, delta);
+        }
+        // **A notch over a notice is nobody's** (user ruling, 2026-08-16). The
+        // card is not a scroller and it is not transparent: a wheel that fell
+        // through it would scroll the list underneath by a notch aimed at
+        // something standing over that list. It is swallowed rather than passed
+        // on, which is the same answer a press on the card's body gets.
+        if let Some(position) = self.pointer_position
+            && toast::at(&self.toast_layouts, position.x as f32, position.y as f32).is_some()
+        {
+            return Ok(());
         }
         // A7/A8 — a notch over the tab strip is the strip's. The mock-up gives
         // `.tabs-inline` `overflow-x: auto`, and a wheel over an overflowing
@@ -32070,6 +32434,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // The notices' three clocks, beside the tip's and after it: a card that
+        // has just left frees the pixels the tip may be about to be laid over.
+        if let Err(error) = runtime.advance_toasts(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // The glance card's own 350ms, beside the layout peek's and for the same
         // reason it stands where it does: it is a *peek*, and a peek that has
         // matured is already on screen when everything above it asks.
@@ -32161,6 +32531,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
             runtime.tooltip_deadline(now),
+            // A notice's entrance landing, its life running out, its exit
+            // finishing — and nothing at all while one is held under the pointer,
+            // because a stopped clock owes no wake-ups (2026-08-16).
+            runtime.toast_deadline(now),
             // The peek's 350ms while one is settling, and nothing afterwards:
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
@@ -33973,9 +34347,10 @@ mod tests {
             modal: mark(5),
             file_menu: mark(6),
             pane_menu: mark(7),
-            tooltip: mark(8),
-            file_peek: mark(9),
-            drag_ghost: mark(10),
+            toast: mark(8),
+            tooltip: mark(9),
+            file_peek: mark(10),
+            drag_ghost: mark(11),
         };
         let order: Vec<u8> = stack
             .flattened()
@@ -33984,9 +34359,9 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             "bottom to top: pane bars, rail, ground, schematic, float, modal, file menu, \
-             pane menu, tip, glance, ghost"
+             pane menu, notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -34006,8 +34381,20 @@ mod tests {
             "and the float still covers the panes, the rail and the dock drawing"
         );
         assert!(
-            at(8) > at(5) && at(8) > at(4),
+            at(9) > at(5) && at(9) > at(4),
             "the tip is covered by nothing"
+        );
+        // The notices (user ruling, 2026-08-16): over every menu, because a card
+        // anchored to the top of a pane's body is exactly where a pane menu drops
+        // into — and under the tip, because the `×` on that card has a tip of
+        // its own.
+        assert!(
+            at(8) > at(7) && at(8) > at(6) && at(8) > at(5),
+            "a notice is not covered by the menus or the modal family"
+        );
+        assert!(
+            at(8) < at(9),
+            "and it does not cover the tip about its own ×"
         );
         // The pane head's menu sits on the file menu's level, above every
         // surface either of them can be raised over.
@@ -34020,7 +34407,7 @@ mod tests {
         // too" and a card that its own host covered would be unreadable in the
         // very place the ruling names.
         assert!(
-            at(9) > at(4) && at(9) > at(8),
+            at(10) > at(4) && at(10) > at(9),
             "the glance card stands over the float it may have been raised from"
         );
     }
@@ -34039,6 +34426,87 @@ mod tests {
             ..OverlayStack::default()
         };
         assert_eq!(only_float.flattened().len(), 1);
+    }
+
+    // ── the notices (user ruling, 2026-08-16) ──────────────────────────────
+
+    /// PIN — **a verb git refused raises exactly one notice, carrying git's own
+    /// words; a read that failed raises none.**
+    ///
+    /// This is the whole transient/persistent split, and both halves matter. The
+    /// first half is what replaced the red banner: the report is made once, at
+    /// the instant the answer lands, rather than re-derived from a remembered
+    /// sentence on every frame until the next attempt. The second half is what
+    /// stops the replacement from being worse than what it replaced — a machine
+    /// with no git would otherwise raise a card that appears, says so, and takes
+    /// the only report away again six seconds later.
+    ///
+    /// Mutation: add `Repo`/`Status` to `git_answer_notice` and the second half
+    /// goes red; drop the `Checkout` arm and the refusal the user reported —
+    /// "fatal: 't1-tab-basics' is already used by worktree at …" — is silent.
+    #[test]
+    fn a_refused_verb_raises_one_notice_and_a_read_that_failed_raises_none() {
+        let root = std::path::PathBuf::from(r"D:\repo");
+        let refused = |words: &str| git::GitFault::Refused(words.to_owned());
+        let worktree = "fatal: 't1-tab-basics' is already used by worktree at D:/x";
+
+        let checkout = git::GitAnswer::Checkout {
+            root: root.clone(),
+            target: "t1-tab-basics".to_owned(),
+            outcome: Err(refused(worktree)),
+        };
+        let lock = "fatal: Unable to create '.git/index.lock': File exists.";
+        let write = git::GitAnswer::Write {
+            root: root.clone(),
+            verb: git::GitWriteVerb::Stage,
+            paths: vec!["work.rs".to_owned()],
+            outcome: Err(refused(lock)),
+        };
+        assert_eq!(git_answer_notice(&checkout).as_deref(), Some(worktree));
+        assert_eq!(git_answer_notice(&write).as_deref(), Some(lock));
+
+        // Every read, and the two verbs that went through: silence.
+        for quiet in [
+            git::GitAnswer::Repo {
+                dir: root.clone(),
+                outcome: Err(git::GitFault::GitMissing("no git.exe".to_owned())),
+            },
+            git::GitAnswer::Status {
+                root: root.clone(),
+                outcome: Err(refused("fatal: detected dubious ownership")),
+            },
+            git::GitAnswer::Branches {
+                root: root.clone(),
+                outcome: Err(git::GitFault::TimedOut),
+            },
+            git::GitAnswer::Log {
+                root: root.clone(),
+                skip: 0,
+                outcome: Err(refused("fatal: bad object HEAD")),
+            },
+            git::GitAnswer::Checkout {
+                root: root.clone(),
+                target: "main".to_owned(),
+                outcome: Ok(()),
+            },
+            git::GitAnswer::Write {
+                root,
+                verb: git::GitWriteVerb::Stage,
+                paths: vec!["work.rs".to_owned()],
+                outcome: Ok(()),
+            },
+        ] {
+            assert_eq!(
+                git_answer_notice(&quiet),
+                None,
+                "a persistent fault is not a notice: {quiet:?}"
+            );
+        }
+
+        // And who is named as speaking, which is the other half of the words:
+        // the sentence is git's, so the title has to say so rather than let a
+        // paragraph of `fatal:` look like something this window decided.
+        assert_eq!(git_panel::GIT_TOAST_TITLE, "Git");
     }
 
     // ── dragging a peek's header keeps it (user ruling 2026-08-12) ──────────

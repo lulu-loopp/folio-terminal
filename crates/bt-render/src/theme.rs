@@ -582,7 +582,11 @@ pub struct ChromePalette {
     /// them land on the hues this product already speaks in — 225° is
     /// [`Self::accent`]'s own hue, 145° the green of `status_ok`, 35° the amber
     /// of `status_warn`, 350° the red of `status_err` — with four more
-    /// interleaved between them at roughly even spacing. Every hue is then given
+    /// interleaved between them at roughly even spacing. (The red moved to 347°
+    /// when `status_err` became a rose on 2026-08-16; the wheel keeps its 350
+    /// because these eight are literals struck once against both canvases, not a
+    /// function of the status four, and three degrees is not a colour.) Every
+    /// hue is then given
     /// **the same** saturation and lightness, which is what makes the eight read
     /// as one family and not as eight decisions: dark canvas S 52% L 66%, light
     /// canvas S 55% L 38%. Low, deliberately (R18's "low-saturation family"):
@@ -849,19 +853,33 @@ pub struct ChromePalette {
     // never a literal". They are opaque hex in the design, so unlike most of
     // this palette there is nothing to pre-composite — they land as written.
     //
-    // **Three of them are one set and two are not** (R29, 2026-08-15). The
-    // comment above them in the design says the four are declared once "so both
-    // themes share them **until a walkthrough proves a theme needs its own**",
-    // and `--ok` is the one the walkthrough caught: `body.dark` overrides it to
-    // `#57ab5a` (mock-up 74) and overrides no other, because `#1a7f37` on
-    // `#1B1B1B` is a green nobody can read. So the set that varies by canvas is
-    // [`Self::accent`] and [`Self::status_ok`], and the set that does not is the
-    // three below them. Naming the split is the whole point — a reader who was
-    // told "the status colours are one table" and then found a per-theme entry
-    // would rightly distrust the rest.
-    /// `--err #c50f1f` — a session that finished with a failing exit code, worn
-    /// by the tab's dot, by a progress ring reporting `OSC 9;4` state 2, and by
-    /// the Git page's `D` and `U` badges (a file gone, a merge unresolved).
+    // **Two of them are one set and three are not** (R29, 2026-08-15; widened
+    // 2026-08-16). The comment above them in the design says the four are
+    // declared once "so both themes share them **until a walkthrough proves a
+    // theme needs its own**", and `--ok` was the first the walkthrough caught:
+    // `body.dark` overrides it to `#57ab5a` (mock-up 74) because `#1a7f37` on
+    // `#1B1B1B` is a green nobody can read. `--err` is the second, and it split
+    // for the same reason the moment it became a rose — a rose dark enough to
+    // clear 4.5:1 on white is a bruise on `#1B1B1B`, and one light enough to
+    // read on `#1B1B1B` is unreadable on white. So the set that varies by canvas
+    // is [`Self::accent`], [`Self::status_ok`] and [`Self::status_err`], and the
+    // set that does not is `--warn` and `--pause`. Naming the split is the whole
+    // point — a reader who was told "the status colours are one table" and then
+    // found a per-theme entry would rightly distrust the rest.
+    /// `--err` — `#e11d48` light, `#fb7185` dark. A session that finished with a
+    /// failing exit code, worn by the tab's dot, by a progress ring reporting
+    /// `OSC 9;4` state 2, by the Git page's `D` and `U` badges (a file gone, a
+    /// merge unresolved), and by a toast that carries a failure.
+    ///
+    /// **A rose and not the danger red** (user ruling, 2026-08-16). The mock-up
+    /// declared `#c50f1f`, which is GitHub's own danger red, and on a refused
+    /// checkout it read as a fire alarm over a sentence that only means "git
+    /// would not do that". The ruling replaces it with the pinkish red modern
+    /// minimal interfaces use — Tailwind's rose-600 on the light canvas, rose-400
+    /// on the dark — and the mock-up's literal was retuned with it rather than
+    /// left behind, so the design record and this table still say one thing.
+    /// Both clear 4.5:1 against their own canvas, which the danger red did not
+    /// on the dark one.
     pub status_err: [u8; 3],
     /// `--warn #d9822b` — the bell, and (once the attention queue lands) an
     /// agent blocked on you.
@@ -1013,8 +1031,8 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     preview_code_lang: [0x78, 0x78, 0x78],
     // `--ok #57ab5a` at 13% over 27: (34.8, 45.7, 35.2).
     preview_diff_add: [0x23, 0x2e, 0x23],
-    // `--err #c50f1f` at 10% over 27: (44.0, 25.8, 27.4).
-    preview_diff_del: [0x2c, 0x1a, 0x1b],
+    // `--err #fb7185` at 10% over 27: (49.4, 35.6, 37.6).
+    preview_diff_del: [0x31, 0x24, 0x26],
     preview_diff_hunk: [0x7a, 0x99, 0xff],
     // `--ink` (white .87) over `--hover` over `--termbg`: 27 + 228×.055 = 39.5,
     // then 39.5 + 215.5×.87 = 227.0.
@@ -1145,13 +1163,15 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     tab_badge_text_on_hovered_tab: [0xab, 0xab, 0xab],
     // `--ink3` (white .38) over `--menu` #2A2A2A: 42 + 213×.38 = 122.9.
     menu_item_hint_text: [0x7b, 0x7b, 0x7b],
-    // Three of the mock-up's status semantics live in `:root` and `body.dark`
-    // overrides none of them, so the dark canvas wears the same three literals.
-    status_err: [0xc5, 0x0f, 0x1f],
+    // Two of the mock-up's status semantics live in `:root` and `body.dark`
+    // overrides neither, so the dark canvas wears the same two literals.
     status_warn: [0xd9, 0x82, 0x2b],
     status_pause: [0xc1, 0x9c, 0x00],
-    // The fourth is overridden (mock-up 74): `#1a7f37` on `#1B1B1B` is a green
-    // that reads as a smudge.
+    // The other two are overridden. `--ok` since mock-up 74: `#1a7f37` on
+    // `#1B1B1B` is a green that reads as a smudge. `--err` since the rose ruling
+    // (2026-08-16): rose-400, because rose-600 over this canvas is 2.8:1 — the
+    // same smudge in the other hue.
+    status_err: [0xfb, 0x71, 0x85],
     status_ok: [0x57, 0xab, 0x5a],
     // `--border` (white at .094) at `opacity: .7` — .0658 white — over
     // `--termbg` #1B1B1B, `--panel` #252525, and `--hover`-over-`--panel`
@@ -1220,8 +1240,8 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     preview_code_lang: [0xa1, 0xa0, 0x9c],
     // `--ok #1a7f37` at 13% over white: (225.2, 238.4, 229.0).
     preview_diff_add: [0xe1, 0xee, 0xe5],
-    // `--err #c50f1f` at 10% over white: (249.2, 231.0, 232.6).
-    preview_diff_del: [0xf9, 0xe7, 0xe9],
+    // `--err #e11d48` at 10% over white: (252.0, 232.4, 236.7).
+    preview_diff_del: [0xfc, 0xe8, 0xed],
     preview_diff_hunk: [0x30, 0x59, 0xd8],
     // `--ink #37352F` is opaque on this canvas, so the head row's ink is itself.
     preview_table_head_text: [0x37, 0x35, 0x2f],
@@ -1350,10 +1370,11 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // the same white as `--win`, so it agrees with `dialog_muted_text` exactly.
     menu_item_hint_text: [0xa5, 0xa4, 0xa1],
     // Opaque in the mock-up's `:root`, and not overridden by either canvas.
-    status_err: [0xc5, 0x0f, 0x1f],
     status_warn: [0xd9, 0x82, 0x2b],
     status_pause: [0xc1, 0x9c, 0x00],
-    // `:root`'s own `--ok`, which only the dark canvas overrides.
+    // `:root`'s own `--err` and `--ok`, each of which only the dark canvas
+    // overrides. Rose-600 is 4.7:1 on white.
+    status_err: [0xe1, 0x1d, 0x48],
     status_ok: [0x1a, 0x7f, 0x37],
     // `--border` (black at .088) at `opacity: .7` — .0616 black — over
     // `--termbg` #FFFFFF, `--panel` #F7F7F5, and `--hover`-over-`--panel`
@@ -2473,28 +2494,30 @@ mod tests {
         );
     }
 
-    /// PIN (T2 tab status, amended by R29 2026-08-15): **three of the "something
-    /// happened" colours are one set and two are not**, and which is which is
-    /// read off the design rather than chosen.
+    /// PIN (T2 tab status, amended by R29 2026-08-15 and by the rose ruling of
+    /// 2026-08-16): **two of the "something happened" colours are one set and
+    /// three are not**, and which is which is read off the design rather than
+    /// chosen.
     ///
     /// This test used to say the split itself was forbidden — "a theme split here
     /// would be an invention, not a reading". That was true of the three it was
     /// written about and was never true of the design's own comment, which
     /// declares the four in `:root` "so both themes share them **until a
-    /// walkthrough proves a theme needs its own**". `body.dark` proves it for
-    /// exactly one: `--ok` is re-struck at line 74 and nothing else is. So the
-    /// claim the test makes is narrowed to the three that are genuinely shared,
-    /// and the two that vary are pinned as *varying* — which is a stronger
-    /// statement than the old one, not a weaker one, because a future palette
-    /// that quietly folded `--ok` back to one value would now fail here instead
-    /// of passing.
+    /// walkthrough proves a theme needs its own**". `body.dark` proved it first
+    /// for `--ok` (mock-up 74) and now for `--err` as well. So the claim the test
+    /// makes is narrowed to the two that are genuinely shared, and the three that
+    /// vary are pinned as *varying* — which is a stronger statement than the old
+    /// one, not a weaker one, because a future palette that quietly folded either
+    /// back to one value would now fail here instead of passing.
     #[test]
     fn the_status_colours_are_one_set_shared_by_both_canvases() {
         for palette in [DARK_CHROME, LIGHT_CHROME] {
-            assert_eq!(palette.status_err, [0xc5, 0x0f, 0x1f], "--err");
             assert_eq!(palette.status_warn, [0xd9, 0x82, 0x2b], "--warn");
             assert_eq!(palette.status_pause, [0xc1, 0x9c, 0x00], "--pause");
         }
+        // The rose, which is the third that varies (user ruling, 2026-08-16).
+        assert_eq!(LIGHT_CHROME.status_err, [0xe1, 0x1d, 0x48], "--err");
+        assert_eq!(DARK_CHROME.status_err, [0xfb, 0x71, 0x85], "dark --err");
         // The accent is the fourth claim ("finished, unread") and is one of the
         // two that *do* vary by canvas, so the dot's four colours are never a
         // single constant table.
@@ -2503,6 +2526,30 @@ mod tests {
         // `body.dark`'s lighter one over the dark canvas.
         assert_eq!(LIGHT_CHROME.status_ok, [0x1a, 0x7f, 0x37], "--ok");
         assert_eq!(DARK_CHROME.status_ok, [0x57, 0xab, 0x5a], "dark --ok");
+    }
+
+    /// PIN (user ruling, 2026-08-16) — **the rose is legible on its own canvas,
+    /// which is the whole reason it is two values and not one.**
+    ///
+    /// The floor is 4.5:1 and not the lane wheel's 3:1, because this ink is worn
+    /// by *words*: a toast's mark stands beside a sentence, and the Git page's
+    /// `D` badge is a letter. The danger red the ruling replaced managed 2.8:1
+    /// over `#1B1B1B` — legible on paper, a bruise on the dark canvas — and the
+    /// assertion below is what stops a future retune from landing there again by
+    /// picking one rose and using it twice.
+    #[test]
+    fn the_error_rose_reads_on_both_canvases() {
+        for (palette, canvas) in [(DARK_CHROME, TERMBG_DARK), (LIGHT_CHROME, TERMBG_LIGHT)] {
+            let body = contrast(palette.status_err, canvas);
+            assert!(body >= 4.5, "the rose over its own canvas: {body:.2}:1");
+            // And over `--menu`, which is the face a toast is drawn on — the
+            // first surface to wear this ink over something other than the body.
+            let card = contrast(palette.status_err, palette.menu_surface);
+            assert!(card >= 4.5, "the rose over a menu's face: {card:.2}:1");
+        }
+        // And the one that was replaced does not: this is the ruling's own
+        // arithmetic, kept so the reason survives the change.
+        assert!(contrast([0xc5, 0x0f, 0x1f], TERMBG_DARK) < 3.0);
     }
 
     /// Relative luminance, sRGB, as WCAG defines it — the one arithmetic a
