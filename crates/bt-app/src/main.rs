@@ -1,6 +1,6 @@
 use std::{
     backtrace::Backtrace,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::OpenOptions,
     io::Write,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod cmdrail;
 mod file_peek;
 mod files;
 mod float;
@@ -3889,6 +3890,21 @@ struct Runtime {
     /// crossing from the card into its own dismiss button repaints nothing that
     /// [`Self::toasts_drawn`] can see.
     toast_pointer_drawn: toast::ToastPointer,
+    /// One command marks rail per terminal seat of the tab on screen, held across
+    /// frames.
+    ///
+    /// Keyed by seat and **not** stored on [`LeafSession`], which is the one
+    /// choice here worth stating: a rail is a function of a ledger *and a
+    /// rectangle*, and the rectangle belongs to the solve rather than to the
+    /// shell. A cache on the leaf would follow a pane that is torn into another
+    /// tab and be wrong about its geometry the moment it landed; one on the
+    /// window is simply swept — see [`Self::sweep_command_rails`].
+    command_rails: BTreeMap<SeatId, cmdrail::RailCache>,
+    /// The rail and the tick the pointer is on, if any. At most one, because at
+    /// most one rail is hot (mock 8478-8483).
+    command_rail_hover: Option<(SeatId, usize)>,
+    /// A jump's 950 ms row flash, while one is running.
+    command_flash: Option<CommandFlash>,
     /// Rasterized chrome marks, held across frames so a hover repaint costs a
     /// hash lookup rather than eight SVG renders.
     chrome_marks: marks::ChromeMarkRasters,
@@ -6593,6 +6609,89 @@ enum RenameVerdict {
 /// is the minimum a name field needs and is deliberately not grapheme-aware:
 /// splitting a combining sequence is the one thing this loses, and buying the
 /// segmentation for a forty-character label is not a trade this slice makes.
+/// A jump's 950 ms row flash, while one is running.
+///
+/// It holds a `ContentAnchor` rather than a row number, and the reason is the one
+/// the jump itself is built on: a row number stops being true at the next line the
+/// shell prints, while an anchor keeps naming the same content and is looked up in
+/// whatever frame is on the glass when the next of the flash's frames is drawn. So
+/// a command that flashes while its shell is still printing stays lit on *itself*
+/// as it travels up the pane, instead of lighting whatever slid into the row it
+/// was in.
+#[derive(Clone, Debug, PartialEq)]
+struct CommandFlash {
+    seat: SeatId,
+    anchor: bt_doc::ContentAnchor,
+    started: Instant,
+}
+
+/// Which way a keyboard walk of the command marks goes.
+///
+/// A named pair rather than a signed integer, because the two ends behave
+/// differently — see [`Runtime::step_command_mark`] — and `-1` at a call site
+/// tells the reader nothing about which end it is walking toward.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Step {
+    Back,
+    Forward,
+}
+
+/// Which command a walk lands on, given how many there are and which one the
+/// viewport is showing.
+///
+/// A function rather than four lines inside [`Runtime::step_command_mark`], for
+/// [`stepped_tab`]'s reason one file over: the ends are the whole of the rule and
+/// the ends are what a window, a session and a solve make expensive to reach.
+///
+/// **`at` is `None` when the viewport is above every command** — scrolled into
+/// output that predates the oldest mark, or into a transcript whose oldest marks
+/// have been evicted. Forwards, the first command is the next one; backwards there
+/// is nothing before it, and there is no wrap to throw the walk to the newest.
+fn stepped_command_mark(count: usize, at: Option<usize>, step: Step) -> Option<usize> {
+    match (step, at) {
+        (Step::Forward, None) => (count > 0).then_some(0),
+        (Step::Back, None) => None,
+        (Step::Forward, Some(index)) => (index + 1 < count).then_some(index + 1),
+        (Step::Back, Some(index)) => index.checked_sub(1),
+    }
+}
+
+/// Which presentation row of `frame` is showing `anchor`, or `None` when the
+/// content it names is not on the glass at all.
+///
+/// Answered out of the frame's own `cell_anchors`, which is the list the paint and
+/// every pointer verb already read: the row a flash lights has to be the row the
+/// user is looking at, and a second derivation of "where that content went" is a
+/// second thing that can be off by one. An unorderable pair — the alternate
+/// screen's isolated namespace — is skipped rather than guessed at, which is the
+/// same silence `command_mark_at_or_before` keeps for it.
+fn frame_row_of_anchor(
+    frame: &ViewportFrame,
+    anchor: &bt_doc::ContentAnchor,
+) -> Option<bt_viewport::FrameVisualRow> {
+    let columns = frame.columns.get() as usize;
+    let mut found = None;
+    for row in 0..frame.drawable_rows() {
+        let start = &frame.cell_anchors.get(row * columns)?.start;
+        match bt_doc::compare_anchors(start, anchor) {
+            Ok(order) if order.is_le() => found = Some(row),
+            // The first row that begins after the anchor ends the search: rows are
+            // in document order, so nothing further down can contain it.
+            Ok(_) => break,
+            Err(_) => continue,
+        }
+    }
+    let row = found?;
+    // The greatest row that *begins* at or before the anchor is only the row
+    // showing it if the anchor is also within that row's own span. Without this,
+    // an anchor below the last drawable row would light the last one.
+    let end = &frame.cell_anchors.get(row * columns + columns - 1)?.end;
+    bt_doc::compare_anchors(anchor, end)
+        .ok()
+        .filter(|order| order.is_le())?;
+    frame.row_map.get(row).copied()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabRename {
     tab: TabId,
@@ -9489,6 +9588,22 @@ struct OverlayStack {
     /// it has to stand above its own window and below the next one, so it rides
     /// in [`Self::float`] beside the window it belongs to.
     preview_bars: Vec<marks::OverlayLayer>,
+    /// `.cmdrail { z-index: 5 }` — **a terminal pane's command marks**, beside
+    /// the preview's bar and for its argument.
+    ///
+    /// It belongs *to* a pane rather than floating over the window: it is the
+    /// pane's own right edge, it moves with the pane, and every surface above is
+    /// entitled to cover it — a menu dropped out of a pane head must not have
+    /// ticks showing through it. It is in the overlay at all for
+    /// [`Self::preview_bars`]'s reason: the seats' document lane runs a whole
+    /// pass earlier, so a rail handed to that lane would be painted under the
+    /// very text it has to ride over.
+    ///
+    /// Above the preview's bar rather than below it only because the two can
+    /// never be up together — a seat is a terminal or a preview — so the order
+    /// between them is bookkeeping. The jump's row flash rides here too: it is a
+    /// band across one pane's own rows, drawn by the gesture that scrolled them.
+    command_rail: Vec<marks::OverlayLayer>,
     /// `.rail { z-index: 15 }` — chrome that floats over the panes and over
     /// nothing else. Every surface below is entitled to cover it.
     rail: Vec<marks::OverlayLayer>,
@@ -9582,6 +9697,7 @@ impl OverlayStack {
     fn flattened(self) -> Vec<marks::OverlayLayer> {
         let Self {
             preview_bars,
+            command_rail,
             rail,
             ground,
             layout_peek,
@@ -9597,6 +9713,7 @@ impl OverlayStack {
         } = self;
         [
             preview_bars,
+            command_rail,
             rail,
             ground,
             layout_peek,
@@ -9941,6 +10058,7 @@ fn pointer_cursor(
     float: Option<FloatGrasp>,
     divider_axis: Option<bt_layout::Axis>,
     over_link: bool,
+    over_command_tick: bool,
     image: Option<ImageGrasp>,
 ) -> winit::window::CursorIcon {
     use winit::window::CursorIcon;
@@ -9964,6 +10082,12 @@ fn pointer_cursor(
     // Under the float's grasps, because a window standing over the document
     // covers what the pointer would otherwise be aiming at.
     if float.is_none() && over_link {
+        return CursorIcon::Pointer;
+    }
+    // `.cmdtick { cursor: pointer }` — a tick answers a press, and the same
+    // finger says so. Beside the link and under the float for the link's reason:
+    // a window standing over a pane covers the rail on its edge.
+    if float.is_none() && over_command_tick {
         return CursorIcon::Pointer;
     }
     match float {
@@ -13533,6 +13657,9 @@ impl Runtime {
             toast_layouts: Vec::new(),
             toasts_drawn: Vec::new(),
             toast_pointer_drawn: toast::ToastPointer::default(),
+            command_rails: BTreeMap::new(),
+            command_rail_hover: None,
+            command_flash: None,
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
             settings_scroll: 0.0,
@@ -15282,6 +15409,326 @@ impl Runtime {
         Ok(true)
     }
 
+    // ────────────────────────── the command marks rail ──────────────────────────
+
+    /// One terminal pane's body, or `None` when the rail has nothing to stand on.
+    ///
+    /// The rail is drawn on the **primary screen only**, and this is where that is
+    /// enforced rather than inside [`cmdrail`]: the ledger already refuses to
+    /// record an alternate-screen marker (§3.2's isolated namespace), so a pane
+    /// running `vim` has a ledger full of the commands that ran *before* `vim`
+    /// started — perfectly true marks that would be drawn over somebody else's
+    /// canvas. What the alternate screen suspends is not the data, it is the
+    /// picture.
+    fn command_rail_body(&self, seat: SeatId) -> Option<[f32; 4]> {
+        let leaf = self.sessions.get(&seat)?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+        cmdrail::host_rect(
+            [
+                body.x as f32,
+                body.y as f32,
+                (body.x + body.width) as f32,
+                (body.y + body.height) as f32,
+            ],
+            leaf.session.terminal_modes().alternate_screen,
+        )
+    }
+
+    /// Every rail on screen, resting, with the hovered tick's crest over it and
+    /// the jump flash under it.
+    ///
+    /// The rails themselves come out of [`cmdrail::RailCache`] and are usually not
+    /// rebuilt at all: a frame that moved neither a ledger nor a pane hands back
+    /// the layer it handed back last time, which is the whole reason
+    /// `command_marks_revision` exists.
+    fn command_rail_layers(&mut self) -> Vec<marks::OverlayLayer> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let palette = bt_render::chrome_palette();
+        let hover = self.command_rail_hover;
+        let flash = self.command_flash_layer(&palette, scale);
+        // Pass one, under a shared borrow: every rail that is drawn this frame,
+        // and — for the ones whose key has moved — the geometry to draw it with.
+        // See [`cmdrail::RailCache::needs_rebuild`] for why the question and the
+        // answer are asked in two passes.
+        let seats: Vec<SeatId> = self.sessions.keys().copied().collect();
+        let plans: Vec<(SeatId, cmdrail::RailKey, Option<cmdrail::Rail>)> = seats
+            .into_iter()
+            .filter_map(|seat| {
+                let body = self.command_rail_body(seat)?;
+                let leaf = self.sessions.get(&seat)?;
+                let key = cmdrail::RailKey {
+                    revision: leaf.session.command_marks_revision(),
+                    body,
+                    scale,
+                };
+                let stale = self
+                    .command_rails
+                    .get(&seat)
+                    .is_none_or(|cache| cache.needs_rebuild(key));
+                Some((
+                    seat,
+                    key,
+                    stale.then(|| cmdrail::lay_out(body, leaf.session.command_marks(), scale)),
+                ))
+            })
+            .collect();
+        // Pass two, exclusive: store what changed and hand out the pictures.
+        let mut layers: Vec<marks::OverlayLayer> = flash.into_iter().collect();
+        for (seat, key, fresh) in plans {
+            let cache = self.command_rails.entry(seat).or_default();
+            if let Some(rail) = fresh {
+                cache.install(key, rail, &palette);
+            }
+            let rail = cache.rail();
+            // An empty ledger draws nothing and reports nothing — `cmd.exe` and a
+            // PowerShell without the integration script live here (inventory C13).
+            if rail.ticks.is_empty() {
+                continue;
+            }
+            let mut layer = cache.layer().clone();
+            if let Some((hot, index)) = hover
+                && hot == seat
+            {
+                layer.quads.extend(cmdrail::crest(rail, index, &palette));
+            }
+            layers.push(layer);
+        }
+        layers
+    }
+
+    /// The jump flash, as a band across the row it landed on.
+    ///
+    /// It is read out of the pane's **last presented frame** rather than from the
+    /// projection, and that is what makes it honest across a scroll: the frame is
+    /// the picture on the glass, its `cell_anchors` say which content each row is
+    /// showing, and a row that has since scrolled out simply is not found and is
+    /// not drawn. Nothing here re-derives where a row "should" be.
+    fn command_flash_layer(
+        &self,
+        palette: &bt_render::ChromePalette,
+        scale: f32,
+    ) -> Option<marks::OverlayLayer> {
+        let flash = self.command_flash.as_ref()?;
+        let alpha = cmdrail::flash_alpha(
+            Instant::now().saturating_duration_since(flash.started),
+            |x| cubic_bezier(x, EASE),
+        )?;
+        let body = self.command_rail_body(flash.seat)?;
+        let frame = self.pane_frame(flash.seat)?;
+        let row = frame_row_of_anchor(frame, &flash.anchor)?;
+        let metrics = self.renderer.metrics();
+        let top = body[1]
+            + metrics.padding_px
+            + row.top_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
+        let bottom = top + row.height_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
+        // Clipped to the body, because a row half scrolled past the top of the
+        // viewport must flash the half that is there and never a strip of the pane
+        // head above it.
+        let band = [
+            body[0],
+            top.max(body[1]),
+            // Short of the reserved scroll lane, which is the mock-up's own
+            // arrangement seen from the other side: `.term` carries an 18px right
+            // padding and the flash is a background on a block inside it, so the
+            // band has never reached under the rail.
+            body[2] - bt_render::TERMINAL_SCROLL_LANE_LOGICAL_PX * scale,
+            bottom.min(body[3]),
+        ];
+        Some(marks::OverlayLayer {
+            quads: cmdrail::flash_quads(band, alpha, scale, palette),
+            ..marks::OverlayLayer::default()
+        })
+    }
+
+    /// While a flash is running, one frame at the animation's own rate; nothing at
+    /// all otherwise.
+    fn command_flash_deadline(&self, now: Instant) -> Option<Instant> {
+        self.command_flash
+            .as_ref()
+            .filter(|flash| cmdrail::flash_is_running(now.saturating_duration_since(flash.started)))
+            .map(|_| now + STRIP_ANIMATION_FRAME)
+    }
+
+    /// Pay the flash's frames, and let it go when it is over.
+    fn advance_command_flash(&mut self, now: Instant) -> Result<()> {
+        let Some(flash) = self.command_flash.as_ref() else {
+            return Ok(());
+        };
+        if !cmdrail::flash_is_running(now.saturating_duration_since(flash.started)) {
+            self.command_flash = None;
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Drop the rails of seats that are no longer terminals of the tab on screen.
+    ///
+    /// A cache keyed by seat outlives the seat unless something says otherwise,
+    /// and a torn-out pane leaves one behind that would be handed back to whatever
+    /// seat id the solver reuses next. The sweep runs where the overlay is built,
+    /// so it is a function of the same solve everything else that frame is.
+    fn sweep_command_rails(&mut self) {
+        if self.command_rails.is_empty() {
+            return;
+        }
+        let live: BTreeSet<SeatId> = self.sessions.keys().copied().collect();
+        self.command_rails.retain(|seat, _| live.contains(seat));
+        if self
+            .command_rail_hover
+            .is_some_and(|(seat, _)| !live.contains(&seat))
+        {
+            self.command_rail_hover = None;
+        }
+    }
+
+    /// Note which rail the pointer is on. Returns whether the rail owns this
+    /// pointer — a press there is a jump and not a selection.
+    fn drive_command_rail_hover(
+        &mut self,
+        position: Option<PhysicalPosition<f64>>,
+    ) -> Result<bool> {
+        let hover = position.and_then(|position| self.command_rail_at(position));
+        let changed = self.command_rail_hover != hover;
+        self.command_rail_hover = hover;
+        if changed {
+            // The finger, and the crest, on the same reading — see
+            // [`pointer_cursor`]'s `over_command_tick`.
+            self.apply_pointer_cursor();
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(hover.is_some())
+    }
+
+    /// Which rail and which tick a point means.
+    fn command_rail_at(&self, position: PhysicalPosition<f64>) -> Option<(SeatId, usize)> {
+        let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
+        // Asked of the cache rather than laid out afresh: the band the pointer is
+        // tested against must be the band that was drawn, and one derivation is
+        // the only way to say that. A seat whose rail has not been built this
+        // session has no band and answers nothing.
+        self.command_rail_body(seat)?;
+        let rail = self.command_rails.get(&seat)?.rail();
+        cmdrail::nearest(rail, position.x as f32, position.y as f32).map(|index| (seat, index))
+    }
+
+    /// A press on a rail: jump to the tick under the pointer.
+    fn press_command_rail(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((seat, index)) = self.command_rail_at(position) else {
+            return Ok(false);
+        };
+        let Some(mark) = self
+            .command_rails
+            .get(&seat)
+            .and_then(|cache| cache.rail().ticks.get(index))
+            .map(|tick| tick.mark)
+        else {
+            return Ok(false);
+        };
+        self.jump_to_command_mark(seat, mark)?;
+        Ok(true)
+    }
+
+    /// **Scroll one pane so that a command's own row stands at the top of it**,
+    /// and flash that row so the eye can find it.
+    ///
+    /// This is the first consumer of `ViewportProjection::set_scroll_anchor`, and
+    /// the point of going through it rather than through `scroll_by_rows` is that
+    /// the result is a *position* rather than an act. A row number computed now
+    /// would be wrong at the next PTY frame — every line the shell prints pushes
+    /// the content up under it — whereas an anchored viewport is re-projected
+    /// against the document every frame and keeps naming the same content through
+    /// output, reflow, resize and eviction. §7.1.5c wrote it down years before
+    /// there was anything to scroll: "跳转=Anchored(逻辑行)".
+    ///
+    /// A mark whose anchor is gone does nothing at all. That is not a failure
+    /// path being tolerated — it is the honest answer to "jump to a command whose
+    /// output was deleted", and the alternative (scroll somewhere near where it
+    /// used to be) is the class of guess this whole block refuses.
+    fn jump_to_command_mark(&mut self, seat: SeatId, mark: bt_term::CommandMarkId) -> Result<()> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        let Some(anchor) = leaf
+            .session
+            .command_mark(mark)
+            .and_then(|mark| leaf.session.command_mark_anchor(mark.start))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        // `scroll_y = anchor_y(source) + local_offset`, so a negative offset lifts
+        // the viewport's top *above* the anchor and the row lands that far down the
+        // pane — the mock-up's own `line.offsetTop - 8`.
+        let local_offset =
+            -((cmdrail::JUMP_TOP_INSET_LOGICAL_PX * scale * bt_viewport::SUBPIXELS_PER_PX as f32)
+                .round() as i64);
+        leaf.projection
+            .set_scroll_anchor(Some(bt_viewport::ScrollAnchor {
+                source: anchor.clone(),
+                local_offset,
+            }));
+        self.command_flash = Some(CommandFlash {
+            seat,
+            anchor,
+            started: Instant::now(),
+        });
+        // The pane's own repaint, and **not** an overlay rebuild beside it. The
+        // band is placed out of the frame that is on the glass, and the frame
+        // showing this jump has not been composed yet — an overlay built here
+        // would light the row the anchor was in *before* the scroll, for one
+        // frame. [`Self::command_flash_deadline`] has already asked for the next
+        // one, by which time the redraw this line requests has run.
+        self.repaint_pane_change(seat)
+    }
+
+    /// `Ctrl+Shift+↑/↓` — the command before or after the one the viewport is
+    /// showing.
+    ///
+    /// **Relative to the viewport, not to the last jump.** The mock-up computes it
+    /// from `scrollTop` every time (4690-4707) and it matters: a walk that
+    /// remembered its own cursor would disagree with the screen the moment the
+    /// wheel was touched, and the user would press "previous" and go somewhere
+    /// they had already scrolled past.
+    ///
+    /// **No wrap-around at either end**, also the mock-up's (`if (at < 0) return`)
+    /// and deliberately the opposite of the search's ring: a rail is a history with
+    /// a beginning and an end, and arriving at the oldest command and being thrown
+    /// to the newest is not what the key said.
+    fn step_command_mark(&mut self, step: Step) -> Result<()> {
+        let seat = self.focused_leaf;
+        let Some(leaf) = self.sessions.get(&seat) else {
+            return Ok(());
+        };
+        let marks = leaf.session.command_marks();
+        if marks.is_empty() {
+            return Ok(());
+        }
+        // Where the viewport is looking, as a `ContentAnchor` — the projection's
+        // own `ScrollAnchor.source` when it has been scrolled, and the newest mark
+        // of all when it is resting at the live bottom.
+        let here = leaf
+            .projection
+            .scroll_anchor()
+            .map(|anchor| anchor.source.clone());
+        let at = match &here {
+            Some(anchor) => leaf.session.command_mark_at_or_before(anchor),
+            None => marks.last().map(|mark| mark.id),
+        };
+        let index = at.and_then(|id| marks.iter().position(|mark| mark.id == id));
+        let Some(target) =
+            stepped_command_mark(marks.len(), index, step).map(|index| marks[index].id)
+        else {
+            return Ok(());
+        };
+        self.jump_to_command_mark(seat, target)
+    }
+
     /// Show a settled tip, and keep paying the fade's frames until it lands.
     fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
         let promoted = self.tooltip.activate_if_due(now);
@@ -15916,6 +16363,10 @@ impl Runtime {
         // state and this is the state that the pointer, the tree and the window
         // all move.
         self.sync_drop_preview(now);
+        // Before the rails are asked for, and for the same reason: this is the
+        // frame's own reading of which seats exist, and a cache for a seat that
+        // left the tree is a cache nobody may be handed.
+        self.sweep_command_rails();
         // The two lowest things the overlay carries, in their own order: P177's
         // veil under the dock drawing's `z-index` 24 and 25, both under a menu's
         // 30. Neither is a surface floating over the window — one is a drawing on
@@ -15931,6 +16382,7 @@ impl Runtime {
             // a surface floating over the window at all — see
             // [`OverlayStack::preview_bars`].
             preview_bars: self.preview_seat_bar_layers(),
+            command_rail: self.command_rail_layers(),
             rail: self.rail_overlay_layers(),
             ground: ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now)),
             ..OverlayStack::default()
@@ -16912,6 +17364,13 @@ impl Runtime {
             ThemeChange::Changed => {
                 install_theme_class_background(&self.window)?;
                 self.sync_math_layout_key();
+                // The one thing a rail's key cannot see. A palette is not a fact
+                // about a pane, so [`cmdrail::RailKey`] does not carry one — which
+                // means a rail built under the old ink would be handed back
+                // unchanged, and a light window would keep a dark window's ticks.
+                for cache in self.command_rails.values_mut() {
+                    cache.clear();
+                }
                 self.refresh_chrome();
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
@@ -17358,6 +17817,13 @@ impl Runtime {
             // Ruling 9's row, dispatched like every other: the same verb the
             // header's save button and the editor's own `Ctrl+S` reach.
             shortcuts::Action::SavePreview => self.save_preview(),
+            // §7.1.5c ③, and the whole of it: the walk is over the **full**
+            // history, never over the ticks the rail happened to draw. A
+            // collapsed bucket is a density decision made by a painter with a
+            // pane's height to fit into, and the keyboard is not looking at the
+            // pane.
+            shortcuts::Action::PrevCommandMark => self.step_command_mark(Step::Back),
+            shortcuts::Action::NextCommandMark => self.step_command_mark(Step::Forward),
         }
     }
 
@@ -19186,6 +19652,16 @@ impl Runtime {
     fn shortcut_focus(&self) -> shortcuts::Focus {
         shortcuts::Focus {
             preview: self.preview_keyboard_surface().is_some(),
+            // The two halves of [`shortcuts::Scope::TerminalPrimary`], read as one
+            // question. `keyboard_owner_is_a_shell` is already the window's answer
+            // to "is a terminal typing" — the same reading the caret's blink and
+            // the IME's routing take — so a row scoped to a terminal is in force
+            // exactly when a keystroke would otherwise have reached a shell, and
+            // never while a rename box, a menu, a tree or a preview holds the
+            // keyboard. The alternate screen then takes it back: a full-screen
+            // program owns its canvas and there is no scrollback behind it.
+            terminal_primary: self.keyboard_owner_is_a_shell()
+                && !self.session.terminal_modes().alternate_screen,
         }
     }
 
@@ -31091,6 +31567,10 @@ impl Runtime {
         // has to be told — nothing else will move the pointer again to tell it,
         // so an open panel would simply stay open over the terminal forever.
         self.drive_rail_zone(None);
+        // And the command marks rail, for the identical reason one line up: a
+        // crest still lit after the pointer has left the window is a tick
+        // claiming to be under a hand that is not there.
+        self.drive_command_rail_hover(None)?;
         // Deliberately *not* a drag cancel, and the reason is measurable rather
         // than stylistic: winit takes the Win32 mouse capture on button-down
         // (`capture_mouse`, its `WM_LBUTTONDOWN` arm), so a held drag keeps
@@ -31916,13 +32396,29 @@ impl Runtime {
         // is answered by that pane, with no focus prerequisite and no focus side effect: the
         // window says what it is being pointed at (user ruling 2026-08-10).
         self.observe_hovered_pane()?;
+        // **The rail is a surface standing on the pane's own right edge**, so it
+        // takes the pointer before anything the pane itself would answer with: a
+        // hyperlink underlined beneath a tick is a link the tick is standing on,
+        // and a mouse report sent from under one is a report about a cell nobody
+        // pointed at. Every gesture that owns the pointer has already returned
+        // above, so this only ever sees a free hand — and a selection drag in
+        // flight is answered further down, before the gate, because a drag pulled
+        // across the rail must keep following the hand.
+        //
+        // A selection drag is the one live gesture that reaches this line — it is
+        // answered further down, so that a drag pulled across the rail keeps
+        // following the hand — and a rail must not light under it. S2 owns the
+        // rest of the mock-up's pointer machinery (`pointerleave`, one hot rail at
+        // a time, the glance card); this is the part a press needs to exist.
+        let on_command_rail =
+            self.drive_command_rail_hover(self.mouse_route.is_none().then_some(position))?;
         // `position` stays the window's own coordinates from here down. The flyout is a floating
         // window laid over the surface rather than a tenant of one pane, so its anchor is a point
         // on the window; translating it into some seat's corner is what used to make a peek raised
         // in one pane appear beside another.
         let now = Instant::now();
         let math_hit = self.update_math_hover(now)?;
-        let hit = self.frame_hit();
+        let hit = self.frame_hit().filter(|_| !on_command_rail);
         let hyperlink = hit
             .filter(|_| {
                 math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
@@ -32377,6 +32873,7 @@ impl Runtime {
             grasp,
             divider_axis,
             self.preview_link_hover.is_some(),
+            self.command_rail_hover.is_some(),
             self.image_grasp(),
         ));
     }
@@ -34478,6 +34975,28 @@ impl Runtime {
         }
         if let Some(position) = self.pointer_position
             && self.chrome_mouse_input(state, button, position)?
+        {
+            return Ok(());
+        }
+        // **The rail takes its own press** — above the pane's cells, below every
+        // surface that floats over the window, which is the order it is drawn in.
+        //
+        // The mock-up binds this in the *capture* phase specifically "to beat the
+        // pane click handler wired per-pane" (8488-8503); here that is simply
+        // where the arm stands. A press on the band is a jump and never a
+        // selection: a column of ticks that also began a drag would turn the tick
+        // you missed into a selection nobody asked for.
+        //
+        // The pane it is on has already taken the layout focus — D40 runs above
+        // this router and consumes nothing, so a press on a rail is a press
+        // inside a pane like any other. That is the right way round: the rail is
+        // *part of* the pane's own edge, not a control floating over it, and a
+        // window where clicking a pane focused it except on one nine-pixel strip
+        // would have an edge nobody finds on purpose.
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some(position) = self.pointer_position
+            && self.press_command_rail(position)?
         {
             return Ok(());
         }
@@ -36970,6 +37489,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // The jump's row flash, beside the notices' clocks: it is the same shape —
+        // a fade that runs itself out with the pointer and the keyboard both
+        // still, and that nothing else in the window would wake the loop to draw.
+        if let Err(error) = runtime.advance_command_flash(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // The glance card's own 350ms, beside the layout peek's and for the same
         // reason it stands where it does: it is a *peek*, and a peek that has
         // matured is already on screen when everything above it asks.
@@ -37065,6 +37591,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // finishing — and nothing at all while one is held under the pointer,
             // because a stopped clock owes no wake-ups (2026-08-16).
             runtime.toast_deadline(now),
+            // The jump flash's own 950ms, at the animation's rate and only while
+            // one is running. A window that has not jumped asks for nothing.
+            runtime.command_flash_deadline(now),
             // The peek's 350ms while one is settling, and nothing afterwards:
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
@@ -38943,8 +39472,14 @@ mod tests {
                 "{other:?} is not the graph's"
             );
         }
-        // And none of the six is a row of the chord registry — see
+        // And none of the six is a **bare** row of the chord registry — see
         // [`graph_key_of`] for why a seat-local key is not a binding.
+        //
+        // Bare, and not "the key at all" (2026-08-16): the registry matches its
+        // modifiers exactly, so `Ctrl+Shift+↑` walking the command marks and `↑`
+        // walking a graph's rows are two different presses and neither can reach
+        // the other. What the graph's keys may not survive is a row claiming the
+        // *same* press, which is what this asserts.
         for binding in shortcuts::BINDINGS {
             assert!(
                 !matches!(
@@ -38957,7 +39492,7 @@ mod tests {
                             | NamedKey::Enter
                             | NamedKey::Escape
                     )
-                ),
+                ) || binding.chord.modifiers != ModifiersState::empty(),
                 "{:?} claims a key the graph answers bare",
                 binding.action
             );
@@ -38996,6 +39531,7 @@ mod tests {
         };
         let stack = OverlayStack {
             preview_bars: mark(0),
+            command_rail: mark(13),
             rail: mark(1),
             ground: mark(2),
             layout_peek: mark(3),
@@ -39016,9 +39552,9 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 12, 8, 9, 10, 11],
-            "bottom to top: pane bars, rail, ground, schematic, float, modal, file menu, \
-             pane menu, git menu, notices, tip, glance, ghost"
+            vec![0, 13, 1, 2, 3, 4, 5, 6, 7, 12, 8, 9, 10, 11],
+            "bottom to top: pane bars, command rails, rail, ground, schematic, float, modal, \
+             file menu, pane menu, git menu, notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -39036,6 +39572,13 @@ mod tests {
         assert!(
             at(4) > at(2) && at(4) > at(1),
             "and the float still covers the panes, the rail and the dock drawing"
+        );
+        // The command marks rail belongs *to* a pane, so every surface that
+        // floats over the window is entitled to cover it — a pane menu dropped
+        // over a rail must not have ticks showing through it.
+        assert!(
+            at(13) < at(1) && at(13) < at(4) && at(13) < at(7),
+            "a pane's own ticks are under the chrome rail, the float and the pane menu"
         );
         assert!(
             at(9) > at(5) && at(9) > at(4),
@@ -43216,6 +43759,120 @@ mod tests {
         assert_eq!(stepped_tab(0, 0, true), None);
     }
 
+    /// PIN — **`Ctrl+Shift+↑/↓` walks the commands and stops at both ends**
+    /// (§7.1.5c, mock-up 4690-4707).
+    ///
+    /// The opposite of the strip's ring one test above, and deliberately: a strip
+    /// is a set of places you can be in any of, while a rail is a history with a
+    /// beginning and an end. Arriving at the oldest command and being thrown to
+    /// the newest is not what the key said, and the mock-up's own `if (at < 0)
+    /// return` says so too.
+    ///
+    /// MUTATION: make either end wrap and the first two assertions of the second
+    /// block go red — which is the ruling refusing to be turned into a ring.
+    #[test]
+    fn the_command_walk_stops_at_both_ends_instead_of_wrapping() {
+        // Five commands, with the viewport showing the third.
+        assert_eq!(
+            stepped_command_mark(5, Some(2), Step::Forward),
+            Some(3),
+            "next is the command after the one on screen"
+        );
+        assert_eq!(stepped_command_mark(5, Some(2), Step::Back), Some(1));
+
+        // The two ends.
+        assert_eq!(
+            stepped_command_mark(5, Some(4), Step::Forward),
+            None,
+            "there is nothing after the newest command"
+        );
+        assert_eq!(
+            stepped_command_mark(5, Some(0), Step::Back),
+            None,
+            "and nothing before the oldest"
+        );
+
+        // A viewport above every mark — scrolled into output older than the
+        // oldest surviving command. Forwards is the first of them; backwards has
+        // nowhere to go, and inventing the newest would be a wrap by another name.
+        assert_eq!(stepped_command_mark(5, None, Step::Forward), Some(0));
+        assert_eq!(stepped_command_mark(5, None, Step::Back), None);
+
+        // A pane whose shell sends no OSC 133 at all answers nothing, either way
+        // and from anywhere (inventory C13).
+        assert_eq!(stepped_command_mark(0, None, Step::Forward), None);
+        assert_eq!(stepped_command_mark(0, None, Step::Back), None);
+
+        // A lone command: the viewport is on it, and both keys are silent.
+        assert_eq!(stepped_command_mark(1, Some(0), Step::Forward), None);
+        assert_eq!(stepped_command_mark(1, Some(0), Step::Back), None);
+    }
+
+    /// The jump's flash lands on the row that is **showing** the command, and on
+    /// nothing at all when that content is not on the glass.
+    ///
+    /// Read out of the presented frame's own `cell_anchors` rather than from the
+    /// projection, for the reason [`Runtime::command_flash_layer`] gives: the
+    /// frame is the picture, and a second derivation of "which row is that
+    /// content in" is a second thing that can be off by one.
+    ///
+    /// MUTATION: drop the containment check at the end of [`frame_row_of_anchor`]
+    /// and the last assertion goes red — an anchor below the last drawable row
+    /// would light the last one, which is a band drawn over the wrong command.
+    #[test]
+    fn the_flash_finds_the_row_a_frame_is_showing_a_command_on() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(20).unwrap(), NonZeroU32::new(4).unwrap());
+        let mut projection = session.new_projection(session.layout_key());
+        session.feed(b"one\r\ntwo\r\nthree\r\n").unwrap();
+        session.refresh_projection(&mut projection);
+        let frame = session
+            .viewport_frame(&mut projection)
+            .expect("a frame for a four-row grid");
+        let columns = frame.columns.get() as usize;
+
+        // Every row of the frame answers itself, which is the property the whole
+        // band is placed by.
+        for row in 0..frame.drawable_rows() {
+            let anchor = frame.cell_anchors[row * columns].start.clone();
+            assert_eq!(
+                frame_row_of_anchor(&frame, &anchor).map(|found| found.top_subpixels),
+                Some(frame.row_map[row].top_subpixels),
+                "row {row} does not find itself"
+            );
+        }
+
+        // The alternate screen is an isolated namespace (§3.2), so its
+        // coordinates are neither before nor after this frame's — the honest
+        // answer is no row rather than a guessed one.
+        assert!(
+            frame_row_of_anchor(
+                &frame,
+                &bt_doc::ContentAnchor::Live {
+                    screen: bt_doc::ScreenId::Alternate,
+                    point: bt_doc::GridPoint { row: 0, column: 0 },
+                    bias: bt_doc::Bias::Before,
+                    generation: bt_doc::GridGeneration(1),
+                }
+            )
+            .is_none(),
+            "an alternate-screen anchor lights nothing on a primary frame"
+        );
+
+        // And content past the bottom of the frame: a row that has not been drawn
+        // is not a row the last one may stand in for.
+        let past = bt_doc::ContentAnchor::Live {
+            screen: bt_doc::ScreenId::Primary,
+            point: bt_doc::GridPoint {
+                row: frame.grid_rows.get() + 40,
+                column: 0,
+            },
+            bias: bt_doc::Bias::Before,
+            generation: bt_doc::GridGeneration(1),
+        };
+        assert!(frame_row_of_anchor(&frame, &past).is_none());
+    }
+
     /// Ctrl+Shift+1..9 counts the strip the way the user does, and an ordinal past
     /// the end of it names no tab at all.
     #[test]
@@ -46532,10 +47189,26 @@ mod tests {
     fn the_retired_preview_chord_reaches_the_shell_like_any_other_key() {
         let key = Key::Character("p".into());
         let claimed = |modifiers| {
-            shortcuts::lookup_action(&key, &key, modifiers, shortcuts::Focus { preview: false })
+            shortcuts::lookup_action(
+                &key,
+                &key,
+                modifiers,
+                shortcuts::Focus {
+                    preview: false,
+                    terminal_primary: true,
+                },
+            )
         };
         let in_preview = |modifiers| {
-            shortcuts::lookup_action(&key, &key, modifiers, shortcuts::Focus { preview: true })
+            shortcuts::lookup_action(
+                &key,
+                &key,
+                modifiers,
+                shortcuts::Focus {
+                    preview: true,
+                    terminal_primary: false,
+                },
+            )
         };
         for modifiers in [
             ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
@@ -50834,15 +51507,15 @@ mod tests {
         // when nothing did" (mock-up 1710-1711).
         use winit::window::CursorIcon;
         assert_eq!(
-            pointer_cursor(false, None, None, false, None),
+            pointer_cursor(false, None, None, false, false, None),
             CursorIcon::Default
         );
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Row), false, None),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Row), false, false, None),
             CursorIcon::EwResize
         );
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Col), false, None),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Col), false, false, None),
             CursorIcon::NsResize
         );
         for axis in [None, Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
@@ -50854,7 +51527,7 @@ mod tests {
             ] {
                 for over_link in [false, true] {
                     assert_eq!(
-                        pointer_cursor(true, grasp, axis, over_link, None),
+                        pointer_cursor(true, grasp, axis, over_link, false, None),
                         CursorIcon::Default,
                         "a tab drag crossing a divider, a float or a link must \
                          not flicker into another shape"
@@ -50871,16 +51544,16 @@ mod tests {
     fn a_markdown_link_wears_the_pointing_finger() {
         use winit::window::CursorIcon;
         assert_eq!(
-            pointer_cursor(false, None, None, true, None),
+            pointer_cursor(false, None, None, true, false, None),
             CursorIcon::Pointer
         );
         assert_eq!(
-            pointer_cursor(false, None, Some(bt_layout::Axis::Row), true, None),
+            pointer_cursor(false, None, Some(bt_layout::Axis::Row), true, false, None),
             CursorIcon::Pointer,
             "and over a divider it is still the link the pointer is on"
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Head), None, true, None),
+            pointer_cursor(false, Some(FloatGrasp::Head), None, true, false, None),
             CursorIcon::Grab,
             "but a window over the document takes the pointer with it"
         );
@@ -50894,20 +51567,20 @@ mod tests {
     fn a_pinned_float_wears_the_diagonal_arrow_on_its_grip() {
         use winit::window::CursorIcon;
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Grip), None, false, None),
+            pointer_cursor(false, Some(FloatGrasp::Grip), None, false, false, None),
             CursorIcon::NwseResize
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Head), None, false, None),
+            pointer_cursor(false, Some(FloatGrasp::Head), None, false, false, None),
             CursorIcon::Grab
         );
         assert_eq!(
-            pointer_cursor(false, Some(FloatGrasp::Carrying), None, false, None),
+            pointer_cursor(false, Some(FloatGrasp::Carrying), None, false, false, None),
             CursorIcon::Grabbing
         );
         for axis in [Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
             assert_eq!(
-                pointer_cursor(false, Some(FloatGrasp::Grip), axis, false, None),
+                pointer_cursor(false, Some(FloatGrasp::Grip), axis, false, false, None),
                 CursorIcon::NwseResize,
                 "the window is drawn over the divider, so the divider is not what you are aiming at"
             );

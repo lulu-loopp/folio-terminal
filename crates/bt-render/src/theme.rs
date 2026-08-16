@@ -729,6 +729,37 @@ pub struct ChromePalette {
     pub pane_title_focus: [u8; 3],
     /// The mock-up accent used by structural pane/tab marks.
     pub accent: [u8; 3],
+    // ── the command marks rail, mixed over the one ground a terminal pane has ──
+    //
+    // Three declarations of `design/ui-mockup.html` 1362-1376, and three fields
+    // rather than three borrowings, for the reason the pane head's `×` is not
+    // [`Self::files_row_muted`]: the numbers coincide today and the rules do not,
+    // so either could be re-struck without the other. The rail's rest ink is
+    // numerically [`Self::pane_title`] on both canvases — both are `--ink3` over
+    // `--termbg` — and its `.fail` ink is [`Self::status_err`] outright, which is
+    // the one borrowing that *is* the rule: "signals earn permanent colour" means
+    // an error tick wears the window's error red and not a red of its own.
+    /// `.cmdtick { background: var(--ink3) }` over `--termbg`.
+    ///
+    /// The tick's own `opacity: .45` is **not** folded in here. It rides as the
+    /// quad's alpha, because it is the property the mock-up animates
+    /// (`transition: … opacity .12s ease`) and a colour with an animation baked
+    /// into it is a colour that can only be drawn at one moment of it.
+    pub command_tick: [u8; 3],
+    /// `.cmdrail.hot .cmdtick.crest { background: color-mix(in srgb,
+    /// var(--accent) 86%, #000) }` — the tick under the pointer.
+    ///
+    /// **Fourteen per cent black, and `docs/DESIGN.md` §7.1.5c says twelve.** The
+    /// mock-up wins: it is the executable artefact, and the twelve is a middle
+    /// state from the same day's second round of errata that reached the prose
+    /// and not the stylesheet. The deviation is recorded in §7.1.5c's own
+    /// S1-UI note rather than left for the next reader to rediscover.
+    pub command_tick_crest: [u8; 3],
+    /// `.cmdrail.hot .cmdtick.crest.fail { background: var(--err-deep) }` — the
+    /// failed tick under the pointer, deepened the way its neighbours are but in
+    /// its own hue, because a signal does not stop being one when it is pointed
+    /// at.
+    pub command_tick_fail_crest: [u8; 3],
     /// A floating window's face — `--menu`, worn by `.float-win`, the term menu
     /// and the hover-peek flyout. It is deliberately *not* `title_bar`: a window
     /// that floats over content is a different plane from the chrome that frames
@@ -1207,6 +1238,11 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     pane_title: [0x72, 0x72, 0x72],
     pane_title_focus: [0xe1, 0xe1, 0xe1],
     accent: [0x7a, 0x99, 0xff],
+    // `--ink3` (white .38) over the dark `--termbg`, which is `pane_title`'s own
+    // mix; `#7A99FF` at 86% over black; and the dark `--err-deep` `#f43f5e`.
+    command_tick: [0x72, 0x72, 0x72],
+    command_tick_crest: [0x69, 0x84, 0xdb],
+    command_tick_fail_crest: [0xf4, 0x3f, 0x5e],
     menu_surface: [0x2a, 0x2a, 0x2a],
     menu_border: [0xff, 0xff, 0xff],
     menu_border_alpha: 24,
@@ -1423,6 +1459,11 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     pane_title: [0xa5, 0xa4, 0xa1],
     pane_title_focus: [0x37, 0x35, 0x2f],
     accent: [0x30, 0x59, 0xd8],
+    // The same three on the light canvas: `--ink3` (black .45) over the light
+    // `--termbg`, `#3059D8` at 86% over black, and `--err-deep` `#be123c`.
+    command_tick: [0xa5, 0xa4, 0xa1],
+    command_tick_crest: [0x29, 0x4d, 0xba],
+    command_tick_fail_crest: [0xbe, 0x12, 0x3c],
     menu_surface: [0xff, 0xff, 0xff],
     menu_border: [0x00, 0x00, 0x00],
     menu_border_alpha: 22,
@@ -1530,6 +1571,35 @@ fn chrome_palette_for_background(background: [u8; 3]) -> ChromePalette {
 /// mark, `×`, trigger, root button — re-centres by construction rather than by
 /// a second number being edited to match.
 pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 30.0;
+/// **The band down a terminal pane's right edge that belongs to its scroll bar,
+/// and to nothing else** (user ruling 2026-08-16, inventory D-14).
+///
+/// # A lane declared before the instrument that runs in it
+///
+/// There is no terminal scroll bar yet — P2-9 owns it — and this constant exists
+/// precisely because there is not. The mock-up's rail carries an accident report
+/// in its own stylesheet (`design/ui-mockup.html` 1355-1357): *"inboard of the
+/// scrollbar gutter (thin ≈ 8px): the rail and the thumb are different
+/// instruments and may not share a lane (user report 2026-07-18 — ticks sat on
+/// top of the thumb)"*. A rail that measured its inset from the pane's own edge
+/// would be right today and wrong on the day the bar lands, and it would be
+/// wrong in exactly the way that report describes. So the lane is reserved now,
+/// by a number both the rail and the future bar are derived from, and neither
+/// can be moved without the other.
+///
+/// # Why it is not [`BLOCK_SCROLL_THICKNESS_LOGICAL_PX`]'s eight
+///
+/// The preview's bar has no lane constant to share: `crates/bt-app/src/preview.rs`
+/// declares how thick a bar is **drawn** (two logical pixels, an overlay rule on
+/// the surface's own far edge) and how far it reaches for a **hand**, and neither
+/// of those is a reserved band — an overlay bar deliberately takes no gutter out
+/// of the document it rides over, because taking one would change the width the
+/// document lays out at. A terminal's grid is different in kind: it is a
+/// character lattice whose right-most column is a place text actually is, and a
+/// nine-pixel tick that grows to twenty-seven under the pointer would cover it.
+/// Eight is the mock-up's own `thin` gutter, which is what its `right: 11px`
+/// (this, plus a three-pixel gap) was derived from.
+pub const TERMINAL_SCROLL_LANE_LOGICAL_PX: f32 = 8.0;
 /// The self-drawn window title bar (`--titleh`).
 pub const WINDOW_TITLE_BAR_LOGICAL_PX: f32 = 40.0;
 /// Every settings/min/max/close box in `.capbtn` (`width: 46px; height: 40px`).
@@ -2655,6 +2725,45 @@ mod tests {
         // And the one that was replaced does not: this is the ruling's own
         // arithmetic, kept so the reason survives the change.
         assert!(contrast([0xc5, 0x0f, 0x1f], TERMBG_DARK) < 3.0);
+    }
+
+    /// The command marks rail's three inks, each stated as the mixing rule it
+    /// came from rather than as the six bytes it came out as.
+    ///
+    /// The crest's is the one worth pinning: `docs/DESIGN.md` §7.1.5c says the
+    /// accent is deepened with **twelve** per cent black and the mock-up's own
+    /// `color-mix(in srgb, var(--accent) 86%, #000)` says fourteen. The
+    /// stylesheet wins — it is the executable artefact — and this is where that
+    /// ruling is kept, so a future reader who finds the prose first is corrected
+    /// by an assertion rather than by a paragraph.
+    #[test]
+    fn the_command_ticks_wear_the_mock_ups_own_three_mixes() {
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            // Rest: `--ink3` over `--termbg`, which is what an unfocused pane
+            // title is mixed from — the same two colours, so the same answer.
+            assert_eq!(
+                palette.command_tick, palette.pane_title,
+                "--ink3 on --termbg"
+            );
+            // Crest: the accent at 86% over black, channel by channel.
+            for channel in 0..3 {
+                let mixed = (f32::from(palette.accent[channel]) * 0.86).round() as u8;
+                assert_eq!(
+                    palette.command_tick_crest[channel], mixed,
+                    "the crest is the accent with 14% black, not 12%"
+                );
+            }
+        }
+        // Fail crest: `--err-deep`, one value per canvas like the rose it deepens.
+        assert_eq!(LIGHT_CHROME.command_tick_fail_crest, [0xbe, 0x12, 0x3c]);
+        assert_eq!(DARK_CHROME.command_tick_fail_crest, [0xf4, 0x3f, 0x5e]);
+        // And it *is* a deepening: darker than the rose on the light canvas,
+        // lighter on the dark one, because "deeper" means further from the ground
+        // rather than further from white.
+        assert!(
+            luminance(LIGHT_CHROME.command_tick_fail_crest) < luminance(LIGHT_CHROME.status_err)
+        );
+        assert!(luminance(DARK_CHROME.command_tick_fail_crest) < luminance(DARK_CHROME.status_err));
     }
 
     /// Relative luminance, sRGB, as WCAG defines it — the one arithmetic a

@@ -42,6 +42,17 @@ pub(crate) enum Action {
     /// The one row in the table that is not the window's everywhere. See
     /// [`Scope`].
     SavePreview,
+    /// Walk the command marks rail backwards — the previous command relative to
+    /// the one the viewport is showing (§7.1.5c ③).
+    ///
+    /// **The rail's hover and click must never be the only door.** The mock-up
+    /// states it as an iron rule beside the rail's own code (4603-4607: "nothing
+    /// is hover-only") and §7.1.5c repeats it, adding that the keyboard walks the
+    /// *full* history however the rail has chosen to aggregate itself — a
+    /// collapsed bucket is a drawing decision and this is not drawing.
+    PrevCommandMark,
+    /// The same, forwards.
+    NextCommandMark,
 }
 
 /// Where a row is in force.
@@ -64,6 +75,28 @@ pub(crate) enum Scope {
     Window,
     /// Only while the preview seat holds the keyboard focus.
     Preview,
+    /// Only while a **terminal** holds the keyboard and is showing its **primary
+    /// screen**.
+    ///
+    /// The second half is the whole reason this is a scope rather than a guard
+    /// inside a handler. `Ctrl+Shift+↑` on the alternate screen has to reach the
+    /// child untouched — a full-screen program owns its canvas, there is no
+    /// scrollback behind it to walk, and §3.2 keeps the two screens in separate
+    /// namespaces so there is not even an ordering between a command mark and
+    /// what is on the glass. Expressed here, the row is simply *not in the table*
+    /// for that press and the key falls through to the encoder exactly as an
+    /// unbound one does; expressed as an early return at the dispatch site, the
+    /// key would be claimed and then dropped, which is the one outcome that
+    /// leaves the child silent.
+    ///
+    /// It is also the shape the shortcut-editing panel needs. The scrollback keys
+    /// (`Shift+PgUp`, `Ctrl+Home`) have carried the same condition since long
+    /// before this table existed, in an `if !alternate_screen` ladder inside
+    /// `keyboard_input` — which is exactly the "binding whose applicability lives
+    /// in a function body" this module's own header says the panel could only
+    /// describe by guessing. They are not moved here in this slice, but this is
+    /// the column they would move into.
+    TerminalPrimary,
 }
 
 /// What the window's focus looks like to the table.
@@ -76,6 +109,13 @@ pub(crate) enum Scope {
 pub(crate) struct Focus {
     /// Whether the focused leaf is a preview seat, its quick edit included.
     pub(crate) preview: bool,
+    /// Whether the keyboard is on a terminal that is showing its primary screen.
+    ///
+    /// Both halves in one bool, because [`Scope::TerminalPrimary`] is one
+    /// condition: a preview seat is not a terminal and a terminal running `vim` is
+    /// not showing its scrollback, and a row in that scope is out of force for
+    /// either reason.
+    pub(crate) terminal_primary: bool,
 }
 
 impl Scope {
@@ -84,6 +124,7 @@ impl Scope {
         match self {
             Self::Window => true,
             Self::Preview => focus.preview,
+            Self::TerminalPrimary => focus.terminal_primary,
         }
     }
 }
@@ -140,6 +181,15 @@ impl Binding {
             action,
             chord,
             scope: Scope::Preview,
+        }
+    }
+
+    /// A row in force only on a terminal showing its primary screen.
+    const fn terminal_primary(action: Action, chord: Chord) -> Self {
+        Self {
+            action,
+            chord,
+            scope: Scope::TerminalPrimary,
         }
     }
 }
@@ -225,6 +275,34 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // control letter *from the terminal*; it does not forbid a chord in a place
     // where there is no terminal to take it from.
     Binding::preview(Action::SavePreview, Chord::new(CTRL, character("s"))),
+    // **`Ctrl+Shift+↑/↓`, and pointedly not the mock-up's `Ctrl+Alt+↑/↓`** (user
+    // ruling 2026-08-16, inventory D-1).
+    //
+    // The mock-up binds the command walk to `Ctrl+Alt+arrow` (6268-6277) and
+    // §7.1.5c calls it an iron rule — but the same mock-up's own audit note four
+    // lines earlier declares `Ctrl+Alt` a forbidden zone, because Windows reports
+    // AltGr as exactly that pair and a German, French, Polish or Portuguese
+    // keyboard reaches it by typing an `@` or a `{`. Two rulings in one file, and
+    // the later one is the one with a keyboard model behind it.
+    //
+    // Nothing is actually overturned by choosing Shift: the iron rule asks that
+    // the rail have *a* keyboard door — "the rail's hover/click must never be the
+    // only door" — and never says which. `Ctrl+Shift+arrow` is not a terminal
+    // sequence any shell claims (`Ctrl+arrow` is readline's word movement and is
+    // left alone; `Shift+arrow` is selection extension in the applications that
+    // have one, and this window's own selection is a pointer gesture), and it
+    // wears Shift for the reason every other window row does.
+    //
+    // Scoped rather than shifted-and-global, because the alternate screen has to
+    // keep it — see [`Scope::TerminalPrimary`].
+    Binding::terminal_primary(
+        Action::PrevCommandMark,
+        Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::ArrowUp)),
+    ),
+    Binding::terminal_primary(
+        Action::NextCommandMark,
+        Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::ArrowDown)),
+    ),
 ];
 
 const fn character(text: &'static str) -> ChordKey {
@@ -284,13 +362,39 @@ mod tests {
     /// Pressed with the keyboard **on a terminal**, which is the focus every
     /// assertion in this module was written against before scopes existed and
     /// the one that has to keep answering the same way.
+    ///
+    /// Every scope is out of force here, which since 2026-08-16 makes this
+    /// specifically *a terminal showing the alternate screen* — the harshest
+    /// reading of "on a terminal", and the right one for the assertions that say
+    /// what must reach the child.
     fn press(key: Key, modifiers: ModifiersState) -> Option<Action> {
         lookup_action(&key, &key, modifiers, Focus::default())
     }
 
     /// The same press with the preview seat holding the focus.
     fn press_in_preview(key: Key, modifiers: ModifiersState) -> Option<Action> {
-        lookup_action(&key, &key, modifiers, Focus { preview: true })
+        lookup_action(
+            &key,
+            &key,
+            modifiers,
+            Focus {
+                preview: true,
+                terminal_primary: false,
+            },
+        )
+    }
+
+    /// The same press on a terminal that is showing its own scrollback.
+    fn press_on_primary_screen(key: Key, modifiers: ModifiersState) -> Option<Action> {
+        lookup_action(
+            &key,
+            &key,
+            modifiers,
+            Focus {
+                preview: false,
+                terminal_primary: true,
+            },
+        )
     }
 
     fn character(text: &str) -> Key {
@@ -357,6 +461,65 @@ mod tests {
         );
         assert_eq!(press(character("b"), CTRL_SHIFT), Some(Action::FilesPane));
         assert_eq!(press(character(","), CTRL), Some(Action::OpenSettings));
+        assert_eq!(
+            press_on_primary_screen(Key::Named(NamedKey::ArrowUp), CTRL_SHIFT),
+            Some(Action::PrevCommandMark)
+        );
+        assert_eq!(
+            press_on_primary_screen(Key::Named(NamedKey::ArrowDown), CTRL_SHIFT),
+            Some(Action::NextCommandMark)
+        );
+    }
+
+    /// PIN (user ruling 2026-08-16) — **the rail's keyboard door, and the screen
+    /// it is shut on.**
+    ///
+    /// Three assertions for three separate promises: the walk answers on a
+    /// terminal's own scrollback; the chord the mock-up asked for is refused
+    /// because `Ctrl+Alt` is how Windows reports AltGr; and on the alternate
+    /// screen the row is not in the table at all, so the bytes reach the
+    /// full-screen program that owns the canvas.
+    ///
+    /// MUTATIONS:
+    /// ① give the rows `Scope::Window` — the alternate-screen assertions go red,
+    ///    and a `vim` user loses a chord to a rail with nothing to walk;
+    /// ② put them back on `Ctrl+Alt` — the AltGr assertions go red, and so does
+    ///    `the_altgr_family_is_never_claimed`.
+    #[test]
+    fn the_command_walk_answers_on_a_terminals_scrollback_and_nowhere_else() {
+        let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
+        for (key, action) in [
+            (NamedKey::ArrowUp, Action::PrevCommandMark),
+            (NamedKey::ArrowDown, Action::NextCommandMark),
+        ] {
+            assert_eq!(
+                press_on_primary_screen(Key::Named(key), CTRL_SHIFT),
+                Some(action)
+            );
+            assert_eq!(
+                press(Key::Named(key), CTRL_SHIFT),
+                None,
+                "the alternate screen keeps {key:?} — a full-screen program owns its canvas"
+            );
+            assert_eq!(
+                press_on_primary_screen(Key::Named(key), ctrl_alt),
+                None,
+                "Ctrl+Alt is how Windows reports AltGr"
+            );
+            // `Ctrl+arrow` is readline's word movement and plain arrows are the
+            // child's outright; neither is claimed on either screen.
+            assert_eq!(press_on_primary_screen(Key::Named(key), CTRL), None);
+            assert_eq!(
+                press_on_primary_screen(Key::Named(key), ModifiersState::empty()),
+                None
+            );
+        }
+        // A preview seat is not a terminal, so the walk is not in force there
+        // either — there is no scrollback in a document.
+        assert_eq!(
+            press_in_preview(Key::Named(NamedKey::ArrowUp), CTRL_SHIFT),
+            None
+        );
     }
 
     /// The Files row wears Shift because the key the mock-up asked for is the
@@ -424,7 +587,10 @@ mod tests {
     /// difference instead of depending on which of the two a keyboard happens to produce.
     #[test]
     fn shift_folded_keys_resolve_from_either_the_glyph_or_the_bare_key() {
-        let terminal = Focus::default();
+        let terminal = Focus {
+            preview: false,
+            terminal_primary: true,
+        };
         // US layout: Shift+1 produces "!", the bare key is "1".
         assert_eq!(
             lookup_action(&character("!"), &character("1"), CTRL_SHIFT, terminal),
@@ -499,6 +665,22 @@ mod tests {
                 "AltGr+{text} in a preview"
             );
         }
+        // The named keys the table claims are held to the same discipline, on
+        // every screen: the command walk was the mock-up's one `Ctrl+Alt` row and
+        // this is the assertion that keeps it from coming back.
+        for key in [NamedKey::ArrowUp, NamedKey::ArrowDown, NamedKey::Tab] {
+            assert_eq!(press(Key::Named(key), ctrl_alt), None, "AltGr+{key:?}");
+            assert_eq!(
+                press_on_primary_screen(Key::Named(key), ctrl_alt),
+                None,
+                "AltGr+{key:?} on a scrollback"
+            );
+            assert_eq!(
+                press_on_primary_screen(Key::Named(key), ctrl_alt_shift),
+                None,
+                "AltGr+Shift+{key:?} on a scrollback"
+            );
+        }
     }
 
     /// The retired development keys must resolve to nothing at all.
@@ -556,17 +738,35 @@ mod tests {
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 14 single actions plus GotoTab(1..=9).
-        assert_eq!(BINDINGS.len(), 23);
+        // 16 single actions plus GotoTab(1..=9).
+        assert_eq!(BINDINGS.len(), 25);
 
         // Two rows may share a chord only if no focus state has both in force —
         // which is what a scope is *for*, and also the one way scopes could
         // quietly reintroduce the ambiguity the flat table forbade.
+        //
+        // Every focus the window can actually be in, and no impossible one: the
+        // keyboard is on a preview, on a terminal's scrollback, or on neither
+        // (a terminal running a full-screen program, a files column, a menu).
+        // "Both at once" is not a state a window has.
         for (index, binding) in BINDINGS.iter().enumerate() {
             for other in BINDINGS.iter().skip(index + 1) {
-                let overlap = [Focus { preview: false }, Focus { preview: true }]
-                    .into_iter()
-                    .any(|focus| binding.scope.holds(focus) && other.scope.holds(focus));
+                let overlap = [
+                    Focus {
+                        preview: false,
+                        terminal_primary: false,
+                    },
+                    Focus {
+                        preview: true,
+                        terminal_primary: false,
+                    },
+                    Focus {
+                        preview: false,
+                        terminal_primary: true,
+                    },
+                ]
+                .into_iter()
+                .any(|focus| binding.scope.holds(focus) && other.scope.holds(focus));
                 assert!(
                     binding.chord != other.chord || !overlap,
                     "{:?} reuses a chord already claimed above it in the same focus",
@@ -601,6 +801,8 @@ mod tests {
             Action::GitPage,
             Action::OpenSettings,
             Action::SavePreview,
+            Action::PrevCommandMark,
+            Action::NextCommandMark,
         ];
         expected.extend((1..=9u8).map(Action::GotoTab));
 
@@ -624,7 +826,14 @@ mod tests {
             };
             let focus = match binding.scope {
                 Scope::Window => Focus::default(),
-                Scope::Preview => Focus { preview: true },
+                Scope::Preview => Focus {
+                    preview: true,
+                    terminal_primary: false,
+                },
+                Scope::TerminalPrimary => Focus {
+                    preview: false,
+                    terminal_primary: true,
+                },
             };
             assert_eq!(
                 lookup_action(&key, &key, binding.chord.modifiers, focus),

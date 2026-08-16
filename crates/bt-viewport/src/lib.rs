@@ -5361,6 +5361,98 @@ mod tests {
         assert_eq!(narrow.cache_misses(), misses_after_new_width);
     }
 
+    /// PIN — **a jump to a command mark is a position, not an act** (S1-UI,
+    /// 2026-08-16).
+    ///
+    /// The command marks rail is this API's first consumer, and the whole reason
+    /// it goes through an anchor rather than through `scroll_by_rows` is asserted
+    /// here: the viewport is told *which line* it is looking at and how far above
+    /// it to sit, and it goes on looking at that line while the shell prints under
+    /// it. Computed as a row number, the same jump would slide by one line for
+    /// every line of output that arrived after it.
+    ///
+    /// The offset is negative because `scroll_y = anchor_y(source) + local_offset`
+    /// — lifting the viewport's top *above* the line is what puts the line eight
+    /// pixels down the pane, which is the mock-up's own `line.offsetTop - 8`.
+    ///
+    /// MUTATIONS:
+    /// ① drop the sign from `local_offset` — the row lands eight pixels off the
+    ///    top of the pane instead of eight pixels into it, and the first
+    ///    assertion goes red;
+    /// ② store a row number and re-derive `scroll_y` from it — the second block
+    ///    goes red the moment a line is appended, which is the whole claim.
+    #[test]
+    fn a_jump_to_a_commands_own_line_keeps_naming_that_line_while_the_shell_prints() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        let append = |store: &mut TranscriptStore, document: &mut HistoryDocument, text: &str| {
+            let line = store
+                .capture(CapturedRow::plain(text, false))
+                .finalized
+                .remove(0);
+            let id = line.line.id;
+            document.finalize_transaction(line);
+            id
+        };
+        append(&mut store, &mut document, "first");
+        let command = append(&mut store, &mut document, "cargo test");
+        append(&mut store, &mut document, "output");
+
+        let mut projection = ViewportProjection::new(
+            key(40),
+            DetectionRevision(1),
+            nz32(24),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        // What `jump_to_command_mark` builds: the mark's own `start` anchor, and
+        // eight logical pixels of lift.
+        let eight_px = -8 * SUBPIXELS_PER_PX;
+        projection.set_scroll_anchor(Some(ScrollAnchor {
+            source: ContentAnchor::History {
+                id: command,
+                offset: GraphemeOffset(0),
+                bias: Bias::Before,
+                generation: SourceGeneration(1),
+            },
+            local_offset: eight_px,
+        }));
+        let landed = projection
+            .scroll_y(&document)
+            .expect("the anchor resolves")
+            .expect("the viewport is anchored");
+        // One line of eighteen pixels above it, less the eight of lift.
+        assert_eq!(landed, 18 * SUBPIXELS_PER_PX + eight_px);
+
+        // Now the shell goes on printing. The viewport is re-projected against a
+        // taller document and still names the same line: the pixels below it grew
+        // and the pixels above it did not.
+        for text in ["running 1 test", "test result: ok", "done"] {
+            append(&mut store, &mut document, text);
+        }
+        projection.project(&document);
+        assert_eq!(
+            projection
+                .scroll_y(&document)
+                .expect("the anchor still resolves")
+                .expect("and the viewport is still anchored"),
+            landed,
+            "an anchored jump does not drift under output"
+        );
+        assert!(
+            matches!(projection.scroll_anchor(), Some(anchor)
+            if anchor.source == ContentAnchor::History {
+                id: command,
+                offset: GraphemeOffset(0),
+                bias: Bias::Before,
+                generation: SourceGeneration(1),
+            }),
+            "and it is still the command's own line that is being named"
+        );
+    }
+
     #[test]
     fn math_block_replaces_a_multi_line_span_in_two_projections_at_free_pixel_height() {
         let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
