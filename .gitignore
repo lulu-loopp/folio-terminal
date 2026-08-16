@@ -12,3 +12,5 @@
 !docs/spikes/artifacts/webview2/*.png
 dist/
 .tmp-repaint-capture/
+.claude/worktrees/
+local-images/
