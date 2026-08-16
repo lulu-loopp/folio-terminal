@@ -3993,7 +3993,7 @@ struct Runtime {
     /// twin, kept for the same `&self` hit test.
     git_graphs_shown: BTreeMap<SeatId, git_graph::GraphContent>,
     /// Double clicks on graph rows, paired by commit (R23).
-    git_graph_clicks: FilesRowClicks,
+    git_graph_clicks: FilesRowClicks<SeatId>,
     /// How wide each column's `Files | Git` switch is drawn, for the hit test.
     ///
     /// The third field of this family, and it exists for the reason the two above
@@ -6182,24 +6182,38 @@ fn graph_key_of(key: &Key, modifiers: ModifiersState) -> Option<git_graph::Graph
 /// faster. Pairing on the id is what makes "you clicked the same thing twice"
 /// mean what it says.
 ///
-/// The seat is in the key for the reason a tab is in `TabClicks`': one click in
-/// each of two columns is two first clicks, however alike the two paths look.
-#[derive(Default)]
-struct FilesRowClicks {
-    last: Option<(SeatId, String, Instant)>,
+/// The host is in the key for the reason a tab is in `TabClicks`': one click in
+/// each of two trees is two first clicks, however alike the two paths look.
+/// **A host and not a seat** (user report, 2026-08-16): a floating tree — the
+/// peek and the pinned window alike — is a tree too, and its file rows had no
+/// double click at all because this counter could only name a column. Keyed by
+/// [`RowHost`], one counter serves every tree in the window and a double click
+/// means the same thing on all of them.
+///
+/// Generic over the host's name because the graph counts its rows on the same
+/// counter with a `SeatId` for a host: what varies is *who* is being clicked
+/// in, never how a pair is decided.
+struct FilesRowClicks<H = RowHost> {
+    last: Option<(H, String, Instant)>,
 }
 
-impl FilesRowClicks {
-    fn register(&mut self, seat: SeatId, key: &str, now: Instant) -> TabClick {
-        let paired = self.last.as_ref().is_some_and(|(last_seat, last_key, at)| {
-            *last_seat == seat
+impl<H> Default for FilesRowClicks<H> {
+    fn default() -> Self {
+        Self { last: None }
+    }
+}
+
+impl<H: PartialEq> FilesRowClicks<H> {
+    fn register(&mut self, host: H, key: &str, now: Instant) -> TabClick {
+        let paired = self.last.as_ref().is_some_and(|(last_host, last_key, at)| {
+            *last_host == host
                 && last_key == key
                 && now.saturating_duration_since(*at) <= MULTI_CLICK_INTERVAL
         });
         // A double click consumes its own history, exactly as the strip's does:
         // without this a third press inside the window pairs with the second and
         // opens the file twice.
-        self.last = (!paired).then(|| (seat, key.to_owned(), now));
+        self.last = (!paired).then(|| (host, key.to_owned(), now));
         if paired {
             TabClick::Double
         } else {
@@ -22043,7 +22057,10 @@ impl Runtime {
         // once for `dir === "1"` (7847), so unfolding twice quickly is two
         // folds, which is what it looks like, and nothing else.
         let activating = matches!(kind, RowKind::File)
-            && self.files_row_clicks.register(seat, &key, now) == TabClick::Double;
+            && self
+                .files_row_clicks
+                .register(RowHost::Column(seat), &key, now)
+                == TabClick::Double;
         if !matches!(kind, RowKind::File) {
             self.files_row_clicks.interrupt();
         }
@@ -24807,6 +24824,7 @@ impl Runtime {
         };
         let key = row.key.clone();
         let kind = row.kind;
+        let root = files.files.root.clone();
         // The same press as a docked column's (`press_files_node`), because a
         // click is a *toggle* and not a keystroke. This used to be spelled as
         // `TreeCommand::Right`-then-`Left` — but Right on an already-open
@@ -24820,15 +24838,29 @@ impl Runtime {
         if opening {
             // Unfolding is this product's refresh gesture (there is no watcher
             // yet), so an opened directory is re-asked exactly as a column's is.
-            let root = files.files.root.clone();
             let request = files::DirRequest {
                 host: files::FilesHost::Float(epoch),
                 path: files::full_path(&root, &key),
-                key,
+                key: key.clone(),
             };
             if !self.files_worker.request(request) {
                 self.disable_files_worker();
             }
+        }
+        // K156 on a floating tree too (user report, 2026-08-16): the second
+        // press on one file row opens it, on the same counter and the same
+        // interval as a column's, keyed by this window. A folder is not
+        // counted, for the reason the column gives.
+        let activating = matches!(kind, files::RowKind::File)
+            && self
+                .files_row_clicks
+                .register(RowHost::Float(id), &key, Instant::now())
+                == TabClick::Double;
+        if !matches!(kind, files::RowKind::File) {
+            self.files_row_clicks.interrupt();
+        }
+        if activating && let RowActivation::Preview(path) = files_row_activation(&root, &key) {
+            self.open_preview(path)?;
         }
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -51066,7 +51098,7 @@ mod tests {
     #[test]
     fn two_presses_on_one_file_row_are_an_opening_and_a_folder_press_is_never_half_of_one() {
         let now = Instant::now();
-        let (a, b) = (SeatId(1), SeatId(2));
+        let (a, b) = (RowHost::Column(SeatId(1)), RowHost::Column(SeatId(2)));
         let mut clicks = FilesRowClicks::default();
         assert_eq!(clicks.register(a, "/notes.md", now), TabClick::Single);
         assert_eq!(
@@ -51089,6 +51121,18 @@ mod tests {
         let mut clicks = FilesRowClicks::default();
         assert_eq!(clicks.register(a, "/notes.md", now), TabClick::Single);
         assert_eq!(clicks.register(b, "/notes.md", now), TabClick::Single);
+
+        // A floating tree is a host of its own (user report, 2026-08-16): its
+        // rows pair with themselves and never with a column's, and two presses
+        // on one of its file rows are an opening exactly as a column's are.
+        let float = RowHost::Float(7);
+        let mut clicks = FilesRowClicks::default();
+        assert_eq!(clicks.register(a, "/notes.md", now), TabClick::Single);
+        assert_eq!(clicks.register(float, "/notes.md", now), TabClick::Single);
+        assert_eq!(
+            clicks.register(float, "/notes.md", now + Duration::from_millis(90)),
+            TabClick::Double
+        );
 
         // Slower than the system's own interval is two clicks, which is what
         // "double click" means everywhere else in this window.
