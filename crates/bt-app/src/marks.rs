@@ -422,6 +422,41 @@ pub enum ChromeMark {
     /// repository.
     #[allow(dead_code)]
     GitGraph,
+    /// **One edge of the full graph** (G-4): a branch leaving a commit, or
+    /// arriving at one.
+    ///
+    /// Generated rather than quoted, which is the whole difference between this
+    /// and [`Self::GitMergeCurve`] beside it. The mini graph has exactly one
+    /// curve — a side branch joining the single road from the top right — so the
+    /// design could state it as four control points in a fixed 14×27 box. The
+    /// full graph's edges reach across *any* number of lanes and in either
+    /// direction, and a fixed path stretched into a box that is sometimes 16
+    /// pixels wide and sometimes 112 is a stroke that is sometimes seven times
+    /// too fat: `stroke-width` is in the path's own units, so a non-uniform
+    /// scale is a non-uniform pen.
+    ///
+    /// So the shape is one quadratic and the box is the edge's own bounding
+    /// rectangle: the curve leaves the dot **horizontally** and arrives at the
+    /// lane **vertically**, which is the tangent profile the mock-up's two
+    /// curves both have (§G G73/G74) and the reason a lane looks like a road
+    /// that a branch merges onto rather than a wire soldered to it. The four
+    /// cases — opening or closing, leftward or rightward — are the same drawing
+    /// mirrored, so they are two booleans rather than four marks.
+    ///
+    /// The path is inset by half the stroke on every side and the caller pads
+    /// the rectangle by the same, because a stroke centres on its path: written
+    /// corner to corner it would lose half its width to the edge of its own
+    /// raster at both ends, which reads as an edge that goes thin exactly where
+    /// it meets the line it is joining.
+    GraphCurve {
+        stroke_px: u32,
+        /// The dot is at the box's right rather than its left — the edge runs
+        /// leftward.
+        flip_x: bool,
+        /// The dot is at the box's bottom rather than its top — the edge is
+        /// arriving (a close) rather than leaving (an open).
+        flip_y: bool,
+    },
 }
 
 impl ChromeMark {
@@ -478,6 +513,9 @@ impl ChromeMark {
             Self::GitGraph => "i-git-graph",
             Self::Minus => "i-minus",
             Self::GitMergeCurve => "git-merge-curve",
+            // One id for four mirrorings and every span, exactly as the chevron
+            // has one id for every angle: `mark_key` adds the rest.
+            Self::GraphCurve { .. } => "graph-curve",
         }
     }
 
@@ -859,6 +897,16 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     {
         let _ = write!(key, ":a{start_milliturns}+{sweep_milliturns}w{stroke_px}");
     }
+    // The span is in the box, so what is left to say is which way the drawing
+    // is turned over and how fat the pen is.
+    if let ChromeMark::GraphCurve {
+        stroke_px,
+        flip_x,
+        flip_y,
+    } = sprite.mark
+    {
+        let _ = write!(key, ":w{stroke_px}{}{}", u8::from(flip_x), u8::from(flip_y));
+    }
     // The angle is the only thing that tells one frame of the turn from
     // another: one id, one box, one colour, and different pixels.
     if let ChromeMark::Chevron { turned_degrees } | ChromeMark::TreeDisclosure { turned_degrees } =
@@ -1006,6 +1054,35 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
             format!("0 0 {width_px} {height_px}"),
             format!(r#"<rect width="{width_px}" height="{height_px}" fill="currentColor"/>"#),
         ),
+        // One quadratic corner to corner, inset by half the pen so the whole
+        // stroke lands inside its own raster. The control point sits over the
+        // lane end at the dot's own height, which is what makes the curve leave
+        // the dot flat and arrive at the lane upright.
+        ChromeMark::GraphCurve {
+            stroke_px,
+            flip_x,
+            flip_y,
+        } => {
+            let inset = f64::from(stroke_px.max(1)) / 2.0;
+            let right = f64::from(width_px) - inset;
+            let bottom = f64::from(height_px) - inset;
+            let (dot_x, lane_x) = if flip_x {
+                (right, inset)
+            } else {
+                (inset, right)
+            };
+            let (dot_y, lane_y) = if flip_y {
+                (bottom, inset)
+            } else {
+                (inset, bottom)
+            };
+            (
+                format!("0 0 {width_px} {height_px}"),
+                format!(
+                    r#"<path fill="none" stroke="currentColor" stroke-width="{stroke_px}" stroke-linecap="round" d="M{dot_x} {dot_y} Q{lane_x} {dot_y} {lane_x} {lane_y}"/>"#
+                ),
+            )
+        }
         ChromeMark::ProgressRing {
             start_milliturns,
             sweep_milliturns,
@@ -1239,6 +1316,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::CardCorner { .. } => 8,
         ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
+        ChromeMark::GraphCurve { .. } => 8,
     }
 }
 

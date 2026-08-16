@@ -1882,6 +1882,16 @@ pub enum ChromeTarget {
         seat: SeatId,
         index: usize,
     },
+    /// One row of the full commit graph, by index (G-4).
+    ///
+    /// Its own target and not [`Self::GitRow`], because the two lists are two
+    /// lists: one is indexed into a Files column's page and the other into a
+    /// preview seat's document, and a press that could not say which would open
+    /// the wrong row of whichever happened to be longer.
+    GitGraphRow {
+        seat: SeatId,
+        index: usize,
+    },
     /// One of a Git row's hover verbs (R14).
     ///
     /// Its own target inside the row for [`Self::PaneClose`]'s reason: the row is
@@ -4486,6 +4496,8 @@ static NO_FILES_TREES: BTreeMap<SeatId, FilesTreeContent> = BTreeMap::new();
 static NO_FILES_VIEWS: BTreeMap<SeatId, FilesViewContent> = BTreeMap::new();
 #[cfg(test)]
 static NO_GIT_PAGES: BTreeMap<SeatId, crate::git_panel::GitPanelContent> = BTreeMap::new();
+#[cfg(test)]
+static NO_GIT_GRAPHS: BTreeMap<SeatId, crate::git_graph::GraphContent> = BTreeMap::new();
 
 /// Every Terminal seat of `seats` running a PowerShell — the map a real tab of
 /// one profile hands in.
@@ -4577,6 +4589,7 @@ pub fn build_chrome_with_preview(
             files_trees: &NO_FILES_TREES,
             files_views: &NO_FILES_VIEWS,
             git_pages: &NO_GIT_PAGES,
+            git_graphs: &NO_GIT_GRAPHS,
             preview_messages: &preview_messages,
             preview_feet: &[],
             preview_heads: &[],
@@ -4907,6 +4920,16 @@ pub struct ChromeContent<'a> {
     /// rectangles, and a module that could read a repository for itself would be
     /// a module that runs `git` on the event loop.
     pub git_pages: &'a BTreeMap<SeatId, crate::git_panel::GitPanelContent>,
+    /// The commit graph each preview seat showing one is drawing this frame
+    /// (G-4).
+    ///
+    /// **A picture and not a body**, which is why it arrives here beside the Git
+    /// pages rather than in `preview_messages`: a `PreviewBody` is rectangles and
+    /// text runs, and a graph is circles and curves. It is drawn by the same
+    /// three channels the panel's mini graph is drawn by, into the preview seat's
+    /// own body, and the document's body is left empty because this *is* the
+    /// document.
+    pub git_graphs: &'a BTreeMap<SeatId, crate::git_graph::GraphContent>,
     /// What each preview pane's body says while it has no body yet — "Loading
     /// …", a decode failure, the invitation an empty pane wears — **by seat**.
     ///
@@ -5134,6 +5157,7 @@ pub fn build_chrome_for_tabs(
         files_trees,
         files_views,
         git_pages,
+        git_graphs,
         preview_messages,
         preview_feet,
         preview_heads,
@@ -5707,6 +5731,32 @@ pub fn build_chrome_for_tabs(
                                 Some(view)
                             }
                             _ => None,
+                        },
+                        scale,
+                        &palette,
+                        (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+                    );
+                }
+                // A preview seat showing the commit graph draws it into the
+                // same body a document's text would have used — see
+                // [`ChromeInputs::git_graphs`] for why a picture goes through
+                // the chrome and not through `PreviewBody`.
+                if placement.kind == SeatKind::Preview
+                    && let Some(graph) = git_graphs.get(&placement.id)
+                    && let Some(geometry) = files_pane
+                {
+                    crate::git_graph::push_graph(
+                        geometry.body,
+                        graph,
+                        crate::git_graph::GraphHover {
+                            row: match pointer.hover {
+                                Some(ChromeTarget::GitGraphRow { seat, index })
+                                    if seat == placement.id =>
+                                {
+                                    Some(index)
+                                }
+                                _ => None,
+                            },
                         },
                         scale,
                         &palette,
@@ -9509,6 +9559,33 @@ pub fn hit_git_panel(
     None
 }
 
+/// Which row of a commit graph the pointer is on (G-4).
+///
+/// The twin of [`hit_git_panel`], and it asks the same body the paint drew into:
+/// a preview seat's, less its head and its foot.
+#[must_use]
+pub fn hit_git_graph(
+    seats: &Seats,
+    layout: &SeatLayout,
+    graphs: &BTreeMap<SeatId, crate::git_graph::GraphContent>,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for (seat, content) in graphs {
+        let Some(body) = preview_seat_body_rect(seats, layout, *seat, scale) else {
+            continue;
+        };
+        let geometry = crate::git_graph::graph_geometry(body, content, scale);
+        let Some(index) = geometry.row_at(x, y, content.total_rows) else {
+            continue;
+        };
+        return Some(ChromeTarget::GitGraphRow { seat: *seat, index });
+    }
+    None
+}
+
 /// Draw one column's `Files | Git` switch.
 ///
 /// Three inks and an underline, and every one of them is the design's own
@@ -12795,6 +12872,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &heads,
@@ -12862,6 +12940,7 @@ mod tests {
                     files_trees: &NO_FILES_TREES,
                     files_views: &NO_FILES_VIEWS,
                     git_pages: &NO_GIT_PAGES,
+                    git_graphs: &NO_GIT_GRAPHS,
                     preview_messages: messages,
                     preview_feet: &[],
                     preview_heads: &[],
@@ -14548,6 +14627,7 @@ mod tests {
                     files_trees: &NO_FILES_TREES,
                     files_views: &NO_FILES_VIEWS,
                     git_pages: &NO_GIT_PAGES,
+                    git_graphs: &NO_GIT_GRAPHS,
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
@@ -14762,6 +14842,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -14845,6 +14926,7 @@ mod tests {
                 tabs: &[],
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
@@ -18530,6 +18612,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -18726,6 +18809,7 @@ mod tests {
                     files_trees: &NO_FILES_TREES,
                     files_views: &NO_FILES_VIEWS,
                     git_pages: &NO_GIT_PAGES,
+                    git_graphs: &NO_GIT_GRAPHS,
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
@@ -18831,6 +18915,7 @@ mod tests {
                     files_trees: &NO_FILES_TREES,
                     files_views: &NO_FILES_VIEWS,
                     git_pages: &NO_GIT_PAGES,
+                    git_graphs: &NO_GIT_GRAPHS,
                     preview_messages: &[],
                     preview_feet: &[],
                     preview_heads: &[],
@@ -19042,6 +19127,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -21079,6 +21165,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -21138,6 +21225,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -21927,6 +22015,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -22170,6 +22259,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -22421,6 +22511,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -22577,6 +22668,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],
@@ -23864,6 +23956,7 @@ mod tests {
                 files_trees: &NO_FILES_TREES,
                 files_views: &NO_FILES_VIEWS,
                 git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
                 preview_messages: &[],
                 preview_feet: &[],
                 preview_heads: &[],

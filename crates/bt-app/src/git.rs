@@ -124,8 +124,44 @@ pub const GIT_NOT_FOUND: &str = "git.exe was not found on this machine";
 /// here, and the epoch dance [`crate::files::FilesHost`] needs does not arise.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRequest {
-    pub host: LeafId,
+    pub host: GitHost,
     pub question: GitQuestion,
+}
+
+/// **Who is asking**, and therefore where the answer is filed.
+///
+/// Two surfaces read repositories and they are addressed differently, which is
+/// the whole reason this is an enum rather than a seat id. A Git *page* belongs
+/// to a Files column and dies with it. A *graph* belongs to a tab and to a
+/// repository — it is a document on the preview seat, it outlives the column it
+/// was opened from, and two columns rooted in one repository open the same one.
+/// Addressing it by the seat that happened to launch it would make the document
+/// go blank the moment that column was closed or re-rooted, which is a page
+/// forgetting its own subject because something else moved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitHost {
+    /// The Git page in one docked Files column.
+    ///
+    /// **A docked seat and nothing else.** A floating tree gets no Git page
+    /// (R2): the float is a peek at a folder, not a seat in a tab, and the
+    /// panel's whole vocabulary — a page beside a Files page, a branch head, a
+    /// list you stage from — is seat-shaped. So there is no `Float` variant
+    /// here, and the epoch dance [`crate::files::FilesHost`] needs does not
+    /// arise.
+    Column(LeafId),
+    /// The commit graph document of one repository, in one tab.
+    Graph { tab: crate::TabId, root: PathBuf },
+}
+
+impl GitHost {
+    /// Which tab the answer belongs in.
+    #[must_use]
+    pub fn tab(&self) -> crate::TabId {
+        match self {
+            Self::Column(leaf) => leaf.tab,
+            Self::Graph { tab, .. } => *tab,
+        }
+    }
 }
 
 /// The six things this product ever asks a repository.
@@ -205,6 +241,34 @@ pub enum GitQuestion {
         /// fifty children racing each other for `index.lock` is fifty ways to
         /// half-succeed.
         paths: Vec<String>,
+    },
+    /// **Stand somewhere else** (R10) — `git checkout`.
+    ///
+    /// Its own question rather than a fifth [`GitWriteVerb`], because the four
+    /// verbs there take a *pathspec* and this one takes a *ref*, and a field
+    /// called `paths` holding a branch name is a lie the type system would help
+    /// tell. What it shares with them is the shape of the answer — a receipt
+    /// with nothing in it, or git's own sentence about why not.
+    ///
+    /// **No stash and no force** (R10, ruled 2026-08-15). A checkout onto a
+    /// dirty tree that would lose work is refused *by git*, in git's words, and
+    /// that refusal is the whole of the failure design: the panel prints the
+    /// sentence and the branch does not change. Offering to stash or to force
+    /// from a one-click row would be this panel deciding what to do with work it
+    /// did not write — the heavy verbs belong to the terminal beside it (G12).
+    Checkout {
+        root: PathBuf,
+        /// A branch name, or the commit to stand on when `detach` is set.
+        target: String,
+        /// Whether this is a detached checkout of a commit (R23's double click)
+        /// rather than a move onto a branch.
+        ///
+        /// Explicit rather than sniffed from the string: `git checkout <thing>`
+        /// resolves a name that is *both* a branch and a hash prefix as the
+        /// branch, so a double click on a commit whose abbreviation happens to
+        /// spell a branch name would silently move the branch instead of
+        /// detaching. `--detach` says which of the two was meant.
+        detach: bool,
     },
 }
 
@@ -312,7 +376,12 @@ impl GitQuestion {
             // older of two staging requests because a newer one arrived would
             // silently not stage a file the user asked for. The queue may
             // reorder work; it may not decline to do it.
-            (Self::Write { .. }, Self::Write { .. }) => false,
+            //
+            // A checkout is the same kind of thing and gets the same answer, for
+            // one extra reason of its own: two checkouts in flight are two
+            // places to stand, and the second is where the user asked to be.
+            (Self::Write { .. }, Self::Write { .. })
+            | (Self::Checkout { .. }, Self::Checkout { .. }) => false,
             _ => false,
         }
     }
@@ -329,7 +398,7 @@ impl GitRequest {
 /// What the worker learned, addressed back to the seat that asked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitResponse {
-    pub host: LeafId,
+    pub host: GitHost,
     pub answer: GitAnswer,
 }
 
@@ -389,6 +458,12 @@ pub enum GitAnswer {
         root: PathBuf,
         verb: GitWriteVerb,
         paths: Vec<String>,
+        outcome: GitOutcome<()>,
+    },
+    /// A checkout finished, or git said why it would not (R10).
+    Checkout {
+        root: PathBuf,
+        target: String,
         outcome: GitOutcome<()>,
     },
 }
@@ -656,6 +731,26 @@ pub struct GitCommit {
     /// input the lane algorithm has** (G-4), which is why it is carried from the
     /// first slice rather than added when the graph is drawn.
     pub parents: Vec<String>,
+    /// The local branches standing on this commit (R22), in git's own order.
+    ///
+    /// Local only, and that is the ruling rather than the easy half: a remote
+    /// tracking ref and a tag are *different kinds of claim* about a commit —
+    /// one is where another machine last said it was, the other is a name
+    /// somebody nailed on — and giving all three the one pill this slice draws
+    /// would say they were the same kind. They are booked for v2 with a pill of
+    /// their own, which is why the parse throws them away here rather than
+    /// flattening them in.
+    pub refs: Vec<GitRef>,
+}
+
+/// One name worn on a commit row (R22).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRef {
+    /// The branch's short name — `main`, never `refs/heads/main`.
+    pub name: String,
+    /// Whether `HEAD` is this ref. The pill wears the accent ring for it, and
+    /// there is at most one on the whole page.
+    pub head: bool,
 }
 
 /// One page of history (R16).
@@ -932,11 +1027,12 @@ pub fn parse_name_status(bytes: &[u8]) -> Vec<GitCommitFile> {
 pub fn parse_log(bytes: &[u8], now_unix: i64, skip: usize, wanted: usize) -> GitLog {
     let text = String::from_utf8_lossy(bytes);
     let fields: Vec<&str> = text.split('\0').collect();
-    // Six fields per commit, NUL between them and a NUL after the last — so the
-    // whole stream divides evenly and `chunks_exact` drops the terminator's empty
-    // tail without having to know whether git wrote a separator or a terminator.
+    // Seven fields per commit, NUL between them and a NUL after the last — so
+    // the whole stream divides evenly and `chunks_exact` drops the terminator's
+    // empty tail without having to know whether git wrote a separator or a
+    // terminator.
     let mut commits: Vec<GitCommit> = fields
-        .chunks_exact(6)
+        .chunks_exact(7)
         .map(|record| {
             let (committer_unix, committer_offset) = parse_iso_strict(record[3]).unwrap_or((0, 0));
             GitCommit {
@@ -951,6 +1047,7 @@ pub fn parse_log(bytes: &[u8], now_unix: i64, skip: usize, wanted: usize) -> Git
                 // is an empty list rather than a missing one, because the root
                 // genuinely has no parents.
                 parents: record[5].split_whitespace().map(str::to_owned).collect(),
+                refs: parse_decoration(record[6]),
             }
         })
         .collect();
@@ -961,6 +1058,47 @@ pub fn parse_log(bytes: &[u8], now_unix: i64, skip: usize, wanted: usize) -> Git
         commits,
         has_more,
     }
+}
+
+/// `%D` under `--decorate=full`, decoded into the pills one row wears (R22).
+///
+/// **Full ref names and not short ones**, and the flag is the whole reason this
+/// is readable: `%D`'s default spelling gives `main` and `origin/main` and
+/// `v1.0` side by side, three kinds of claim that can only be told apart by
+/// guessing at slashes — and a branch genuinely called `origin/main` exists.
+/// Under `--decorate=full` they arrive as `refs/heads/…`, `refs/remotes/…` and
+/// `refs/tags/…`, and the kind is stated rather than inferred.
+///
+/// git separates them with `", "` and prefixes the checked-out one with
+/// `"HEAD -> "`. A detached head is the bare word `HEAD`, which is a ref
+/// standing on this commit with no branch behind it — a pill, because "you are
+/// here" is exactly what the graph is for.
+#[must_use]
+fn parse_decoration(text: &str) -> Vec<GitRef> {
+    const LOCAL: &str = "refs/heads/";
+    const HEAD_ARROW: &str = "HEAD -> ";
+    text.split(", ")
+        .filter_map(|item| {
+            let item = item.trim();
+            if item == "HEAD" {
+                return Some(GitRef {
+                    name: "HEAD".to_owned(),
+                    head: true,
+                });
+            }
+            let (head, name) = match item.strip_prefix(HEAD_ARROW) {
+                Some(rest) => (true, rest),
+                None => (false, item),
+            };
+            // Remotes and tags are booked for v2 with pills of their own, and a
+            // ref this parse does not recognise is not a ref this row can draw.
+            let name = name.strip_prefix(LOCAL)?;
+            (!name.is_empty()).then(|| GitRef {
+                name: name.to_owned(),
+                head,
+            })
+        })
+        .collect()
 }
 
 /// `2026-08-15T10:18:07-04:00` → the instant and the offset it was written in.
@@ -1221,6 +1359,11 @@ fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
             paths: paths.clone(),
             outcome: Err(fault),
         },
+        GitQuestion::Checkout { root, target, .. } => GitAnswer::Checkout {
+            root: root.clone(),
+            target: target.clone(),
+            outcome: Err(fault),
+        },
     }
 }
 
@@ -1320,7 +1463,10 @@ pub fn answer(
                     OsStr::new("--parents"),
                     OsStr::new("--topo-order"),
                     OsStr::new("-z"),
-                    OsStr::new("--format=%H%x00%h%x00%an%x00%cI%x00%s%x00%P"),
+                    // `--decorate=full` is what makes `%D` say which *kind* of
+                    // ref each name is — see [`parse_decoration`].
+                    OsStr::new("--decorate=full"),
+                    OsStr::new("--format=%H%x00%h%x00%an%x00%cI%x00%s%x00%P%x00%D"),
                     OsStr::new(&limit),
                     OsStr::new(&skipped),
                 ],
@@ -1459,6 +1605,39 @@ pub fn answer(
                 Err(fault) => faulted(question, fault),
             }
         }
+        // **One command and no cleverness** (R10). No `--force`, no `--merge`,
+        // no stash around it: what git does with a dirty tree here is exactly
+        // what it does in the pane next door, and the sentence it prints when it
+        // declines is the sentence the panel shows.
+        //
+        // **No `--` either**, and that is not an omission: after `--` git reads
+        // its argument as a *pathspec*, so `git checkout -- main` restores a
+        // file called `main` from the index instead of moving onto the branch.
+        // The disambiguator that would be safe here is the one that says which
+        // kind of thing was meant, and for the only ambiguous case — a commit
+        // whose abbreviation spells a branch name — that is `--detach`, which
+        // this question already carries.
+        GitQuestion::Checkout {
+            root,
+            target,
+            detach,
+        } => {
+            let mut arguments = vec![OsStr::new("checkout")];
+            if *detach {
+                arguments.push(OsStr::new("--detach"));
+            }
+            arguments.push(OsStr::new(target));
+            let command = git_command(program, root, &arguments);
+            match run_git(command, timeout) {
+                Ok(run) if run.ok => GitAnswer::Checkout {
+                    root: root.clone(),
+                    target: target.clone(),
+                    outcome: Ok(()),
+                },
+                Ok(run) => faulted(question, classify_failure(&run.stderr)),
+                Err(fault) => faulted(question, fault),
+            }
+        }
         GitQuestion::CommitFiles { root, hash } => {
             let command = git_command(
                 program,
@@ -1584,9 +1763,47 @@ pub struct GitCache {
     /// read. It is cleared by a new attempt because that is the moment the user
     /// has said they know.
     write_error: Option<String>,
+    /// The ref a checkout is in flight for (R10) — the branch row that is dimmed
+    /// while git works, and the guard that makes a second click on it do
+    /// nothing rather than start a second `git checkout`.
+    checkout: Option<String>,
+    /// What this cache is for, and therefore what it asks (R31).
+    role: GitRole,
+}
+
+/// Which surface a cache feeds, and therefore which questions it owes.
+///
+/// **A distinction about work and not about types.** The graph and the panel
+/// hold the same four answers in the same four slots; what differs is that the
+/// graph has no branch list on it, and a cache that asked for one anyway would
+/// spend a `for-each-ref` per graph opened on an answer nothing draws. R31 is
+/// the whole reason this exists: a repository is read for a surface that is
+/// looking at it, and only for what that surface shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GitRole {
+    /// The Git page in a Files column: status, branches and history.
+    #[default]
+    Page,
+    /// The commit graph document (G-4): history, and the head to name it by.
+    Graph,
 }
 
 impl GitCache {
+    /// A cache for a repository whose root is already known.
+    ///
+    /// The graph is opened *from* a page that has already probed, so the probe
+    /// is an answer it has rather than a question it owes — and starting one
+    /// would blank the document's own heading for the length of a subprocess to
+    /// re-learn a path it was handed.
+    #[must_use]
+    pub fn at_root(root: PathBuf, role: GitRole) -> Self {
+        Self {
+            dir: Some(root.clone()),
+            repo: GitSlot::Ready(root),
+            role,
+            ..Self::default()
+        }
+    }
     /// Point this cache at a folder, forgetting everything if it is a different
     /// one. Answers whether anything was forgotten.
     pub fn retarget(&mut self, dir: &Path) -> bool {
@@ -1595,6 +1812,9 @@ impl GitCache {
         }
         *self = Self {
             dir: Some(dir.to_owned()),
+            // What a cache is *for* survives what it is *about*: a column that
+            // moves to another folder is still a page.
+            role: self.role,
             ..Self::default()
         };
         true
@@ -1684,6 +1904,39 @@ impl GitCache {
         Some(GitQuestion::Write { root, verb, paths })
     }
 
+    /// Which ref a checkout is in flight for (R10).
+    #[must_use]
+    pub fn checkout_pending(&self) -> Option<&str> {
+        self.checkout.as_deref()
+    }
+
+    /// Build the checkout, and dim the row it is about (R10).
+    ///
+    /// Returns `None` — and starts nothing — when there is no repository, or
+    /// when a checkout is already running. **One at a time and not one per
+    /// click**: two `git checkout` processes racing over one working tree is two
+    /// ways to end up somewhere neither of them was asked for, and the second
+    /// click is almost always the first one arriving twice.
+    ///
+    /// There is no confirmation in front of this. R10 ruled a checkout a
+    /// *browsing* verb: nothing is destroyed by standing somewhere else, and git
+    /// itself refuses the one case where something would be — which is the whole
+    /// of the failure design, printed in git's own words by the banner.
+    #[must_use]
+    pub fn begin_checkout(&mut self, target: String, detach: bool) -> Option<GitQuestion> {
+        let root = self.repo.ready()?.clone();
+        if self.checkout.is_some() {
+            return None;
+        }
+        self.write_error = None;
+        self.checkout = Some(target.clone());
+        Some(GitQuestion::Checkout {
+            root,
+            target,
+            detach,
+        })
+    }
+
     /// What this cache still needs to ask to be complete.
     ///
     /// The whole driver, in one place: probe first, and only once there is a
@@ -1707,7 +1960,8 @@ impl GitCache {
         if matches!(self.status, GitSlot::Idle) {
             questions.push(GitQuestion::Status { root: root.clone() });
         }
-        if matches!(self.branches, GitSlot::Idle) {
+        // The graph has no branch list on it, so it does not ask for one (R31).
+        if self.role == GitRole::Page && matches!(self.branches, GitSlot::Idle) {
             questions.push(GitQuestion::Branches { root: root.clone() });
         }
         if matches!(self.log, GitSlot::Idle) {
@@ -1776,11 +2030,14 @@ impl GitCache {
             // written by `begin_write` at the moment the question is built.
             // An expansion's own "already asked" bookkeeping is written by
             // `begin_commit_files`, at the moment the question is built.
+            // A checkout's own "already asked" bookkeeping is `checkout`,
+            // written by `begin_checkout` at the moment the question is built.
             GitQuestion::Log { .. }
             | GitQuestion::Diff { .. }
             | GitQuestion::Show { .. }
             | GitQuestion::CommitFiles { .. }
-            | GitQuestion::Write { .. } => {}
+            | GitQuestion::Write { .. }
+            | GitQuestion::Checkout { .. } => {}
         }
     }
 
@@ -1888,6 +2145,30 @@ impl GitCache {
                     return false;
                 }
                 *slot = GitSlot::take(outcome);
+                true
+            }
+            // **The checkout's receipt** (R10), and the asymmetry with a write's
+            // is the ruling: a checkout that succeeded changes the branch, the
+            // status and the whole history the page is drawn from, so everything
+            // is asked again; one that git refused changed *nothing at all* —
+            // that is what "refused" means here — so the page it was asked from
+            // is still true, and all that is added to it is git's sentence.
+            GitAnswer::Checkout {
+                root,
+                target,
+                outcome,
+            } => {
+                if self.root() != Some(root.as_path()) {
+                    return false;
+                }
+                if self.checkout.as_deref() != Some(target.as_str()) {
+                    return false;
+                }
+                self.checkout = None;
+                match outcome {
+                    Ok(()) => self.refresh(),
+                    Err(fault) => self.write_error = Some(write_refusal(&fault)),
+                }
                 true
             }
             // Diffs and file histories are documents, not column state: they
@@ -2100,7 +2381,7 @@ mod tests {
 
     /// `log --parents --topo-order -z` with this module's format: a merge commit
     /// with **two** parents, then two ordinary commits.
-    const LOG_Z: &[u8] = b"36d3949271716f6d8cd1395f6f5606245c08b914\x0036d3949\x00T\x002026-08-15T10:18:24-04:00\x00merge other\x005a18cfe67ca341203166040bfc8f954b899e275e 91d138a3d39811755e479ec386b450a8c8465302\x0091d138a3d39811755e479ec386b450a8c8465302\x0091d138a\x00T\x002026-08-15T10:17:57-04:00\x00other\x00a4499ab318aa13e08d780a084fe865fa8d18e558\x005a18cfe67ca341203166040bfc8f954b899e275e\x005a18cfe\x00T\x002026-08-15T10:18:07-04:00\x00ahead2\x00452220ba3687b9dcf3399962a69310de387b7af9\x00";
+    const LOG_Z: &[u8] = b"36d3949271716f6d8cd1395f6f5606245c08b914\x0036d3949\x00T\x002026-08-15T10:18:24-04:00\x00merge other\x005a18cfe67ca341203166040bfc8f954b899e275e 91d138a3d39811755e479ec386b450a8c8465302\x00HEAD -> refs/heads/main, refs/remotes/origin/main\x0091d138a3d39811755e479ec386b450a8c8465302\x0091d138a\x00T\x002026-08-15T10:17:57-04:00\x00other\x00a4499ab318aa13e08d780a084fe865fa8d18e558\x00refs/heads/other\x005a18cfe67ca341203166040bfc8f954b899e275e\x005a18cfe\x00T\x002026-08-15T10:18:07-04:00\x00ahead2\x00452220ba3687b9dcf3399962a69310de387b7af9\x00\x00";
 
     /// The instant the `BRANCHES` and `LOG_Z` recordings were made, so that every
     /// age in these tests is a fixed number rather than whatever the clock says
@@ -2441,6 +2722,16 @@ mod tests {
         assert_eq!(merge.committer_unix, 1_786_803_504);
         assert_eq!(merge.committer_offset, -4 * 3600);
         assert_eq!(merge.time_relative, "now");
+        // R22 — the pills, local only: the remote tracking ref beside `main` in
+        // the recording is dropped rather than drawn as a second branch.
+        assert_eq!(
+            merge.refs,
+            vec![GitRef {
+                name: "main".to_owned(),
+                head: true,
+            }]
+        );
+        assert_eq!(page.commits[2].refs, Vec::new(), "an undecorated commit");
 
         let root_ward = &page.commits[2];
         assert_eq!(root_ward.subject, "ahead2");
@@ -2487,7 +2778,7 @@ mod tests {
     fn a_staged_diff_and_an_unstaged_diff_are_not_the_same_question() {
         let (tx, rx) = mpsc::channel();
         let diff = |staged: bool| GitRequest {
-            host: seat(1),
+            host: GitHost::Column(seat(1)),
             question: GitQuestion::Diff {
                 root: PathBuf::from(r"D:\repo"),
                 path: "src/main.rs".to_owned(),
@@ -2515,7 +2806,7 @@ mod tests {
     fn two_pages_of_history_are_two_questions_and_one_page_asked_twice_is_one() {
         let (tx, rx) = mpsc::channel();
         let page = |skip: usize, count: usize| GitRequest {
-            host: seat(1),
+            host: GitHost::Column(seat(1)),
             question: GitQuestion::Log {
                 root: PathBuf::from(r"D:\repo"),
                 skip,
@@ -2538,7 +2829,7 @@ mod tests {
     fn two_columns_asking_the_same_thing_both_get_answered() {
         let (tx, rx) = mpsc::channel();
         let ask = |host: LeafId| GitRequest {
-            host,
+            host: GitHost::Column(host),
             question: GitQuestion::Status {
                 root: PathBuf::from(r"D:\repo"),
             },
@@ -2557,7 +2848,7 @@ mod tests {
     fn a_status_superseded_during_a_slow_read_is_never_run() {
         let (tx, rx) = mpsc::channel();
         let ask = |root: &str| GitRequest {
-            host: seat(1),
+            host: GitHost::Column(seat(1)),
             question: GitQuestion::Status {
                 root: PathBuf::from(root),
             },
@@ -2699,6 +2990,7 @@ mod tests {
                 GitAnswer::Show { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::CommitFiles { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Write { outcome, .. } => outcome.as_ref().err(),
+                GitAnswer::Checkout { outcome, .. } => outcome.as_ref().err(),
             };
             assert_eq!(carried, Some(&fault), "{question:?} came back unanswered");
         }
@@ -2849,6 +3141,154 @@ mod tests {
         );
     }
 
+    /// PIN (R10) — a checkout git refused changes nothing but the banner.
+    ///
+    /// The whole failure design of the verb, in one test. git is the thing that
+    /// decides a dirty tree may not be walked away from, and what comes back is
+    /// **git's own sentence**; the panel prints it and stays exactly where it
+    /// was. What must *not* happen is the two halves of the mock-up's version:
+    /// moving the branch on the click and hoping, or paraphrasing the refusal
+    /// into something friendlier than what the terminal beside it would print.
+    #[test]
+    fn a_refused_checkout_keeps_gits_words_and_leaves_the_branch_alone() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Page);
+        assert!(cache.accept(GitAnswer::Branches {
+            root: root.clone(),
+            outcome: Ok(parse_branches(b"main\0*\0\0\nside\0\0\0\n", RECORDED_AT)),
+        }));
+        assert!(cache.accept(GitAnswer::Status {
+            root: root.clone(),
+            outcome: Ok(parse_status(STATUS_Z)),
+        }));
+        assert!(cache.accept(GitAnswer::Log {
+            root: root.clone(),
+            skip: 0,
+            outcome: Ok(parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE)),
+        }));
+        assert!(
+            cache.pending_questions().is_empty(),
+            "a cache that has been told everything asks nothing"
+        );
+        let question = cache
+            .begin_checkout("side".to_owned(), false)
+            .expect("a repository that is known can be checked out of");
+        assert_eq!(
+            question,
+            GitQuestion::Checkout {
+                root: root.clone(),
+                target: "side".to_owned(),
+                detach: false,
+            }
+        );
+        // **One at a time**: the second click while the first is running is the
+        // first click arriving twice.
+        assert_eq!(cache.begin_checkout("side".to_owned(), false), None);
+        assert_eq!(cache.checkout_pending(), Some("side"));
+
+        let refusal =
+            "error: Your local changes to the following files would be overwritten by checkout:";
+        assert!(cache.accept(GitAnswer::Checkout {
+            root: root.clone(),
+            target: "side".to_owned(),
+            outcome: Err(GitFault::Refused(refusal.to_owned())),
+        }));
+        assert_eq!(cache.write_error(), Some(refusal), "gits own words");
+        assert_eq!(cache.checkout_pending(), None, "the row stops waiting");
+        // The list is untouched: the refusal changed nothing, so nothing is
+        // re-asked and `main` is still the branch.
+        let branches = cache.branches().ready().expect("still answered");
+        assert_eq!(branches[0].name, "main");
+        assert!(branches[0].is_head);
+        assert!(
+            cache.pending_questions().is_empty(),
+            "a refusal re-asks nothing"
+        );
+
+        // A checkout that *succeeded* invalidates everything, because after it
+        // the branch, the status and the history are all about somewhere else.
+        let question = cache
+            .begin_checkout("side".to_owned(), false)
+            .expect("the guard cleared with the receipt");
+        cache.mark_pending(&question);
+        assert!(cache.accept(GitAnswer::Checkout {
+            root,
+            target: "side".to_owned(),
+            outcome: Ok(()),
+        }));
+        assert_eq!(cache.write_error(), None);
+        assert_eq!(cache.pending_questions().len(), 3, "status, branches, log");
+    }
+
+    /// A detached checkout says so on the command line rather than hoping.
+    #[test]
+    fn a_detached_checkout_is_spelled_out() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Graph);
+        assert_eq!(
+            cache.begin_checkout("deadbeef".to_owned(), true),
+            Some(GitQuestion::Checkout {
+                root,
+                target: "deadbeef".to_owned(),
+                detach: true,
+            })
+        );
+        // And a graph never asks for a branch list it does not draw (R31).
+        assert!(
+            !cache
+                .pending_questions()
+                .iter()
+                .any(|question| matches!(question, GitQuestion::Branches { .. })),
+            "the graph asked for branches"
+        );
+    }
+
+    /// R22 — the pills a commit wears are the local branches and nothing else.
+    #[test]
+    fn a_decoration_keeps_local_branches_and_marks_the_head() {
+        assert_eq!(parse_decoration(""), Vec::new());
+        assert_eq!(
+            parse_decoration(
+                "HEAD -> refs/heads/main, refs/remotes/origin/main, refs/tags/v1.0, refs/heads/side"
+            ),
+            vec![
+                GitRef {
+                    name: "main".to_owned(),
+                    head: true,
+                },
+                GitRef {
+                    name: "side".to_owned(),
+                    head: false,
+                },
+            ],
+            "remotes and tags are v2's, and are dropped rather than flattened in"
+        );
+        // A detached head is a place you are standing with no branch behind it,
+        // and the graph is exactly the surface that should say so.
+        assert_eq!(
+            parse_decoration("HEAD, refs/heads/main"),
+            vec![
+                GitRef {
+                    name: "HEAD".to_owned(),
+                    head: true,
+                },
+                GitRef {
+                    name: "main".to_owned(),
+                    head: false,
+                },
+            ]
+        );
+        // A branch genuinely called `origin/main` is a local branch, and the
+        // full spelling is the only thing that can tell it from the remote one.
+        assert_eq!(
+            parse_decoration("refs/heads/origin/main"),
+            vec![GitRef {
+                name: "origin/main".to_owned(),
+                head: false,
+            }]
+        );
+    }
+
     /// PIN — "Load more" extends the list rather than replacing it, and a page
     /// that does not start where the list ends is not filed at all.
     #[test]
@@ -2870,6 +3310,7 @@ mod tests {
             committer_offset: 0,
             time_relative: "now".to_owned(),
             parents: Vec::new(),
+            refs: Vec::new(),
         };
         cache.accept(GitAnswer::Log {
             root: root.clone(),

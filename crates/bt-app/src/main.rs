@@ -16,6 +16,7 @@ mod file_peek;
 mod files;
 mod float;
 mod git;
+mod git_graph;
 mod git_panel;
 mod input;
 mod marks;
@@ -3096,6 +3097,19 @@ struct TabState {
     /// three-writers arrangement `DirCache::scroll_px` has, and for the report
     /// that ruling came from.
     git_scroll: BTreeMap<SeatId, f32>,
+    /// The commit graph documents this tab has open, by repository root (G-4).
+    ///
+    /// **Keyed by the repository and not by the seat that opened it**, which is
+    /// [`git::GitHost::Graph`]'s own ruling: the graph is a document about a
+    /// repository, there is one of it however many columns are pointed at that
+    /// repository, and it must not go blank because the column it was launched
+    /// from was closed. Each entry carries its own cache, so the graph pages its
+    /// own history — a reader walking back a thousand commits in the graph does
+    /// not make the panel beside it a thousand commits long.
+    git_graphs: BTreeMap<std::path::PathBuf, git_graph::GraphState>,
+    /// How far each preview seat's graph is scrolled, and how wide its lane
+    /// column is being held (R18). Both are view state and neither is persisted.
+    git_graph_view: BTreeMap<SeatId, GraphView>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
     ///
     /// **Always a Terminal seat in this build**, which is what lets `sessions`
@@ -3372,6 +3386,35 @@ struct Runtime {
     /// captured, projected, decorated and recomposed to say the same thing it
     /// said 16ms ago.
     chrome_present_pending: bool,
+    /// A pane that is **not** the focused one has said something that has not
+    /// been through a compositor pass.
+    ///
+    /// **The window's content-dirty bit, as against the focused leaf's.**
+    /// [`Self::publish_frame_inner`] composes exactly one pane — the focused one
+    /// — and its unchanged-frame gate compares exactly that picture. Every other
+    /// pane is composed nowhere but inside [`Self::redraw`], and `redraw` runs
+    /// only when a frame reached the slot; so a sibling's new bytes, judged by
+    /// the focused pane's unchanged picture, were dropped and had no second road
+    /// to the screen. Until the animation ticks stopped recomposing the window
+    /// they were carried there anyway, by the caret's blink and the strip's ring,
+    /// at whatever rate those happened to be running; once a tick began
+    /// re-presenting the picture on the glass instead
+    /// ([`chrome_tick_reuses_picture`]) they were not carried at all, and a wheel
+    /// forwarded into an unfocused alternate screen moved that pane only when
+    /// something else — a keystroke, a pointer move, the focused shell speaking —
+    /// published a frame of its own. Measured on two panes running `less`: with
+    /// the pane focused, 20 notches out of 20 reached the glass at a mean of
+    /// 16.6ms; with the same pane unfocused, 1 out of 20, the other nineteen
+    /// answered by `skip=unchanged` against an unchanging focused-pane digest.
+    ///
+    /// Set where a sibling is heard ([`Self::drain_pty`],
+    /// [`Self::finish_synchronized_update_if_due`]); cleared where the window is
+    /// composed and presented ([`Self::redraw`]), because that pass rebuilds
+    /// every drawable pane from its own projection. Cleared on the present as one
+    /// bit rather than pane by pane, so that a pane the layout declines to draw —
+    /// which is therefore a pane with nothing on the glass to owe — can never
+    /// leave the window in a debt nothing can pay.
+    unpainted_pane_output: bool,
     /// How many terminal frames this window has composed, for the trace and for
     /// the tests that count them. Monotonic; never read by the app itself.
     composed_terminal_frames: u64,
@@ -3818,6 +3861,11 @@ struct Runtime {
     /// rather than by two functions agreeing. It is also what lets a press know
     /// *which* row it landed on without rebuilding the page under the pointer.
     git_pages_shown: BTreeMap<SeatId, git_panel::GitPanelContent>,
+    /// The graph each preview seat drew this frame — [`Self::git_pages_shown`]'s
+    /// twin, kept for the same `&self` hit test.
+    git_graphs_shown: BTreeMap<SeatId, git_graph::GraphContent>,
+    /// Double clicks on graph rows, paired by commit (R23).
+    git_graph_clicks: FilesRowClicks,
     /// How wide each column's `Files | Git` switch is drawn, for the hit test.
     ///
     /// The third field of this family, and it exists for the reason the two above
@@ -5832,6 +5880,25 @@ impl TabClicks {
     fn interrupt(&mut self) {
         self.last = None;
     }
+}
+
+/// What one preview seat's graph is *looking at* — never what it says.
+///
+/// **Not persisted, and the ruling is `git_expanded`'s** (R1): an expansion is a
+/// glance, and a session restored with one commit's file list hanging open under
+/// a history that has since moved on is a window remembering something the
+/// repository does not. The scroll goes with it for the same reason — a position
+/// in a list of commits means nothing once the list is not the same list.
+#[derive(Clone, Debug, Default)]
+struct GraphView {
+    /// Which repository this seat's graph is about, so that a seat re-pointed at
+    /// another document does not carry the last one's scroll into it.
+    root: std::path::PathBuf,
+    scroll_px: f32,
+    /// The one open commit (R15's accordion, in the graph's seat).
+    expanded: Option<String>,
+    /// R18's hysteresis, carried frame to frame.
+    lane_hold: git_graph::LaneWidthHold,
 }
 
 /// A files tree's own click counter — [`TabClicks`] for rows.
@@ -11056,6 +11123,8 @@ fn assemble_tab_state(
         files,
         file_trees: BTreeMap::new(),
         git_scroll: BTreeMap::new(),
+        git_graphs: BTreeMap::new(),
+        git_graph_view: BTreeMap::new(),
         git_trees: BTreeMap::new(),
         focused_leaf,
         pinned: seed.pinned,
@@ -11495,6 +11564,15 @@ fn absorb_tab_into_layout(
 struct DrainOutcome {
     /// Bytes reached the screen.
     arrived: bool,
+    /// Bytes reached the screen of a leaf that is **not** the one holding this
+    /// tab's keyboard.
+    ///
+    /// Split out of [`Self::arrived`] because the frame path can only ever
+    /// answer for the focused leaf: [`Runtime::publish_frame_inner`] composes
+    /// that leaf and compares *that* leaf's picture, so "nothing changed" is a
+    /// sentence about one pane out of N. A sibling that has spoken needs its own
+    /// reason to reach the glass, and this is where that reason is heard.
+    arrived_off_focus: bool,
     /// Something the name stack reads changed — see [`LeafSession::name_evidence`].
     renamed: bool,
     /// The shell reported a different working directory, which is **durable**
@@ -11505,6 +11583,7 @@ struct DrainOutcome {
 impl DrainOutcome {
     fn merge(&mut self, other: Self) {
         self.arrived |= other.arrived;
+        self.arrived_off_focus |= other.arrived_off_focus;
         self.renamed |= other.renamed;
         self.moved |= other.moved;
     }
@@ -11566,6 +11645,10 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
     let name_after = leaf.name_evidence();
     Ok(DrainOutcome {
         arrived: changed,
+        // A leaf cannot know whether it is the one the frame path will compose;
+        // that is a fact about the tab, and [`drain_tab_pty`] is where it is
+        // known and where this is filled in.
+        arrived_off_focus: false,
         renamed: name_after != name_before,
         moved: name_after.1 != name_before.1,
     })
@@ -11665,9 +11748,15 @@ fn git_document_answer(
 /// fills its pipe and blocks the shell writing into it. The tab's answer is the
 /// union of its leaves' — anything arrived anywhere, any title moved anywhere.
 fn drain_tab_pty(tab: &mut TabState) -> Result<DrainOutcome> {
+    // Copied before the loop, which then holds the tab mutably. It is the one
+    // fact this loop needs that a leaf cannot supply about itself: whether the
+    // pane it just heard is the pane the frame path is going to compose.
+    let focused = tab.focused_leaf;
     let mut outcome = DrainOutcome::default();
-    for (_, leaf) in tab.leaves_mut() {
-        outcome.merge(drain_leaf_pty(leaf)?);
+    for (seat, leaf) in tab.leaves_mut() {
+        let leaf_outcome = drain_leaf_pty(leaf)?;
+        outcome.arrived_off_focus |= leaf_outcome.arrived && *seat != focused;
+        outcome.merge(leaf_outcome);
     }
     Ok(outcome)
 }
@@ -11946,6 +12035,7 @@ impl Runtime {
             terminal_content_revision: 0,
             presented_picture_revision: 0,
             chrome_present_pending: false,
+            unpainted_pane_output: false,
             composed_terminal_frames: 0,
             strip_animation_ticked_at: None,
             preedit: None,
@@ -12032,6 +12122,8 @@ impl Runtime {
             revealed_foot: None,
             files_name_widths: BTreeMap::new(),
             git_pages_shown: BTreeMap::new(),
+            git_graphs_shown: BTreeMap::new(),
+            git_graph_clicks: FilesRowClicks::default(),
             files_view_widths: BTreeMap::new(),
             files_notice: None,
             files_focus: FilesKeyboardFocus::default(),
@@ -12973,6 +13065,9 @@ impl Runtime {
         // press then lands on the row that was drawn, because it *is* the row
         // that was drawn.
         self.git_pages_shown = git_pages.clone();
+        let git_graphs = self.git_graphs(scale);
+        // Kept for the hit test, for `git_pages_shown`'s reason exactly.
+        self.git_graphs_shown = git_graphs.clone();
         self.files_view_widths = files_views
             .iter()
             .map(|(seat, content)| (*seat, content.widths))
@@ -13176,6 +13271,7 @@ impl Runtime {
                 files_trees: &files_trees,
                 files_views: &files_views,
                 git_pages: &git_pages,
+                git_graphs: &git_graphs,
                 preview_messages: &preview_messages,
                 preview_feet: &preview_feet,
                 preview_heads: &preview_heads,
@@ -18123,7 +18219,15 @@ impl Runtime {
                     layout,
                 }
             }
-            preview::PreviewView::Image | preview::PreviewView::None => PreviewDocument::Empty,
+            // **The graph's body is empty on purpose**, and it is the one place
+            // in this match where that is a statement rather than an absence:
+            // the picture is drawn by the chrome into this pane's own body
+            // rectangle, so a `PreviewDocument` that put anything here would put
+            // it *over* the graph. An image is the same arrangement one surface
+            // along, and `None` is the card.
+            preview::PreviewView::Image
+            | preview::PreviewView::Graph
+            | preview::PreviewView::None => PreviewDocument::Empty,
         };
         self.preview_pane_mut(surface).doc = doc;
     }
@@ -19196,10 +19300,13 @@ impl Runtime {
         let composed = compose_preedit(&terminal_frame, self.shell_preedit())
             .context("reject non-rectangular frame before IME composition")?;
         if skip_unchanged
-            && pty_frame_is_unchanged(
-                self.pending_frames.pending_frame(),
-                self.last_presented_frame.as_ref(),
-                &composed.frame,
+            && pty_drain_says_nothing_new(
+                pty_frame_is_unchanged(
+                    self.pending_frames.pending_frame(),
+                    self.last_presented_frame.as_ref(),
+                    &composed.frame,
+                ),
+                self.unpainted_pane_output,
             )
         {
             if self.trace_perf {
@@ -19304,12 +19411,22 @@ impl Runtime {
             match self.git_worker.responses.try_recv() {
                 Ok(response) => {
                     let host = response.host;
-                    let Some(index) = self.tabs.iter().position(|tab| tab.id == host.tab) else {
+                    let Some(index) = self.tabs.iter().position(|tab| tab.id == host.tab()) else {
                         continue;
                     };
                     let tab = &mut self.tabs[index];
-                    if !tab.files.contains_key(&host.seat) {
-                        continue;
+                    // **The asker has to still be there.** A column that closed
+                    // and a graph that was shut are the same cancellation,
+                    // arriving as a dropped answer — and each says so in its own
+                    // map, because each is addressed in its own way.
+                    match &host {
+                        git::GitHost::Column(leaf) if !tab.files.contains_key(&leaf.seat) => {
+                            continue;
+                        }
+                        git::GitHost::Graph { root, .. } if !tab.git_graphs.contains_key(root) => {
+                            continue;
+                        }
+                        _ => {}
                     }
                     // **The two answers that are documents go to the pool**
                     // (G-3), which is a tab's and not a column's: a diff opened
@@ -19339,10 +19456,54 @@ impl Runtime {
                         }
                         Err(answer) => answer,
                     };
-                    let Some(cache) = tab.git_trees.get_mut(&host.seat) else {
-                        continue;
+                    // **A checkout that went through is about the whole
+                    // repository, not about the surface that asked for it.**
+                    // After it, every branch head, every status and every
+                    // history of that repository is about somewhere else — and
+                    // a panel still drawing the old branch beside a graph
+                    // drawing the new one is exactly the disagreement this
+                    // subsystem was built to prevent. Noted before the answer is
+                    // filed, because filing moves it.
+                    let moved = match &answer {
+                        git::GitAnswer::Checkout {
+                            root,
+                            outcome: Ok(()),
+                            ..
+                        } => Some(root.clone()),
+                        _ => None,
                     };
-                    let filed = cache.accept(answer);
+                    let filed = match &host {
+                        git::GitHost::Column(leaf) => tab
+                            .git_trees
+                            .get_mut(&leaf.seat)
+                            .is_some_and(|cache| cache.accept(answer)),
+                        git::GitHost::Graph { root, .. } => match tab.git_graphs.get_mut(root) {
+                            Some(state) => {
+                                let filed = state.cache.accept(answer);
+                                // The lanes are a reading of the log, so they are
+                                // brought level with it the moment it moves — a
+                                // page appended, or a checkout that replaced the
+                                // history altogether.
+                                if filed {
+                                    state.sync();
+                                }
+                                filed
+                            }
+                            None => false,
+                        },
+                    };
+                    if let Some(root) = moved.filter(|_| filed) {
+                        for cache in tab.git_trees.values_mut() {
+                            if cache.root() == Some(root.as_path()) {
+                                cache.refresh();
+                            }
+                        }
+                        if let Some(state) = tab.git_graphs.get_mut(&root) {
+                            state.cache.refresh();
+                            // The lanes are a reading of the history that was.
+                            state.invalidate();
+                        }
+                    }
                     changed |= filed && index == self.active_tab;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -19386,7 +19547,7 @@ impl Runtime {
         }
         for question in questions {
             if !self.git_worker.request(git::GitRequest {
-                host: LeafId { tab: tab_id, seat },
+                host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 question,
             }) {
                 self.disable_git_worker();
@@ -19689,6 +19850,9 @@ impl Runtime {
                 renamed_from,
             } => self.open_git_document(seat, source, name, renamed_from),
             git_panel::GitRowOpen::Expand { hash } => self.expand_commit(seat, &hash),
+            git_panel::GitRowOpen::Checkout { target, detach } => {
+                self.checkout_from_column(seat, target, detach)
+            }
         }
     }
 
@@ -19749,7 +19913,7 @@ impl Runtime {
         let active = self.active_tab;
         let tab_id = self.tabs[active].id;
         if !self.git_worker.request(git::GitRequest {
-            host: LeafId { tab: tab_id, seat },
+            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
             self.disable_git_worker();
@@ -19776,7 +19940,7 @@ impl Runtime {
             && let Some(cache) = self.tabs[active].git_trees.get_mut(&seat)
             && let Some(question) = cache.begin_commit_files(&hash)
             && !self.git_worker.request(git::GitRequest {
-                host: LeafId { tab: tab_id, seat },
+                host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 question,
             })
         {
@@ -19802,8 +19966,16 @@ impl Runtime {
         let Some(row) = page.rows.get(index) else {
             return Ok(());
         };
-        if act == git_panel::GitAct::LoadMore {
-            return self.load_more_commits(seat);
+        // **Two of the verbs are about no file at all** and are answered before
+        // a pathspec is gathered, because there is none to gather: one asks the
+        // repository for another page of history, the other puts a document on
+        // the preview seat. Both still go through `press_outcome`, so the
+        // judgement stays in one place even for the two verbs that need nothing
+        // from the row they were pressed on.
+        match git_panel::press_outcome(act, false) {
+            git_panel::GitPress::MoreCommits => return self.load_more_commits(seat),
+            git_panel::GitPress::Graph => return self.open_git_graph(seat),
+            git_panel::GitPress::Write(_) | git_panel::GitPress::Gate => {}
         }
         // Which files this verb is about: one row's, or a whole group's. The
         // group's list is read off the page that is on screen, which is the same
@@ -19852,6 +20024,7 @@ impl Runtime {
             }
             git_panel::GitPress::Write(verb) => self.write_to_repository(seat, verb, paths),
             git_panel::GitPress::MoreCommits => self.load_more_commits(seat),
+            git_panel::GitPress::Graph => self.open_git_graph(seat),
         }
     }
 
@@ -19871,7 +20044,7 @@ impl Runtime {
             return Ok(());
         };
         if !self.git_worker.request(git::GitRequest {
-            host: LeafId { tab: tab_id, seat },
+            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
             self.disable_git_worker();
@@ -19901,10 +20074,409 @@ impl Runtime {
             return Ok(());
         };
         if !self.git_worker.request(git::GitRequest {
-            host: LeafId { tab: tab_id, seat },
+            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
             self.disable_git_worker();
+        }
+        Ok(())
+    }
+
+    /// Put the whole commit graph on the preview seat (G24/G100).
+    ///
+    /// **The document is the repository's, not the column's.** The column is
+    /// only where the press happened; what is opened is keyed on the root it
+    /// found, so pressing `Graph` in two columns rooted in one repository is
+    /// pressing it twice on one document — which is what the preview pool's own
+    /// single-instance contract already means by "the same buffer".
+    fn open_git_graph(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.active_tab;
+        let Some(root) = self.tabs[active]
+            .git_trees
+            .get(&seat)
+            .and_then(git::GitCache::root)
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        let source = preview::PreviewSource::GitGraph { root: root.clone() };
+        let name = root.file_name().map_or_else(
+            || root.to_string_lossy().into_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        // The state before the seat, so the first frame after the seat is taken
+        // already has a cache to ask its questions from.
+        self.tabs[active]
+            .git_graphs
+            .entry(root)
+            .or_insert_with_key(|root| git_graph::GraphState::new(root.clone()));
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_source_on(surface, source, name)?;
+        Ok(())
+    }
+
+    /// Ask every open graph what it still needs.
+    ///
+    /// [`Self::ask_git_for_column`]'s twin, and idempotent for its reason: the
+    /// plan is derived from the cache rather than remembered, so a slot already
+    /// in flight asks for nothing however often this is called.
+    fn ask_git_for_graphs(&mut self) {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let roots: Vec<std::path::PathBuf> = self.tabs[active].git_graphs.keys().cloned().collect();
+        for root in roots {
+            let Some(state) = self.tabs[active].git_graphs.get_mut(&root) else {
+                continue;
+            };
+            let questions = state.cache.pending_questions();
+            for question in &questions {
+                state.cache.mark_pending(question);
+            }
+            for question in questions {
+                if !self.git_worker.request(git::GitRequest {
+                    host: git::GitHost::Graph {
+                        tab: tab_id,
+                        root: root.clone(),
+                    },
+                    question,
+                }) {
+                    self.disable_git_worker();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// One more page of history for a graph (R23's auto-paging).
+    fn extend_graph(&mut self, root: &Path) {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(state) = self.tabs[active].git_graphs.get(root) else {
+            return;
+        };
+        let Some(question) = state.cache.more_commits() else {
+            return;
+        };
+        // **The guard against asking every frame** is the same one `Load more`
+        // relies on: `GitCache::accept` files a later page only when it starts
+        // exactly where the list ends, so a duplicate in flight is dropped
+        // rather than appended. What stops the flood is that the list is one
+        // page longer the moment the first answer lands, and `wants_more` then
+        // asks about a further page rather than the same one.
+        if !self.git_worker.request(git::GitRequest {
+            host: git::GitHost::Graph {
+                tab: tab_id,
+                root: root.to_owned(),
+            },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+    }
+
+    /// Which graph each preview seat is drawing, and how far down it is.
+    fn git_graphs(&mut self, scale: f32) -> BTreeMap<SeatId, git_graph::GraphContent> {
+        let active = self.active_tab;
+        let showing: Vec<(SeatId, std::path::PathBuf)> = self
+            .seats
+            .preview_seats()
+            .into_iter()
+            .filter_map(|seat| {
+                let source = self
+                    .preview_buffer_on(PreviewSurface::Seat(seat))?
+                    .source
+                    .clone();
+                match source {
+                    preview::PreviewSource::GitGraph { root } => Some((seat, root)),
+                    _ => None,
+                }
+            })
+            .collect();
+        // A seat that has stopped showing a graph keeps no scroll and no open
+        // commit: it is not looking at that list any more.
+        self.tabs[active]
+            .git_graph_view
+            .retain(|seat, _| showing.iter().any(|(shown, _)| shown == seat));
+        if showing.is_empty() {
+            return BTreeMap::new();
+        }
+        let mut pages = BTreeMap::new();
+        let mut extend: Vec<std::path::PathBuf> = Vec::new();
+        for (seat, root) in showing {
+            let Some(body) =
+                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
+            else {
+                continue;
+            };
+            // The state may not exist yet on the very first frame after a
+            // restore put a graph buffer back on a seat; making it here is the
+            // same "vivify and ask" the columns do.
+            self.tabs[active]
+                .git_graphs
+                .entry(root.clone())
+                .or_insert_with_key(|root| git_graph::GraphState::new(root.clone()));
+            let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+            if view.root != root {
+                *view = GraphView {
+                    root: root.clone(),
+                    ..GraphView::default()
+                };
+            }
+            let (scroll, expanded, hold) = (view.scroll_px, view.expanded.clone(), view.lane_hold);
+            let Some(state) = self.tabs[active].git_graphs.get(&root) else {
+                continue;
+            };
+            let state = state.clone();
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let mut content = git_graph::build(
+                &state,
+                expanded.as_deref(),
+                body,
+                scroll,
+                hold,
+                scale,
+                &mut measure,
+            );
+            // R2 乙案 again: the painter believes the stored scroll, so a list
+            // that got shorter — a checkout that replaced the history — is
+            // healed here rather than by the layout disagreeing with the number.
+            let healed = git_graph::clamp_graph_scroll(body, &content, content.scroll_px, scale);
+            content.scroll_px = healed;
+            if content.wants_more {
+                extend.push(root.clone());
+            }
+            let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+            view.scroll_px = healed;
+            view.lane_hold = git_graph::LaneWidthHold {
+                width: content.lane_width,
+                until: content.lane_width_until,
+            };
+            pages.insert(seat, content);
+        }
+        for root in extend {
+            self.extend_graph(&root);
+        }
+        self.ask_git_for_graphs();
+        pages
+    }
+
+    /// A graph row's body, pressed — one click.
+    fn press_graph_row(&mut self, seat: SeatId, index: usize, now: Instant) -> Result<()> {
+        let active = self.active_tab;
+        let Some(root) = self.tabs[active]
+            .git_graph_view
+            .get(&seat)
+            .map(|view| view.root.clone())
+        else {
+            return Ok(());
+        };
+        let Some(row) = self
+            .git_graphs_shown
+            .get(&seat)
+            .and_then(|page| page.rows.iter().find(|row| row.index() == index))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        // **The double click is synthesised, not read** — winit has no click
+        // count and this window has never asked for one. The identity paired on
+        // is the row's own subject (a commit's hash, a file's path), never its
+        // index, for [`FilesRowClicks`]'s reason: a page appended between the two
+        // clicks moves nothing above the pointer here, but an accordion opened by
+        // the *first* click moves everything below it, and a pair keyed on the
+        // index would then be a pair keyed on two different rows.
+        let key = match &row {
+            git_graph::GraphViewRow::Commit(commit) => commit.hash.clone(),
+            git_graph::GraphViewRow::File(file) => format!("{}\u{1f}{}", file.hash, file.path),
+        };
+        let double = self.git_graph_clicks.register(seat, &key, now) == TabClick::Double;
+        let open = if double {
+            git_graph::row_double_open(&row).or_else(|| git_graph::row_open(&row, &root))
+        } else {
+            git_graph::row_open(&row, &root)
+        };
+        let Some(open) = open else { return Ok(()) };
+        match open {
+            git_panel::GitRowOpen::Document {
+                source,
+                name,
+                renamed_from,
+            } => self.open_git_document_for_graph(&root, source, name, renamed_from),
+            git_panel::GitRowOpen::Expand { hash } => self.expand_graph_commit(seat, &root, &hash),
+            git_panel::GitRowOpen::Checkout { target, detach } => {
+                self.checkout_in_graph(&root, target, detach)
+            }
+        }
+    }
+
+    /// Turn one commit's file list over, in the graph (R15).
+    fn expand_graph_commit(&mut self, seat: SeatId, root: &Path, hash: &str) -> Result<()> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let opened = {
+            let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+            let opened = git_graph::toggled_expansion(view.expanded.as_deref(), hash);
+            view.expanded.clone_from(&opened);
+            opened
+        };
+        if let Some(hash) = opened
+            && let Some(state) = self.tabs[active].git_graphs.get_mut(root)
+            && let Some(question) = state.cache.begin_commit_files(&hash)
+            && !self.git_worker.request(git::GitRequest {
+                host: git::GitHost::Graph {
+                    tab: tab_id,
+                    root: root.to_owned(),
+                },
+                question,
+            })
+        {
+            self.disable_git_worker();
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// A document opened from the graph rather than from a column.
+    ///
+    /// The same two steps [`Self::open_git_document`] takes; what differs is
+    /// only which cache the question is addressed to, because the answer has to
+    /// come home to the graph's host.
+    fn open_git_document_for_graph(
+        &mut self,
+        root: &Path,
+        source: preview::PreviewSource,
+        name: String,
+        renamed_from: Option<String>,
+    ) -> Result<()> {
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_source_on(surface, source.clone(), name)?;
+        let unread = self
+            .preview_pool
+            .get(&source)
+            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+        if !unread {
+            return Ok(());
+        }
+        let preview::PreviewSource::GitShow {
+            root: show_root,
+            hash,
+            path,
+        } = &source
+        else {
+            return Ok(());
+        };
+        let question = git::GitQuestion::Show {
+            root: show_root.clone(),
+            hash: hash.clone(),
+            path: path.clone(),
+            renamed_from,
+        };
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        if !self.git_worker.request(git::GitRequest {
+            host: git::GitHost::Graph {
+                tab: tab_id,
+                root: root.to_owned(),
+            },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+        Ok(())
+    }
+
+    /// **Stand somewhere else** (R10) — from a branch row.
+    fn checkout_from_column(&mut self, seat: SeatId, target: String, detach: bool) -> Result<()> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(cache) = self.tabs[active].git_trees.get_mut(&seat) else {
+            return Ok(());
+        };
+        let Some(question) = cache.begin_checkout(target, detach) else {
+            return Ok(());
+        };
+        if !self.git_worker.request(git::GitRequest {
+            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            question,
+        }) {
+            self.disable_git_worker();
+            return Ok(());
+        }
+        // The rows dim now, so the frame that shows them dimmed is this one.
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
+    }
+
+    /// The same, from a double click in the graph — a detached checkout.
+    ///
+    /// **Every column on this repository is invalidated too**, and that is not
+    /// tidiness: after this the branch head, the status and the history are
+    /// about a different place, and a panel still drawing the old branch beside
+    /// a graph drawing the new one is the one disagreement this whole subsystem
+    /// was built to prevent.
+    fn checkout_in_graph(&mut self, root: &Path, target: String, detach: bool) -> Result<()> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(state) = self.tabs[active].git_graphs.get_mut(root) else {
+            return Ok(());
+        };
+        let Some(question) = state.cache.begin_checkout(target, detach) else {
+            return Ok(());
+        };
+        if !self.git_worker.request(git::GitRequest {
+            host: git::GitHost::Graph {
+                tab: tab_id,
+                root: root.to_owned(),
+            },
+            question,
+        }) {
+            self.disable_git_worker();
+            return Ok(());
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
+    }
+
+    /// A notch over a graph (R23's virtual list scrolls like every other list).
+    fn scroll_git_graph(
+        &mut self,
+        seat: SeatId,
+        body: [f32; 4],
+        delta: MouseScrollDelta,
+    ) -> Result<()> {
+        let active = self.active_tab;
+        let Some(content) = self.git_graphs_shown.get(&seat) else {
+            return Ok(());
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let extent = (content.total_rows.max(1)) as f32;
+        let travel = self.vertical_wheel_travel(delta, extent);
+        let stored = self.tabs[active]
+            .git_graph_view
+            .get(&seat)
+            .map_or(0.0, |view| view.scroll_px);
+        let wanted = git_graph::clamp_graph_scroll(body, content, stored - travel, scale);
+        if (wanted - stored).abs() < f32::EPSILON {
+            return Ok(());
+        }
+        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+            view.scroll_px = wanted;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
         }
         Ok(())
     }
@@ -24481,6 +25053,19 @@ impl Runtime {
             },
             !force,
         )?;
+        // **The hold belongs to the focused leaf; the panes beside it hold
+        // nothing.** `publish_frame_inner` returns before the slot while a
+        // presentation hold stands, so a sibling that has just spoken would be
+        // frozen behind a decision that was never about it. Same shape as the
+        // wheel bug [`Self::repaint_pane_change`] was written for, and the same
+        // repair: run the compositor over the picture already on the glass, which
+        // rebuilds every unfocused pane from its own projection.
+        if !published && self.unpainted_pane_output {
+            self.represent_on_screen_frame(FrameTrigger {
+                occurred_at: now,
+                source: FrameSource::Expose,
+            })?;
+        }
         let sync_open = self.session.synchronized_update_deadline().is_some();
         if published || !sync_open {
             self.pending_keyboard_at = None;
@@ -24542,16 +25127,23 @@ impl Runtime {
 
     fn drain_pty(&mut self) -> Result<()> {
         let mut active_changed = false;
+        let mut active_changed_off_focus = false;
         let mut chrome_changed = false;
         let mut moved = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let outcome = drain_tab_pty(tab)?;
             if index == self.active_tab {
                 active_changed = outcome.arrived;
+                active_changed_off_focus = outcome.arrived_off_focus;
             }
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
         }
+        // Raised before anything below can publish, because it is what that
+        // publish's own gate reads. Only the tab on screen: a pane of a tab
+        // nobody is looking at is not painted by any pass, and its backlog is
+        // already kept by the ledger the strip's unread dot is drawn from.
+        self.unpainted_pane_output |= active_changed_off_focus;
         // **A shell that moved is a session that changed.** `cwd` is a field of
         // every terminal leaf in `session.json`, and until now nothing about a
         // shell reporting a new one was a reason to write the file: the value on
@@ -24590,12 +25182,14 @@ impl Runtime {
 
     fn finish_synchronized_update_if_due(&mut self, now: Instant) -> Result<()> {
         let mut active_finished = false;
+        let mut active_finished_off_focus = false;
         let mut chrome_changed = false;
         let active = self.active_tab;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let focused = tab.focused_leaf;
             // Per leaf: a synchronized update is a property of one screen, and
             // two shells in one tab time out independently.
-            for (_, leaf) in tab.leaves_mut() {
+            for (seat, leaf) in tab.leaves_mut() {
                 let due = leaf
                     .session
                     .synchronized_update_deadline()
@@ -24609,9 +25203,19 @@ impl Runtime {
                     .finish_synchronized_update(now)
                     .context("finish timed-out DEC 2026 synchronized update")?;
                 chrome_changed |= leaf.name_evidence() != name_before;
-                active_finished |= index == active && finished;
+                if index == active && finished {
+                    active_finished = true;
+                    // **A screen that changed with no byte arriving.** The block
+                    // this closes was fed to the parser turns ago and withheld;
+                    // releasing it moves cells without anything passing through
+                    // the drain, so the drain's own account of who has spoken
+                    // never hears it. For a sibling pane that is the only notice
+                    // there is.
+                    active_finished_off_focus |= *seat != focused;
+                }
             }
         }
+        self.unpainted_pane_output |= active_finished_off_focus;
         if chrome_changed {
             self.window.set_title(&self.display_title());
             self.refresh_chrome();
@@ -26113,6 +26717,21 @@ impl Runtime {
         if self.publish_frame_inner(trigger, false)? || seat == self.focused_leaf {
             return Ok(());
         }
+        self.represent_on_screen_frame(trigger)
+    }
+
+    /// Put the frame that is **already on the glass** back into the presentation
+    /// slot, so that [`Self::redraw`] runs and rebuilds every *other* pane from
+    /// that pane's own projection.
+    ///
+    /// The focused pane's pixels are unchanged and stay unchanged — whatever
+    /// declined to compose a new picture for it is honoured to the letter — but
+    /// the compositor pass is the only thing an unfocused pane is ever drawn by,
+    /// and it runs for a frame in the slot and for nothing else. So this is how a
+    /// pane that is not the keyboard's gets to the screen when the keyboard's
+    /// pane has nothing to say: not by inventing a picture for the held pane, but
+    /// by running the pass its neighbours are painted in.
+    fn represent_on_screen_frame(&mut self, trigger: FrameTrigger) -> Result<()> {
         // Not while a resize present is outstanding: that gate admits only the
         // newly projected grid, and the frame on screen is the previous one.
         if self.pending_resize_present.is_none()
@@ -26121,7 +26740,7 @@ impl Runtime {
         {
             self.pending_frames
                 .publish(frame, trigger)
-                .context("re-present the on-screen frame for an unfocused pane's scroll")?;
+                .context("re-present the on-screen frame for an unfocused pane")?;
         }
         self.window.request_redraw();
         Ok(())
@@ -27017,6 +27636,20 @@ impl Runtime {
             seats::hit_git_panel(
                 &self.seat_layout,
                 &self.git_pages_shown,
+                scale,
+                position.x,
+                position.y,
+            )
+        })
+        // The graph, in the preview seat's own body. Asked here rather than
+        // among the preview pane's controls because it *is* the body: nothing
+        // else claims that rectangle while a graph is on it, and the document
+        // underneath has no text to place a caret in.
+        .or_else(|| {
+            seats::hit_git_graph(
+                &self.seats,
+                &self.seat_layout,
+                &self.git_graphs_shown,
                 scale,
                 position.x,
                 position.y,
@@ -28627,6 +29260,11 @@ impl Runtime {
                 self.files_row_clicks.interrupt();
                 self.press_git_row(seat, index)?;
             }
+            seats::ChromeTarget::GitGraphRow { seat, index } => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.press_graph_row(seat, index, Instant::now())?;
+            }
             seats::ChromeTarget::GitAct { seat, index, act } => {
                 self.tab_clicks.interrupt();
                 self.files_row_clicks.interrupt();
@@ -29669,6 +30307,17 @@ impl Runtime {
                 return self.scroll_git_panel(seat, body, delta);
             }
             return self.scroll_files_tree(seat, body, delta);
+        }
+        // A graph is a list before it is a document, and it scrolls like one.
+        // Asked before the preview body's own branch because that branch's guard
+        // — "the buffer has content" — is false for a graph by construction:
+        // there is no text in it to have been read.
+        if let Some(position) = self.pointer_position
+            && let Some((surface, body)) = self.preview_surface_at(position)
+            && let PreviewSurface::Seat(seat) = surface
+            && self.git_graphs_shown.contains_key(&seat)
+        {
+            return self.scroll_git_graph(seat, body, delta);
         }
         // `.preview-body { overflow: auto }` (mock-up 597) — and the same
         // sentence again. Asked here, beside the tree's, because it is the same
@@ -30970,6 +31619,11 @@ impl Runtime {
                 // is the equality [`chrome_tick_reuses_picture`] reads as its
                 // licence to answer the next animation tick from the screen.
                 self.presented_picture_revision = self.terminal_content_revision;
+                // And every pane that could be drawn was just projected afresh
+                // and put on the glass with it, so nothing is owed. See
+                // [`Self::unpainted_pane_output`] for why this is one bit
+                // squared here rather than a debt kept per pane.
+                self.unpainted_pane_output = false;
                 if self.window_shown && !self.first_visible_present_dpi_checked {
                     self.first_visible_present_dpi_checked = true;
                     self.reconcile_authoritative_dpi("first-present")?;
@@ -31397,10 +32051,19 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             .flat_map(|tab| tab.leaves())
             .filter_map(|(_, leaf)| leaf.session.resize_finish_deadline())
             .min();
+        // Every leaf, for the reason the line above gives about resizes: a DEC
+        // 2026 block is a property of one screen, and
+        // `finish_synchronized_update_if_due` has always walked every leaf to
+        // time them out. Reading the deadline through the tab's deref asked only
+        // the pane holding the keyboard, so an unfocused pane that opened a block
+        // and then went quiet had nothing to wake the loop on its behalf — its
+        // own timeout could only fire if something else happened to wake the
+        // window first.
         let synchronized_update_deadline = runtime
             .tabs
             .iter()
-            .filter_map(|tab| tab.session.synchronized_update_deadline())
+            .flat_map(|tab| tab.leaves())
+            .filter_map(|(_, leaf)| leaf.session.synchronized_update_deadline())
             .min();
         let live_stability_deadline = runtime.session.live_stability_deadline();
         let wake_deadline = earliest_deadline([
@@ -32657,6 +33320,28 @@ fn pty_frame_is_unchanged(
     pending
         .or(last_presented)
         .is_some_and(|previous| presentation_equivalent(previous, next))
+}
+
+/// Whether a PTY drain says nothing the glass is not already showing.
+///
+/// **Two halves, because a window is not one pane.** `focused_frame_unchanged`
+/// is [`pty_frame_is_unchanged`]'s answer, and it is an answer about exactly one
+/// pane: the frame [`Runtime::publish_frame_inner`] composed is the focused
+/// leaf's, and the frame it was compared against is the focused leaf's.
+/// `unpainted_pane_output` is the rest of the window — see
+/// [`Runtime::unpainted_pane_output`] for what it costs to leave it out.
+///
+/// A drain may be dropped only when both halves are quiet. A sibling pane that
+/// has spoken makes the window's content new however still the focused pane is,
+/// and the composed frame — identical though it may be — is the vehicle every
+/// other pane rides to the screen on: `redraw` is where they are projected, and
+/// `redraw` runs for a frame that entered the slot and for nothing else.
+///
+/// Written as a free function taking the two facts rather than as a condition
+/// inside the publish, so that the *previous* policy — the focused frame alone —
+/// can be run through the same machinery by a test and shown to lose the pane.
+fn pty_drain_says_nothing_new(focused_frame_unchanged: bool, unpainted_pane_output: bool) -> bool {
+    focused_frame_unchanged && !unpainted_pane_output
 }
 
 /// Whether the tab strip's animation is allowed to move again.
@@ -38239,6 +38924,305 @@ mod tests {
             .iter()
             .map(|cell| cell.text.as_str())
             .collect()
+    }
+
+    /// Everything a pane is showing, as one string, so a test can ask whether a
+    /// word is on the glass without knowing which row it landed on.
+    fn frame_text(frame: &ViewportFrame) -> String {
+        (0..frame.drawable_rows())
+            .map(|row| frame_row_text(frame, row))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **The window this bug lives in**: the pane holding the keyboard, and a
+    /// pane beside it.
+    ///
+    /// Driven through the same three steps the runtime takes on every turn of
+    /// its loop, in the same order and with the same dependency between them:
+    /// `drain_pty` hears every shell, `publish_frame_inner` composes **the
+    /// focused leaf only** and may drop the frame, and `redraw` — which runs for
+    /// a frame that reached the slot and for nothing else — is the one and only
+    /// place the *other* pane is projected and drawn.
+    ///
+    /// That last sentence is the whole bug: judge the drain by the focused
+    /// pane's picture and a sibling that has just spoken loses the pass it is
+    /// painted in.
+    struct TwoPaneHarness {
+        focused: DualPlaneSession,
+        focused_projection: ViewportProjection,
+        sibling: DualPlaneSession,
+        sibling_projection: ViewportProjection,
+        pending: LatestFrameSlot,
+        /// `Runtime::last_presented_frame` — the focused leaf's copy, and what
+        /// the unchanged-frame gate compares against.
+        focused_on_glass: Option<ViewportFrame>,
+        /// `LeafSession::last_presented_frame` for the pane beside it: what the
+        /// user can actually read in that half of the window.
+        sibling_on_glass: Option<ViewportFrame>,
+        /// [`Runtime::unpainted_pane_output`].
+        unpainted_pane_output: bool,
+        presents: usize,
+        /// Every projection this window paid for, both panes counted — the P0
+        /// meter, so that a repair for one pane can be shown not to have bought
+        /// back the whole-window recompose P0 removed.
+        viewport_frames: usize,
+    }
+
+    impl TwoPaneHarness {
+        fn new(columns: u32, rows: u32) -> Self {
+            let pane = || {
+                let session = DualPlaneSession::new(
+                    NonZeroU32::new(columns).unwrap(),
+                    NonZeroU32::new(rows).unwrap(),
+                );
+                let projection = session.new_projection(session.layout_key());
+                (session, projection)
+            };
+            let (focused, focused_projection) = pane();
+            let (sibling, sibling_projection) = pane();
+            Self {
+                focused,
+                focused_projection,
+                sibling,
+                sibling_projection,
+                pending: LatestFrameSlot::default(),
+                focused_on_glass: None,
+                sibling_on_glass: None,
+                unpainted_pane_output: false,
+                presents: 0,
+                viewport_frames: 0,
+            }
+        }
+
+        /// One turn of `about_to_wait`: drain both shells, publish if anything
+        /// arrived, then the redraw that publish asked for.
+        fn turn(
+            &mut self,
+            focused_bytes: &[u8],
+            sibling_bytes: &[u8],
+            says_nothing_new: fn(bool, bool) -> bool,
+        ) {
+            let mut arrived = false;
+            if !focused_bytes.is_empty() {
+                self.focused.feed(focused_bytes).unwrap();
+                arrived = true;
+            }
+            if !sibling_bytes.is_empty() {
+                self.sibling.feed(sibling_bytes).unwrap();
+                arrived = true;
+                // `drain_tab_pty`: a leaf that is not this tab's focused leaf
+                // has spoken, which is what `Runtime::drain_pty` raises the bit
+                // for.
+                self.unpainted_pane_output = true;
+            }
+            if arrived {
+                self.publish_pty_frame(says_nothing_new);
+            }
+            self.redraw();
+        }
+
+        /// `publish_frame_inner` for a PTY drain: compose the focused leaf, then
+        /// drop the frame only if the whole window has nothing to say.
+        fn publish_pty_frame(&mut self, says_nothing_new: fn(bool, bool) -> bool) {
+            self.focused
+                .refresh_projection(&mut self.focused_projection);
+            self.viewport_frames += 1;
+            let frame = self
+                .focused
+                .viewport_frame(&mut self.focused_projection)
+                .unwrap();
+            if says_nothing_new(
+                pty_frame_is_unchanged(
+                    self.pending.pending_frame(),
+                    self.focused_on_glass.as_ref(),
+                    &frame,
+                ),
+                self.unpainted_pane_output,
+            ) {
+                return;
+            }
+            self.pending
+                .publish(
+                    frame,
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::PtyOutput,
+                    },
+                )
+                .unwrap();
+        }
+
+        /// `Runtime::redraw`. No frame in the slot, no pass — and the sibling
+        /// goes on showing whatever it last showed.
+        fn redraw(&mut self) {
+            let Some((frame, _)) = self.pending.take() else {
+                return;
+            };
+            self.sibling
+                .refresh_projection(&mut self.sibling_projection);
+            self.viewport_frames += 1;
+            self.sibling_on_glass = Some(
+                self.sibling
+                    .viewport_frame(&mut self.sibling_projection)
+                    .unwrap(),
+            );
+            self.focused_on_glass = Some(frame);
+            self.unpainted_pane_output = false;
+            self.presents += 1;
+        }
+
+        fn sibling_shows(&self, needle: &str) -> bool {
+            self.sibling_on_glass
+                .as_ref()
+                .is_some_and(|frame| frame_text(frame).contains(needle))
+        }
+
+        fn focused_shows(&self, needle: &str) -> bool {
+            self.focused_on_glass
+                .as_ref()
+                .is_some_and(|frame| frame_text(frame).contains(needle))
+        }
+    }
+
+    /// **The mutant**: the policy this fix replaces, in which the focused pane's
+    /// picture decided, alone, whether the window had anything to say.
+    fn focused_frame_alone(focused_frame_unchanged: bool, _unpainted_pane_output: bool) -> bool {
+        focused_frame_unchanged
+    }
+
+    /// **The bug, as a count.** A pane that is not holding the keyboard says
+    /// something; it must be on the glass at the end of the same turn of the
+    /// loop, having cost exactly one present — the rhythm the focused pane gets.
+    ///
+    /// The second turn is the one that matters: by then the focused pane's
+    /// picture is a byte-for-byte match of the one on the glass, so the
+    /// unchanged-frame gate — which only ever looks at that pane — says the
+    /// window has nothing to say while the other half of it has just scrolled.
+    #[test]
+    fn a_pane_that_is_not_the_keyboards_reaches_the_glass_on_the_turn_it_speaks() {
+        let mut harness = TwoPaneHarness::new(24, 6);
+        harness.turn(b"prompt\r\n", b"first\r\n", pty_drain_says_nothing_new);
+        assert!(harness.sibling_shows("first"));
+        let presents_before = harness.presents;
+
+        harness.turn(b"", b"second\r\n", pty_drain_says_nothing_new);
+
+        assert!(
+            harness.sibling_shows("second"),
+            "the pane beside the keyboard spoke and is on the glass in the same turn"
+        );
+        assert_eq!(
+            harness.presents,
+            presents_before + 1,
+            "and it cost one present, not a wait for some unrelated event"
+        );
+    }
+
+    /// **Same rhythm, not merely eventual.** The turn count from "the shell
+    /// spoke" to "it is on the glass" is measured for each pane in turn, under
+    /// the identical script. Focus is the only difference between the two, and
+    /// it must make no difference to this number.
+    #[test]
+    fn both_panes_reach_the_glass_in_the_same_number_of_turns() {
+        let turns_until_shown = |sibling_speaks: bool| {
+            let mut harness = TwoPaneHarness::new(24, 6);
+            harness.turn(b"prompt\r\n", b"prompt\r\n", pty_drain_says_nothing_new);
+            let (focused_bytes, sibling_bytes): (&[u8], &[u8]) = if sibling_speaks {
+                (b"", b"needle\r\n")
+            } else {
+                (b"needle\r\n", b"")
+            };
+            let mut spoken = false;
+            for turn in 1..=10 {
+                harness.turn(
+                    if spoken { b"" } else { focused_bytes },
+                    if spoken { b"" } else { sibling_bytes },
+                    pty_drain_says_nothing_new,
+                );
+                spoken = true;
+                let shown = if sibling_speaks {
+                    harness.sibling_shows("needle")
+                } else {
+                    harness.focused_shows("needle")
+                };
+                if shown {
+                    return turn;
+                }
+            }
+            u32::MAX
+        };
+
+        assert_eq!(turns_until_shown(false), 1, "the pane with the keyboard");
+        assert_eq!(
+            turns_until_shown(true),
+            turns_until_shown(false),
+            "and the pane without it, on the same turn"
+        );
+    }
+
+    /// **The mutation.** The identical script with the focused pane's frame as
+    /// the only judge — which is what this window shipped — and the sibling
+    /// stays on a picture it has already outgrown, for as long as nothing else
+    /// happens to publish. Measured on the real machine as 19 wheel notches out
+    /// of 20 producing no picture at all.
+    #[test]
+    fn the_focused_frame_alone_strands_the_other_pane_on_a_stale_picture() {
+        let mut harness = TwoPaneHarness::new(24, 6);
+        harness.turn(b"prompt\r\n", b"first\r\n", focused_frame_alone);
+        assert!(harness.sibling_shows("first"));
+        let presents_before = harness.presents;
+
+        for _ in 0..20 {
+            harness.turn(b"", b"second\r\n", focused_frame_alone);
+        }
+
+        assert!(
+            !harness.sibling_shows("second"),
+            "twenty turns of a shell talking, and none of it on the glass"
+        );
+        assert_eq!(
+            harness.presents, presents_before,
+            "because not one frame was ever published to draw it in"
+        );
+    }
+
+    /// **And P0 is not bought back.** With every pane beside the keyboard
+    /// silent, the gate is the one P0 installed, exactly: the focused frame's
+    /// own answer and nothing else.
+    #[test]
+    fn a_silent_sibling_leaves_the_unchanged_frame_gate_exactly_as_p0_left_it() {
+        for focused_frame_unchanged in [false, true] {
+            assert_eq!(
+                pty_drain_says_nothing_new(focused_frame_unchanged, false),
+                focused_frame_unchanged,
+                "nothing else is speaking, so this is P0's question and no other"
+            );
+        }
+        assert!(
+            !pty_drain_says_nothing_new(true, true),
+            "and a pane that has spoken is not answered by another pane's stillness"
+        );
+    }
+
+    /// The same promise as a count, through the whole loop: once the sibling's
+    /// words are on the glass, turns in which nobody speaks cost no projection
+    /// and no present.
+    #[test]
+    fn turns_in_which_nobody_speaks_cost_nothing_in_a_split_window() {
+        let mut harness = TwoPaneHarness::new(24, 6);
+        harness.turn(b"prompt\r\n", b"first\r\n", pty_drain_says_nothing_new);
+        harness.turn(b"", b"second\r\n", pty_drain_says_nothing_new);
+        assert!(harness.sibling_shows("second"));
+        let projections_before = harness.viewport_frames;
+        let presents_before = harness.presents;
+
+        for _ in 0..600 {
+            harness.turn(b"", b"", pty_drain_says_nothing_new);
+        }
+
+        assert_eq!(harness.viewport_frames, projections_before);
+        assert_eq!(harness.presents, presents_before);
     }
 
     #[test]

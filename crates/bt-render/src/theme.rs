@@ -109,6 +109,39 @@ const TERMBG_DARK: [u8; 3] = [0x1b, 0x1b, 0x1b];
 /// `--termbg #FFFFFF` on the light canvas.
 const TERMBG_LIGHT: [u8; 3] = [0xff, 0xff, 0xff];
 /// `--panel #252525` on the dark canvas.
+/// How many roads the commit graph's wheel has (R18's floor).
+///
+/// Declared here rather than in the app because it is the length of a palette
+/// field, and a palette whose length is a fact somewhere else is a palette that
+/// can be indexed off the end of.
+pub const GRAPH_LANE_COUNT: usize = 8;
+
+/// The lane wheel on the dark canvas — HSL S 52% L 66%, hues 225 265 305 350 35
+/// 75 145 190. See [`ChromePalette::graph_lanes`] for the derivation.
+const GRAPH_LANES_DARK: [[u8; 3]; GRAPH_LANE_COUNT] = [
+    [0x7b, 0x92, 0xd5],
+    [0xa1, 0x7b, 0xd5],
+    [0xd5, 0x7b, 0xce],
+    [0xd5, 0x7b, 0x8a],
+    [0xd5, 0xb0, 0x7b],
+    [0xbf, 0xd5, 0x7b],
+    [0x7b, 0xd5, 0xa1],
+    [0x7b, 0xc6, 0xd5],
+];
+
+/// The same eight hues on the light canvas — S 55% L 38%, which is where they
+/// clear white by the same margin the dark set clears `#1b1b1b`.
+const GRAPH_LANES_LIGHT: [[u8; 3]; GRAPH_LANE_COUNT] = [
+    [0x2c, 0x46, 0x96],
+    [0x58, 0x2c, 0x96],
+    [0x96, 0x2c, 0x8d],
+    [0x96, 0x2c, 0x3d],
+    [0x96, 0x6a, 0x2c],
+    [0x7c, 0x96, 0x2c],
+    [0x2c, 0x96, 0x58],
+    [0x2c, 0x84, 0x96],
+];
+
 const PANEL_DARK: [u8; 3] = [0x25, 0x25, 0x25];
 /// `--panel #F7F7F5` on the light canvas.
 const PANEL_LIGHT: [u8; 3] = [0xf7, 0xf7, 0xf5];
@@ -533,6 +566,35 @@ pub struct ChromePalette {
     pub git_pill_text: [u8; 3],
     /// `.gud { border: 1px solid var(--border) }` over `--termbg`.
     pub git_pill_border: [u8; 3],
+    /// **The commit graph's lane wheel** (R18) — eight roads, told apart by hue.
+    ///
+    /// The mock-up declared three (`LANE_COLOR = [accent, ok, warn]`) and
+    /// indexed straight into them, so a repository with four concurrent branches
+    /// painted its fourth road `undefined`. R18 struck that and set a floor of
+    /// eight; what is here is a **family** rather than four semantic tokens
+    /// stretched to fill it, because a lane is not a status: an amber road does
+    /// not mean "careful" and a red one does not mean "wrong". Reusing the
+    /// status four as lanes would be the one thing this palette's whole
+    /// discipline forbids — a colour that means something, used where it means
+    /// nothing.
+    ///
+    /// **How it is derived.** Eight hues on one ring, anchored so that four of
+    /// them land on the hues this product already speaks in — 225° is
+    /// [`Self::accent`]'s own hue, 145° the green of `status_ok`, 35° the amber
+    /// of `status_warn`, 350° the red of `status_err` — with four more
+    /// interleaved between them at roughly even spacing. Every hue is then given
+    /// **the same** saturation and lightness, which is what makes the eight read
+    /// as one family and not as eight decisions: dark canvas S 52% L 66%, light
+    /// canvas S 55% L 38%. Low, deliberately (R18's "low-saturation family"):
+    /// these are furniture behind the text, not signals in front of it.
+    ///
+    /// **Both canvases, checked.** Every entry clears 3:1 — the non-text
+    /// contrast floor — against its own canvas *and* against the card ground,
+    /// which is the bar these earn: a lane is a 1.7-pixel line and a 7.2-pixel
+    /// dot, a graphical object rather than a letter. The two ends of each ladder
+    /// are pinned by
+    /// `the_graph_lane_wheel_is_eight_colours_that_clear_both_canvases`.
+    pub graph_lanes: [[u8; 3]; GRAPH_LANE_COUNT],
 
     /// A divider at rest: one logical pixel of quiet separation.
     pub divider: [u8; 3],
@@ -1009,6 +1071,7 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     git_head_muted: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 380),
     git_pill_text: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 550),
     git_pill_border: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 94),
+    graph_lanes: GRAPH_LANES_DARK,
     divider: [0x35, 0x35, 0x35],
     divider_hover: [0x51, 0x51, 0x51],
     divider_active: [0x7a, 0x99, 0xff],
@@ -1213,6 +1276,7 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     git_pill_text: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 650),
     // `--border` on light is `rgba(0,0,0,.088)` — black, not the ink.
     git_pill_border: ink_over(TERMBG_LIGHT, [0x00, 0x00, 0x00], 88),
+    graph_lanes: GRAPH_LANES_LIGHT,
     divider: [0xe9, 0xe9, 0xe9],
     divider_hover: [0xc2, 0xc1, 0xbf],
     divider_active: [0x30, 0x59, 0xd8],
@@ -2439,6 +2503,66 @@ mod tests {
         // `body.dark`'s lighter one over the dark canvas.
         assert_eq!(LIGHT_CHROME.status_ok, [0x1a, 0x7f, 0x37], "--ok");
         assert_eq!(DARK_CHROME.status_ok, [0x57, 0xab, 0x5a], "dark --ok");
+    }
+
+    /// Relative luminance, sRGB, as WCAG defines it — the one arithmetic a
+    /// contrast claim can be checked with.
+    fn luminance(colour: [u8; 3]) -> f64 {
+        let channel = |byte: u8| {
+            let value = f64::from(byte) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(colour[0]) + 0.7152 * channel(colour[1]) + 0.0722 * channel(colour[2])
+    }
+
+    fn contrast(one: [u8; 3], other: [u8; 3]) -> f64 {
+        let (a, b) = (luminance(one), luminance(other));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// PIN (R18): eight lanes, all eight legible on both canvases, and no two
+    /// of them the same colour.
+    ///
+    /// The floor is **3:1**, which is the non-text contrast bar and the right
+    /// one here: a lane is a 1.7-pixel line and a 7.2-pixel dot, a graphical
+    /// object rather than a letter. Both grounds are checked, because the graph
+    /// draws on the pane's own body and its rows light up on a card.
+    ///
+    /// This is what the mock-up could not have passed: it declared three lane
+    /// colours and indexed straight into them, so a fourth lane's stroke was the
+    /// string `undefined`. The distinctness assertion below is the half of R18
+    /// that says the *wheel* is a wheel — eight roads a reader can tell apart —
+    /// and the contrast assertion is the half that says every one of them is
+    /// there at all.
+    #[test]
+    fn the_graph_lane_wheel_is_eight_colours_that_clear_both_canvases() {
+        for (palette, canvas, card) in [
+            (DARK_CHROME, TERMBG_DARK, PANEL_DARK),
+            (LIGHT_CHROME, TERMBG_LIGHT, PANEL_LIGHT),
+        ] {
+            assert_eq!(palette.graph_lanes.len(), GRAPH_LANE_COUNT);
+            for (index, lane) in palette.graph_lanes.iter().enumerate() {
+                assert!(
+                    contrast(*lane, canvas) >= 3.0,
+                    "lane {index} {lane:02x?} against the body: {:.2}:1",
+                    contrast(*lane, canvas)
+                );
+                assert!(
+                    contrast(*lane, card) >= 3.0,
+                    "lane {index} {lane:02x?} against the card: {:.2}:1",
+                    contrast(*lane, card)
+                );
+            }
+            for (index, lane) in palette.graph_lanes.iter().enumerate() {
+                for (other, second) in palette.graph_lanes.iter().enumerate().skip(index + 1) {
+                    assert_ne!(lane, second, "lanes {index} and {other} are one colour");
+                }
+            }
+        }
     }
 
     /// PIN (R29): the Git page's card and the inks on it are `--panel` and the

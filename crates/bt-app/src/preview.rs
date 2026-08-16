@@ -209,6 +209,17 @@ pub enum PreviewView {
     Table,
     Diff,
     Text,
+    /// **One repository's commit graph** (G-4).
+    ///
+    /// Its own answer and not [`Self::None`], which is what it used to be while
+    /// the surface did not exist. The two are opposites: `None` is "there is
+    /// nothing to show here" and draws a card saying so, while this is "there is
+    /// a great deal to show here and it is not text". Nothing in the *body*
+    /// pipeline draws it — the picture is chrome, in the pane's own body
+    /// rectangle ([`crate::git_graph::push_graph`]) — so what this variant buys
+    /// is that every surface asking "what is this" gets the true answer rather
+    /// than the one that happens to render the same.
+    Graph,
     /// The "no preview" card.
     None,
 }
@@ -1263,9 +1274,15 @@ impl PreviewBuffer {
             // `Pending` a head read waits in — but for the git worker G-1 builds,
             // never for [`PreviewWorker`], which reads disks (see
             // [`Self::wants_head_read`]).
-            PreviewSource::GitDiff { .. }
-            | PreviewSource::GitShow { .. }
-            | PreviewSource::GitGraph { .. } => PreviewLoad::Pending,
+            PreviewSource::GitDiff { .. } | PreviewSource::GitShow { .. } => PreviewLoad::Pending,
+            // **The graph has no body and never waits for one** (G-4). Its two
+            // siblings are documents whose text arrives from a subprocess, and
+            // `Pending` is what says the text is on its way; the graph's content
+            // is the picture the chrome draws over this pane, and there is no
+            // second thing coming. Left `Pending` it would sit under a
+            // "Loading …" line forever, which was exactly what the first real
+            // frame of it showed.
+            PreviewSource::GitGraph { .. } => PreviewLoad::Ready,
         };
         Self {
             source,
@@ -1410,10 +1427,9 @@ impl PreviewBuffer {
         match &self.source {
             PreviewSource::File(_) => preview_view(&self.name, self.ftype, md_source),
             PreviewSource::GitDiff { .. } | PreviewSource::GitShow { .. } => PreviewView::Diff,
-            // G-4's full graph is its own surface and has no body in this
-            // vocabulary yet; until it exists the honest answer is the card that
-            // says there is nothing to show.
-            PreviewSource::GitGraph { .. } => PreviewView::None,
+            // G-4's full graph: its own surface, drawn as chrome over this
+            // pane's body. See [`PreviewView::Graph`].
+            PreviewSource::GitGraph { .. } => PreviewView::Graph,
         }
     }
 
@@ -1444,7 +1460,11 @@ impl PreviewBuffer {
         if let PreviewLoad::Unavailable(words) = &self.load {
             return Some(words);
         }
+        // The graph is exempt for [`PreviewBuffer::new`]'s reason: a document
+        // with no *text* is not a document with nothing in it when the thing in
+        // it is a picture.
         (self.source.is_git()
+            && !matches!(self.source, PreviewSource::GitGraph { .. })
             && self.load == PreviewLoad::Ready
             && self.content.as_ref().is_none_or(|body| body.is_empty()))
         .then_some(GIT_DOCUMENT_EMPTY)
@@ -2677,6 +2697,18 @@ mod tests {
         // read as anything but a path.
         assert_eq!(diff(&repo_a, false).file_path(), None);
         assert_eq!(PreviewSource::GitGraph { root: repo_a }.file_path(), None);
+        // G-4 — the graph is its own view and waits for no body: it is a
+        // picture the chrome draws, not text a subprocess is fetching.
+        let graph = PreviewBuffer::new(
+            PreviewSource::GitGraph {
+                root: PathBuf::from(r"C:\w\repo"),
+            },
+            "repo".to_owned(),
+        );
+        assert_eq!(graph.view(false), PreviewView::Graph);
+        assert_eq!(graph.load, PreviewLoad::Ready);
+        assert_eq!(graph.body_notice(), None, "a picture is not an empty diff");
+        assert!(!graph.is_editable(false));
         assert_eq!(
             pool.get(&PreviewSource::file(r"git:C:\w\repo:src/main.rs"))
                 .and_then(|buffer| buffer.source.file_path()),

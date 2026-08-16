@@ -248,6 +248,22 @@ pub fn group_tooltip(group: GitGroup) -> &'static str {
 
 /// The history's own heading. A section, but not a status group — nothing about
 /// it is a letter, so it is not a [`GitGroup`] and does not pretend to be.
+/// `.gbdot { width:7px; height:7px }` (G35) — the dot that says which branch
+/// `HEAD` is on. Filled with the accent when it is this one, an empty ring when
+/// it is not: the same Fluent 2 rule the tab pin already follows.
+pub const GIT_BRANCH_DOT_LOGICAL_PX: f32 = 7.0;
+/// `.gbdot { border: 1.5px solid var(--ink3) }` — the ring's own weight.
+pub const GIT_BRANCH_DOT_EDGE_LOGICAL_PX: f32 = 1.5;
+
+pub const GIT_BRANCHES_HEADING: &str = "BRANCHES";
+/// The teaching sentence over the list, in the voice its three siblings use.
+///
+/// It says what a press does, because the row itself cannot: unlike a change
+/// row, a branch row has no hover button to point at, and a list of names with
+/// no visible verb is a list nobody tries.
+pub const GIT_BRANCHES_TOOLTIP: &str =
+    "Local branches, current one first — click one to check it out";
+
 pub const GIT_COMMITS_HEADING: &str = "COMMITS";
 /// Mock-up 4952, cut to what this slice draws: the merge curve is here, the
 /// lanes are G-4's.
@@ -273,6 +289,16 @@ pub enum GitAct {
     UnstageAll,
     /// The last row of the history.
     LoadMore,
+    /// The masthead's own button: put the whole graph on the preview seat (G24).
+    ///
+    /// A verb on this list rather than a control of its own, because it is one:
+    /// it lives on a row, it is hit-tested by the row, it wears a mark and it
+    /// carries a sentence — every mechanism [`act_boxes`] already owns. The
+    /// mock-up drew it as a naked text button reading `Graph`; R27 gave it the
+    /// mark cut for it ([`ChromeMark::GitGraph`], three commits and two edges),
+    /// because a word in a masthead beside a branch name reads as part of the
+    /// name.
+    OpenGraph,
 }
 
 impl GitAct {
@@ -291,6 +317,7 @@ impl GitAct {
             Self::StageAll => "Stage all",
             Self::UnstageAll => "Unstage all",
             Self::LoadMore => "Load fifty more commits",
+            Self::OpenGraph => "Open the full commit graph",
         }
     }
 
@@ -304,6 +331,7 @@ impl GitAct {
             Self::Discard => ChromeMark::PaneClose,
             // Never drawn as a glyph — the whole row is the button.
             Self::LoadMore => ChromeMark::Plus,
+            Self::OpenGraph => ChromeMark::GitGraph,
         }
     }
 
@@ -318,8 +346,22 @@ impl GitAct {
             Self::Unstage | Self::UnstageAll => Some(GitWriteVerb::Unstage),
             Self::Discard if untracked => Some(GitWriteVerb::DiscardUntracked),
             Self::Discard => Some(GitWriteVerb::Discard),
-            Self::LoadMore => None,
+            Self::LoadMore | Self::OpenGraph => None,
         }
+    }
+
+    /// Whether this button is there before the pointer is.
+    ///
+    /// **One of the six is, and it is the one that is a door rather than a
+    /// verb.** R12's three rungs are about hover verbs — controls that act on
+    /// the row they sit in, and whose whole discipline is zero footprint at rest
+    /// (mock-up 1611). The masthead's `Graph` is not one of those: it opens
+    /// another surface, it is the only way in to that surface, and the mock-up
+    /// draws it as a plain always-there button (`.gopen`, line 1567). A door
+    /// nobody can see is a feature nobody finds.
+    #[must_use]
+    pub fn rests_visible(self) -> bool {
+        matches!(self, Self::OpenGraph)
     }
 
     /// Whether pressing this needs a confirmation first (R14).
@@ -343,6 +385,9 @@ pub enum GitPress {
     Gate,
     /// Ask the repository for another page of history.
     MoreCommits,
+    /// Put the graph on the preview seat. Asks the repository nothing by itself
+    /// — the document does its own asking once it is open.
+    Graph,
 }
 
 /// The one place a verb turns into an act.
@@ -355,6 +400,9 @@ pub enum GitPress {
 pub fn press_outcome(act: GitAct, untracked: bool) -> GitPress {
     if act == GitAct::LoadMore {
         return GitPress::MoreCommits;
+    }
+    if act == GitAct::OpenGraph {
+        return GitPress::Graph;
     }
     if act.needs_gate() {
         return GitPress::Gate;
@@ -481,6 +529,32 @@ pub struct GitBadge {
     pub ink: GitBadgeInk,
 }
 
+/// One local branch, ready to draw (§D).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitBranchRow {
+    pub name: String,
+    pub name_width: f32,
+    /// Whether `HEAD` is on it — the one that leads the list (R9) and wears the
+    /// filled dot (G35).
+    pub current: bool,
+    /// A checkout is in flight, for this branch or another one (R10).
+    ///
+    /// **The whole list dims and not only the row pressed**, which is the
+    /// difference between this and a change row's own pending flag: staging one
+    /// file leaves every other row true, while a checkout is about to move the
+    /// *whole* repository — every branch's ahead and behind, every row of the
+    /// history, and which of these dots is filled. A list that stayed bright
+    /// while that was in flight would be claiming to still be true.
+    pub pending: bool,
+    /// When it was last committed to, through the one relative-time table (R8).
+    pub time: String,
+    pub time_width: f32,
+    /// `↑ 2` and `↓ 1` against its own upstream — the same pill the masthead
+    /// wears, because it is the same fact about a different branch.
+    pub pills: Vec<GitPill>,
+    pub tooltip: String,
+}
+
 /// One commit, ready to draw.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GitCommitRow {
@@ -564,6 +638,8 @@ pub enum GitRow {
         act: Option<GitAct>,
     },
     Change(GitChangeRow),
+    /// One local branch (§D / R9).
+    Branch(GitBranchRow),
     Commit(GitCommitRow),
     /// A file under the one expanded commit (R15).
     CommitFile(GitCommitFileRow),
@@ -584,6 +660,7 @@ impl GitRow {
         matches!(
             self,
             Self::Change(_)
+                | Self::Branch(_)
                 | Self::Commit(_)
                 | Self::CommitFile(_)
                 | Self::LoadMore
@@ -605,6 +682,7 @@ impl GitRow {
                 * scale)
                 .round(),
             Self::Change(_)
+            | Self::Branch(_)
             | Self::Commit(_)
             | Self::CommitFile(_)
             | Self::LoadMore
@@ -637,6 +715,22 @@ pub enum GitRowOpen {
     },
     /// Turn this commit's file list over (R15).
     Expand { hash: String },
+    /// **Stand somewhere else** (R10) — a branch row pressed, or a commit row
+    /// double-clicked in the graph.
+    ///
+    /// There is no gate in front of it and that is the ruling rather than an
+    /// omission: a checkout destroys nothing, and the one case where it would —
+    /// a working tree whose changes it would overwrite — is refused by git
+    /// itself, in git's own words, which the banner then prints. What this page
+    /// does not offer is the two ways past that refusal: `--force` throws the
+    /// work away and a stash hides it somewhere the panel does not show. Both
+    /// are heavy verbs, and heavy verbs belong to the terminal beside this
+    /// column (G12).
+    Checkout {
+        /// A branch name, or a commit when `detach` is set.
+        target: String,
+        detach: bool,
+    },
 }
 
 /// The display name a git document wears: the file's base name and `.diff`.
@@ -681,6 +775,16 @@ pub fn row_document(row: &GitRow, root: &Path) -> Option<GitRowOpen> {
             },
             name: git_document_name(&file.path),
             renamed_from: file.renamed_from.clone(),
+        }),
+        // **A branch row is a verb, not a document** (R10) — and the current
+        // one is not even that: the mock-up gives it `cursor: default` because
+        // there is nowhere for it to take you. A row already waiting on a
+        // checkout answers nothing either, which is the same guard `+` has
+        // against being pressed twice.
+        GitRow::Branch(branch) if branch.current || branch.pending => None,
+        GitRow::Branch(branch) => Some(GitRowOpen::Checkout {
+            target: branch.name.clone(),
+            detach: false,
         }),
         // A masthead, a heading, the "load more" row and a notice are not
         // documents. The first three answer their own presses through
@@ -784,6 +888,38 @@ pub fn build(
     content
         .rows
         .push(GitRow::Masthead(masthead(status, scale, measure)));
+
+    // **Branches first** (G25's group order, R9's contents): the list of places
+    // this repository can stand, with the one it is standing on at the top. The
+    // sort is `parse_branches`' own — current first, then git's order — and it
+    // is done there rather than here because "the current one leads" is a fact
+    // about the answer and not about the drawing of it.
+    match cache.branches() {
+        GitSlot::Ready(branches) if !branches.is_empty() => {
+            content.rows.push(GitRow::Heading {
+                group: None,
+                label: GIT_BRANCHES_HEADING,
+                tooltip: GIT_BRANCHES_TOOLTIP,
+                count: branches.len(),
+                // No group verb: "stage all" over a list of branches is not a
+                // sentence, and a checkout of all of them is not a thing.
+                act: None,
+            });
+            let waiting = cache.checkout_pending().is_some();
+            for branch in branches {
+                content
+                    .rows
+                    .push(GitRow::Branch(branch_row(branch, waiting, scale, measure)));
+            }
+        }
+        GitSlot::Failed(fault) => {
+            content.banner.get_or_insert_with(|| fault_sentence(fault));
+        }
+        // A repository with no local branches at all is an unborn one, and the
+        // masthead has already said so — a heading over nothing would be a
+        // second, quieter way of saying the same thing.
+        GitSlot::Ready(_) | GitSlot::Idle | GitSlot::Pending => {}
+    }
 
     // The three groups, in the order the design fixes: what is packed, what is
     // edited, what git has not been told about. **A group with nothing in it
@@ -905,6 +1041,60 @@ fn commit_file_row(file: &GitCommitFile, hash: &str) -> GitRow {
     })
 }
 
+/// One branch row (the inventory's section D).
+fn branch_row(
+    branch: &crate::git::GitBranch,
+    waiting: bool,
+    scale: f32,
+    measure: &mut Measure<'_>,
+) -> GitBranchRow {
+    let font = GIT_ROW_FONT_LOGICAL_PX * scale;
+    let time_font = GIT_TIME_FONT_LOGICAL_PX * scale;
+    let pill_font = GIT_PILL_FONT_LOGICAL_PX * scale;
+    let mut pills = Vec::new();
+    if branch.ahead > 0 {
+        pills.push(pill(ARROW_UP, branch.ahead, "ahead", pill_font, measure));
+    }
+    if branch.behind > 0 {
+        pills.push(pill(
+            ARROW_DOWN,
+            branch.behind,
+            "behind",
+            pill_font,
+            measure,
+        ));
+    }
+    GitBranchRow {
+        name_width: measure(&branch.name, font),
+        time_width: measure(&branch.committerdate_relative, time_font),
+        // The mock-up's own two sentences (G36), and the second one is the only
+        // place this page names the verb a branch row carries.
+        tooltip: if branch.is_head {
+            format!("{} - the branch you are on", branch.name)
+        } else {
+            format!("Check out {}", branch.name)
+        },
+        name: branch.name.clone(),
+        current: branch.is_head,
+        pending: waiting,
+        time: branch.committerdate_relative.clone(),
+        pills,
+    }
+}
+
+/// The masthead a repository earns, asked for by a cache rather than a status.
+///
+/// **The graph's door to the same sentence** (R20): the panel builds this from
+/// the status it already has in hand, and the graph has only a cache — so the
+/// step from one to the other lives here, once, instead of in both.
+#[must_use]
+pub fn head_of(cache: &GitCache, scale: f32, measure: &mut Measure<'_>) -> GitHead {
+    masthead(cache.status().ready(), scale, measure)
+}
+
+/// A repository whose history is empty — R7's own sentence for it.
+pub const GIT_NO_COMMITS: &str = "No commits yet";
+
 /// The masthead: which branch, and how far from its upstream.
 fn masthead(
     status: Option<&crate::git::GitStatus>,
@@ -932,10 +1122,16 @@ fn masthead(
     };
     let mut pills = Vec::new();
     if status.ahead > 0 {
-        pills.push(pill('↑', status.ahead, "ahead", pill_font, measure));
+        pills.push(pill(ARROW_UP, status.ahead, "ahead", pill_font, measure));
     }
     if status.behind > 0 {
-        pills.push(pill('↓', status.behind, "behind", pill_font, measure));
+        pills.push(pill(
+            ARROW_DOWN,
+            status.behind,
+            "behind",
+            pill_font,
+            measure,
+        ));
     }
     GitHead {
         branch_width: measure(&branch, font),
@@ -944,6 +1140,11 @@ fn masthead(
         pills,
     }
 }
+
+/// The two arrows a count pill wears (G22), named once so a branch row and the
+/// masthead cannot drift apart on which character they are.
+const ARROW_UP: char = '↑';
+const ARROW_DOWN: char = '↓';
 
 fn pill(
     arrow: char,
@@ -1246,6 +1447,7 @@ pub fn act_boxes(row: &GitRow, rect: [f32; 4], scale: f32) -> Vec<(GitAct, [f32;
             GitGroup::Changes | GitGroup::Untracked => vec![GitAct::Stage, GitAct::Discard],
         },
         GitRow::Heading { act, .. } => act.iter().copied().collect(),
+        GitRow::Masthead(_) => vec![GitAct::OpenGraph],
         // **The whole row is the button.** It has no glyph and no reserved
         // corner — it is a sentence you press — so its box is the row's own, and
         // saying that here rather than in the press handler is what makes the
@@ -1297,12 +1499,18 @@ pub fn pill_boxes(head: &GitHead, rect: [f32; 4], scale: f32) -> Vec<[f32; 4]> {
     let height = (GIT_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
     let pad = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
     let top = ((rect[1] + rect[3] - height) / 2.0).round();
-    let name_right = (rect[0] + mark + gap + head.branch_width).min(rect[2]);
+    // The `Graph` button holds the trailing edge (G24's `margin-left:auto`), so
+    // the pills' room ends where its own box begins. Taken from [`act_boxes`]
+    // rather than re-measured, on this function's own rule: two derivations of
+    // one edge is a pill drawn under a button.
+    let button = (GIT_ACT_LOGICAL_PX * scale).round().max(1.0) + gap;
+    let limit = (rect[2] - button).max(rect[0]);
+    let name_right = (rect[0] + mark + gap + head.branch_width).min(limit);
     let mut left = name_right + gap;
     let mut boxes = Vec::with_capacity(head.pills.len());
     for pill in &head.pills {
         let width = pill.text_width + pad * 2.0;
-        if left + width > rect[2] {
+        if left + width > limit {
             break;
         }
         boxes.push([left, top, left + width, top + height]);
@@ -1320,6 +1528,7 @@ pub fn row_tooltip(row: &GitRow) -> Option<String> {
     match row {
         GitRow::Masthead(_) => None,
         GitRow::Heading { tooltip, .. } => Some((*tooltip).to_owned()),
+        GitRow::Branch(branch) => Some(branch.tooltip.clone()),
         GitRow::Change(change) => Some(change.tooltip.clone()),
         GitRow::Commit(commit) => Some(commit.tooltip.clone()),
         GitRow::CommitFile(file) => Some(file.tooltip.clone()),
@@ -1360,7 +1569,7 @@ pub fn push_git_panel(
     let geometry = git_panel_geometry(body, content, scale);
 
     if let (Some(strip), Some(words)) = (geometry.banner, content.banner.as_ref()) {
-        push_banner(strip, words, scale, palette, labels);
+        push_git_banner(strip, words, scale, palette, labels);
     }
 
     if let Some(sentence) = content.empty {
@@ -1414,7 +1623,8 @@ pub fn push_git_panel(
         let hovered = hover.row == Some(index);
         match row {
             GitRow::Masthead(head) => {
-                push_masthead(head, rect, scale, palette, (labels, sprites), &crop);
+                push_git_masthead(head, rect, scale, palette, (labels, sprites), &crop);
+                push_acts(row, rect, hover, hovered, scale, palette, sprites, &crop);
             }
             GitRow::Heading { label, count, .. } => {
                 push_heading(label, *count, rect, scale, palette, labels, &crop);
@@ -1432,6 +1642,25 @@ pub fn push_git_panel(
                     &crop,
                 );
                 push_acts(row, rect, hover, hovered, scale, palette, sprites, &crop);
+            }
+            GitRow::Branch(branch) => {
+                push_row_ground(
+                    rect,
+                    hovered && !branch.current,
+                    scale,
+                    palette,
+                    sprites,
+                    &crop,
+                );
+                push_branch(
+                    branch,
+                    rect,
+                    hovered && !branch.current,
+                    scale,
+                    palette,
+                    (labels, sprites),
+                    &crop,
+                );
             }
             GitRow::Commit(commit) => {
                 // **An open commit keeps the ground its hover gave it** — the
@@ -1508,7 +1737,7 @@ fn inset(rect: [f32; 4], by: f32) -> [f32; 4] {
     ]
 }
 
-fn push_banner(
+pub fn push_git_banner(
     strip: [f32; 4],
     words: &str,
     scale: f32,
@@ -1554,7 +1783,7 @@ fn push_row_ground(
     ));
 }
 
-fn push_masthead(
+pub fn push_git_masthead(
     head: &GitHead,
     rect: [f32; 4],
     scale: f32,
@@ -1633,6 +1862,161 @@ fn push_masthead(
             clip: Some(crop(box_)),
         });
     }
+}
+
+/// One branch row: a dot that says where `HEAD` is, a name, its counts and its
+/// age.
+#[allow(clippy::too_many_arguments)]
+fn push_branch(
+    branch: &GitBranchRow,
+    rect: [f32; 4],
+    hovered: bool,
+    scale: f32,
+    palette: &ChromePalette,
+    out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
+    crop: &dyn Fn([f32; 4]) -> [f32; 4],
+) {
+    let (labels, sprites) = out;
+    let pad = (GIT_ROW_PADDING_X_LOGICAL_PX * scale).round();
+    let gap = (GIT_ROW_GAP_LOGICAL_PX * scale).round();
+    let dot = (GIT_BRANCH_DOT_LOGICAL_PX * scale).round().max(1.0);
+    let edge = (GIT_BRANCH_DOT_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32;
+    // **A checkout in flight fades the list, it does not empty it** (R13's own
+    // pessimism, one list along): what is on screen is still what the repository
+    // last said, and it is about to stop being true.
+    let opacity = if branch.pending {
+        GIT_PENDING_FADE
+    } else {
+        1.0
+    };
+    let middle = |size: f32| ((rect[1] + rect[3] - size) / 2.0).round();
+
+    let dot_rect = [
+        rect[0] + pad,
+        middle(dot),
+        rect[0] + pad + dot,
+        middle(dot) + dot,
+    ];
+    let radius = (dot / 2.0).round().max(1.0) as u32;
+    // Filled for the branch you are on, an empty ring for the ones you are not
+    // (G35) — the tab pin's rule, and the reason it needs no legend: a filled
+    // mark is a state and an outlined one is an offer.
+    sprites.push(
+        ChromeSprite::new(
+            if branch.current {
+                ChromeMark::ControlPill { radius_px: radius }
+            } else {
+                ChromeMark::ControlPillRing {
+                    radius_px: radius,
+                    stroke_px: edge,
+                }
+            },
+            crop(dot_rect),
+            if branch.current {
+                palette.accent
+            } else {
+                palette.git_row_muted
+            },
+        )
+        .with_opacity(opacity),
+    );
+
+    let muted = if hovered {
+        palette.git_row_muted_hover
+    } else {
+        palette.git_row_muted
+    };
+    // The pills sit between the name and the age, so the age is measured off the
+    // trailing edge first and everything else is fitted inside what is left.
+    let time_left = (rect[2] - pad - branch.time_width).max(rect[0]);
+    let time_rect = [time_left, rect[1], rect[2] - pad, rect[3]];
+    labels.push(ChromeLabel {
+        text: branch.time.clone(),
+        rect: time_rect,
+        font_size_px: GIT_TIME_FONT_LOGICAL_PX * scale,
+        color: muted,
+        align_right: true,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: true,
+        clip: Some(crop(time_rect)),
+    });
+
+    let pill_height = (GIT_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let pill_pad = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
+    let pill_radius = (GIT_PILL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let pill_edge = (GIT_PILL_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let mut pill_edge_x = time_rect[0] - gap;
+    for pill in branch.pills.iter().rev() {
+        let width = pill.text_width + pill_pad * 2.0;
+        let left = pill_edge_x - width;
+        if left < rect[0] + pad + dot + gap {
+            break;
+        }
+        let box_ = [
+            left,
+            middle(pill_height),
+            left + width,
+            middle(pill_height) + pill_height,
+        ];
+        sprites.push(
+            ChromeSprite::new(
+                ChromeMark::ControlPillRing {
+                    radius_px: pill_radius,
+                    stroke_px: pill_edge,
+                },
+                crop(box_),
+                palette.git_pill_border,
+            )
+            .with_opacity(opacity),
+        );
+        labels.push(ChromeLabel {
+            text: pill.text.clone(),
+            rect: box_,
+            font_size_px: GIT_PILL_FONT_LOGICAL_PX * scale,
+            color: palette.git_pill_text,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: true,
+            clip: Some(crop(box_)),
+        });
+        pill_edge_x = left - gap;
+    }
+
+    let name_left = dot_rect[2] + gap;
+    let name_rect = [
+        name_left,
+        rect[1],
+        (pill_edge_x - gap).max(name_left),
+        rect[3],
+    ];
+    labels.push(ChromeLabel {
+        text: branch.name.clone(),
+        rect: name_rect,
+        font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
+        // `.gbr bdi { color: --ink2 }`, and `--ink` at 500 for the current one
+        // (G34): the branch you are on is the fact, the rest are offers.
+        color: if branch.current {
+            palette.git_row_text
+        } else if hovered {
+            palette.git_act_glyph_hover
+        } else {
+            palette.git_act_glyph
+        },
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: if branch.current {
+            ChromeLabelWeight::Medium
+        } else {
+            ChromeLabelWeight::Regular
+        },
+        tabular_numerals: false,
+        clip: Some(crop(name_rect)),
+    });
 }
 
 fn push_heading(
@@ -1871,18 +2255,26 @@ fn push_acts(
     // once the row has it, whole — over its own pill — once the button does. The
     // mock-up's `.gact` had only the outer two; unifying on `.pv-tool`'s ladder
     // is what makes every hover verb in this product fade at one rate.
-    if !hovered {
-        return;
-    }
     let glyph = (GIT_ACT_GLYPH_LOGICAL_PX * scale).round().max(1.0);
     let radius = (GIT_ACT_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    // The masthead stands on the pane's own body and every other row on a
+    // `--panel` card, so a button up there wears the body's inks — the same
+    // split the branch name and the group headings already live by.
+    let on_body = matches!(row, GitRow::Masthead(_));
     for (act, box_) in act_boxes(row, rect, scale) {
+        if !hovered && !act.rests_visible() {
+            continue;
+        }
         let lit = hover.act == Some(act);
         if lit {
             sprites.push(ChromeSprite::new(
                 ChromeMark::ControlPill { radius_px: radius },
                 crop(box_),
-                palette.git_act_pill,
+                if on_body {
+                    palette.files_row_hover
+                } else {
+                    palette.git_act_pill
+                },
             ));
         }
         let inset = ((box_[2] - box_[0]) - glyph) / 2.0;
@@ -1895,13 +2287,20 @@ fn push_acts(
         let mut mark = ChromeSprite::new(
             act.mark(),
             crop(glyph_box),
-            if lit {
-                palette.git_act_glyph_on_pill
-            } else {
-                palette.git_act_glyph_hover
+            match (lit, on_body) {
+                (true, true) => palette.git_head_text,
+                (true, false) => palette.git_act_glyph_on_pill,
+                (false, true) => palette.git_head_muted,
+                (false, false) => palette.git_act_glyph_hover,
             },
         );
-        mark.opacity = if lit { 1.0 } else { GIT_ACT_REVEAL };
+        // A button that is always there is always whole: the ladder is what a
+        // hover verb climbs, and this one never left the ground.
+        mark.opacity = if lit || act.rests_visible() {
+            1.0
+        } else {
+            GIT_ACT_REVEAL
+        };
         sprites.push(mark);
     }
 }
@@ -2110,11 +2509,130 @@ mod tests {
             committer_offset: 0,
             time_relative: "2h".to_owned(),
             parents: (0..parents).map(|n| format!("parent{n}")).collect(),
+            refs: Vec::new(),
         }
     }
 
     fn rows_of(cache: &GitCache) -> GitPanelContent {
         build(cache, None, 1.0, &mut ruler)
+    }
+
+    /// The branches git would have answered with, in git's own order.
+    fn branch(name: &str, is_head: bool, ahead: usize, behind: usize) -> crate::git::GitBranch {
+        crate::git::GitBranch {
+            name: name.to_owned(),
+            is_head,
+            ahead,
+            behind,
+            committer_unix: 1_760_000_000,
+            committerdate_relative: "2h".to_owned(),
+        }
+    }
+
+    fn with_branches(mut cache: GitCache, branches: Vec<crate::git::GitBranch>) -> GitCache {
+        assert!(cache.accept(GitAnswer::Branches {
+            root: PathBuf::from(ROOT),
+            outcome: Ok(branches),
+        }));
+        cache
+    }
+
+    fn branch_rows(content: &GitPanelContent) -> Vec<GitBranchRow> {
+        content
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                GitRow::Branch(branch) => Some(branch.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// R9 — every local branch is listed, and the one you are standing on leads.
+    ///
+    /// The order is not a nicety: a repository with sixty branches shows the
+    /// first handful without scrolling, and the one fact a reader always needs
+    /// from this list is where they are. It is also **not** sorted here — the
+    /// sort is `parse_branches`', so this holds the whole pipeline rather than a
+    /// re-sort the page could quietly stop doing.
+    #[test]
+    fn the_branch_list_puts_the_current_branch_first() {
+        let cache = with_branches(
+            answered(b"", vec![commit("aaaaaaa", "one", 1)], false),
+            crate::git::parse_branches(
+                b"feat/latex\0\0\0\nmain\0*\0\0\nspike/x\0\0\0\n",
+                1_760_000_000,
+            ),
+        );
+        let content = rows_of(&cache);
+        let rows = branch_rows(&content);
+        assert_eq!(rows.len(), 3, "{content:#?}");
+        assert_eq!(rows[0].name, "main", "the current branch leads");
+        assert!(rows[0].current);
+        assert!(rows.iter().skip(1).all(|row| !row.current));
+        // And the heading over them carries its count (R7).
+        let heading = content.rows.iter().find_map(|row| match row {
+            GitRow::Heading { label, count, .. } if *label == GIT_BRANCHES_HEADING => Some(*count),
+            _ => None,
+        });
+        assert_eq!(heading, Some(3));
+        // The group leads the page, right after the masthead (G25's order).
+        let first = content.rows.iter().position(
+            |row| matches!(row, GitRow::Heading { label, .. } if *label == GIT_BRANCHES_HEADING),
+        );
+        assert_eq!(first, Some(1), "branches come before anything else");
+
+        // R5/G22 again, one list along: a branch's own distance from its own
+        // upstream, and zero draws no pill at all.
+        let counted = with_branches(
+            answered(b"", Vec::new(), false),
+            vec![branch("main", true, 2, 0), branch("side", false, 0, 0)],
+        );
+        let rows = branch_rows(&rows_of(&counted));
+        assert_eq!(rows[0].pills.len(), 1, "ahead only");
+        assert_eq!(rows[0].pills[0].tooltip, "2 commits ahead");
+        assert!(rows[1].pills.is_empty(), "nothing to say draws nothing");
+    }
+
+    /// R10 — a branch row is a checkout, and the one you are on is not.
+    #[test]
+    fn a_branch_row_checks_out_and_the_current_one_does_nothing() {
+        let cache = with_branches(
+            answered(b"", Vec::new(), false),
+            crate::git::parse_branches(b"main\0*\0\0\nside\0\0\0\n", 1_760_000_000),
+        );
+        let content = rows_of(&cache);
+        let rows: Vec<&GitRow> = content
+            .rows
+            .iter()
+            .filter(|row| matches!(row, GitRow::Branch(_)))
+            .collect();
+        assert_eq!(
+            row_document(rows[0], Path::new(ROOT)),
+            None,
+            "the current one"
+        );
+        assert_eq!(
+            row_document(rows[1], Path::new(ROOT)),
+            Some(GitRowOpen::Checkout {
+                target: "side".to_owned(),
+                detach: false,
+            })
+        );
+    }
+
+    /// G24/R27 — the masthead carries the door to the full graph.
+    #[test]
+    fn the_masthead_offers_the_graph() {
+        let content = rows_of(&answered(b"", Vec::new(), false));
+        let masthead = &content.rows[0];
+        assert!(matches!(masthead, GitRow::Masthead(_)));
+        let acts: Vec<GitAct> = act_boxes(masthead, [0.0, 0.0, 240.0, 30.0], 1.0)
+            .into_iter()
+            .map(|(act, _)| act)
+            .collect();
+        assert_eq!(acts, vec![GitAct::OpenGraph]);
+        assert_eq!(press_outcome(GitAct::OpenGraph, false), GitPress::Graph);
     }
 
     fn change_rows(content: &GitPanelContent) -> Vec<GitChangeRow> {
