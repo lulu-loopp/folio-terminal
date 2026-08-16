@@ -18260,11 +18260,12 @@ impl Runtime {
     fn preview_ime(&mut self, event: Ime) -> Result<()> {
         match event {
             Ime::Preedit(text, cursor_range) => {
-                // Spike 04 found all three Chinese IMEs report a collapsed
-                // caret; the target clause stays out until one reports it.
+                // A collapsed range is the caret; an open one is the IME's
+                // target clause and not a caret at all — see
+                // [`preedit_caret_byte`].
                 self.preedit = (!text.is_empty()).then_some(Preedit {
                     text,
-                    cursor_byte: cursor_range.map(|(start, _)| start),
+                    cursor_byte: preedit_caret_byte(cursor_range),
                 });
                 self.repaint_preview()
             }
@@ -32892,6 +32893,23 @@ impl Runtime {
     /// the composition next starts. `Preedit` and `Commit` are text, and text
     /// goes exactly where [`Self::keyboard_owner`] says the keyboard is.
     fn ime_input(&mut self, event: Ime) -> Result<()> {
+        // **Diagnostic scaffolding: write every IME event to a file.** Off
+        // unless `BT_IME_TRACE` names a path; then each event lands as one
+        // line with its instant. It exists for the same reason
+        // `BT_CHROME_DUMP` does — a caret standing in the wrong place cannot be
+        // grepped, and the question "did the IME say that, or did we" has to
+        // be answered from what the IME actually said. Written before any
+        // routing so a swallowed event is still on the record.
+        if let Some(path) = std::env::var_os("BT_IME_TRACE") {
+            use std::io::Write as _;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(file, "{:?} {:?}", Instant::now(), event);
+            }
+        }
         let composing = matches!(event, Ime::Preedit(..) | Ime::Commit(_));
         if composing {
             match ime_owner(self.keyboard_owner()) {
@@ -32950,11 +32968,13 @@ impl Runtime {
                 })
             }
             Ime::Preedit(text, cursor_range) => {
-                // Spike 04 found all three Chinese IMEs report a collapsed caret. Target-clause
-                // styling is intentionally outside M0-beta; keep only the caret's start offset.
+                // A collapsed range is the caret; an open one is the IME's
+                // target clause and not a caret at all — see
+                // [`preedit_caret_byte`]. Target-clause styling is still
+                // outside scope; the caret simply stops standing on it.
                 self.preedit = (!text.is_empty()).then_some(Preedit {
                     text,
-                    cursor_byte: cursor_range.map(|(start, _)| start),
+                    cursor_byte: preedit_caret_byte(cursor_range),
                 });
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
@@ -34061,6 +34081,32 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.runtime = None;
+    }
+}
+
+/// Where the IME's caret is drawn inside a composition — or `None` for "at
+/// the end".
+///
+/// winit hands over `Some((start, end))`, and the pair means **two different
+/// things** depending on whether it is collapsed. Collapsed (`start == end`) it
+/// is `GCS_CURSORPOS`, the caret proper. Open (`start < end`) it is not a caret
+/// at all: winit derives it from `GCS_COMPATTR`, and it is the *target clause*
+/// — the run of characters the IME has marked `ATTR_TARGET_CONVERTED` /
+/// `ATTR_TARGET_NOTCONVERTED`, which Microsoft Pinyin does now and then during
+/// ordinary typing (the syllable it is currently converting), and which spike
+/// 04 happened never to catch. Reading `start` as the caret in that case put
+/// the bar in the middle of `ran` (user report, 2026-08-16: "ra|n", not every
+/// time, same pinyin). A clause is a highlight, not a position; while the IME
+/// is showing one, the caret belongs where every terminal draws it — at the end
+/// of the composition — which is what `None` means downstream
+/// (`bt_render::compose_preedit` takes `text.len()`).
+///
+/// Styling the clause itself is still the day-someone-asks item spike 04 left
+/// it as; this only stops mistaking it for a caret.
+fn preedit_caret_byte(cursor_range: Option<(usize, usize)>) -> Option<usize> {
+    match cursor_range {
+        Some((start, end)) if start == end => Some(start),
+        _ => None,
     }
 }
 
@@ -35765,6 +35811,29 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// PIN (user report, 2026-08-16) — **an open cursor range is a target clause,
+    /// not a caret.** winit reports `(start, end)` for the run Microsoft Pinyin
+    /// has marked as the clause under conversion; the first cut read `start`
+    /// as the caret and drew `ra|n`. A collapsed range is the caret and is
+    /// kept; an open one yields `None`, which the composer draws at the end
+    /// of the composition.
+    #[test]
+    fn an_open_cursor_range_is_a_clause_and_the_caret_goes_to_the_end() {
+        assert_eq!(super::preedit_caret_byte(Some((3, 3))), Some(3));
+        assert_eq!(super::preedit_caret_byte(Some((0, 0))), Some(0));
+        assert_eq!(
+            super::preedit_caret_byte(Some((2, 3))),
+            None,
+            "the clause `n` of `ran`"
+        );
+        assert_eq!(
+            super::preedit_caret_byte(Some((0, 3))),
+            None,
+            "the whole word as clause"
+        );
+        assert_eq!(super::preedit_caret_byte(None), None);
+    }
+
     use super::*;
     use bt_render::{DARK_CHROME, LIGHT_CHROME};
     use std::time::Duration;
