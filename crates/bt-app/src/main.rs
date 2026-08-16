@@ -15107,6 +15107,34 @@ impl Runtime {
                 );
             }
         }
+        // **The glance card, as one anchor and not one per tick.**
+        //
+        // The rail's whole pointer contract is that *the band* takes the pointer
+        // and the nearest ordinal answers it (mock 8404-8409): a list of
+        // nine-by-two boxes would put the card up only when a hand happened to
+        // land on two pixels, which is precisely the target the crest exists
+        // because nobody can hit. So the anchor is the crest's own box, its id
+        // names the mark rather than the tick's index — the fisheye renumbers
+        // indices under a hand that has not moved — and it is registered only
+        // while a rail is hot, which is the only time there is anything to glance
+        // at. `retain` below therefore takes the card down the moment the pointer
+        // leaves the rail, and the pointer's own 380ms is the delay the ruling
+        // asked to reuse rather than a clock of the card's own.
+        if self.drag.is_none()
+            && let Some((seat, index)) = self.command_rail_hover
+            && let Some(cache) = self.command_rails.get(&seat)
+            && let Some(tick) = cache.rail().ticks.get(index).copied()
+            && let Some(host) = cmdrail::peek_host(cache.rail(), index)
+            && let Some(leaf) = self.sessions.get(&seat)
+        {
+            let (text, muted) = cmdrail::peek_text(&tick, leaf.session.command_marks());
+            anchors.push_faced(
+                tooltip::TooltipAnchorId::CommandTick(seat, tick.mark),
+                host,
+                text,
+                tooltip::TipFace::Peek { muted },
+            );
+        }
         // A tip whose subject has left the strip has nothing left to say — and a
         // tip still counting down toward a subject that left has nothing to
         // arrive at. Retiring both here, against the list that was just built, is
@@ -15435,17 +15463,21 @@ impl Runtime {
         )
     }
 
-    /// Every rail on screen, resting, with the hovered tick's crest over it and
-    /// the jump flash under it.
+    /// Every rail on screen, at whatever temperature its own clocks have reached,
+    /// with the jump flash under them.
     ///
     /// The rails themselves come out of [`cmdrail::RailCache`] and are usually not
-    /// rebuilt at all: a frame that moved neither a ledger nor a pane hands back
-    /// the layer it handed back last time, which is the whole reason
-    /// `command_marks_revision` exists.
+    /// rebuilt at all: a frame that moved neither a ledger nor a pane nor an
+    /// unfolded bucket hands back the layer it handed back last time, which is the
+    /// whole reason `command_marks_revision` exists. What the cache cannot hand
+    /// back is a rail with a hand on it — `hot` recolours every tick and the crest
+    /// travels — so [`cmdrail::RailCache::picture`] paints those afresh and caches
+    /// only the resting one.
     fn command_rail_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let scale = self.renderer.metrics().scale_factor as f32;
         let palette = bt_render::chrome_palette();
-        let hover = self.command_rail_hover;
+        let motion = self.motion;
+        let now = Instant::now();
         let flash = self.command_flash_layer(&palette, scale);
         // Pass one, under a shared borrow: every rail that is drawn this frame,
         // and — for the ones whose key has moved — the geometry to draw it with.
@@ -15461,6 +15493,12 @@ impl Runtime {
                     revision: leaf.session.command_marks_revision(),
                     body,
                     scale,
+                    // The pointer's, and the one thing about the pointer a rail's
+                    // *geometry* is a function of: a fisheye genuinely moves ticks.
+                    expanded: self
+                        .command_rails
+                        .get(&seat)
+                        .and_then(|cache| cache.pointer().expanded()),
                 };
                 let stale = self
                     .command_rails
@@ -15469,7 +15507,9 @@ impl Runtime {
                 Some((
                     seat,
                     key,
-                    stale.then(|| cmdrail::lay_out(body, leaf.session.command_marks(), scale)),
+                    stale.then(|| {
+                        cmdrail::lay_out(body, leaf.session.command_marks(), scale, key.expanded)
+                    }),
                 ))
             })
             .collect();
@@ -15480,19 +15520,12 @@ impl Runtime {
             if let Some(rail) = fresh {
                 cache.install(key, rail, &palette);
             }
-            let rail = cache.rail();
             // An empty ledger draws nothing and reports nothing — `cmd.exe` and a
             // PowerShell without the integration script live here (inventory C13).
-            if rail.ticks.is_empty() {
+            if cache.rail().ticks.is_empty() {
                 continue;
             }
-            let mut layer = cache.layer().clone();
-            if let Some((hot, index)) = hover
-                && hot == seat
-            {
-                layer.quads.extend(cmdrail::crest(rail, index, &palette));
-            }
-            layers.push(layer);
+            layers.push(cache.picture(&palette, now, motion));
         }
         layers
     }
@@ -15584,15 +15617,62 @@ impl Runtime {
         }
     }
 
-    /// Note which rail the pointer is on. Returns whether the rail owns this
-    /// pointer — a press there is a jump and not a selection.
+    /// Note which rail the pointer is on, open or fold the bucket under it, and
+    /// aim every rail's clocks at where the hand has left them. Returns whether
+    /// the rail owns this pointer — a press there is a jump and not a selection.
+    ///
+    /// **One hot rail at a time** (mock 8478-8483): the mock-up's `pointermove` is
+    /// delegated on `#termhost` and resets every *other* rail before it touches
+    /// the one under the pointer, so two panes can never both be lit. Here that is
+    /// the cooling loop below, and it is also the whole of `pointerleave` — a
+    /// `None` position cools everything, which is what [`Self::pointer_left`]
+    /// calls it with.
     fn drive_command_rail_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
-        let hover = position.and_then(|position| self.command_rail_at(position));
-        let changed = self.command_rail_hover != hover;
+        let now = Instant::now();
+        let motion = self.motion;
+        let palette = bt_render::chrome_palette();
+        // Pass one, shared: the fisheye and the crest, settled together against
+        // the ledger — see [`cmdrail::resolve`].
+        let settled = position.and_then(|position| self.settle_command_rail(position));
+        let hover = settled
+            .as_ref()
+            .and_then(|(seat, _, resolved)| resolved.nearest.map(|index| (*seat, index)));
+        let mut changed = self.command_rail_hover != hover;
         self.command_rail_hover = hover;
+        // Pass two, exclusive. Every rail the pointer is not on cools and folds
+        // whatever it had open — the mock-up's `railReset`, which does exactly
+        // these two things in this order.
+        let cold: Vec<SeatId> = self
+            .command_rails
+            .keys()
+            .copied()
+            .filter(|seat| hover.map(|(hot, _)| hot) != Some(*seat))
+            .collect();
+        for seat in cold {
+            let Some(cache) = self.command_rails.get_mut(&seat) else {
+                continue;
+            };
+            let ticks = cache.rail().ticks.len();
+            // Folding is expressed as a key change and paid for by the next
+            // [`Self::command_rail_layers`], rather than laid out here: a rail
+            // nobody is pointing at can afford to fold on the frame it is drawn.
+            changed |= cache.pointer_mut().expand(None);
+            cache.pointer_mut().aim(ticks, None, false, now, motion);
+        }
+        if let Some((seat, key, resolved)) = settled {
+            let cache = self.command_rails.entry(seat).or_default();
+            if cache.needs_rebuild(key) {
+                cache.install(key, resolved.rail, &palette);
+            }
+            let ticks = cache.rail().ticks.len();
+            changed |= cache.pointer_mut().expand(resolved.expanded);
+            cache
+                .pointer_mut()
+                .aim(ticks, resolved.nearest, true, now, motion);
+        }
         if changed {
             // The finger, and the crest, on the same reading — see
             // [`pointer_cursor`]'s `over_command_tick`.
@@ -15604,16 +15684,97 @@ impl Runtime {
         Ok(hover.is_some())
     }
 
-    /// Which rail and which tick a point means.
+    /// Which rail the pointer is on, what its geometry should be, and which tick
+    /// is the crest — all three under a shared borrow, so the answer can be stored
+    /// under an exclusive one.
+    ///
+    /// The band is tested **before** the fisheye is asked anything, and it is
+    /// tested at the temperature the rail is currently drawn at (see
+    /// [`cmdrail::Rail::hot_bounds`] for why that asymmetry is safe). Asking the
+    /// other way round would let a pointer that is not on the rail at all open a
+    /// bucket on it.
+    fn settle_command_rail(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(SeatId, cmdrail::RailKey, cmdrail::Resolved)> {
+        let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
+        let body = self.command_rail_body(seat)?;
+        let cache = self.command_rails.get(&seat)?;
+        cmdrail::nearest(
+            cache.rail(),
+            self.command_rail_hover.is_some_and(|(hot, _)| hot == seat),
+            position.x as f32,
+            position.y as f32,
+        )?;
+        let leaf = self.sessions.get(&seat)?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let resolved = cmdrail::resolve(
+            body,
+            leaf.session.command_marks(),
+            scale,
+            cache.pointer().expanded(),
+            position.y as f32,
+        );
+        let key = cmdrail::RailKey {
+            revision: leaf.session.command_marks_revision(),
+            body,
+            scale,
+            expanded: resolved.expanded,
+        };
+        Some((seat, key, resolved))
+    }
+
+    /// Which rail and which tick a point means, in the geometry that is on the
+    /// glass.
+    ///
+    /// Asked of the cache rather than laid out afresh: the band the pointer is
+    /// tested against must be the band that was drawn, and one derivation is the
+    /// only way to say that. A seat whose rail has not been built this session has
+    /// no band and answers nothing.
     fn command_rail_at(&self, position: PhysicalPosition<f64>) -> Option<(SeatId, usize)> {
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
-        // Asked of the cache rather than laid out afresh: the band the pointer is
-        // tested against must be the band that was drawn, and one derivation is
-        // the only way to say that. A seat whose rail has not been built this
-        // session has no band and answers nothing.
         self.command_rail_body(seat)?;
-        let rail = self.command_rails.get(&seat)?.rail();
-        cmdrail::nearest(rail, position.x as f32, position.y as f32).map(|index| (seat, index))
+        let cache = self.command_rails.get(&seat)?;
+        cmdrail::nearest(
+            cache.rail(),
+            self.command_rail_hover.is_some_and(|(hot, _)| hot == seat),
+            position.x as f32,
+            position.y as f32,
+        )
+        .map(|index| (seat, index))
+    }
+
+    /// The glance card's anchor for the tick the crest is on, if a rail is hot.
+    fn command_tick_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
+        let (seat, index) = self.command_rail_hover?;
+        let tick = self.command_rails.get(&seat)?.rail().ticks.get(index)?;
+        Some(tooltip::TooltipAnchorId::CommandTick(seat, tick.mark))
+    }
+
+    /// While any rail still owes a frame to one of its four clocks, one frame at
+    /// the animation's own rate; nothing at all otherwise.
+    fn command_rail_deadline(&self, now: Instant) -> Option<Instant> {
+        self.command_rails_are_moving(now)
+            .then(|| now + STRIP_ANIMATION_FRAME)
+    }
+
+    fn command_rails_are_moving(&self, now: Instant) -> bool {
+        let motion = self.motion;
+        self.command_rails
+            .values()
+            .any(|cache| cache.pointer().is_animating(now, motion))
+    }
+
+    /// Pay the rails' frames. The clocks run themselves out — nothing here has to
+    /// stop them, because `is_animating` and the paint read the same instants.
+    fn advance_command_rails(&mut self, now: Instant) -> Result<()> {
+        if !self.command_rails_are_moving(now) {
+            return Ok(());
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// A press on a rail: jump to the tick under the pointer.
@@ -16974,32 +17135,62 @@ impl Runtime {
         else {
             return Vec::new();
         };
-        let (text, host) = (anchor.text.clone(), anchor.rect);
+        let (text, host, face) = (anchor.text.clone(), anchor.rect, anchor.face);
         let scale = self.renderer.metrics().scale_factor as f32;
-        let font_px = tooltip::TIP_FONT_LOGICAL_PX * scale;
+        let font_px = face.font_logical_px() * scale;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the badge's and the editor's do — first
-        // to break the text at the tip's width bound, then to size the box to
-        // the lines that came out.
+        // to bring the text inside the width bound, then to size the box to the
+        // lines that came out. Which face measures is the face that draws: a
+        // monospace card measured with the sans metrics is a box its own text
+        // overflows.
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         let gap = tooltip::TIP_GAP_LOGICAL_PX * scale;
-        let max_width = (tooltip::TIP_MAX_WIDTH_LOGICAL_PX * scale).min(width as f32 - 2.0 * gap);
-        let text = tooltip::wrap(&text, max_width, |run| {
-            self.renderer.measure_chrome_text(run, font_px)
-        })
-        .join("\n");
-        let widths: Vec<f32> = text
-            .split('\n')
-            .map(|line| self.renderer.measure_chrome_text(line, font_px))
-            .collect();
-        let Some(layout) =
-            tooltip::layout(&text, host, &widths, (width as f32, height as f32), scale)
-        else {
+        let max_width = (face.max_width_logical_px() * scale).min(width as f32 - 2.0 * gap);
+        let (text, widths) = {
+            let renderer = &mut self.renderer;
+            let line_height = (font_px * face.line_height()).round();
+            let mut measure = |run: &str| -> f32 {
+                if face.monospace() {
+                    renderer.measure_preview_paragraph_width(
+                        &[bt_render::PreviewRun {
+                            text: run.to_owned(),
+                            color: [0, 0, 0],
+                            mono: true,
+                            bold: false,
+                            font_scale: 1.0,
+                        }],
+                        font_px,
+                        line_height,
+                    )
+                } else {
+                    renderer.measure_chrome_text(run, font_px)
+                }
+            };
+            // `white-space: pre-line` and a wrap, or `nowrap` and an ellipsis —
+            // the two faces answer "too wide" differently and that difference is
+            // the point of [`tooltip::TipFace`].
+            let text = if face.wraps() {
+                tooltip::wrap(&text, max_width, &mut measure).join("\n")
+            } else {
+                tooltip::ellipsize(&text, max_width, &mut measure)
+            };
+            let widths: Vec<f32> = text.split('\n').map(&mut measure).collect();
+            (text, widths)
+        };
+        let Some(layout) = tooltip::layout(
+            &text,
+            host,
+            &widths,
+            (width as f32, height as f32),
+            scale,
+            face,
+        ) else {
             return Vec::new();
         };
         let palette = bt_render::chrome_palette();
         self.tooltip_drawn_opacity = Some(opacity);
-        tooltip::build(&layout, &palette, scale, opacity)
+        tooltip::build(&layout, &palette, scale, opacity, face)
     }
 
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
@@ -32387,31 +32578,38 @@ impl Runtime {
         // The peek first, and the tip only where the peek is not already
         // answering (§6). A tab that qualifies for neither is untouched by both.
         self.note_layout_peek(self.layout_peek_target_at(position))?;
-        let anchor = self
-            .tooltip_anchor_at(position)
-            .filter(|anchor| !self.layout_peek_suppresses(*anchor));
+        // **The rail is a surface standing on the pane's own right edge**, so it
+        // takes the pointer before anything the pane itself would answer with: a
+        // hyperlink underlined beneath a tick is a link the tick is standing on,
+        // and a mouse report sent from under one is a report about a cell nobody
+        // pointed at. Every gesture that owns the pointer has already returned
+        // above, so this only ever sees a free hand.
+        //
+        // A selection drag is the one live gesture that reaches this line — it is
+        // answered further down, so that a drag pulled across the rail keeps
+        // following the hand — and a rail must not light under it.
+        //
+        // **Above the tip**, which it was not until the glance card arrived: the
+        // card is a tip whose anchor is the crest, and the crest is what this line
+        // settles. Asking the anchor list first would offer the pointer whatever
+        // the *previous* frame's crest was, so a hand walking down a rail would
+        // see a card one tick behind it.
+        let on_command_rail =
+            self.drive_command_rail_hover(self.mouse_route.is_none().then_some(position))?;
+        // The glance card wins over anything the pane underneath it would say,
+        // for the reason the rail takes the pointer at all: it is the surface on
+        // top. `command_tick_anchor` answers only while a rail is hot, so
+        // everywhere else this is the tip list exactly as it was.
+        let anchor = self.command_tick_anchor().or_else(|| {
+            self.tooltip_anchor_at(position)
+                .filter(|anchor| !self.layout_peek_suppresses(*anchor))
+        });
         self.note_tooltip(anchor)?;
         // Which pane the pointer is in, settled before anything asks a question of it. Everything
         // below — the formula hover, the link's underline, the reference's underline, the flyout —
         // is answered by that pane, with no focus prerequisite and no focus side effect: the
         // window says what it is being pointed at (user ruling 2026-08-10).
         self.observe_hovered_pane()?;
-        // **The rail is a surface standing on the pane's own right edge**, so it
-        // takes the pointer before anything the pane itself would answer with: a
-        // hyperlink underlined beneath a tick is a link the tick is standing on,
-        // and a mouse report sent from under one is a report about a cell nobody
-        // pointed at. Every gesture that owns the pointer has already returned
-        // above, so this only ever sees a free hand — and a selection drag in
-        // flight is answered further down, before the gate, because a drag pulled
-        // across the rail must keep following the hand.
-        //
-        // A selection drag is the one live gesture that reaches this line — it is
-        // answered further down, so that a drag pulled across the rail keeps
-        // following the hand — and a rail must not light under it. S2 owns the
-        // rest of the mock-up's pointer machinery (`pointerleave`, one hot rail at
-        // a time, the glance card); this is the part a press needs to exist.
-        let on_command_rail =
-            self.drive_command_rail_hover(self.mouse_route.is_none().then_some(position))?;
         // `position` stays the window's own coordinates from here down. The flyout is a floating
         // window laid over the surface rather than a tenant of one pane, so its anchor is a point
         // on the window; translating it into some seat's corner is what used to make a peek raised
@@ -37496,6 +37694,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // And the rail's own three, beside the flash because they are the same
+        // shape: a hand resting on a rail moves nothing and no other clock in this
+        // window would wake the loop to finish the crest it started.
+        if let Err(error) = runtime.advance_command_rails(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // The glance card's own 350ms, beside the layout peek's and for the same
         // reason it stands where it does: it is a *peek*, and a peek that has
         // matured is already on screen when everything above it asks.
@@ -37594,6 +37799,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // The jump flash's own 950ms, at the animation's rate and only while
             // one is running. A window that has not jumped asks for nothing.
             runtime.command_flash_deadline(now),
+            // `width .1s, background .14s, opacity .12s` on the ticks of whichever
+            // rail the pointer is on — and nothing at all once the longest of the
+            // three has landed, which is what makes a rail under a still hand cost
+            // no wake-ups.
+            runtime.command_rail_deadline(now),
             // The peek's 350ms while one is settling, and nothing afterwards:
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.

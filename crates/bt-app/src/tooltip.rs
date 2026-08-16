@@ -65,6 +65,119 @@ pub const TIP_GAP_LOGICAL_PX: f32 = 6.0;
 /// to everywhere else, and never as a banner.
 pub const TIP_MAX_WIDTH_LOGICAL_PX: f32 = 360.0;
 
+// ── `#cmd-peek`: the same machine wearing a second face (inventory D-19) ──
+//
+// *"the glance card: monospace one-liner, structurally non-interactive"* (mock
+// 1483-1491). Every one of these is a `#cmd-peek` declaration and every one of
+// them differs from `.tip` above, which is the whole reason [`TipFace`] exists:
+// the delay, the fade, the anchor bookkeeping and the surface are the tip's and
+// must not be written twice, while the type, the measure and the placement are
+// the card's and are not the tip's in any of the four.
+
+/// `font: 12px/1.5 Consolas, "Cascadia Mono", monospace` — the size.
+///
+/// A point larger than the chrome tip beside it, and set in the *terminal's* face
+/// rather than the window's, because what it quotes is a command line: the card
+/// shows a thing the reader typed at a grid, and a proportional rendering of it is
+/// a paraphrase.
+pub const PEEK_FONT_LOGICAL_PX: f32 = 12.0;
+/// The `1.5` of the same declaration.
+pub const PEEK_LINE_HEIGHT: f32 = 1.5;
+/// The `10px` of `padding: 5px 10px`.
+pub const PEEK_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// The `5px` of `padding: 5px 10px`.
+pub const PEEK_PADDING_Y_LOGICAL_PX: f32 = 5.0;
+/// `border-radius: 8px` — the card is a *card*, rounded like the menus and the
+/// float windows, where the tip's five is the smaller radius of a label.
+pub const PEEK_RADIUS_LOGICAL_PX: f32 = 8.0;
+/// `max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space:
+/// nowrap` — one line, cut with an ellipsis, and never wider than this.
+///
+/// **Ellipsis and not wrapping**, which is the opposite of what the tip does and
+/// deliberately so: a wrapped command line is a command line whose shape has been
+/// changed, and the shape is half of what makes one recognisable. A cut one is
+/// obviously cut.
+pub const PEEK_MAX_WIDTH_LOGICAL_PX: f32 = 460.0;
+/// What a cut line ends with.
+pub const PEEK_ELLIPSIS: &str = "…";
+
+/// Which of the two faces a tip is drawn in.
+///
+/// D-19 ruled that `#cmd-peek` reuses this module rather than becoming a second
+/// popup, and this is the shape of that reuse: one enum carrying the six things
+/// that differ — type, leading, padding, radius, width bound, and whether the text
+/// wraps or is cut — so that everything which does *not* differ (the 380ms delay,
+/// the fade, [`TooltipAnchors`], [`TooltipHost`], the surface, the shadow) has
+/// exactly one implementation. A second popup would have meant a second clock, and
+/// two clocks over one pointer is how a window ends up showing two boxes at once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TipFace {
+    /// `.tip` — the window talking about its own controls.
+    Chrome,
+    /// `#cmd-peek` — the glance card beside a command tick.
+    Peek {
+        /// The text is the ledger's honest gap rather than a command, so it is
+        /// drawn in `--ink3` instead of `--ink2` (`cmdrail::PEEK_EMPTY_TEXT`).
+        muted: bool,
+    },
+}
+
+impl TipFace {
+    #[must_use]
+    pub fn font_logical_px(self) -> f32 {
+        match self {
+            Self::Chrome => TIP_FONT_LOGICAL_PX,
+            Self::Peek { .. } => PEEK_FONT_LOGICAL_PX,
+        }
+    }
+
+    #[must_use]
+    pub fn line_height(self) -> f32 {
+        match self {
+            Self::Chrome => CHROME_LINE_HEIGHT,
+            Self::Peek { .. } => PEEK_LINE_HEIGHT,
+        }
+    }
+
+    /// `(horizontal, vertical)` padding, logical pixels.
+    #[must_use]
+    pub fn padding_logical_px(self) -> (f32, f32) {
+        match self {
+            Self::Chrome => (TIP_PADDING_X_LOGICAL_PX, TIP_PADDING_Y_LOGICAL_PX),
+            Self::Peek { .. } => (PEEK_PADDING_X_LOGICAL_PX, PEEK_PADDING_Y_LOGICAL_PX),
+        }
+    }
+
+    #[must_use]
+    pub fn radius_logical_px(self) -> f32 {
+        match self {
+            Self::Chrome => TIP_RADIUS_LOGICAL_PX,
+            Self::Peek { .. } => PEEK_RADIUS_LOGICAL_PX,
+        }
+    }
+
+    #[must_use]
+    pub fn max_width_logical_px(self) -> f32 {
+        match self {
+            Self::Chrome => TIP_MAX_WIDTH_LOGICAL_PX,
+            Self::Peek { .. } => PEEK_MAX_WIDTH_LOGICAL_PX,
+        }
+    }
+
+    /// Whether text too wide for the bound is broken onto more lines, or cut with
+    /// an ellipsis.
+    #[must_use]
+    pub fn wraps(self) -> bool {
+        matches!(self, Self::Chrome)
+    }
+
+    /// Whether the text is set in the terminal's face.
+    #[must_use]
+    pub fn monospace(self) -> bool {
+        matches!(self, Self::Peek { .. })
+    }
+}
+
 /// Which anchor a tip belongs to.
 ///
 /// Identity only — never the text. The text is recomputed from the anchor every
@@ -129,6 +242,20 @@ pub enum TooltipAnchorId {
     /// is a list here" and never what is on it. It is exactly the case a tip is
     /// for.
     PaneChevron(bt_layout::SeatId),
+    /// One tick of a pane's command marks rail — *"hover **glances** the command"*
+    /// (mock 4604).
+    ///
+    /// It carries the **mark** and not the tick's index, and the difference is the
+    /// fisheye: a bucket opening under the pointer renumbers every tick below it,
+    /// so an index would have the card follow the pointer's *position* through a
+    /// re-layout while the hand had not moved. A `CommandMarkId` survives
+    /// aggregation, expansion, eviction and resize, which is exactly the set of
+    /// things that can happen underneath a card that is already up.
+    ///
+    /// There is deliberately **no plain tip on a tick beside this**. "Jump to this
+    /// command" would be a second box explaining a first one; the card *is* the
+    /// tip, and what it says is the command.
+    CommandTick(bt_layout::SeatId, bt_term::CommandMarkId),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.
@@ -146,6 +273,14 @@ pub struct TooltipAnchor {
     pub rect: [f32; 4],
     /// What the tip says. Never empty — see [`TooltipAnchors::push`].
     pub text: String,
+    /// Which face this anchor's tip is drawn in.
+    ///
+    /// On the anchor rather than derived from the id at paint time, because
+    /// [`TipFace::Peek`]'s muteness is a fact about the *text* — whether the
+    /// ledger had a command to quote — and the id knows only which mark it is.
+    /// Deriving it would mean the painter re-asking the ledger a question the
+    /// anchor already answered, one frame later than it answered it.
+    pub face: TipFace,
 }
 
 /// Everything tippable this frame, innermost first.
@@ -172,11 +307,27 @@ impl TooltipAnchors {
     /// underneath. Refusing to register is what lets the idle mark fall through
     /// to its tab.
     pub fn push(&mut self, id: TooltipAnchorId, rect: [f32; 4], text: impl Into<String>) {
+        self.push_faced(id, rect, text, TipFace::Chrome);
+    }
+
+    /// The same, in a face of its own — the glance card's one caller.
+    pub fn push_faced(
+        &mut self,
+        id: TooltipAnchorId,
+        rect: [f32; 4],
+        text: impl Into<String>,
+        face: TipFace,
+    ) {
         let text = text.into();
         if text.trim().is_empty() || rect[2] <= rect[0] || rect[3] <= rect[1] {
             return;
         }
-        self.entries.push(TooltipAnchor { id, rect, text });
+        self.entries.push(TooltipAnchor {
+            id,
+            rect,
+            text,
+            face,
+        });
     }
 
     /// The innermost anchor under this point.
@@ -463,28 +614,54 @@ pub struct TooltipLayout {
 /// neither above nor below, because no tip of its could be that tall. A wrapped
 /// tip can be (user report, 2026-08-16), so a third case now holds such a tip
 /// inside the window, covering its host if it must.
+///
+/// # The card's placement is a different rule and lives in the same door
+///
+/// `#cmd-peek` stands to the **left** of its tick and eight pixels above it
+/// (mock 8474-8476), which is not "centred below" with different numbers — it is
+/// another rule, and it has to be, because its host is on the pane's right edge
+/// where a centred card would hang half off the window and a card below would
+/// cover the tick under it. Both live here so that the day a third surface asks
+/// for a tip there is one place to read what "placed" means.
 #[must_use]
 pub fn place(
     host: [f32; 4],
     line_widths: &[f32],
     window: (f32, f32),
     scale: f32,
+    face: TipFace,
 ) -> Option<([f32; 4], f32, f32)> {
     if line_widths.is_empty() {
         return None;
     }
     let px = |logical: f32| logical * scale;
-    let pad_x = px(TIP_PADDING_X_LOGICAL_PX);
-    let pad_y = px(TIP_PADDING_Y_LOGICAL_PX);
+    let (pad_x, pad_y) = face.padding_logical_px();
+    let (pad_x, pad_y) = (px(pad_x), px(pad_y));
     let border = px(TIP_BORDER_LOGICAL_PX);
     let gap = px(TIP_GAP_LOGICAL_PX);
-    let line_height = (px(TIP_FONT_LOGICAL_PX) * CHROME_LINE_HEIGHT).round();
+    let line_height = (px(face.font_logical_px()) * face.line_height()).round();
 
     let text_width = line_widths.iter().copied().fold(0.0_f32, f32::max);
     let width = (text_width + 2.0 * (pad_x + border)).round();
     let height = (line_widths.len() as f32 * line_height + 2.0 * (pad_y + border)).round();
 
     let (window_width, window_height) = window;
+    if face.monospace() {
+        // `left = max(6, r.left − peekWidth − 12)`, `top = max(6, r.top − 8)`.
+        // The mock-up clamps only the near edges, because its card can only ever
+        // be pushed off the top-left; the far edges are clamped here as well, for
+        // a rail on a pane narrow enough that 460 pixels of card do not fit
+        // between it and the window's left edge.
+        let left = (host[0] - px(crate::cmdrail::PEEK_GAP_LOGICAL_PX) - width)
+            .min(window_width - width - gap)
+            .max(gap)
+            .round();
+        let top = (host[1] - px(crate::cmdrail::PEEK_RISE_LOGICAL_PX))
+            .min(window_height - height - gap)
+            .max(gap)
+            .round();
+        return Some(([left, top, left + width, top + height], line_height, border));
+    }
     let centred = (host[0] + host[2]) / 2.0 - width / 2.0;
     let left = centred.min(window_width - width - gap).max(gap).round();
 
@@ -625,12 +802,45 @@ fn is_word_joint(ch: char) -> bool {
     matches!(ch, '/' | '\\' | '-' | '_')
 }
 
+/// Cut `text` to `max_width`, ending it with an ellipsis when it had to be cut.
+///
+/// `text-overflow: ellipsis` on a `white-space: nowrap` box, which is what the
+/// glance card is. The cut lands on a **character** boundary and not a byte one,
+/// and the ellipsis is measured as part of every candidate rather than added
+/// afterwards — a cut made without it and then appended to overflows the box by
+/// exactly the width of the mark that was supposed to prove it fits.
+///
+/// Binary search over the character boundaries, so a five-hundred-character
+/// command line costs about ten shapings a frame rather than five hundred.
+#[must_use]
+pub fn ellipsize(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) -> String {
+    if measure(text) <= max_width {
+        return text.to_owned();
+    }
+    let cuts: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    // The longest prefix whose ellipsised form still fits. `lo` is always a
+    // fitting answer (the empty prefix, which is the bare ellipsis) and `hi` is
+    // always past the last one, so the loop cannot fail to terminate on a face
+    // whose widths are not monotonic in the string's length.
+    let (mut lo, mut hi) = (0_usize, cuts.len() - 1);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let candidate = format!("{}{PEEK_ELLIPSIS}", &text[..cuts[mid]]);
+        if measure(&candidate) <= max_width {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    format!("{}{PEEK_ELLIPSIS}", &text[..cuts[lo]])
+}
+
 /// Lay the tip out: the box, and one row per line.
 ///
 /// The mock-up's `.tip` is `white-space: pre-line`: every `\n` is a line. The
-/// width bound is applied before this — [`wrap`] has already broken the text,
-/// and the widths handed in are the wrapped lines' — so this splits on `\n` and
-/// nothing else, and shrink-wraps the box to the longest line.
+/// width bound is applied before this — [`wrap`] or [`ellipsize`] has already
+/// dealt with it, and the widths handed in are the resulting lines' — so this
+/// splits on `\n` and nothing else, and shrink-wraps the box to the longest line.
 #[must_use]
 pub fn layout(
     text: &str,
@@ -638,10 +848,12 @@ pub fn layout(
     line_widths: &[f32],
     window: (f32, f32),
     scale: f32,
+    face: TipFace,
 ) -> Option<TooltipLayout> {
-    let (frame, line_height, border) = place(host, line_widths, window, scale)?;
-    let pad_x = TIP_PADDING_X_LOGICAL_PX * scale;
-    let pad_y = TIP_PADDING_Y_LOGICAL_PX * scale;
+    let (frame, line_height, border) = place(host, line_widths, window, scale, face)?;
+    let (pad_x, pad_y) = face.padding_logical_px();
+    let pad_x = pad_x * scale;
+    let pad_y = pad_y * scale;
     let lines = text
         .split('\n')
         .enumerate()
@@ -672,6 +884,7 @@ pub fn build(
     palette: &ChromePalette,
     scale: f32,
     opacity: f32,
+    face: TipFace,
 ) -> Vec<OverlayLayer> {
     let px = |logical: f32| logical * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
@@ -680,7 +893,7 @@ pub fn build(
     push_float_window(
         &mut quads,
         layout.frame,
-        px(TIP_RADIUS_LOGICAL_PX),
+        px(face.radius_logical_px()),
         px(TIP_BORDER_LOGICAL_PX),
         px(bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX),
         palette.menu_surface,
@@ -691,17 +904,69 @@ pub fn build(
         alpha(palette.menu_border_alpha),
     );
 
+    // `color: var(--ink2)` over `--menu` — the same ink a menu row that is not
+    // the selected one is drawn in, which is what `--ink2` on that surface
+    // already means. The card's honest gap drops one step to `--ink3`, which is
+    // the ink this palette already keeps for a menu row's annotation.
+    let ink = match face {
+        TipFace::Peek { muted: true } => palette.menu_item_hint_text,
+        _ => palette.menu_item_text,
+    };
+
+    // **Monospace rides the body channel, not the label channel.** A
+    // [`ChromeLabel`] is set in the window's sans face and has no say in the
+    // matter; [`bt_render::PreviewRun`] is the pipeline's one run of text that can
+    // ask for the terminal's face, and an [`OverlayLayer`]'s body is drawn inside
+    // that layer rather than a pass earlier — so the card's own surface is still
+    // underneath its text. Teaching `ChromeLabel` a face instead would have been a
+    // field on a struct with a hundred literal construction sites, every one of
+    // which would have had to say "sans" to go on meaning what it already means.
+    if face.monospace() {
+        let font_size_px = px(face.font_logical_px());
+        let paragraphs = layout
+            .lines
+            .iter()
+            .map(|(rect, text)| bt_render::PreviewParagraph {
+                runs: vec![bt_render::PreviewRun {
+                    text: text.clone(),
+                    color: ink,
+                    mono: true,
+                    bold: false,
+                    font_scale: 1.0,
+                }],
+                rect: *rect,
+                font_size_px,
+                line_height_px: rect[3] - rect[1],
+                // `white-space: nowrap`: the text was cut to the bound by
+                // [`ellipsize`] before it ever got here, and a reflow at this
+                // point would be a second opinion about the same measurement.
+                wrap: false,
+                letter_spacing_em: 0.0,
+                align_right: false,
+                align_center: false,
+            })
+            .collect();
+        return vec![OverlayLayer {
+            quads,
+            body: Some(bt_render::PreviewBody {
+                clip: layout.frame,
+                quads: Vec::new(),
+                paragraphs,
+                blocks: Vec::new(),
+            }),
+            opacity,
+            ..OverlayLayer::default()
+        }];
+    }
+
     let labels = layout
         .lines
         .iter()
         .map(|(rect, text)| ChromeLabel {
             text: text.clone(),
             rect: *rect,
-            font_size_px: px(TIP_FONT_LOGICAL_PX),
-            // `color: var(--ink2)` over `--menu` — the same ink a menu row that is
-            // not the selected one is drawn in, which is what `--ink2` on that
-            // surface already means.
-            color: palette.menu_item_text,
+            font_size_px: px(face.font_logical_px()),
+            color: ink,
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
@@ -728,6 +993,39 @@ mod tests {
 
     fn host(left: f32, top: f32, right: f32, bottom: f32) -> [f32; 4] {
         [left, top, right, bottom]
+    }
+
+    /// Every test below the card's own section is about `.tip`, so these two
+    /// shadow the faced versions with the chrome face bound. Stated once here
+    /// rather than repeated at fifty call sites, and the card's face is passed
+    /// explicitly by the tests that are about it — which is how a reader can tell
+    /// which face a given assertion is making a claim about.
+    fn place(
+        host: [f32; 4],
+        line_widths: &[f32],
+        window: (f32, f32),
+        scale: f32,
+    ) -> Option<([f32; 4], f32, f32)> {
+        super::place(host, line_widths, window, scale, TipFace::Chrome)
+    }
+
+    fn layout(
+        text: &str,
+        host: [f32; 4],
+        line_widths: &[f32],
+        window: (f32, f32),
+        scale: f32,
+    ) -> Option<TooltipLayout> {
+        super::layout(text, host, line_widths, window, scale, TipFace::Chrome)
+    }
+
+    fn build(
+        layout: &TooltipLayout,
+        palette: &ChromePalette,
+        scale: f32,
+        opacity: f32,
+    ) -> Vec<OverlayLayer> {
+        super::build(layout, palette, scale, opacity, TipFace::Chrome)
     }
 
     // ── M139: placement ────────────────────────────────────────────────────
@@ -1309,5 +1607,217 @@ mod tests {
                 .any(|quad| quad.color == palette.menu_surface),
             "faced"
         );
+    }
+
+    // ── `#cmd-peek`: the second face (D-19) ────────────────────────────────
+
+    /// A monospace measure with one number in it: every character is `advance`
+    /// wide, which is what a monospace face means and all these tests need.
+    fn mono(advance: f32) -> impl FnMut(&str) -> f32 {
+        move |text: &str| text.chars().count() as f32 * advance
+    }
+
+    /// The card's metrics are the card's, and none of them is the tip's.
+    #[test]
+    fn the_glance_cards_face_is_larger_rounder_and_wider_than_the_tips() {
+        let peek = TipFace::Peek { muted: false };
+        assert_eq!(peek.font_logical_px(), 12.0);
+        assert_eq!(peek.line_height(), 1.5);
+        assert_eq!(peek.padding_logical_px(), (10.0, 5.0));
+        assert_eq!(peek.radius_logical_px(), 8.0);
+        assert_eq!(peek.max_width_logical_px(), 460.0);
+        assert!(peek.monospace());
+        assert!(!peek.wraps(), "one line, cut — never reflowed");
+        assert_eq!(TipFace::Chrome.font_logical_px(), TIP_FONT_LOGICAL_PX);
+        assert!(TipFace::Chrome.wraps() && !TipFace::Chrome.monospace());
+    }
+
+    /// **The card stands to the left of its tick and eight pixels above it**, and
+    /// is held inside the window on every side.
+    ///
+    /// MUTATION: place it below and centred like a tip, and every card the rail
+    /// raises hangs half off the right edge of the window — the rail is *on* that
+    /// edge, which is the whole reason this face has a placement of its own.
+    #[test]
+    fn the_glance_card_stands_to_the_left_of_its_tick_and_never_leaves_the_window() {
+        let peek = TipFace::Peek { muted: false };
+        // A tick on a pane's right edge, as the rail always is.
+        let tick = host(960.0, 300.0, 987.0, 302.0);
+        let (frame, line_height, _) = super::place(tick, &[200.0], WINDOW, SCALE, peek).unwrap();
+        assert_eq!(frame[2], tick[0] - 12.0, "twelve pixels off the tick");
+        assert_eq!(frame[1], tick[1] - 8.0, "eight pixels above it");
+        assert_eq!(line_height, (12.0 * 1.5_f32).round());
+        assert_eq!(
+            frame[3] - frame[1],
+            (line_height + 2.0 * (5.0 + 1.0)).round()
+        );
+        assert_eq!(
+            frame[2] - frame[0],
+            (200.0_f32 + 2.0 * (10.0 + 1.0)).round()
+        );
+        // Hard against the top of the window: the card is pushed in to six and no
+        // further, which is the mock-up's own `max(6, …)`.
+        let high =
+            super::place(host(960.0, 2.0, 987.0, 4.0), &[200.0], WINDOW, SCALE, peek).unwrap();
+        assert_eq!(high.0[1], 6.0);
+        // And a card too wide for the room to the left of its tick — the mock-up
+        // clamps only the near edge; the far one is clamped here too.
+        let wide = super::place(
+            host(80.0, 300.0, 107.0, 302.0),
+            &[900.0],
+            WINDOW,
+            SCALE,
+            peek,
+        )
+        .unwrap();
+        assert_eq!(wide.0[0], 6.0);
+        assert!(wide.0[2] <= WINDOW.0 - 6.0);
+        // Near the bottom, the card is held above the window's own margin rather
+        // than running off it.
+        let low = super::place(
+            host(960.0, 695.0, 987.0, 697.0),
+            &[200.0],
+            WINDOW,
+            SCALE,
+            peek,
+        )
+        .unwrap();
+        assert!(low.0[3] <= WINDOW.1 - 6.0);
+    }
+
+    /// One line, cut at the bound, with the ellipsis measured as part of the cut.
+    ///
+    /// MUTATION: cut first and append the mark afterwards and every cut line is
+    /// one ellipsis wider than the box that was supposed to prove it fits.
+    #[test]
+    fn a_command_too_long_for_the_card_is_cut_with_an_ellipsis_that_fits_inside_the_bound() {
+        // 460 logical pixels at a seven-pixel advance is sixty-five characters,
+        // one of which the ellipsis takes.
+        let bound = TipFace::Peek { muted: false }.max_width_logical_px();
+        let short = "cargo test --workspace";
+        assert_eq!(ellipsize(short, bound, mono(7.0)), short, "it already fits");
+        let long = "x".repeat(200);
+        let cut = ellipsize(&long, bound, mono(7.0));
+        assert!(cut.ends_with(PEEK_ELLIPSIS));
+        assert!(
+            mono(7.0)(&cut) <= bound,
+            "the cut line fits its own box: {}",
+            mono(7.0)(&cut)
+        );
+        assert_eq!(
+            cut.chars().count(),
+            65,
+            "as many characters as fit, and no more"
+        );
+        // One more character would not have fitted — the cut is the *longest* one
+        // that does, not merely one that does.
+        let over = format!("{}{PEEK_ELLIPSIS}", &long[..cut.chars().count()]);
+        assert!(mono(7.0)(&over) > bound);
+        // Multi-byte text is cut on a character boundary and never inside one.
+        let cjk = "回声 ".repeat(200);
+        let cut = ellipsize(&cjk, bound, mono(7.0));
+        assert!(cut.ends_with(PEEK_ELLIPSIS));
+        assert!(mono(7.0)(&cut) <= bound);
+        // A bound too small for anything at all still answers with something
+        // drawable rather than panicking on an empty slice.
+        assert_eq!(ellipsize(&long, 1.0, mono(7.0)), PEEK_ELLIPSIS);
+    }
+
+    /// The card's text rides the monospace channel, and its honest gap is drawn
+    /// one ink lighter.
+    ///
+    /// MUTATION: put it in `labels` and the command is set in the window's sans
+    /// face — a paraphrase of the thing the reader typed at a grid.
+    #[test]
+    fn the_glance_card_draws_its_line_in_the_terminals_own_face() {
+        let palette = bt_render::chrome_palette();
+        let peek = TipFace::Peek { muted: false };
+        let laid = super::layout(
+            "cargo test --workspace",
+            host(960.0, 300.0, 987.0, 302.0),
+            &[180.0],
+            WINDOW,
+            SCALE,
+            peek,
+        )
+        .expect("a card is placed");
+        let layers = super::build(&laid, &palette, SCALE, 1.0, peek);
+        let layer = &layers[0];
+        assert!(layer.labels.is_empty(), "not a chrome label");
+        let body = layer.body.as_ref().expect("the monospace channel");
+        assert_eq!(body.clip, laid.frame);
+        assert_eq!(body.paragraphs.len(), 1);
+        let paragraph = &body.paragraphs[0];
+        assert!(!paragraph.wrap, "white-space: nowrap");
+        assert_eq!(paragraph.font_size_px, 12.0);
+        assert_eq!(paragraph.runs.len(), 1);
+        assert!(paragraph.runs[0].mono);
+        assert_eq!(paragraph.runs[0].text, "cargo test --workspace");
+        assert_eq!(paragraph.runs[0].color, palette.menu_item_text);
+        // The card is still a card: the menu's face, the menu's hairline, and a
+        // radius of its own.
+        assert!(
+            layer
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.menu_surface)
+        );
+        // The ledger's honest gap drops a step, to the ink a menu row's
+        // annotation already wears.
+        let muted = super::build(&laid, &palette, SCALE, 1.0, TipFace::Peek { muted: true });
+        assert_eq!(
+            muted[0].body.as_ref().unwrap().paragraphs[0].runs[0].color,
+            palette.menu_item_hint_text
+        );
+        assert_ne!(palette.menu_item_hint_text, palette.menu_item_text);
+    }
+
+    /// The card is a tip, so it is the tip's clocks that raise it — there is no
+    /// second delay and no second fade anywhere in this module.
+    #[test]
+    fn the_glance_card_arrives_on_the_tips_own_delay_and_takes_the_tips_own_fade() {
+        let seat = bt_layout::SeatId(3);
+        let anchor = TooltipAnchorId::CommandTick(seat, bt_term::CommandMarkId(11));
+        let mut host = TooltipHost::default();
+        let now = Instant::now();
+        host.observe(Some(anchor), now);
+        assert_eq!(host.active(), None, "still settling");
+        assert!(!host.activate_if_due(now + TOOLTIP_DELAY - Duration::from_millis(1)));
+        assert!(host.activate_if_due(now + TOOLTIP_DELAY));
+        assert_eq!(host.active(), Some(anchor));
+        // And the fade is the tip's 90ms, not a number of the card's own.
+        assert!(host.is_fading(now + TOOLTIP_DELAY, Motion::Full));
+        assert!(!host.is_fading(now + TOOLTIP_DELAY + TOOLTIP_FADE, Motion::Full));
+        // A tick that is no longer under the pointer takes its card with it —
+        // which is how the rail's own `pointerleave` reaches the card.
+        assert!(host.retain(|_| false));
+        assert_eq!(host.active(), None);
+    }
+
+    /// The face travels on the anchor, because muteness is a fact about the text.
+    #[test]
+    fn an_anchor_carries_the_face_its_tip_is_drawn_in() {
+        let mut anchors = TooltipAnchors::default();
+        anchors.push(TooltipAnchorId::NewTab, [0.0, 0.0, 10.0, 10.0], "New tab");
+        anchors.push_faced(
+            TooltipAnchorId::CommandTick(bt_layout::SeatId(1), bt_term::CommandMarkId(4)),
+            [20.0, 0.0, 60.0, 10.0],
+            "command",
+            TipFace::Peek { muted: true },
+        );
+        assert_eq!(anchors.at(5.0, 5.0).unwrap().face, TipFace::Chrome);
+        assert_eq!(
+            anchors.at(30.0, 5.0).unwrap().face,
+            TipFace::Peek { muted: true }
+        );
+        // And an anchor with nothing to say is still not an anchor, whichever
+        // face it asked for.
+        anchors.push_faced(
+            TooltipAnchorId::CommandTick(bt_layout::SeatId(1), bt_term::CommandMarkId(5)),
+            [70.0, 0.0, 90.0, 10.0],
+            "   ",
+            TipFace::Peek { muted: false },
+        );
+        assert!(anchors.at(80.0, 5.0).is_none());
     }
 }
