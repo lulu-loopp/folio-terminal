@@ -271,7 +271,7 @@ mod tests {
         let mut cells = text
             .chars()
             .map(|character| CapturedCell {
-                text: character.to_string(),
+                text: character.into(),
                 ..CapturedCell::default()
             })
             .collect::<Vec<_>>();

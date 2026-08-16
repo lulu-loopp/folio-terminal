@@ -1,4 +1,5 @@
 use std::{
+    cell::{Cell, RefCell},
     collections::hash_map::RandomState,
     hash::{BuildHasher, Hasher},
     num::NonZeroU32,
@@ -244,6 +245,18 @@ pub struct TerminalAdapter {
     columns: NonZeroU32,
     rows: NonZeroU32,
     row_fingerprint_seed: u64,
+    /// How many rows this terminal has actually captured — cache misses only.
+    ///
+    /// A capture clones a whole row of vendor cells and turns them into
+    /// [`bt_transcript::CapturedRow`]; a frame that captures the grid three
+    /// times used to pay for it three times. The counter is what lets a test
+    /// say how many times, rather than how many times it looks like. A [`Cell`]
+    /// because [`Self::visible_row`] is `&self` and a measurement must not be
+    /// allowed to change that.
+    captures: Cell<u64>,
+    /// Each visible row's capture, filed under the fingerprint of the vendor
+    /// cells it was made from. See [`Self::visible_row`].
+    captured_rows: RefCell<Vec<Option<(CapturedRowFingerprint, CapturedRow)>>>,
 }
 
 struct ResizeCanonical {
@@ -369,6 +382,8 @@ impl TerminalAdapter {
             columns,
             rows,
             row_fingerprint_seed,
+            captures: Cell::new(0),
+            captured_rows: RefCell::new(Vec::new()),
         }
     }
 
@@ -709,13 +724,52 @@ impl TerminalAdapter {
             .collect()
     }
 
+    /// One visible row of the grid, as stable captured cells.
+    ///
+    /// **Captured once per distinct row content, not once per caller.** A
+    /// single published frame asked for the whole grid at least twice — once to
+    /// project it and once more to build the live detection context — and each
+    /// ask cloned eighty vendor cells and rebuilt eighty captured ones. The
+    /// row's own fingerprint is the key: it hashes exactly the vendor fields
+    /// this capture reads, without allocating, so a hit is a fact about the
+    /// cells rather than a guess about who has touched them since. **Nothing
+    /// invalidates this cache, because content is the key** — a row that
+    /// changed hashes differently and is captured again.
+    ///
+    /// The one field the fingerprint leaves out is a hyperlink's *id*, which
+    /// the vendor synthesizes per emission; [`CellHyperlink`] compares and
+    /// hashes on the uri alone for that exact reason, so two captures the
+    /// fingerprint calls equal are equal everywhere this workspace looks.
     pub fn visible_row(&self, row: u32) -> Option<CapturedRow> {
-        (row < self.rows.get()).then(|| {
-            let cells = (0..self.columns.get())
-                .map(|column| self.term.grid()[Line(row as i32)][Column(column as usize)].clone())
-                .collect::<Vec<_>>();
-            to_captured_row(&cells)
-        })
+        if row >= self.rows.get() {
+            return None;
+        }
+        let fingerprint =
+            captured_row_fingerprint(&self.term, row as usize, self.row_fingerprint_seed);
+        let mut cache = self.captured_rows.borrow_mut();
+        let rows = self.rows.get() as usize;
+        if cache.len() != rows {
+            cache.clear();
+            cache.resize(rows, None);
+        }
+        if let Some((cached_fingerprint, cached)) = &cache[row as usize]
+            && *cached_fingerprint == fingerprint
+        {
+            return Some(cached.clone());
+        }
+        self.captures.set(self.captures.get().saturating_add(1));
+        let cells = (0..self.columns.get())
+            .map(|column| self.term.grid()[Line(row as i32)][Column(column as usize)].clone())
+            .collect::<Vec<_>>();
+        let captured = to_captured_row(&cells);
+        cache[row as usize] = Some((fingerprint, captured.clone()));
+        Some(captured)
+    }
+
+    /// How many rows have been captured out of this terminal since it opened.
+    /// See [`Self::captures`].
+    pub fn captures(&self) -> u64 {
+        self.captures.get()
     }
 
     /// Whether `row` soft-wraps into the row below it — the `continues` flag of `visible_row`, read

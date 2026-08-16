@@ -252,9 +252,293 @@ impl std::hash::Hash for CellHyperlink {
     }
 }
 
+/// How many UTF-8 bytes a cell's text keeps without touching the heap.
+///
+/// A cell holds one grapheme cluster: a base character plus whatever zero-width
+/// marks the terminal attached to it. Four bytes covers every single codepoint;
+/// twenty-two covers a base character with several combining marks, a regional
+/// indicator pair, and the ZWJ sequences that ordinary emoji are made of. It is
+/// also the number that makes [`CellText`] exactly the size of the [`String`] it
+/// replaced — twenty-four bytes — so the grids, rows and frames built out of
+/// these are byte-for-byte the same size they were.
+const CELL_TEXT_INLINE_BYTES: usize = 22;
+
+#[derive(Clone, Debug)]
+enum CellTextRepr {
+    Inline {
+        bytes: [u8; CELL_TEXT_INLINE_BYTES],
+        len: u8,
+    },
+    /// A cluster longer than any terminal cell realistically holds. Kept
+    /// because "realistically" is not "never" — a pathological ZWJ chain is
+    /// still text somebody typed, and losing it would be a lie about the grid.
+    Spilled(Box<str>),
+}
+
+/// One cell's text, stored inline.
+///
+/// **This was a `String`, and the `String` was the single largest cost in this
+/// application.** A cell is one grapheme cluster — one to four bytes, nearly
+/// always — and an eighty-by-thirty grid is 2,600 of them. Capturing the grid
+/// therefore made 2,600 heap allocations, and the grid was captured several
+/// times per published frame: sampling the main thread found it *allocator
+/// bound*, with ntdll at 50% self time and `__rdl_dealloc` on three quarters of
+/// all stacks.
+///
+/// Inline storage removes every one of those allocations without changing what
+/// a cell is. It derefs to `str`, so everything that read a cell's text still
+/// reads it the same way.
+#[derive(Clone)]
+pub struct CellText(CellTextRepr);
+
+impl CellText {
+    /// The empty cluster — a blank cell.
+    pub const fn new() -> Self {
+        Self(CellTextRepr::Inline {
+            bytes: [0; CELL_TEXT_INLINE_BYTES],
+            len: 0,
+        })
+    }
+
+    /// Empty the cluster, back to inline storage.
+    ///
+    /// A blanked cell releases whatever it had spilled, because a cell that was
+    /// cleared is a cell nobody is going to ask for the old bytes of.
+    pub fn clear(&mut self) {
+        self.0 = CellTextRepr::Inline {
+            bytes: [0; CELL_TEXT_INLINE_BYTES],
+            len: 0,
+        };
+    }
+
+    /// How many bytes of *heap* this cluster is holding — zero for every cell
+    /// that fits inline, which is very nearly all of them.
+    ///
+    /// The question the resident-bytes accounting is actually asking. A
+    /// `String`'s `capacity()` answered it too, back when every cell had one.
+    pub fn heap_bytes(&self) -> usize {
+        match &self.0 {
+            CellTextRepr::Inline { .. } => 0,
+            CellTextRepr::Spilled(text) => text.len(),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            CellTextRepr::Inline { bytes, len } => std::str::from_utf8(&bytes[..usize::from(*len)])
+                .expect("a CellText's inline bytes are UTF-8 by construction"),
+            CellTextRepr::Spilled(text) => text,
+        }
+    }
+
+    /// Extend the cluster with one more character.
+    ///
+    /// The capture path's only mutation: a base character, then whatever
+    /// zero-width marks the terminal hung on it. Spills to the heap at the
+    /// first cluster that outgrows the inline room, and never comes back —
+    /// a cell that long is not going to get shorter mid-frame.
+    pub fn push(&mut self, character: char) {
+        let mut encoded = [0_u8; 4];
+        let encoded = character.encode_utf8(&mut encoded).as_bytes();
+        match &mut self.0 {
+            CellTextRepr::Inline { bytes, len } => {
+                let end = usize::from(*len) + encoded.len();
+                if end <= CELL_TEXT_INLINE_BYTES {
+                    bytes[usize::from(*len)..end].copy_from_slice(encoded);
+                    *len = end as u8;
+                    return;
+                }
+                let mut spilled = String::with_capacity(end);
+                spilled.push_str(
+                    std::str::from_utf8(&bytes[..usize::from(*len)])
+                        .expect("a CellText's inline bytes are UTF-8 by construction"),
+                );
+                spilled.push(character);
+                self.0 = CellTextRepr::Spilled(spilled.into_boxed_str());
+            }
+            CellTextRepr::Spilled(text) => {
+                let mut spilled = String::with_capacity(text.len() + encoded.len());
+                spilled.push_str(text);
+                spilled.push(character);
+                *text = spilled.into_boxed_str();
+            }
+        }
+    }
+
+    /// Extend the cluster with a whole string — the reflow path's form of
+    /// [`Self::push`], where a cluster arrives already assembled.
+    pub fn push_str(&mut self, addition: &str) {
+        if addition.is_empty() {
+            return;
+        }
+        match &mut self.0 {
+            CellTextRepr::Inline { bytes, len } => {
+                let end = usize::from(*len) + addition.len();
+                if end <= CELL_TEXT_INLINE_BYTES {
+                    bytes[usize::from(*len)..end].copy_from_slice(addition.as_bytes());
+                    *len = end as u8;
+                    return;
+                }
+                let mut spilled = String::with_capacity(end);
+                spilled.push_str(
+                    std::str::from_utf8(&bytes[..usize::from(*len)])
+                        .expect("a CellText's inline bytes are UTF-8 by construction"),
+                );
+                spilled.push_str(addition);
+                self.0 = CellTextRepr::Spilled(spilled.into_boxed_str());
+            }
+            CellTextRepr::Spilled(text) => {
+                let mut spilled = String::with_capacity(text.len() + addition.len());
+                spilled.push_str(text);
+                spilled.push_str(addition);
+                *text = spilled.into_boxed_str();
+            }
+        }
+    }
+}
+
+impl Default for CellText {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Deref for CellText {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for CellText {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<&str> for CellText {
+    fn from(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        if bytes.len() <= CELL_TEXT_INLINE_BYTES {
+            let mut inline = [0_u8; CELL_TEXT_INLINE_BYTES];
+            inline[..bytes.len()].copy_from_slice(bytes);
+            return Self(CellTextRepr::Inline {
+                bytes: inline,
+                len: bytes.len() as u8,
+            });
+        }
+        Self(CellTextRepr::Spilled(Box::from(text)))
+    }
+}
+
+impl From<String> for CellText {
+    fn from(text: String) -> Self {
+        Self::from(text.as_str())
+    }
+}
+
+impl From<&String> for CellText {
+    fn from(text: &String) -> Self {
+        Self::from(text.as_str())
+    }
+}
+
+impl From<char> for CellText {
+    fn from(character: char) -> Self {
+        let mut text = Self::new();
+        text.push(character);
+        text
+    }
+}
+
+impl std::fmt::Debug for CellText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), formatter)
+    }
+}
+
+impl std::fmt::Display for CellText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl PartialEq for CellText {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for CellText {}
+
+impl PartialEq<str> for CellText {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for CellText {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for CellText {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<CellText> for str {
+    fn eq(&self, other: &CellText) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<CellText> for &str {
+    fn eq(&self, other: &CellText) -> bool {
+        *self == other.as_str()
+    }
+}
+
+impl PartialOrd for CellText {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CellText {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl std::hash::Hash for CellText {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl std::borrow::Borrow<str> for CellText {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromIterator<char> for CellText {
+    fn from_iter<I: IntoIterator<Item = char>>(characters: I) -> Self {
+        let mut text = Self::new();
+        for character in characters {
+            text.push(character);
+        }
+        text
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CapturedCell {
-    pub text: String,
+    pub text: CellText,
     pub style: CellStyle,
     pub hyperlink: Option<CellHyperlink>,
     /// A terminal wide-character spacer has no source text of its own.
@@ -262,7 +546,7 @@ pub struct CapturedCell {
 }
 
 impl CapturedCell {
-    pub fn plain(text: impl Into<String>) -> Self {
+    pub fn plain(text: impl Into<CellText>) -> Self {
         Self {
             text: text.into(),
             ..Self::default()
@@ -281,10 +565,7 @@ pub struct CapturedRow {
 impl CapturedRow {
     pub fn plain(text: &str, continues: bool) -> Self {
         Self {
-            cells: text
-                .chars()
-                .map(|c| CapturedCell::plain(c.to_string()))
-                .collect(),
+            cells: text.chars().map(CapturedCell::plain).collect(),
             continues,
             shell_mark: None,
         }

@@ -24694,9 +24694,7 @@ impl Runtime {
         // here is not a tick lost: [`Self::strip_animation_deadline`] is
         // clamped to the same clock, so the loop is woken exactly when the ring
         // is next allowed to move.
-        if let Some(last) = self.strip_animation_ticked_at
-            && now.saturating_duration_since(last) < STRIP_ANIMATION_FRAME
-        {
+        if !strip_animation_tick_is_due(self.strip_animation_ticked_at, now) {
             return Ok(());
         }
         self.strip_animation_ticked_at = Some(now);
@@ -32661,6 +32659,20 @@ fn pty_frame_is_unchanged(
         .is_some_and(|previous| presentation_equivalent(previous, next))
 }
 
+/// Whether the tab strip's animation is allowed to move again.
+///
+/// [`STRIP_ANIMATION_FRAME`] is the rate the ring turns at, and this is the
+/// only thing that makes it one. `about_to_wait` runs after *every* event
+/// rather than only when a deadline expires, and the present each tick asks for
+/// is itself an event — so without this the ring simply ran as fast as the loop
+/// could turn, measured at 120 steps a second against a declared 62.5.
+///
+/// The first tick of a window's life is always due: there is no last one to be
+/// too soon after.
+fn strip_animation_tick_is_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= STRIP_ANIMATION_FRAME)
+}
+
 /// What the window can say about the terminal picture, at the moment an
 /// animation asks whether it has to build another one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38124,6 +38136,47 @@ mod tests {
             1,
             "and the ticks after it are free again"
         );
+    }
+
+    /// **The ring turns at the rate the constant declares — no faster.**
+    ///
+    /// A second of wall clock offered to the loop one millisecond at a time,
+    /// which is what a window whose every present wakes `about_to_wait` again
+    /// actually looks like. Sixty-two steps, not a thousand.
+    #[test]
+    fn the_strip_animation_moves_at_its_own_declared_rate() {
+        let start = Instant::now();
+        let mut last = None;
+        let mut ticks = 0;
+        for millisecond in 0..1000 {
+            let now = start + Duration::from_millis(millisecond);
+            if strip_animation_tick_is_due(last, now) {
+                last = Some(now);
+                ticks += 1;
+            }
+        }
+        assert_eq!(
+            ticks,
+            1000_u32.div_ceil(STRIP_ANIMATION_FRAME.as_millis() as u32),
+            "one step per {}ms and not one more",
+            STRIP_ANIMATION_FRAME.as_millis()
+        );
+    }
+
+    /// And it is never *slower* than the constant either: a tick offered
+    /// exactly one frame after the last is due, not one frame and a bit.
+    #[test]
+    fn a_tick_offered_exactly_one_frame_later_is_due() {
+        let start = Instant::now();
+        assert!(strip_animation_tick_is_due(None, start), "the first ever");
+        assert!(strip_animation_tick_is_due(
+            Some(start),
+            start + STRIP_ANIMATION_FRAME
+        ));
+        assert!(!strip_animation_tick_is_due(
+            Some(start),
+            start + STRIP_ANIMATION_FRAME - Duration::from_micros(1)
+        ));
     }
 
     /// A window with nothing on the glass yet composes, whatever else is true.

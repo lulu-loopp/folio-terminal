@@ -14,7 +14,7 @@ use std::{
 };
 
 use bt_doc::{ContentAnchor, MathMode, ScreenId};
-use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
+use bt_transcript::{CapturedCell, CellFlags, CellStyle, CellText, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
 #[cfg(test)]
 use bt_viewport::FrameViewportOrigin;
@@ -1574,14 +1574,14 @@ fn shape_entry_resident_bytes(key: &ShapeKey, buffer: &Buffer, value_bytes: usiz
     size_of::<Arc<ShapeKey>>()
         .saturating_add(3 * size_of::<usize>())
         .saturating_add(size_of::<ShapeKey>())
-        .saturating_add(key.text.capacity())
+        .saturating_add(key.text.heap_bytes())
         .saturating_add(value_bytes)
         .saturating_add(buffer_resident_bytes(buffer))
 }
 
 fn captured_cell_resident_bytes(cell: &CapturedCell) -> usize {
     size_of::<CapturedCell>()
-        .saturating_add(cell.text.capacity())
+        .saturating_add(cell.text.heap_bytes())
         .saturating_add(cell.hyperlink.as_ref().map_or(0, |hyperlink| {
             hyperlink
                 .uri
@@ -1656,7 +1656,10 @@ struct NarrowGlyph {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ShapeKey {
-    text: String,
+    /// The cluster itself, inline. A key is built for *every* non-blank cell on
+    /// *every* row compose — only the misses reach the shaper, but every one of
+    /// them used to reach the allocator first.
+    text: CellText,
     bold: bool,
     italic: bool,
 }
@@ -1913,14 +1916,17 @@ impl WideShapingCache {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NarrowCellSlot {
     column: usize,
-    text: String,
+    /// The cell's own storage, not a copy of it on the heap. One `String` per
+    /// non-blank cell, rebuilt on every row compose, was the second half of the
+    /// allocation storm [`CellText`] exists to end.
+    text: CellText,
     style: CellStyle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WideCellSlot {
     column: usize,
-    text: String,
+    text: CellText,
     style: CellStyle,
 }
 
@@ -10249,7 +10255,7 @@ mod tests {
             assert_ne!(key, changed_cell_key(styled), "flag {flag:?} must key rows");
         }
         let mut changed_text = base.clone();
-        changed_text.text = "y".to_owned();
+        changed_text.text = "y".into();
         assert_ne!(key, changed_cell_key(changed_text));
         let mut spacer = base.clone();
         spacer.wide_spacer = true;

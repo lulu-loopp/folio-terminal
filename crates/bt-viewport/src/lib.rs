@@ -4628,7 +4628,7 @@ mod tests {
         }
         let overlay_cells = &mut live[4].cells[4..7];
         for (cell, text) in overlay_cells.iter_mut().zip(["J", "M", "P"]) {
-            cell.text = text.to_owned();
+            cell.text = text.into();
             cell.style.flags = CellFlags::BOLD;
             cell.style.background = bt_transcript::TerminalColor::Rgb(41, 41, 41);
             cell.hyperlink = None;

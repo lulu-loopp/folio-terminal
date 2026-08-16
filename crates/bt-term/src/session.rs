@@ -8748,7 +8748,7 @@ fn copy_row_from_cells(
             text: if cell.text.is_empty() {
                 " ".to_owned()
             } else {
-                cell.text.clone()
+                cell.text.as_str().to_owned()
             },
         });
     }
@@ -11136,6 +11136,108 @@ mod tests {
 
     fn nz(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
+    }
+
+    /// **P0, the allocator half.** A captured grid must not touch the heap.
+    ///
+    /// Every cell used to carry a `String`, so capturing an 80x30 grid made
+    /// 2,600 heap allocations — and the grid is captured more than once per
+    /// published frame. Sampling the main thread under a running command found
+    /// it allocator-bound: ntdll at 50% self time, `__rdl_dealloc` on three
+    /// quarters of every stack. The cells still hold exactly the same text;
+    /// they hold it inline.
+    ///
+    /// Mutation: shrink `CELL_TEXT_INLINE_BYTES` to 0 and this goes red at the
+    /// first character.
+    #[test]
+    fn a_captured_grid_holds_no_heap_bytes() {
+        let mut session = DualPlaneSession::new(nz(80), nz(30));
+        // Ordinary text, a wide character, a combining mark, and an emoji ZWJ
+        // sequence — the whole range a real cell holds.
+        session
+            .feed("plain ascii, 中文, e\u{0301}, \u{1F469}\u{200D}\u{1F4BB}\r\n".as_bytes())
+            .unwrap();
+        let mut cells = 0_usize;
+        let mut heap = 0_usize;
+        for row in 0..30 {
+            let captured = session.terminal.visible_row(row).unwrap();
+            for cell in &captured.cells {
+                cells += 1;
+                heap += cell.text.heap_bytes();
+            }
+        }
+        assert_eq!(cells, 80 * 30);
+        assert_eq!(
+            heap, 0,
+            "a captured grid must not put a single byte of cell text on the heap"
+        );
+    }
+
+    /// The text survives the move off the heap, byte for byte.
+    #[test]
+    fn an_inline_cell_still_says_what_it_said() {
+        let mut session = DualPlaneSession::new(nz(12), nz(2));
+        session.feed("a中e\u{0301}".as_bytes()).unwrap();
+        let row = session.terminal.visible_row(0).unwrap();
+        // Cell by cell, because a wide character owns two of them and the
+        // second is a spacer with no text of its own.
+        assert_eq!(row.cells[0].text, "a");
+        assert_eq!(row.cells[1].text, "中");
+        assert!(row.cells[2].wide_spacer, "the wide character's second cell");
+        assert_eq!(
+            row.cells[3].text, "e\u{0301}",
+            "a base character and its combining mark are one cluster in one cell"
+        );
+    }
+
+    /// One published frame, in the four calls `publish_frame_inner` makes.
+    fn publish_one_frame(session: &mut DualPlaneSession, projection: &mut ViewportProjection) {
+        session.refresh_projection(projection);
+        let frame = session.viewport_frame(projection).unwrap();
+        session.schedule_visible_artifacts(&frame);
+        session.record_published_frame(&frame, Instant::now());
+    }
+
+    /// **P0, the second half: how many times a frame captures the grid.**
+    ///
+    /// A frame used to capture the whole visible grid **twice** — once to
+    /// project it, and once more to build the live detection context, each ask
+    /// cloning eighty vendor cells a row and rebuilding eighty captured ones.
+    /// A capture is now filed under the fingerprint of the cells it was made
+    /// from, so a row is captured when it *changes* and not when it is asked
+    /// for.
+    ///
+    /// Mutation: drop the fingerprint check in `TerminalAdapter::visible_row`
+    /// and both counts below become 60.
+    #[test]
+    fn a_frame_captures_only_the_rows_that_changed() {
+        let mut session = DualPlaneSession::new(nz(80), nz(30));
+        let mut projection = session.new_projection(session.layout_key());
+        session.feed(b"$ a command that is running\r\n").unwrap();
+        publish_one_frame(&mut session, &mut projection);
+
+        // A command that prints nothing — the burn this whole pass is about.
+        // Its frames must capture nothing at all.
+        let before = session.terminal.captures();
+        for _ in 0..60 {
+            publish_one_frame(&mut session, &mut projection);
+        }
+        assert_eq!(
+            session.terminal.captures() - before,
+            0,
+            "a grid that did not change must not be captured again"
+        );
+
+        // And a row that *does* change is captured once: not twice for the two
+        // askers, and not thirty times for the rows beside it.
+        let before = session.terminal.captures();
+        session.feed(b"one more line\r\n").unwrap();
+        publish_one_frame(&mut session, &mut projection);
+        assert_eq!(
+            session.terminal.captures() - before,
+            1,
+            "one row said something new, so one row was captured"
+        );
     }
 
     fn default_math_padding_subpixels() -> i64 {

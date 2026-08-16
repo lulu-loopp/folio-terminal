@@ -6,7 +6,7 @@ use alacritty_terminal::{
     vte::ansi::{Color, NamedColor},
 };
 use bt_transcript::{
-    CapturedCell, CapturedRow, CellFlags, CellHyperlink, CellStyle, TerminalColor,
+    CapturedCell, CapturedRow, CellFlags, CellHyperlink, CellStyle, CellText, TerminalColor,
 };
 use std::hash::{Hash, Hasher};
 
@@ -139,9 +139,14 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
     let cells = row
         .iter()
         .map(|cell| {
-            let mut text = cell.c.to_string();
+            // **No allocation.** This ran 2,600 times per grid capture and
+            // several times per frame; `cell.c.to_string()` was the single
+            // hottest heap call in the application. See [`CellText`].
+            let mut text = CellText::from(cell.c);
             if let Some(zero_width) = cell.zerowidth() {
-                text.extend(zero_width);
+                for mark in zero_width {
+                    text.push(*mark);
+                }
             }
             CapturedCell {
                 text,
