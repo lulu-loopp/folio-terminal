@@ -137,12 +137,21 @@ pub const TOAST_PADDING_Y_LOGICAL_PX: f32 = 10.0;
 pub const TOAST_BODY_FONT_LOGICAL_PX: f32 = 12.0;
 /// `font-size: 12.5px; font-weight: 500` — the title, when there is one.
 pub const TOAST_TITLE_FONT_LOGICAL_PX: f32 = 12.5;
-/// The kind's mark, and the round it is tinted into.
+/// The mark column — the box the dot is centred in, so the text of every card
+/// starts at the same x whatever the kind.
 pub const TOAST_MARK_LOGICAL_PX: f32 = 14.0;
-/// The glyph inside that round.
-pub const TOAST_GLYPH_LOGICAL_PX: f32 = 8.0;
-/// The `·` of [`ToastKind::Info`], which is a filled round rather than a glyph.
-pub const TOAST_DOT_LOGICAL_PX: f32 = 5.0;
+/// `.tdot { width: 6px; height: 6px; border-radius: 50% }` — the mock-up's own
+/// toast mark, and the only mark a card wears (user ruling 2026-08-16).
+///
+/// **A dot and not a glyph in a round.** The first cut drew a `×` inside a
+/// tinted circle for an error and a check for a success — the vocabulary of
+/// Sonner and Radix, and of nothing else in this house. Here a circle is only
+/// ever a *state*: the filled dot on the current branch, the hollow one on the
+/// others, the node on a commit, the unread dot on a tab, the pip's dot. It is
+/// never a container for an icon. So the card says what the tab and the branch
+/// row say — one dot, in the ink that names the state — and a `×` on a card
+/// means exactly one thing, which is the dismiss verb at its right.
+pub const TOAST_DOT_LOGICAL_PX: f32 = 6.0;
 /// The gap between the mark column and the text.
 pub const TOAST_MARK_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.gact`'s own 18 — the dismiss verb's box.
@@ -151,14 +160,6 @@ pub const TOAST_CLOSE_LOGICAL_PX: f32 = 18.0;
 pub const TOAST_CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// The `×` inside that box.
 pub const TOAST_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
-/// How much of the kind's ink tints the mark's ground —
-/// `color-mix(in srgb, <ink> 15%, transparent)`, in thousandths.
-///
-/// The Git badge's own [`crate::git_panel::GIT_BADGE_GROUND_ALPHA`], and the same
-/// number for the same reason: a status ink at full strength behind a status ink
-/// at full strength is a traffic light, and 15% is the tint that says "this
-/// belongs to that colour" without competing with the glyph standing on it.
-pub const TOAST_MARK_GROUND_ALPHA: i32 = 150;
 /// The most lines of body text a card will show before it stops.
 ///
 /// Six, and the seventh is not shown but *reported* — the last line kept ends in
@@ -193,16 +194,19 @@ pub enum ToastKind {
     Error,
     /// `accent` — a fact, in the colour this product says "look here" in.
     ///
-    /// **No caller yet, and it is here deliberately.** A host that could only
-    /// carry failures would be a *failure* host, and the first quiet thing this
-    /// window wants to say would arrive as a second mechanism beside it. The two
-    /// remaining kinds are three lines of `match` each and are drawn, tested and
-    /// legible on both canvases today, so that day costs one call site.
-    #[allow(dead_code)]
+    /// It had no caller when it was written, and that was deliberate: a host
+    /// that could only carry failures would be a *failure* host, and the first
+    /// quiet thing this window wanted to say would have arrived as a second
+    /// mechanism beside it. The day arrived with v2 ② and cost one call site —
+    /// a seek that ran out of history (`git_graph::graph_seek_gave_up`), which
+    /// is a fact about the reading and not a fault of anything.
     Info,
-    /// `status_ok` — it worked, and the working is worth saying. Here for
-    /// [`Self::Info`]'s reason.
-    #[allow(dead_code)]
+    /// `status_ok` — it worked, and the working is worth saying.
+    ///
+    /// Its first caller is v2 ②'s copy verbs (D7), and it is the case the kind
+    /// was reserved for: a copy's whole effect is somewhere the reader cannot
+    /// see, so a verb that said nothing would be a verb nobody could tell had
+    /// run.
     Ok,
 }
 
@@ -886,40 +890,17 @@ pub fn build(
 
         let mut sprites = Vec::new();
         let ink = toast.kind.ink(palette);
-        // The kind's round: the ink at 15% for the ground, the ink itself for the
-        // glyph standing on it — the Git badge's own arrangement.
+        // The kind's dot — `.tdot`, in the ink that names the state, centred in
+        // the mark column. See [`TOAST_DOT_LOGICAL_PX`] for why it is a dot and
+        // not a glyph in a round.
+        let dot = centred(card.mark, px(TOAST_DOT_LOGICAL_PX));
         sprites.push(ChromeSprite::new(
             ChromeMark::ControlPill {
-                radius_px: (px(TOAST_MARK_LOGICAL_PX) / 2.0).round().max(1.0) as u32,
+                radius_px: (px(TOAST_DOT_LOGICAL_PX) / 2.0).round().max(1.0) as u32,
             },
-            card.mark,
-            bt_render::ink_over(palette.menu_surface, ink, TOAST_MARK_GROUND_ALPHA),
+            dot,
+            ink,
         ));
-        match toast.kind {
-            ToastKind::Error => sprites.push(ChromeSprite::new(
-                ChromeMark::TabClose,
-                centred(card.mark, px(TOAST_GLYPH_LOGICAL_PX)),
-                ink,
-            )),
-            ToastKind::Ok => sprites.push(ChromeSprite::new(
-                ChromeMark::Check,
-                centred(card.mark, px(TOAST_GLYPH_LOGICAL_PX)),
-                ink,
-            )),
-            // A dot and not a lower-case `i`: at five physical pixels a letter is
-            // a smudge, and what this mark has to say is only "there is a notice
-            // here", which a filled round says at any size.
-            ToastKind::Info => {
-                let dot = centred(card.mark, px(TOAST_DOT_LOGICAL_PX));
-                sprites.push(ChromeSprite::new(
-                    ChromeMark::ControlPill {
-                        radius_px: (px(TOAST_DOT_LOGICAL_PX) / 2.0).round().max(1.0) as u32,
-                    },
-                    dot,
-                    ink,
-                ));
-            }
-        }
 
         // The dismiss verb, on the ladder.
         let lit = pointer.close == Some(toast.id);
@@ -1519,26 +1500,26 @@ mod tests {
                 .any(|quad| quad.color == palette.menu_surface),
             "the menu's own face"
         );
-        // The kind's round, its glyph, the lit `×`'s pill and the `×` itself.
-        assert_eq!(layer.sprites.len(), 4);
-        assert_eq!(layer.sprites[1].color, palette.status_err, "the rose");
+        // The kind's dot, the lit `×`'s pill and the `×` itself.
+        assert_eq!(layer.sprites.len(), 3);
+        assert_eq!(layer.sprites[0].color, palette.status_err, "the rose");
         assert!((layer.sprites.last().unwrap().opacity - 1.0).abs() < 0.001);
     }
 
-    /// The three kinds are three inks and three marks, and none of them is a
-    /// literal — every one comes out of the palette.
+    /// The three kinds are three inks and one mark — a dot, `.tdot`, in the
+    /// kind's ink — and none of the inks is a literal: every one comes out of
+    /// the palette. **One dot and nothing in a round** (user ruling 2026-08-16):
+    /// a circle in this house is a state, never a container for an icon, and a
+    /// `×` on a card is only ever the dismiss verb.
     #[test]
-    fn each_kind_wears_its_own_ink() {
+    fn each_kind_wears_its_own_ink_on_one_dot() {
         let palette = bt_render::chrome_palette();
         assert_eq!(ToastKind::Error.ink(&palette), palette.status_err);
         assert_eq!(ToastKind::Info.ink(&palette), palette.accent);
         assert_eq!(ToastKind::Ok.ink(&palette), palette.status_ok);
 
         let start = Instant::now();
-        for (kind, mark) in [
-            (ToastKind::Error, ChromeMark::TabClose),
-            (ToastKind::Ok, ChromeMark::Check),
-        ] {
+        for kind in [ToastKind::Error, ToastKind::Ok, ToastKind::Info] {
             let mut host = ToastHost::default();
             host.raise(kind, ToastAnchor::Window, None, "x", true, start);
             let laid = placed(&host, None);
@@ -1550,27 +1531,26 @@ mod tests {
                 SCALE,
                 start,
             );
-            assert_eq!(layers[0].sprites[1].mark, mark, "{kind:?}");
-            assert_eq!(layers[0].sprites[1].color, kind.ink(&palette));
+            let marks: Vec<&ChromeSprite> = layers[0].sprites.iter().collect();
+            assert_eq!(marks.len(), 1, "{kind:?}: the dot and nothing else at rest");
+            assert!(
+                matches!(marks[0].mark, ChromeMark::ControlPill { .. }),
+                "{kind:?}: a filled round"
+            );
+            assert_eq!(marks[0].color, kind.ink(&palette), "{kind:?}");
+            let side = marks[0].rect[2] - marks[0].rect[0];
+            assert!(
+                (side - TOAST_DOT_LOGICAL_PX * SCALE).abs() < 0.001,
+                "{kind:?}: six logical pixels across, {side}"
+            );
+            assert!(
+                !layers[0]
+                    .sprites
+                    .iter()
+                    .any(|s| s.mark == ChromeMark::TabClose),
+                "{kind:?}: no × anywhere on a card nobody is pointing at"
+            );
         }
-        // Info is a filled round rather than a glyph, so both of its sprites are
-        // pills and the inner one wears the ink.
-        let mut host = ToastHost::default();
-        host.raise(ToastKind::Info, ToastAnchor::Window, None, "x", true, start);
-        let laid = placed(&host, None);
-        let layers = build(
-            &laid,
-            &host,
-            ToastPointer::default(),
-            &palette,
-            SCALE,
-            start,
-        );
-        assert!(matches!(
-            layers[0].sprites[1].mark,
-            ChromeMark::ControlPill { .. }
-        ));
-        assert_eq!(layers[0].sprites[1].color, palette.accent);
     }
 
     /// The `×` climbs `.pv-tool`'s ladder: absent, seven-tenths, whole.
@@ -1586,22 +1566,22 @@ mod tests {
                 .clone()
         };
 
-        assert_eq!(sprites(ToastPointer::default()).len(), 2, "the mark only");
+        assert_eq!(sprites(ToastPointer::default()).len(), 1, "the dot only");
         let over_card = sprites(ToastPointer {
             card: Some(id),
             close: None,
         });
-        assert_eq!(over_card.len(), 3);
+        assert_eq!(over_card.len(), 2);
         assert!(
-            (over_card[2].opacity - crate::seats::PREVIEW_TOOL_REVEAL).abs() < 0.001,
+            (over_card[1].opacity - crate::seats::PREVIEW_TOOL_REVEAL).abs() < 0.001,
             "seven-tenths once the card has the pointer"
         );
         let over_button = sprites(ToastPointer {
             card: Some(id),
             close: Some(id),
         });
-        assert_eq!(over_button.len(), 4, "and it gains a pill of its own");
-        assert!((over_button[3].opacity - 1.0).abs() < 0.001);
+        assert_eq!(over_button.len(), 3, "and it gains a pill of its own");
+        assert!((over_button[2].opacity - 1.0).abs() < 0.001);
     }
 
     /// PIN — **what a refused git verb actually puts on the glass**: one error

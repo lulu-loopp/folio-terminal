@@ -6049,6 +6049,20 @@ struct GraphView {
     /// is a walk down ten thousand commits to answer "which row is under this
     /// one".
     selected: Option<usize>,
+    /// **The far end of a comparison** (D6), when one is running.
+    ///
+    /// A hash and not a row index, unlike the selection beside it, and for the
+    /// selection's own reason read backwards: what this is *for* is a commit, so
+    /// a page arriving under it must not turn it into a different one. The
+    /// lookup it costs is once per build and not once per keypress.
+    ///
+    /// Not persisted, like everything else on this struct: a comparison is a
+    /// glance at two commits, and a session restored comparing two hashes a
+    /// rebase has since retired would be a window remembering something the
+    /// repository does not.
+    compare: Option<String>,
+    /// A walk towards a parent that may not be loaded yet (D2).
+    seek: Option<git_graph::GraphSeek>,
     /// R18's hysteresis, carried frame to frame.
     lane_hold: git_graph::LaneWidthHold,
 }
@@ -6070,12 +6084,19 @@ struct GraphView {
 /// The files column's own arrows are out of the table for the identical reason
 /// and were left out by the same audit (`files::tree_command`); putting one of
 /// the two families in and not the other would be the audit saying two things.
-fn graph_key_of(key: &Key) -> Option<git_graph::GraphKey> {
+fn graph_key_of(key: &Key, modifiers: ModifiersState) -> Option<git_graph::GraphKey> {
     match key {
         Key::Named(NamedKey::ArrowUp) => Some(git_graph::GraphKey::Up),
         Key::Named(NamedKey::ArrowDown) => Some(git_graph::GraphKey::Down),
         Key::Named(NamedKey::Home) => Some(git_graph::GraphKey::Home),
         Key::Named(NamedKey::End) => Some(git_graph::GraphKey::End),
+        // The one place a modifier is read here (D6), and only for this key: the
+        // other five are the same six keys every list on this platform answers
+        // however the modifiers happen to stand, and narrowing them now would be
+        // this ticket quietly re-ruling V14.
+        Key::Named(NamedKey::Enter) if modifiers.control_key() => {
+            Some(git_graph::GraphKey::Compare)
+        }
         Key::Named(NamedKey::Enter) => Some(git_graph::GraphKey::Enter),
         Key::Named(NamedKey::Escape) => Some(git_graph::GraphKey::Escape),
         _ => None,
@@ -11971,7 +11992,61 @@ fn git_document_answer(
             preview::PreviewSource::GitShow { root, hash, path },
             outcome,
         )),
+        git::GitAnswer::DiffRange {
+            root,
+            a,
+            b,
+            path,
+            outcome,
+        } => Ok((
+            preview::PreviewSource::GitDiffRange { root, a, b, path },
+            outcome,
+        )),
         answer => Err(answer),
+    }
+}
+
+/// **Which git question fills a document buffer** — [`git_document_answer`]'s
+/// mirror, and the reason it is one function is that the two are one mapping
+/// read in two directions.
+///
+/// It was written twice before v2 ② — once for a document opened from a column
+/// and once for one opened from a graph — and the two copies differed: the
+/// graph's knew only about `GitShow`, so the very first `GitDiffRange` opened
+/// from a compare block would have arrived at a pane that never asked git
+/// anything and sat on "Loading …" forever. What differs between the two doors
+/// is only which cache the answer must come home to, and that is the caller's
+/// to say; what the *question* is is a fact about the source.
+///
+/// `None` for the two sources that are not documents on this lane: the graph
+/// composes itself, and a file is not this door's business at all.
+fn git_document_question(
+    source: &preview::PreviewSource,
+    renamed_from: Option<String>,
+) -> Option<git::GitQuestion> {
+    match source {
+        preview::PreviewSource::GitDiff { root, path, staged } => Some(git::GitQuestion::Diff {
+            root: root.clone(),
+            path: path.clone(),
+            staged: *staged,
+            renamed_from,
+        }),
+        preview::PreviewSource::GitShow { root, hash, path } => Some(git::GitQuestion::Show {
+            root: root.clone(),
+            hash: hash.clone(),
+            path: path.clone(),
+            renamed_from,
+        }),
+        preview::PreviewSource::GitDiffRange { root, a, b, path } => {
+            Some(git::GitQuestion::DiffRange {
+                root: root.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                path: path.clone(),
+                renamed_from,
+            })
+        }
+        preview::PreviewSource::File(_) | preview::PreviewSource::GitGraph { .. } => None,
     }
 }
 
@@ -17955,7 +18030,7 @@ impl Runtime {
         // rather than a condition written twice.
         if let PreviewSurface::Seat(seat) = surface
             && self.git_graphs_shown.contains_key(&seat)
-            && let Some(key) = graph_key_of(&event.logical_key)
+            && let Some(key) = graph_key_of(&event.logical_key, self.modifiers)
             && self.graph_key(seat, key)?
         {
             return Ok(true);
@@ -20031,6 +20106,12 @@ impl Runtime {
         } else if changed && self.refresh_chrome() {
             self.present_chrome_change()?;
         }
+        // **A seek walks one page at a time, and each page arrives here** (D2).
+        // After the rebuild above, because what the step needs is the list the
+        // page it was waiting for is now part of.
+        if changed && self.step_graph_seeks()? && self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
         Ok(())
     }
 
@@ -20454,24 +20535,8 @@ impl Runtime {
         if !unread {
             return Ok(());
         }
-        let question = match &source {
-            preview::PreviewSource::GitDiff { root, path, staged } => git::GitQuestion::Diff {
-                root: root.clone(),
-                path: path.clone(),
-                staged: *staged,
-                renamed_from,
-            },
-            preview::PreviewSource::GitShow { root, hash, path } => git::GitQuestion::Show {
-                root: root.clone(),
-                hash: hash.clone(),
-                path: path.clone(),
-                renamed_from,
-            },
-            // The graph is G-4's document and has no question on this lane yet;
-            // a file is not this door's business at all.
-            preview::PreviewSource::File(_) | preview::PreviewSource::GitGraph { .. } => {
-                return Ok(());
-            }
+        let Some(question) = git_document_question(&source, renamed_from) else {
+            return Ok(());
         };
         let active = self.active_tab;
         let tab_id = self.tabs[active].id;
@@ -20739,6 +20804,102 @@ impl Runtime {
         }
     }
 
+    /// What two places differ by (D6) — the compare block's own question.
+    ///
+    /// Idempotent, and the guard is the cache's rather than a flag here: this is
+    /// reached from a derivation that runs every frame, so "have I asked this
+    /// already" has to be answerable by the thing holding the answer.
+    fn ask_graph_compare(&mut self, root: &Path, a: &str, b: Option<&str>) {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let Some(state) = self.tabs[active].git_graphs.get_mut(root) else {
+            return;
+        };
+        let Some(question) = state.cache.begin_compare_files(a, b) else {
+            return;
+        };
+        if !self.git_worker.request(git::GitRequest {
+            host: git::GitHost::Graph {
+                tab: tab_id,
+                root: root.to_owned(),
+            },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+    }
+
+    /// Take every running seek one step (D2).
+    ///
+    /// **Driven by the pages arriving and not by the paint**, which is R31's own
+    /// discipline applied to a gesture: a seek is a question the reader asked,
+    /// each page is one answer to it, and the moment the next question can be
+    /// decided is the moment the last answer landed. A version of this that ran
+    /// on every frame would be a timer with extra steps.
+    ///
+    /// Answers whether anything moved, so the caller can decide about a frame.
+    fn step_graph_seeks(&mut self) -> Result<bool> {
+        let active = self.active_tab;
+        let seats: Vec<SeatId> = self.tabs[active]
+            .git_graph_view
+            .iter()
+            .filter(|(_, view)| view.seek.is_some())
+            .map(|(seat, _)| *seat)
+            .collect();
+        let mut moved = false;
+        for seat in seats {
+            let Some((root, seek)) = self.tabs[active]
+                .git_graph_view
+                .get(&seat)
+                .and_then(|view| Some((view.root.clone(), view.seek.clone()?)))
+            else {
+                continue;
+            };
+            let Some(state) = self.tabs[active].git_graphs.get(&root) else {
+                continue;
+            };
+            match git_graph::graph_seek_step(state, &seek) {
+                git_graph::GraphSeekStep::Arrived(at) => {
+                    let row = self
+                        .git_graphs_shown
+                        .get(&seat)
+                        .map(|content| content.commit_row(at));
+                    if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+                        view.seek = None;
+                    }
+                    if let Some(row) = row {
+                        self.select_graph_row(seat, row);
+                        self.reveal_graph_row(seat, row);
+                    }
+                    moved = true;
+                }
+                git_graph::GraphSeekStep::NeedPage => {
+                    if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+                        view.seek = Some(git_graph::GraphSeek {
+                            pages: seek.pages + 1,
+                            ..seek
+                        });
+                    }
+                    self.extend_graph(&root);
+                }
+                git_graph::GraphSeekStep::Waiting => {}
+                git_graph::GraphSeekStep::GaveUp => {
+                    if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+                        view.seek = None;
+                    }
+                    self.toast(
+                        toast::ToastKind::Info,
+                        toast::ToastAnchor::PreviewSeat(seat),
+                        None,
+                        git_graph::graph_seek_gave_up(&seek.hash),
+                    )?;
+                    moved = true;
+                }
+            }
+        }
+        Ok(moved)
+    }
+
     /// Which graph each preview seat is drawing, and how far down it is.
     fn git_graphs(&mut self, scale: f32) -> BTreeMap<SeatId, git_graph::GraphContent> {
         let active = self.active_tab;
@@ -20767,6 +20928,7 @@ impl Runtime {
         }
         let mut pages = BTreeMap::new();
         let mut extend: Vec<std::path::PathBuf> = Vec::new();
+        let mut compares: Vec<(std::path::PathBuf, String, Option<String>)> = Vec::new();
         for (seat, root) in showing {
             let Some(body) =
                 seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
@@ -20787,9 +20949,10 @@ impl Runtime {
                     ..GraphView::default()
                 };
             }
-            let (scroll, expanded, selected, hold) = (
+            let (scroll, expanded, compare, selected, hold) = (
                 view.scroll_px,
                 view.expanded.clone(),
+                view.compare.clone(),
                 view.selected,
                 view.lane_hold,
             );
@@ -20801,8 +20964,11 @@ impl Runtime {
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             let mut content = git_graph::build(
                 &state,
-                expanded.as_deref(),
-                selected,
+                git_graph::GraphLook {
+                    expanded: expanded.as_deref(),
+                    compare: compare.as_deref(),
+                    selected,
+                },
                 body,
                 scroll,
                 hold,
@@ -20830,10 +20996,22 @@ impl Runtime {
                 width: content.lane_width,
                 until: content.lane_width_until,
             };
+            // **The comparison's file list is asked from the derivation** (D6)
+            // and not from the gesture that started it, because the pair can
+            // become answerable without anything being pressed: the far end may
+            // only arrive with a later page. What keeps it to one subprocess per
+            // pair is `GitCache::begin_compare_files`'s own guard, which is
+            // where "have I asked this already" belongs — beside the answer.
+            if let Some((a, b)) = content.compare_pair.clone() {
+                compares.push((root.clone(), a, b));
+            }
             pages.insert(seat, content);
         }
         for root in extend {
             self.extend_graph(&root);
+        }
+        for (root, a, b) in compares {
+            self.ask_graph_compare(&root, &a, b.as_deref());
         }
         self.ask_git_for_graphs();
         pages
@@ -20857,6 +21035,31 @@ impl Runtime {
         else {
             return Ok(());
         };
+        // **`Ctrl` is the compare gesture** (D6), and it is answered before
+        // anything else this press could mean: with a row already open, a
+        // `Ctrl`+click is a claim about *two* rows and never about the one under
+        // the pointer, so it neither opens a document nor turns an accordion
+        // over. Without a row open it is not a comparison at all and falls
+        // through to the ordinary press, because there is no first end for it to
+        // be the second end of.
+        if self.modifiers.control_key() {
+            let hash = match &row {
+                git_graph::GraphViewRow::Uncommitted(_) => {
+                    Some(git_graph::GRAPH_UNCOMMITTED_HASH.to_owned())
+                }
+                git_graph::GraphViewRow::Commit(commit) => Some(commit.hash.clone()),
+                git_graph::GraphViewRow::File(_) | git_graph::GraphViewRow::Detail(_) => None,
+            };
+            if let Some(hash) = hash
+                && self.set_graph_compare(seat, &hash)
+            {
+                self.select_graph_row(seat, index);
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(());
+            }
+        }
         // **The double click is synthesised, not read** — winit has no click
         // count and this window has never asked for one. The identity paired on
         // is the row's own subject (a commit's hash, a file's path), never its
@@ -20870,7 +21073,13 @@ impl Runtime {
             git_graph::GraphViewRow::Uncommitted(_) => git_graph::GRAPH_UNCOMMITTED_HASH.to_owned(),
             git_graph::GraphViewRow::Commit(commit) => commit.hash.clone(),
             git_graph::GraphViewRow::File(file) => format!("{}\u{1f}{}", file.hash, file.path),
+            git_graph::GraphViewRow::Detail(detail) => format!("detail\u{1f}{}", detail.index),
         };
+        // **A plain press leaves compare mode** (D6). The gesture that entered it
+        // said "these two"; an unmodified click says "this one", and a page that
+        // went on holding two rows lit after that would be remembering a question
+        // the reader has stopped asking.
+        self.clear_graph_compare(seat);
         // **A press is a selection** (V8), whatever the press then goes on to do:
         // the keyboard walks from where the pointer last was, which is what makes
         // clicking a row and then pressing `↓` mean the row under it.
@@ -20895,6 +21104,119 @@ impl Runtime {
         }
     }
 
+    /// Point the far end of a comparison at this row (D6).
+    ///
+    /// Answers whether the gesture meant anything here, which is the whole of
+    /// the modifier's fall-through: without a row open there is no first end, so
+    /// `Ctrl`+click is not a comparison and the press goes on to mean what it
+    /// would have meant anyway.
+    ///
+    /// **The far end may not be the open row itself.** The ticket's own wording
+    /// lumps "the expanded row" in with "a third row" under *moves the second
+    /// endpoint*, and taken literally that is a commit compared with itself —
+    /// which is not a comparison, and whose file list is empty by construction.
+    /// So the honest reading of that gesture is the other one it could have:
+    /// **stop comparing**, keeping the row open. Which is also what a second
+    /// `Ctrl`+click on the row already at the far end means, for the reason every
+    /// toggle in this window works that way.
+    fn set_graph_compare(&mut self, seat: SeatId, hash: &str) -> bool {
+        let active = self.active_tab;
+        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+            return false;
+        };
+        let Some(expanded) = view.expanded.clone() else {
+            return false;
+        };
+        view.compare = if expanded == hash || view.compare.as_deref() == Some(hash) {
+            None
+        } else {
+            Some(hash.to_owned())
+        };
+        true
+    }
+
+    /// Stop comparing, keeping the open row open.
+    fn clear_graph_compare(&mut self, seat: SeatId) -> bool {
+        let active = self.active_tab;
+        self.tabs[active]
+            .git_graph_view
+            .get_mut(&seat)
+            .is_some_and(|view| view.compare.take().is_some())
+    }
+
+    /// One of the detail block's own parts, pressed (D2/D6/D7).
+    fn press_graph_detail(&mut self, seat: SeatId, part: git_graph::GraphDetailPart) -> Result<()> {
+        let Some(detail) = self.git_graphs_shown.get(&seat).and_then(|content| {
+            content.rows.iter().find_map(|row| match row {
+                git_graph::GraphViewRow::Detail(detail) => Some(detail.clone()),
+                _ => None,
+            })
+        }) else {
+            return Ok(());
+        };
+        match (part, &detail.detail) {
+            // **A parent is a place to go** (D2). It is looked for in what is
+            // loaded first, and only a miss starts a seek — the overwhelmingly
+            // common case is a parent one row down.
+            (git_graph::GraphDetailPart::Parent(at), git_graph::GraphDetail::Commit(commit)) => {
+                let Some(parent) = commit.parents.get(at) else {
+                    return Ok(());
+                };
+                self.seek_graph_commit(seat, parent.hash.clone())?;
+            }
+            (git_graph::GraphDetailPart::CopyHash, git_graph::GraphDetail::Commit(commit)) => {
+                self.copy_from_graph(seat, &commit.hash, &commit.short)?;
+            }
+            (git_graph::GraphDetailPart::CopySubject, git_graph::GraphDetail::Commit(commit)) => {
+                self.copy_from_graph(seat, &commit.subject, &commit.subject)?;
+            }
+            (git_graph::GraphDetailPart::LeaveCompare, _) => {
+                if self.clear_graph_compare(seat) && self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Put one of a commit's facts on the clipboard, and say so (D7).
+    ///
+    /// **The first `Ok` notice this window raises.** The kind has been drawn,
+    /// tested and legible on both canvases since the toast host was built and
+    /// had no caller, which was deliberate — a host that could only carry
+    /// failures would be a failure host — and this is the call site it was
+    /// waiting for: a copy is invisible, and a verb whose whole effect is
+    /// somewhere the reader cannot see has to say that it happened.
+    fn copy_from_graph(&mut self, seat: SeatId, text: &str, said: &str) -> Result<()> {
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::set_clipboard_text(hwnd, text)
+                .map_err(|error| anyhow!(error))
+                .context("copy a commit's own words to the clipboard")
+        });
+        if !recoverable_clipboard_write(result, "commit copy") {
+            return Ok(());
+        }
+        self.toast(
+            toast::ToastKind::Ok,
+            toast::ToastAnchor::PreviewSeat(seat),
+            None,
+            git_graph::graph_copied(said),
+        )
+    }
+
+    /// Go to a commit, paging until it turns up if it has to (D2).
+    fn seek_graph_commit(&mut self, seat: SeatId, hash: String) -> Result<()> {
+        let active = self.active_tab;
+        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+            view.seek = Some(git_graph::GraphSeek { hash, pages: 0 });
+        }
+        if self.step_graph_seeks()? && self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Put the selected ground on one row of a graph (V8).
     ///
     /// Written whether or not it moved: the caller is a gesture that *means* this
@@ -20914,6 +21236,10 @@ impl Runtime {
             let view = self.tabs[active].git_graph_view.entry(seat).or_default();
             let opened = git_graph::toggled_expansion(view.expanded.as_deref(), hash);
             view.expanded.clone_from(&opened);
+            // **A comparison belongs to the row it was started from** (D6/D9), so
+            // turning another row over ends it: the pair was two rows and one of
+            // them is no longer the open one.
+            view.compare = None;
             opened
         };
         // **The working tree's row asks git nothing** (V5). Its files are the
@@ -21002,6 +21328,30 @@ impl Runtime {
                 }
                 return Ok(true);
             }
+            // `Ctrl+Enter` is `Ctrl`+click without the pointer, through the same
+            // door — so the ruling about what the far end may be is written once.
+            git_graph::GraphKeyAction::Compare(row) => {
+                let hash = content.rows.iter().find_map(|drawn| match drawn {
+                    git_graph::GraphViewRow::Uncommitted(head) if head.index == row => {
+                        Some(git_graph::GRAPH_UNCOMMITTED_HASH.to_owned())
+                    }
+                    git_graph::GraphViewRow::Commit(commit) if commit.index == row => {
+                        Some(commit.hash.clone())
+                    }
+                    _ => None,
+                });
+                if let Some(hash) = hash {
+                    self.set_graph_compare(seat, &hash);
+                }
+                row
+            }
+            git_graph::GraphKeyAction::LeaveCompare => {
+                self.clear_graph_compare(seat);
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(true);
+            }
             git_graph::GraphKeyAction::Collapse(row) => {
                 let hash = self.tabs[self.active_tab]
                     .git_graph_view
@@ -21064,19 +21414,8 @@ impl Runtime {
         if !unread {
             return Ok(());
         }
-        let preview::PreviewSource::GitShow {
-            root: show_root,
-            hash,
-            path,
-        } = &source
-        else {
+        let Some(question) = git_document_question(&source, renamed_from) else {
             return Ok(());
-        };
-        let question = git::GitQuestion::Show {
-            root: show_root.clone(),
-            hash: hash.clone(),
-            path: path.clone(),
-            renamed_from,
         };
         let active = self.active_tab;
         let tab_id = self.tabs[active].id;
@@ -25537,6 +25876,40 @@ impl Runtime {
         Ok(())
     }
 
+    /// Wheel over a floating tree's body — the same `overflow-y: auto`, in a
+    /// window instead of a column.
+    ///
+    /// The float's scroll lives in its own `DirCache` (`FloatFiles::cache`),
+    /// which is where the painter and the hit test already read it from
+    /// (`row_geometry(RowHost::Float)`); this is the one writer a wheel gets,
+    /// and it clamps at both ends the way the column's does (R2 乙案) — the
+    /// body it clamps against is the very body the painter lays the rows into.
+    fn scroll_float_tree(&mut self, id: float::FloatId, delta: MouseScrollDelta) -> Result<()> {
+        let Some(geometry) = self.row_geometry(RowHost::Float(id)) else {
+            return Ok(());
+        };
+        let body = geometry.viewport;
+        let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(files) = self.float.live_mut(id).and_then(float::FloatWin::files_mut) else {
+            return Ok(());
+        };
+        let rows = files::tree_view(&files.files, &files.cache).rows.len();
+        let scrolled = seats::clamp_files_scroll(body, rows, files.cache.scroll_px - travel, scale);
+        if scrolled == files.cache.scroll_px {
+            return Ok(());
+        }
+        files.cache.scroll_px = scrolled;
+        // The rows under a still pointer changed, so the hover row did too.
+        if let Some(position) = self.pointer_position {
+            self.float_hover = self.float_hit_at(position);
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// The same notch, one page along.
     ///
     /// Its own function rather than a branch inside the tree's, because the two
@@ -29984,6 +30357,16 @@ impl Runtime {
                 self.files_row_clicks.interrupt();
                 self.press_graph_row(seat, index, Instant::now())?;
             }
+            // A part of the open row's detail block (v2 ②). It breaks a click
+            // chain for `.files-foot`'s reason — a chain of clicks on a button is
+            // a chain of button presses — and it never reaches `press_graph_row`,
+            // because a press on a control is not a press on the list.
+            seats::ChromeTarget::GitGraphDetail { seat, part, .. } => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                self.git_graph_clicks.interrupt();
+                self.press_graph_detail(seat, part)?;
+            }
             seats::ChromeTarget::GitAct { seat, index, act } => {
                 self.tab_clicks.interrupt();
                 self.files_row_clicks.interrupt();
@@ -31008,6 +31391,28 @@ impl Runtime {
             return Ok(());
         }
         // A7/A8 — a notch over the tab strip is the strip's. The mock-up gives
+        // A floating tree is a scroller too — `#files-flyout .tree {
+        // overflow-y: auto }` — and it stands above the panes, so it is asked
+        // before any of them (user report, 2026-08-16: neither the peek nor the
+        // pinned window would scroll; nothing had ever routed a notch to one).
+        // A files float is opaque to the wheel over its whole frame: a notch on
+        // its head or foot is spent, not passed to whatever is behind. A buffer
+        // float is not answered here — its body is a preview surface and the
+        // preview branch below already finds it by that name.
+        if let Some(position) = self.pointer_position
+            && let Some((id, part)) = self.float_hit_at(position)
+            && self
+                .float
+                .drawn()
+                .any(|win| win.epoch == id && win.files().is_some())
+        {
+            return match part {
+                float::FloatPart::Row(_) | float::FloatPart::Body => {
+                    self.scroll_float_tree(id, delta)
+                }
+                _ => Ok(()),
+            };
+        }
         // `.tabs-inline` `overflow-x: auto`, and a wheel over an overflowing
         // scroller scrolls it; a vertical wheel over a horizontal-only scroller
         // is exactly the case browsers translate into horizontal motion, because
@@ -34633,27 +35038,27 @@ mod tests {
     fn a_focused_graph_answers_six_keys_and_leaves_every_other_one_alone() {
         use winit::keyboard::SmolStr;
         assert_eq!(
-            graph_key_of(&Key::Named(NamedKey::ArrowUp)),
+            graph_key_of(&Key::Named(NamedKey::ArrowUp), ModifiersState::empty()),
             Some(git_graph::GraphKey::Up)
         );
         assert_eq!(
-            graph_key_of(&Key::Named(NamedKey::ArrowDown)),
+            graph_key_of(&Key::Named(NamedKey::ArrowDown), ModifiersState::empty()),
             Some(git_graph::GraphKey::Down)
         );
         assert_eq!(
-            graph_key_of(&Key::Named(NamedKey::Home)),
+            graph_key_of(&Key::Named(NamedKey::Home), ModifiersState::empty()),
             Some(git_graph::GraphKey::Home)
         );
         assert_eq!(
-            graph_key_of(&Key::Named(NamedKey::End)),
+            graph_key_of(&Key::Named(NamedKey::End), ModifiersState::empty()),
             Some(git_graph::GraphKey::End)
         );
         assert_eq!(
-            graph_key_of(&Key::Named(NamedKey::Enter)),
+            graph_key_of(&Key::Named(NamedKey::Enter), ModifiersState::empty()),
             Some(git_graph::GraphKey::Enter)
         );
         assert_eq!(
-            graph_key_of(&Key::Named(NamedKey::Escape)),
+            graph_key_of(&Key::Named(NamedKey::Escape), ModifiersState::empty()),
             Some(git_graph::GraphKey::Escape)
         );
         for other in [
@@ -34665,7 +35070,11 @@ mod tests {
             Key::Named(NamedKey::Tab),
             Key::Character(SmolStr::new("g")),
         ] {
-            assert_eq!(graph_key_of(&other), None, "{other:?} is not the graph's");
+            assert_eq!(
+                graph_key_of(&other, ModifiersState::empty()),
+                None,
+                "{other:?} is not the graph's"
+            );
         }
         // And none of the six is a row of the chord registry — see
         // [`graph_key_of`] for why a seat-local key is not a binding.
@@ -36220,6 +36629,19 @@ mod tests {
         );
         diff.dirty = true;
         pool.insert(diff);
+        // And v2 ②'s range, which is skipped by the same one rule rather than by
+        // a second one: it has no file behind it, so `file_path` answers `None`,
+        // so nothing is written. There is no leaf token for it to add — no git
+        // source has ever had one.
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::GitDiffRange {
+                root: PathBuf::from(r"C:\w\repo"),
+                a: "a".repeat(40),
+                b: None,
+                path: "src/main.rs".to_owned(),
+            },
+            "main.rs".to_owned(),
+        ));
         pool.insert(preview::PreviewBuffer::new(
             preview::PreviewSource::file(r"D:\notes\todo.txt"),
             "todo.txt".to_owned(),
