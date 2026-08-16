@@ -1,0 +1,14 @@
+t=  0.0s RegisterWindowMessageW(TaskbarButtonCreated) = 49385
+t=  0.0s CoCreateInstance(TaskbarList) -> ITaskbarList3 ok
+HWND=462804
+PID=61532
+t=  0.2s early HrInit() = Ok(())
+t=  0.2s WM_TASKBARBUTTONCREATED (msg=49385) -- button exists now
+t=  0.2s HrInit() after button-created
+t=  3.2s TBPF_NORMAL 40/100 state=Ok(()) value=Ok(())
+t=  6.2s TBPF_INDETERMINATE state=Ok(())
+t=  9.2s TBPF_ERROR 70/100 state=Ok(()) value=Ok(())
+t= 12.2s TBPF_PAUSED 55/100 state=Ok(()) value=Ok(())
+t= 15.2s TBPF_NORMAL 40 + SetOverlayIcon(IDI_WARNING) -> Ok(())
+t= 18.2s overlay cleared=Ok(()) TBPF_NOPROGRESS=Ok(())
+t= 21.2s quitting

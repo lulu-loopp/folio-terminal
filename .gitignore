@@ -14,3 +14,4 @@ dist/
 .tmp-repaint-capture/
 .claude/worktrees/
 local-images/
+!docs/spikes/artifacts/win-landing/*.png
