@@ -5399,7 +5399,7 @@ fn take_due_pty_resize(
 /// The single gate between a solved grid and ConPTY.
 ///
 /// A solve that answers what `conpty_grid` already holds must schedule nothing: the ConPTY
-/// sidecar review pinned at 83dbcd3 found that any live resize call is unsafe while a shell is
+/// sidecar review pinned at cc37d01 found that any live resize call is unsafe while a shell is
 /// still initializing (PSReadLine caches its own cursor anchor, and a reflow invalidates it — a
 /// defect in conhost itself, not the sidecar), and a call whose columns and rows do not move is
 /// never the resize that opens that window; it is only ever a spurious repeat of one already
@@ -39013,7 +39013,7 @@ mod tests {
         assert!(maximized, "a minimize demoted a maximized window");
     }
 
-    /// 26f41e1's rule, restated where the new one lives so that extending it to
+    /// fb13766's rule, restated where the new one lives so that extending it to
     /// a third posture cannot quietly drop it: a maximized window keeps the
     /// normal rectangle it had, and is still recorded as maximized.
     #[test]

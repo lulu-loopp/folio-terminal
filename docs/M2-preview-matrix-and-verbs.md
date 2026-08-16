@@ -174,7 +174,7 @@
   单击晋升进预览 pane 随 **M2 图像族**一并落地。**公式/数学 band 明确不在本裁决范围内,分毫未动。**
 - **理由(结构性,不是手感)**:band 是往一块**shell 按绝对坐标寻址**的画布里**注入行**。这与
   PSReadLine 以及一切用绝对 CUP 重绘的应用**结构性交战**——不是某个 bug,是两套坐标系同时对同
-  一块网格声明所有权。§6.1 的副屏裁决(b3769b7)已经证明:band 一死,那一整族「浮动/遮挡/滚动
+  一块网格声明所有权。§6.1 的副屏裁决(257dba9)已经证明:band 一死,那一整族「浮动/遮挡/滚动
   别扭」的毛病跟着一起死。primary 只是同一条病灶显形得慢:它同样是 shell 在按绝对坐标写字。
   于是本次把剩下半步走完。
 - **实现即政策(法则③,可翻案)**:
@@ -251,7 +251,7 @@
     `pixel-scroll-feel` 同时载有公式 band,它一帧未失——这就是「公式不在本裁决范围内」的实测对照)。
   - 逐份(帧数 before→after,`带 band 帧 / 其中图片 band 帧`):
     `alt-peek-only-feel` 191→0 / 191→0、`band-stuck-trace` 38→0 / 38→0、`cc-image-repro` 36→0 / 36→0、
-    `cursor-accept` 13→0 / 13→0、`daily-b35ce24` 965→0 / 965→0、`final-input-accept` 18→0 / 18→0、
+    `cursor-accept` 13→0 / 13→0、`daily-6ba76fb` 965→0 / 965→0、`final-input-accept` 18→0 / 18→0、
     `hover-peek-complement` 80→0 / 80→0、`hover-peek-feel-2` 22→0 / 22→0、`hover-peek-feel` 2→0 / 2→0、
     `image-accept` 259→0 / 259→0(全部是 OSC 1337 的 `[image]` band)、`osc133-accept` 34→0 / 34→0、
     `osc133-accept2` 211→0 / 211→0、`osc133-accept3` 285→0 / 285→0、`osc7-relative-feel` 47→0 / 47→0、
@@ -271,7 +271,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
 本节补的就是这一半。
 
 - **裁决(A)affordance 用超链接的同一套词汇**:一条可 peek 的图片引用,**静止时点线下划线,
-  指针下变实线**——与 142ca48 给 OSC 8 落的那套**一模一样**(跨格合并、物理像素对齐、hover 升级)。
+  指针下变实线**——与 21a02e9 给 OSC 8 落的那套**一模一样**(跨格合并、物理像素对齐、hover 升级)。
   不是「像」,是**同一对 flag、同一条渲染路径**。理由在 §4 已经写好:动词梯度**本来就跨内容类型统一**,
   静止态两者必须无法区分;**分野出现在 hover 揭示什么**——URL 揭示一条真实目标信息条,图片揭示一张
   缩略图。
@@ -281,7 +281,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   - **顺带的好处,裁决点名要留住**:验证顺手把解码烘热了,所以那张图的 hover peek 是**从缓存直接出**,
     不再等一次解码。
 - **实现即扩展,不是新机器**:OSC 1337 早就有「记录活着当解码载体,但永不投影 band」这个形状
-  (§6.1.1,828fc9a)。本次只是把**路径 / `file://` / 相对引用**也接进同一个形状:
+  (§6.1.1,a4ee272)。本次只是把**路径 / `file://` / 相对引用**也接进同一个形状:
   - **注册 ≠ 建 band**。`reconcile_live_image_paths` 与 `detect_frozen_image_paths` 不再被政策位
     整段挡住;挡住的是**那些为了「别把行注进某处」而存在的门**——副屏、shell 输入区、光标所在逻辑行——
     它们现在只在 `inline_image_bands` 为真时发问(`band_gates`)。翻案时三道门原样回来。
@@ -373,7 +373,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
     39 份为 0。**实线(solid)计数逐份不变**——静止上妆只在 `UNDERLINE` 不在场时插 `DOTTED_UNDERLINE`,
     结构上不可能加减实线。逐份新增点线格数:
     `alt-peek-only-feel` +461、`band-stuck-trace` +416、`bare-relative-feel` +566、`cc-image-repro` +41、
-    `cursor-accept` +82、`daily-b35ce24` +205、`final-input-accept` +82、`hover-peek-complement` +170、
+    `cursor-accept` +82、`daily-6ba76fb` +205、`final-input-accept` +82、`hover-peek-complement` +170、
     `hover-peek-feel` +123、`hover-peek-feel-2` +123、`image-accept` +98、`inline-trial2` +123、
     `inline-trial3` +164、`inline-trial4` +200、`osc133-accept` +164、`osc133-accept2` +369、
     `osc133-accept3` +328、`osc7-relative-feel` +614、`paste-accept` +82、`paste-round3` +82、
@@ -382,7 +382,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
     `uri-peek-feel` +491、`zero-resize-restore` +118。
   - 逐份多出的帧数(before→after):`alt-peek-only-feel` 4667→4683、`band-stuck-trace` 76→80、
     `bare-relative-feel` 331→337、`cc-image-repro` 424→429、`cursor-accept` 90→92、
-    `daily-b35ce24` 1152→1158、`final-input-accept` 40→42、`hover-peek-complement` 732→769、
+    `daily-6ba76fb` 1152→1158、`final-input-accept` 40→42、`hover-peek-complement` 732→769、
     `hover-peek-feel` 135→139、`hover-peek-feel-2` 51→55、`image-accept` 350→351、
     `inline-trial2` 50→55、`inline-trial3` 33→37、`inline-trial4` 56→61、`osc133-accept` 129→135、
     `osc133-accept2` 830→841、`osc133-accept3` 320→326、`osc7-relative-feel` 390→402、
@@ -423,7 +423,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   引用故意做成**软换行行里的子串**,以便同时钉住「读整行」与「只读一行」两种错法)与
   `an_anchor_span_the_frame_cells_do_not_spell_paints_nothing`(bt-viewport,帧那一半)。
 - **红检(逐条单独做过,做完复原,五条各自点红)**:① 跳过 `reference_span_content` 直接给跨度
-  (即 84764c1 的行为)→ 第二段红,一三段仍绿,**正是缺陷本身的形状**;② 拿 `source_text` 当见证
+  (即 535620f 的行为)→ 第二段红,一三段仍绿,**正是缺陷本身的形状**;② 拿 `source_text` 当见证
   → 第一段红;③ `reference_span_content` 只读 `start_point.row` 而非 WRAPLINE 合并行 → 第一段红;
   ④ 去掉 `capture_rows_transaction` 给存活 live 锚的行位移 → 第三段红;⑤ 删掉帧那一半的
   `spells_the_reference` 闸 → bt-viewport pin 红。
@@ -527,7 +527,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   **第一处**出现——这正是「一条记录只能说出一个地方」的形状 → 双 echo pin 红,连带覆盖一致性与
   命令行 pin 红(共 3 条)。
 - **回放足迹(72 份 `.tmp-repaint-capture/*.vt` × sync/latency = 144 次,104x26,release oracle
-  对拍 stdout+stderr;「前」= 1378a55 的 release oracle)**:
+  对拍 stdout+stderr;「前」= 1a100d1 的 release oracle)**:
   - **默认模式:144/144 逐字节全同**(stdout 与 stderr;语料自上次起长到 72 份)。默认回放不检测路径,
     扫描直接返回空。
   - **`BT_PROBE_IMAGE_PATHS=1`:144/144 逐字节全同**,stdout 与 stderr 都是。**注意这不表示两版画得
@@ -541,7 +541,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   - **逐帧下划线足迹(`BT_PROBE_UNDERLINE=1`,144 次全跑,逐帧逐行按格集合对拍)**:
     **多出 156905 格,少了 4012 格**,81 份出现差异;**空白带线格数两侧完全相同(各 1177,全是 OSC 8
     标签与应用自己的 SGR 4)**。三处「少了」逐一看过,没有一处是丢标记:
-    - `shellcheck` −826(且一格都没多):那一行是 `…\sunset.svgp`,1378a55 给里面的 59 格
+    - `shellcheck` −826(且一格都没多):那一行是 `…\sunset.svgp`,1a100d1 给里面的 59 格
       `…\sunset.svg` 上了妆,而**那一串并不是这行现在写的词**——探测器按 `is_path_tail_char` 收到 `p`
       才收尾,于是 peek 在那里从来不作答。**旧版在语料里就违反了「下划线 ⊆ peek」这条 pin**,
       现在两边同源,自然一起沉默。
@@ -549,7 +549,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
       **只是帧号早了几帧**——逐帧看,帧扫描从第 202 帧就开始画,而记录版要等到第 207 帧(下一个稳定窗口
       把锚重新落座)才画;敲下一个键、文字不再拼出这条路径时,帧扫描当帧就撤,记录版还留到第 213 帧。
       **早到、早走,正是「每帧现扫」的定义。**
-    - 典型的「多出」在用户自己那份 `affordance-verify` 里:某帧第 9 行,1378a55 只给上一行折下来的
+    - 典型的「多出」在用户自己那份 `affordance-verify` 里:某帧第 9 行,1a100d1 只给上一行折下来的
       `.jpg` 四格上妆,而**同一行右半那条一模一样的引用**(它自己还折到第 10 行)一格没有;帧扫描把
       两处都画上。**这正是用户报的形状**——不是「多画了一处」,是旧版**只认得一处**。
 
@@ -727,7 +727,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
     本身就是 WRAPLINE 合并的结果,所以起点无需再放大,终点则与 live 面同理停在引用处。
     问「整行有没有碰到命令区」会让提示符里的引用在**冻结的那一刻**改判,而迁移只许换坐标载体,
     不许换答案。
-  - **翻案记录**:本条取代 2026-08-04 早些时候「终点沿 WRAPLINE 链走完」的写法(38b9aea)。
+  - **翻案记录**:本条取代 2026-08-04 早些时候「终点沿 WRAPLINE 链走完」的写法(08032a2)。
     那一版把 C 往下长,恰好吞掉第一行输出;用户在 trial 版上同时看到「回显长了 band」和
     「输出没有 band」两种症状,就是这一条的两半。
   - 钉死于 `a_wrapped_command_echo_never_decorates_on_any_of_its_rows`、
@@ -737,7 +737,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   - **已知残余(诚实记账,非本次裁决内容)**:reflow 之后区域的坐标仍由**改宽之前**捕获的
     staging 行承载,而检测器读的是改宽之后的 live 网格;两种载体之间没有公共坐标
     (`compare_anchors` 先比载体类别)。因此「先 reflow、再滚出屏幕」的组合在 staging 中段会
-    短暂改判。该缺陷早于本条(e78e6b9 与 38b9aea 同样复现),记录在
+    短暂改判。该缺陷早于本条(7931374 与 08032a2 同样复现),记录在
     `a_reflow_keeps_the_verdict_while_both_ends_share_a_carrier` 里。
 - 从未见标记的 screen 完全保留本节 §6 的既有启发式。外层 PowerShell 标记不冒充 nested
   alternate-screen TUI 的内部轮次;未标记的 Codex/Claude Code screen 继续走降级模式。

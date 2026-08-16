@@ -384,7 +384,7 @@ fn jump_chip_overlays_source(proven: &str, overlaid: &str) -> bool {
 ///
 /// `false` retires image bands on *both* screens: images are hover-peek only everywhere, and click
 /// promotion to the preview pane arrives with M2's image family. The rationale is the one the
-/// alternate screen already proved (ruling 2026-08-02, b3769b7): a band injects rows into a surface
+/// alternate screen already proved (ruling 2026-08-02, 257dba9): a band injects rows into a surface
 /// the shell addresses absolutely, which is structurally at war with PSReadLine and every
 /// absolute-CUP application. What died on the alternate screen dies on the primary for the same
 /// reason — the primary just took longer to show it.
@@ -1569,7 +1569,7 @@ impl DualPlaneSession {
     /// Every image reference **this frame shows**, as the cells of this frame that show it.
     ///
     /// This is the affordance layer's single seam (user ruling 2026-08-04, superseding the anchored
-    /// spans of 84764c1/1378a55). The rule is one sentence: scan the text the frame draws with the
+    /// spans of 535620f/1a100d1). The rule is one sentence: scan the text the frame draws with the
     /// detector the peek uses, resolve each occurrence to a file, and hand back the cells it stands
     /// on. Nothing is remembered between frames — no anchors, no spans, no per-occurrence records —
     /// so the whole family of stale-mark defects is answered by construction rather than by a
@@ -7387,7 +7387,7 @@ impl DualPlaneSession {
     /// The peek has always answered here — the app reads the target off the frame's hyperlink — so
     /// verification has to reach here too, or a link to a real picture would peek cold while an
     /// identical URI printed as text peeked warm. The span is the link's own cells, which already
-    /// wear the resting dotted underline by the OSC 8 discoverability ruling (142ca48), so this adds
+    /// wear the resting dotted underline by the OSC 8 discoverability ruling (21a02e9), so this adds
     /// no mark at rest: the vocabulary was already the shared one, which is the whole point of §4's
     /// gradient. It adds the verification behind it.
     ///
@@ -19164,7 +19164,7 @@ mod tests {
     ///   * a reference the grid scrolls is underlined at its new place **and nowhere else**;
     ///   * no cell that spells nothing ever wears the mark, in any phase.
     ///
-    /// The witness that answered this first (1378a55) could not: two printings of one path spell the
+    /// The witness that answered this first (1a100d1) could not: two printings of one path spell the
     /// same characters, so a stale coordinate whose cells still spelled the reference kept its mark.
     /// The frame-derived scan has no coordinate to be stale (user ruling 2026-08-04) — see
     /// `the_same_path_echoed_twice_is_marked_at_both_echoes_and_nowhere_else` for the case that
@@ -19176,7 +19176,7 @@ mod tests {
     /// reference actually occupies.
     ///
     /// RED CHECKS, each verified to red this pin on its own:
-    ///   * painting from the record's anchors instead of the frame scan — the shipped 84764c1
+    ///   * painting from the record's anchors instead of the frame scan — the shipped 535620f
     ///     behaviour — reds phase B while leaving A and C green, which is exactly the shape of the
     ///     defect;
     ///   * marking the detector's whole logical line instead of the candidate's own byte range reds
@@ -19315,7 +19315,7 @@ mod tests {
     /// PIN (user report 2026-08-04, the report that overturned the anchored design): **one path
     /// printed twice is two references, and each of them is exactly where it is printed.**
     ///
-    /// This is the case no witness could decide. 1378a55 kept the record's anchors and only painted
+    /// This is the case no witness could decide. 1a100d1 kept the record's anchors and only painted
     /// where the cells still spelled the reference's own characters — which is true at the *stale*
     /// coordinate whenever the same path is on screen twice, because the two printings spell the
     /// same thing. The user saw it as "the underline errs and does not disappear": a history recall
@@ -19917,7 +19917,7 @@ mod tests {
     /// way to lie. A cell the peek would answer on and that carries no affordance is a picture the
     /// user cannot discover; a cell that carries the affordance and peeks nothing is a promise the
     /// terminal does not keep. The one asymmetry is stated rather than papered over: an OSC 8 link
-    /// wears its dotted underline by authorial declaration (142ca48) whatever it points at, and
+    /// wears its dotted underline by authorial declaration (21a02e9) whatever it points at, and
     /// what it promises there is the link's own tooltip. So the second direction is asked of the
     /// cells that are *not* links — where an underline can only have come from a verified image.
     ///

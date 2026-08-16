@@ -5111,7 +5111,7 @@ impl ChromeGroup {
 /// showing — `D:\Developer\BetterTerminal` — printed straight through the face
 /// of the rail lying over it, which is what a real window showed.
 ///
-/// Splitting the run is the same fix `236de00` made for the settings dialog, for
+/// Splitting the run is the same fix `353f1aa` made for the settings dialog, for
 /// the same reason and in the same shape: the floating thing gets a stack level
 /// of its own, and *all three* of its channels are drawn after all three of the
 /// level beneath. Culling the seat text that falls under the rail's rectangle

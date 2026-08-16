@@ -7933,7 +7933,7 @@ mod tests {
     /// native-resolution upload the defect performed does evict one — the grey band symptom.
     #[test]
     fn a_display_sized_peek_thumbnail_does_not_evict_an_onscreen_bands_texture() {
-        // A 4K pane showing three image bands, each already display-sized (14bab58): full padded
+        // A 4K pane showing three image bands, each already display-sized (5421eab): full padded
         // pane width by the one-third-viewport height cap. That is the resident set a hover meets.
         let (viewport_width, viewport_height) = (3840.0_f32, 2160.0_f32);
         let padding = 8.0_f32;
