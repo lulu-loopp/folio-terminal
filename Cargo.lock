@@ -389,6 +389,8 @@ name = "bt-transcript"
 version = "0.0.0"
 dependencies = [
  "bitflags 2.13.0",
+ "bt-unicode",
+ "regex",
  "unicode-segmentation",
 ]
 

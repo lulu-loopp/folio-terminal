@@ -63,6 +63,12 @@ pollster = "0.4"
 # Exact because a newer crates.io 0.9.x would otherwise out-resolve the local
 # loader patch and silently drop BetterTerminal's strict ConPTY sidecar policy.
 portable-pty = "=0.9.0"
+# The transcript's pattern engine (§7.1.5d in-pane search, and the P1-2/P2-11/P3-4 consumers that
+# inherit it). Already in the lock file transitively through syntect and two-face, so naming it here
+# costs no new package. It is `regex` and deliberately not the `fancy-regex` those two run on:
+# search needs no backreferences, and what it does need is the linear-time guarantee a backtracking
+# engine cannot give — `(a+)+b` typed into the find bar must not be able to hang the window.
+regex = "1"
 thiserror = "2"
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 serde = { version = "1", features = ["derive"] }

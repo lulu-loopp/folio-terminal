@@ -5,6 +5,8 @@ use std::{collections::VecDeque, num::NonZeroUsize};
 use bitflags::bitflags;
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod search;
+
 pub const DEFAULT_STAGING_QUOTA: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
 /// Spike-only value; M0 must replace it with a measured or configured quota.
 pub const SPIKE_DEFAULT_FROZEN_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
@@ -685,6 +687,28 @@ impl TranscriptStore {
     pub fn frozen(&self) -> &VecDeque<FrozenLine> {
         &self.frozen
     }
+
+    /// Frozen history as `(id, logical line)` pairs, oldest first — the shape the pattern engine
+    /// eats (`search::find_all`).
+    ///
+    /// "Logical" is the whole point and is free here: `FrozenLine::text` is already the rejoined
+    /// line with the styling held beside it, so a match spanning a soft-wrap boundary is an
+    /// ordinary match, and so is one spanning two differently-coloured runs — the engine never sees
+    /// the seam. Both were prototype-only limits the native indexer was promised not to inherit
+    /// (DESIGN §7.1.5d, "原型双限已注记").
+    ///
+    /// **This is history and only history.** Staged rows are still `CapturedRow` cells with no
+    /// rejoined text of their own, and the live grid is not in this store at all — so a caller that
+    /// wants the word the user can see on the prompt line right now has to supply those two planes
+    /// itself, in document order after these (`History < Staging < Live`, DESIGN §3.2). Materializing
+    /// staged text here would mean a second copy of `normalize`'s wrap/padding rules, and two
+    /// implementations of "what is this row's text" is exactly the drift this store exists to avoid.
+    pub fn logical_lines(&self) -> impl Iterator<Item = (crate::search::LineId, &str)> {
+        self.frozen
+            .iter()
+            .map(|line| (crate::search::LineId::History(line.id), line.text.as_str()))
+    }
+
     /// Mutable scroll-out rows in capture order. Viewports may window these rows, but must never
     /// treat them as frozen source or mutate them outside the transcript owner.
     pub fn staged_rows(&self) -> impl Iterator<Item = &StagedRow> {
