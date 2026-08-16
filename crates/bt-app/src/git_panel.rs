@@ -2875,6 +2875,9 @@ mod tests {
             subject: subject.to_owned(),
             author_name: "Weiyi".to_owned(),
             author_email: "weiyi@example.com".to_owned(),
+            committer_name: "Weiyi".to_owned(),
+            committer_email: "weiyi@example.com".to_owned(),
+            body: String::new(),
             committer_unix: 1_760_000_000,
             committer_offset: 0,
             time_relative: "2h".to_owned(),
@@ -3845,6 +3848,7 @@ mod tests {
                 path: "src/main.rs".to_owned(),
                 code: StatusCode::Modified,
                 renamed_from: None,
+                stat: None,
             }]),
         }));
         let content = build(&cache, Some(&open), 1.0, &mut ruler);
@@ -3900,6 +3904,7 @@ mod tests {
                 path: "src/deep/main.rs".to_owned(),
                 code: StatusCode::Modified,
                 renamed_from: None,
+                stat: None,
             }]),
         }));
         let content = build(&cache, Some(&hash), 1.0, &mut ruler);
@@ -3985,6 +3990,7 @@ mod tests {
                 path: "renamed.txt".to_owned(),
                 code: StatusCode::Renamed,
                 renamed_from: Some("was.txt".to_owned()),
+                stat: None,
             }]),
         }));
         let page = build(&cache, Some(&hash), 1.0, &mut ruler);

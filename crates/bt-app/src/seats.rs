@@ -1892,6 +1892,19 @@ pub enum ChromeTarget {
         seat: SeatId,
         index: usize,
     },
+    /// One pressable part of a graph's detail block (v2 ②) — a parent hash, a
+    /// copy verb, the compare block's `\u{d7}`.
+    ///
+    /// Its own target inside the block for [`Self::GitAct`]'s reason: the block
+    /// occupies list rows and those rows answer a hit test, so a part that did
+    /// not answer first would be a part that never answered at all. It carries
+    /// the block's first row as well as the part, because the paint needs to
+    /// know *which* block the pointer is in to light it.
+    GitGraphDetail {
+        seat: SeatId,
+        index: usize,
+        part: crate::git_graph::GraphDetailPart,
+    },
     /// One of a Git row's hover verbs (R14).
     ///
     /// Its own target inside the row for [`Self::PaneClose`]'s reason: the row is
@@ -5751,9 +5764,18 @@ pub fn build_chrome_for_tabs(
                         crate::git_graph::GraphHover {
                             row: match pointer.hover {
                                 Some(ChromeTarget::GitGraphRow { seat, index })
+                                | Some(ChromeTarget::GitGraphDetail { seat, index, .. })
                                     if seat == placement.id =>
                                 {
                                     Some(index)
+                                }
+                                _ => None,
+                            },
+                            part: match pointer.hover {
+                                Some(ChromeTarget::GitGraphDetail { seat, part, .. })
+                                    if seat == placement.id =>
+                                {
+                                    Some(part)
                                 }
                                 _ => None,
                             },
@@ -9591,6 +9613,27 @@ pub fn hit_git_graph(
         let Some(index) = geometry.row_at(x, y, content.total_rows) else {
             continue;
         };
+        // The detail block is several rows and its parts are inside them, so a
+        // press lands on the block first and on one of its parts second — the
+        // same two-step `hit_git_panel` takes through a row and its verbs.
+        if let Some(detail) = content.rows.iter().find_map(|row| match row {
+            crate::git_graph::GraphViewRow::Detail(detail)
+                if index >= detail.index && index < detail.index + detail.rows =>
+            {
+                Some(detail)
+            }
+            _ => None,
+        }) {
+            let first = geometry.row_rect(detail.index);
+            let last = geometry.row_rect(detail.index + detail.rows - 1);
+            let rect = [first[0], first[1], first[2], last[3]];
+            let part = crate::git_graph::detail_part_at(rect, detail, content.columns, scale, x, y);
+            return part.map(|part| ChromeTarget::GitGraphDetail {
+                seat: *seat,
+                index: detail.index,
+                part,
+            });
+        }
         return Some(ChromeTarget::GitGraphRow { seat: *seat, index });
     }
     None

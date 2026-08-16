@@ -1092,6 +1092,29 @@ pub enum PreviewSource {
         hash: String,
         path: String,
     },
+    /// **One file across a range** (D6) — `git diff {a} [{b}] -- {path}`.
+    ///
+    /// The compare block's document. It is a third case rather than an
+    /// `Option<String>` bolted onto [`Self::GitShow`] for that case's own
+    /// reason: a `show` is *one* commit's reading and this is the difference
+    /// between two places, and the two questions do not become one by sharing a
+    /// field name.
+    ///
+    /// **`b` is an `Option` inside one variant** and not a fourth variant for
+    /// the working-tree end, because that is what keeps every `match` on this
+    /// enum one arm longer instead of two: `file_path`, `is_git`,
+    /// `composed_lead`, `repo_file`, the load, the view, the question builder
+    /// and the session writer all treat "a range" identically however its far
+    /// end is spelled, and the one place the difference matters — the argument
+    /// list handed to git — is the one place that reads the field.
+    GitDiffRange {
+        root: PathBuf,
+        /// The older end, in the graph's own order.
+        a: String,
+        /// The newer end, or the working tree when absent.
+        b: Option<String>,
+        path: String,
+    },
     /// One repository's commit graph. Keyed by the repo alone: there is one
     /// graph per repository and it is the same graph whoever asks.
     #[allow(dead_code)]
@@ -1115,7 +1138,10 @@ impl PreviewSource {
     pub fn file_path(&self) -> Option<&Path> {
         match self {
             Self::File(path) => Some(path),
-            Self::GitDiff { .. } | Self::GitShow { .. } | Self::GitGraph { .. } => None,
+            Self::GitDiff { .. }
+            | Self::GitShow { .. }
+            | Self::GitDiffRange { .. }
+            | Self::GitGraph { .. } => None,
         }
     }
 
@@ -1123,7 +1149,10 @@ impl PreviewSource {
     pub fn is_git(&self) -> bool {
         match self {
             Self::File(_) => false,
-            Self::GitDiff { .. } | Self::GitShow { .. } | Self::GitGraph { .. } => true,
+            Self::GitDiff { .. }
+            | Self::GitShow { .. }
+            | Self::GitDiffRange { .. }
+            | Self::GitGraph { .. } => true,
         }
     }
 
@@ -1153,7 +1182,9 @@ impl PreviewSource {
         };
         match self {
             Self::File(_) => None,
-            Self::GitDiff { root, path, .. } | Self::GitShow { root, path, .. } => {
+            Self::GitDiff { root, path, .. }
+            | Self::GitShow { root, path, .. }
+            | Self::GitDiffRange { root, path, .. } => {
                 Some(format!("{} \u{b7} {path}", repository(root)))
             }
             Self::GitGraph { root } => Some(repository(root)),
@@ -1172,9 +1203,9 @@ impl PreviewSource {
     pub fn repo_file(&self) -> Option<PathBuf> {
         match self {
             Self::File(path) => Some(path.clone()),
-            Self::GitDiff { root, path, .. } | Self::GitShow { root, path, .. } => {
-                Some(root.join(path))
-            }
+            Self::GitDiff { root, path, .. }
+            | Self::GitShow { root, path, .. }
+            | Self::GitDiffRange { root, path, .. } => Some(root.join(path)),
             Self::GitGraph { .. } => None,
         }
     }
@@ -1274,7 +1305,9 @@ impl PreviewBuffer {
             // `Pending` a head read waits in — but for the git worker G-1 builds,
             // never for [`PreviewWorker`], which reads disks (see
             // [`Self::wants_head_read`]).
-            PreviewSource::GitDiff { .. } | PreviewSource::GitShow { .. } => PreviewLoad::Pending,
+            PreviewSource::GitDiff { .. }
+            | PreviewSource::GitShow { .. }
+            | PreviewSource::GitDiffRange { .. } => PreviewLoad::Pending,
             // **The graph has no body and never waits for one** (G-4). Its two
             // siblings are documents whose text arrives from a subprocess, and
             // `Pending` is what says the text is on its way; the graph's content
@@ -1426,7 +1459,9 @@ impl PreviewBuffer {
     pub fn view(&self, md_source: bool) -> PreviewView {
         match &self.source {
             PreviewSource::File(_) => preview_view(&self.name, self.ftype, md_source),
-            PreviewSource::GitDiff { .. } | PreviewSource::GitShow { .. } => PreviewView::Diff,
+            PreviewSource::GitDiff { .. }
+            | PreviewSource::GitShow { .. }
+            | PreviewSource::GitDiffRange { .. } => PreviewView::Diff,
             // G-4's full graph: its own surface, drawn as chrome over this
             // pane's body. See [`PreviewView::Graph`].
             PreviewSource::GitGraph { .. } => PreviewView::Graph,
@@ -3955,6 +3990,19 @@ mod tests {
             Some("folio"),
             "a graph is about the whole repository and names no file"
         );
+        // D6 (v2 ②) — a range is one file in one repository too, however many
+        // ends the diff has.
+        assert_eq!(
+            PreviewSource::GitDiffRange {
+                root: root.clone(),
+                a: "a".repeat(40),
+                b: Some("b".repeat(40)),
+                path: "README.md".to_owned(),
+            }
+            .composed_lead()
+            .as_deref(),
+            Some("folio \u{b7} README.md")
+        );
         assert_eq!(
             PreviewSource::file(r"D:\work\folio\README.md").composed_lead(),
             None,
@@ -3982,6 +4030,28 @@ mod tests {
             }
             .repo_file(),
             Some(root.join("crates/bt-app/src/main.rs"))
+        );
+        let range = PreviewSource::GitDiffRange {
+            root: root.clone(),
+            a: "a".repeat(40),
+            // The far end absent is the working tree, and it changes nothing
+            // about which file this is.
+            b: None,
+            path: "crates/bt-app/src/main.rs".to_owned(),
+        };
+        assert_eq!(
+            range.repo_file(),
+            Some(root.join("crates/bt-app/src/main.rs"))
+        );
+        assert!(range.is_git());
+        assert_eq!(
+            range.file_path(),
+            None,
+            "a range has no file on a disk to save, reveal or write to a session"
+        );
+        assert_eq!(
+            PreviewBuffer::new(range, "main.rs".to_owned()).view(false),
+            PreviewView::Diff
         );
         assert_eq!(PreviewSource::GitGraph { root }.repo_file(), None);
     }

@@ -225,6 +225,21 @@ pub enum GitQuestion {
         /// loses a rename exactly as `git diff` does.
         renamed_from: Option<String>,
     },
+    /// "How does this one file differ between these two places?" (D6, v2 ②).
+    ///
+    /// [`Self::CompareFiles`]'s document to [`Self::Show`]'s: the compare block
+    /// lists the files, and pressing one asks this. `b` absent is the working
+    /// tree, in git's own grammar, exactly as it is there.
+    DiffRange {
+        root: PathBuf,
+        a: String,
+        b: Option<String>,
+        path: String,
+        /// The same pair as everywhere else — `git diff a b -- <new path>` on a
+        /// rename prints a brand-new file for the reason [`Self::Diff`] spells
+        /// out at length.
+        renamed_from: Option<String>,
+    },
     /// "Which files did this commit touch?" — what R15's accordion lists.
     ///
     /// Separate from [`Self::Show`] rather than the same question with an empty
@@ -233,6 +248,23 @@ pub enum GitQuestion {
     /// is a document and goes to the preview pool. One question, one answer, one
     /// home.
     CommitFiles { root: PathBuf, hash: String },
+    /// "What is different between these two places?" (D6, v2 ②).
+    ///
+    /// [`Self::CommitFiles`]'s twin and filed the same way — rows, not a
+    /// document — because a comparison is a *list of files* on the page and each
+    /// of those files then opens a document of its own.
+    ///
+    /// **`b` is optional and its absence is the working tree**, which is git's
+    /// own grammar (`git diff <commit>` with no second revision) rather than an
+    /// invention: the alternative spelling, `<a> HEAD`, is a different question
+    /// — it would compare two commits and say nothing about what is on disk.
+    CompareFiles {
+        root: PathBuf,
+        /// The **older** end, in the graph's own order.
+        a: String,
+        /// The newer end, or the working tree when absent.
+        b: Option<String>,
+    },
     /// **The one question that changes something** (R14).
     ///
     /// Four verbs and one shape, because what the panel does with the answer is
@@ -369,6 +401,22 @@ impl GitQuestion {
                     ..
                 },
             ) => left == right && old == new && from == to,
+            (
+                Self::DiffRange {
+                    root: left,
+                    a: old_a,
+                    b: old_b,
+                    path: from,
+                    ..
+                },
+                Self::DiffRange {
+                    root: right,
+                    a: new_a,
+                    b: new_b,
+                    path: to,
+                    ..
+                },
+            ) => left == right && old_a == new_a && old_b == new_b && from == to,
             // **Every expansion is the same target**, whichever commit it is
             // about: R15's accordion has exactly one open commit, so a second
             // press while the first list is still loading has already replaced
@@ -376,6 +424,12 @@ impl GitQuestion {
             // stops a fast walk down the history spending a subprocess on every
             // commit it passed through.
             (Self::CommitFiles { root: left, .. }, Self::CommitFiles { root: right, .. }) => {
+                left == right
+            }
+            // A comparison coalesces for the identical reason: there is one
+            // compare block and moving its far end replaces the list the first
+            // answer was for.
+            (Self::CompareFiles { root: left, .. }, Self::CompareFiles { root: right, .. }) => {
                 left == right
             }
             // **Two writes are never one question.** Every read above coalesces
@@ -446,9 +500,22 @@ pub enum GitAnswer {
         path: String,
         outcome: GitOutcome<String>,
     },
+    DiffRange {
+        root: PathBuf,
+        a: String,
+        b: Option<String>,
+        path: String,
+        outcome: GitOutcome<String>,
+    },
     CommitFiles {
         root: PathBuf,
         hash: String,
+        outcome: GitOutcome<Vec<GitCommitFile>>,
+    },
+    CompareFiles {
+        root: PathBuf,
+        a: String,
+        b: Option<String>,
         outcome: GitOutcome<Vec<GitCommitFile>>,
     },
     /// A write finished. **The receipt** (R13).
@@ -599,6 +666,30 @@ pub struct GitCommitFile {
     pub code: StatusCode,
     /// Where a rename or a copy came from. `None` for everything else.
     pub renamed_from: Option<String>,
+    /// How many lines went in and how many came out (D4, v2 ②), or `None` when
+    /// git would not count them.
+    ///
+    /// **`None` is "binary" and not "zero".** git prints `-\t-` for a file it
+    /// has no lines in, and a pair of zeroes there would be a claim that
+    /// nothing changed about a file that may have been replaced entirely. The
+    /// row draws an em dash for it, which is the same sentence the numbers are
+    /// not.
+    pub stat: Option<GitFileStat>,
+}
+
+/// The two ends of a comparison, older first — its identity (D6).
+///
+/// A name for the pair rather than a bare tuple in the cache, because it is the
+/// *key*: it is compared, it decides whether a question is asked, and a reader
+/// of that field has to be able to see at a glance that the far end being absent
+/// is the working tree and not a missing value.
+pub type ComparePair = (String, Option<String>);
+
+/// `+N −M` for one file — `--numstat`'s two columns.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GitFileStat {
+    pub added: u32,
+    pub removed: u32,
 }
 
 /// One line of `git status --porcelain`, in full.
@@ -743,6 +834,30 @@ pub struct GitCommit {
     /// be a column of the same domain repeated down the page. The name is the
     /// fact a reader is scanning for; the address is the fact they ask for once.
     pub author_email: String,
+    /// **The rest of the message** — `%b`, git's own word for "everything after
+    /// the subject and the blank line under it" (D1, v2 ②).
+    ///
+    /// A `String` with the newlines still in it and not a `Vec<String>`, because
+    /// where the lines break is a fact about the *pane it is drawn in* and not
+    /// about the commit: the same body wrapped at two widths is two different
+    /// lists of lines and only one commit. What is stripped here is the trailing
+    /// blank git always leaves at the end of `%b`, which is punctuation of the
+    /// format rather than part of what was written.
+    ///
+    /// Empty for the overwhelming majority of commits, and that is not a missing
+    /// value — a one-line commit message genuinely has no body, and what the
+    /// expanded row draws for it is nothing at all rather than an empty box.
+    pub body: String,
+    /// Who *committed* it — `%cn`, which is the same person as the author on
+    /// almost every commit and is a different person on a cherry-pick, a rebase,
+    /// a patch applied from a mailing list, or anything a bot rewrote.
+    ///
+    /// Carried always and shown only when it differs (D2): a meta line that said
+    /// "committed by" under every single row would be a line saying nothing, and
+    /// one that never said it would lose the one case the field exists for.
+    pub committer_name: String,
+    /// The same person's `%ce`.
+    pub committer_email: String,
     pub committer_unix: i64,
     /// The commit's own UTC offset in seconds — what makes `Aug 5` the date the
     /// commit was made in, which is the date git itself prints.
@@ -837,6 +952,28 @@ pub fn relative_time(then_unix: i64, offset_seconds: i32, now_unix: i64) -> Stri
     } else {
         format!("{year} {name}")
     }
+}
+
+/// The same instant said in full: `YYYY-MM-DD HH:mm`, in the zone it was
+/// written in (D2/V3).
+///
+/// **Beside [`relative_time`] and not instead of it**, because the two answer
+/// different questions and the page asks both: a column of rows is scanned, and
+/// `3d` is what a scan wants; one row is *opened*, and an opened row is being
+/// read rather than scanned, at which point "three days ago" stops being an
+/// answer and the date starts being one.
+///
+/// The offset is the commit's own, exactly as it is for the relative table, so
+/// the date printed here is the date git prints — the date it was made where it
+/// was made, and not the date it happens to be here.
+#[must_use]
+pub fn absolute_time(then_unix: i64, offset_seconds: i32) -> String {
+    let local = then_unix + i64::from(offset_seconds);
+    let days = local.div_euclid(SECONDS_PER_DAY);
+    let seconds = local.rem_euclid(SECONDS_PER_DAY);
+    let (year, month, day) = crate::seed::civil_from_days(days);
+    let (hour, minute) = (seconds / 3600, (seconds % 3600) / 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
 }
 
 // ── The parsers ────────────────────────────────────────────────────────────
@@ -992,32 +1129,52 @@ pub fn parse_branches(bytes: &[u8], now_unix: i64) -> Vec<GitBranch> {
     branches
 }
 
-/// `git show --name-status -z --format=`, decoded (R15).
+/// `git show --raw --numstat -z --format=` (and `git diff` in the same clothes),
+/// decoded (R15, D4).
 ///
-/// **The record grammar is one field per status and one per path**, not one line
-/// per file: with `-z` git writes `M\0path\0` and — for a rename or a copy —
-/// `R100\0from\0to\0`, three fields where the others spend two. The similarity
-/// gives the same score attached to the letter (`R100`), which is why only the
-/// first character is read.
+/// **One process and two blocks, because git refuses to print the two facts in
+/// one.** The obvious command is `--name-status --numstat`, and it does not
+/// exist: those two are one setting with two values, and git silently prints
+/// only the name-status half whichever order they are given in (checked on the
+/// real machine, 2026-08-16, with and without `-z`). `--raw` is a *different*
+/// output format and does combine — so the stream is the raw block, whole, and
+/// then the numstat block, whole, in the same file order. What that costs over
+/// the impossible command is one `:` per file; what it saves is a second
+/// subprocess per expansion, which is exactly the reading R31 is about.
 ///
-/// **A merge commit answers with nothing**, because `--name-status` on a merge
-/// compares against no parent by default. That is an empty answer and not a
-/// failure, and it is the accordion's own empty sentence rather than anything
-/// this function has to detect.
+/// **The record grammars.** A raw record is
+/// `:<mode> <mode> <sha> <sha> <STATUS>\0<path>\0`, with a rename or a copy
+/// spending a third field for the name it went to; the similarity score rides
+/// on the letter (`R075`), which is why only the first character is read. A
+/// numstat record is `<added>\t<removed>\t<path>\0`, with a rename writing an
+/// *empty* path there and its two names in the two fields after — git's own
+/// `show_numstat` puts a NUL straight after the second tab — and a binary file
+/// writing `-\t-` where the numbers would be.
+///
+/// The two blocks are told apart by their first byte and not by counting: raw
+/// records open with `:` and numstat records open with a digit or a dash, so a
+/// commit that touched nothing, or a merge (which `--raw` says nothing about,
+/// because it compares against no parent by default), simply produces neither.
+/// That is an empty answer and not a failure, and it is the accordion's own
+/// empty sentence rather than anything this function has to detect.
 #[must_use]
-pub fn parse_name_status(bytes: &[u8]) -> Vec<GitCommitFile> {
+pub fn parse_diff_files(bytes: &[u8]) -> Vec<GitCommitFile> {
     let text = String::from_utf8_lossy(bytes);
-    let mut fields = text.split('\0');
-    let mut files = Vec::new();
-    while let Some(record) = fields.next() {
-        // The stream ends on its terminator, so the split ends on an empty
-        // string; nothing else in it is empty.
-        if record.is_empty() {
-            continue;
-        }
-        let Some(code) = record.chars().next().and_then(StatusCode::from_letter) else {
-            continue;
+    let mut fields = text.split('\0').peekable();
+    let mut files: Vec<GitCommitFile> = Vec::new();
+    // The raw block, while the stream is still in it.
+    while let Some(record) = fields.peek() {
+        let Some(rest) = record.strip_prefix(':') else {
+            break;
         };
+        // `:<mode> <mode> <sha> <sha> <STATUS>` — the letter is the last word,
+        // and reading it from the end rather than by counting spaces is what
+        // keeps this honest about the combined-diff spellings git may one day
+        // hand back for a merge.
+        let letter = rest.split_whitespace().next_back().unwrap_or_default();
+        let code = letter.chars().next().and_then(StatusCode::from_letter);
+        fields.next();
+        let Some(code) = code else { continue };
         let moved = matches!(code, StatusCode::Renamed | StatusCode::Copied);
         let first = fields.next().unwrap_or_default().to_owned();
         // A rename's *second* path is the row: the file is at the new name now,
@@ -1034,10 +1191,49 @@ pub fn parse_name_status(bytes: &[u8]) -> Vec<GitCommitFile> {
             path,
             code,
             renamed_from,
+            stat: None,
         });
+    }
+    // The numstat block. Matched onto the rows already built **by path**, not by
+    // position: the two blocks are in the same order today, and a pairing that
+    // depended on that would be a silent mis-attribution of `+900 −3` to the
+    // wrong file on the day git reorders one of them.
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let mut parts = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(tail)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        // A rename writes its two names in the two fields *after* this one and
+        // leaves the path here empty; the row is at the name it went to, which
+        // is the second of them.
+        let path = if tail.is_empty() {
+            let _from = fields.next();
+            fields.next().unwrap_or_default().to_owned()
+        } else {
+            tail.to_owned()
+        };
+        let stat = match (added.parse::<u32>(), removed.parse::<u32>()) {
+            (Ok(added), Ok(removed)) => Some(GitFileStat { added, removed }),
+            // `-\t-`: git has no lines to count in this file.
+            _ => None,
+        };
+        if let Some(file) = files.iter_mut().find(|file| file.path == path) {
+            file.stat = stat;
+        }
     }
     files
 }
+
+/// How many NUL-separated fields one commit of `--format=` above is spelled in.
+///
+/// Written once, beside the parse that strides by it, because the format string
+/// and this number are one fact: a field added to one and not the other reads
+/// every commit's message as the next commit's hash, and does it silently.
+const LOG_FIELDS: usize = 11;
 
 /// `git log -z --parents`, decoded.
 ///
@@ -1048,33 +1244,44 @@ pub fn parse_name_status(bytes: &[u8]) -> Vec<GitCommitFile> {
 pub fn parse_log(bytes: &[u8], now_unix: i64, skip: usize, wanted: usize) -> GitLog {
     let text = String::from_utf8_lossy(bytes);
     let fields: Vec<&str> = text.split('\0').collect();
-    // Eight fields per commit, NUL between them and a NUL after the last — so
-    // the whole stream divides evenly and `chunks_exact` drops the terminator's
-    // empty tail without having to know whether git wrote a separator or a
-    // terminator.
+    // [`LOG_FIELDS`] fields per commit, NUL between them and a NUL after the
+    // last — so the whole stream divides evenly and `chunks_exact` drops the
+    // terminator's empty tail without having to know whether git wrote a
+    // separator or a terminator.
     //
     // Eight since v2 ① (2026-08-16): `%ae` sits beside `%an` because the author
     // column and its tooltip are one fact read twice, and a second `git log` to
     // learn the address of a commit already on screen would be a second reading
-    // of the same history (R31's whole objection).
+    // of the same history (R31's whole objection). Eleven since v2 ②, for the
+    // same reason again: `%cn`, `%ce` and `%b` are what the expanded row says,
+    // and the stride is still honest because `%b` is last — see the format
+    // string, which is where that argument is written down.
     let mut commits: Vec<GitCommit> = fields
-        .chunks_exact(8)
+        .chunks_exact(LOG_FIELDS)
         .map(|record| {
-            let (committer_unix, committer_offset) = parse_iso_strict(record[4]).unwrap_or((0, 0));
+            let (committer_unix, committer_offset) = parse_iso_strict(record[6]).unwrap_or((0, 0));
             GitCommit {
                 hash: record[0].to_owned(),
                 short: record[1].to_owned(),
                 author_name: record[2].to_owned(),
                 author_email: record[3].to_owned(),
+                committer_name: record[4].to_owned(),
+                committer_email: record[5].to_owned(),
                 committer_unix,
                 committer_offset,
                 time_relative: relative_time(committer_unix, committer_offset, now_unix),
-                subject: record[5].to_owned(),
+                subject: record[7].to_owned(),
                 // Space-separated by `%P`, and empty for the root commit — which
                 // is an empty list rather than a missing one, because the root
                 // genuinely has no parents.
-                parents: record[6].split_whitespace().map(str::to_owned).collect(),
-                refs: parse_decoration(record[7]),
+                parents: record[8].split_whitespace().map(str::to_owned).collect(),
+                refs: parse_decoration(record[9]),
+                // `%b` ends with the newline that separated it from the record
+                // terminator; a body's *own* trailing blank lines are not
+                // something anybody typed on purpose either, so the whole tail
+                // goes. The breaks *inside* it are kept exactly as written —
+                // they are the paragraphs (D1).
+                body: record[10].trim_end().to_owned(),
             }
         })
         .collect();
@@ -1372,6 +1579,21 @@ fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
             hash: hash.clone(),
             outcome: Err(fault),
         },
+        GitQuestion::CompareFiles { root, a, b } => GitAnswer::CompareFiles {
+            root: root.clone(),
+            a: a.clone(),
+            b: b.clone(),
+            outcome: Err(fault),
+        },
+        GitQuestion::DiffRange {
+            root, a, b, path, ..
+        } => GitAnswer::DiffRange {
+            root: root.clone(),
+            a: a.clone(),
+            b: b.clone(),
+            path: path.clone(),
+            outcome: Err(fault),
+        },
         GitQuestion::Show {
             root, hash, path, ..
         } => GitAnswer::Show {
@@ -1500,7 +1722,22 @@ pub fn answer(
                     // that invariant is about how many commits a page holds and
                     // where it starts, and neither is a function of how many
                     // fields a commit is spelled with.
-                    OsStr::new("--format=%H%x00%h%x00%an%x00%ae%x00%cI%x00%s%x00%P%x00%D"),
+                    // `%cn`, `%ce` and `%b` joined the record in v2 ②
+                    // (2026-08-16) for `%ae`'s own reason: the expanded row
+                    // wants the whole message and the committer, and a second
+                    // `git log` to learn them about a commit already on screen
+                    // is a second reading of the same history (R31).
+                    //
+                    // **`%b` last, and that is load-bearing.** It is the one
+                    // field that can contain newlines; putting it at the end of
+                    // the record means the stride is still arithmetic — every
+                    // separator before it is a NUL git wrote, and the one after
+                    // it is `-z`'s own terminator. A commit message cannot
+                    // contain a NUL (git refuses one), so no body can ever open
+                    // a field this parse would count.
+                    OsStr::new(
+                        "--format=%H%x00%h%x00%an%x00%ae%x00%cn%x00%ce%x00%cI%x00%s%x00%P%x00%D%x00%b",
+                    ),
                     OsStr::new(&limit),
                     OsStr::new(&skipped),
                 ],
@@ -1639,6 +1876,38 @@ pub fn answer(
                 Err(fault) => faulted(question, fault),
             }
         }
+        // The compare block's document — [`GitQuestion::Show`]'s shape with two
+        // ends instead of one, and the same insistence on handing git **both
+        // halves of a rename** for the reason written out on `GitQuestion::Diff`.
+        GitQuestion::DiffRange {
+            root,
+            a,
+            b,
+            path,
+            renamed_from,
+        } => {
+            let mut arguments = vec![OsStr::new("diff"), OsStr::new("--no-color"), OsStr::new(a)];
+            if let Some(b) = b {
+                arguments.push(OsStr::new(b));
+            }
+            arguments.push(OsStr::new("--"));
+            if let Some(from) = renamed_from {
+                arguments.push(OsStr::new(from));
+            }
+            arguments.push(OsStr::new(path));
+            let command = git_command(program, root, &arguments);
+            match run_git(command, timeout) {
+                Ok(run) if run.ok => GitAnswer::DiffRange {
+                    root: root.clone(),
+                    a: a.clone(),
+                    b: b.clone(),
+                    path: path.clone(),
+                    outcome: Ok(String::from_utf8_lossy(&run.stdout).into_owned()),
+                },
+                Ok(run) => faulted(question, classify_failure(&run.stderr)),
+                Err(fault) => faulted(question, fault),
+            }
+        }
         // **One command and no cleverness** (R10). No `--force`, no `--merge`,
         // no stash around it: what git does with a dirty tree here is exactly
         // what it does in the pane next door, and the sentence it prints when it
@@ -1679,7 +1948,11 @@ pub fn answer(
                 &[
                     OsStr::new("show"),
                     OsStr::new("--no-color"),
-                    OsStr::new("--name-status"),
+                    // **`--raw` and not `--name-status`**, so that `--numstat`
+                    // can stand beside it — see [`parse_diff_files`], which is
+                    // where that ruling is written down.
+                    OsStr::new("--raw"),
+                    OsStr::new("--numstat"),
                     OsStr::new("-z"),
                     OsStr::new("--format="),
                     OsStr::new(hash),
@@ -1689,7 +1962,41 @@ pub fn answer(
                 Ok(run) if run.ok => GitAnswer::CommitFiles {
                     root: root.clone(),
                     hash: hash.clone(),
-                    outcome: Ok(parse_name_status(&run.stdout)),
+                    outcome: Ok(parse_diff_files(&run.stdout)),
+                },
+                Ok(run) => faulted(question, classify_failure(&run.stderr)),
+                Err(fault) => faulted(question, fault),
+            }
+        }
+        // **The same two blocks, between two places instead of across one
+        // commit** (D6). It is `git diff` and not `git show` because a range has
+        // two ends and `show` only ever has one; everything downstream of the
+        // bytes — the parse, the rows, the badges, the counts — is shared, which
+        // is the whole reason the answer carries the same `GitCommitFile`.
+        //
+        // `b` absent is the working tree, spelled the way git spells it: one
+        // revision and no second, which git reads as "this commit against what
+        // is on disk". Not `<a> HEAD`, which would be a different question with
+        // the same name.
+        GitQuestion::CompareFiles { root, a, b } => {
+            let mut arguments = vec![
+                OsStr::new("diff"),
+                OsStr::new("--no-color"),
+                OsStr::new("--raw"),
+                OsStr::new("--numstat"),
+                OsStr::new("-z"),
+                OsStr::new(a),
+            ];
+            if let Some(b) = b {
+                arguments.push(OsStr::new(b));
+            }
+            let command = git_command(program, root, &arguments);
+            match run_git(command, timeout) {
+                Ok(run) if run.ok => GitAnswer::CompareFiles {
+                    root: root.clone(),
+                    a: a.clone(),
+                    b: b.clone(),
+                    outcome: Ok(parse_diff_files(&run.stdout)),
                 },
                 Ok(run) => faulted(question, classify_failure(&run.stderr)),
                 Err(fault) => faulted(question, fault),
@@ -1777,6 +2084,13 @@ pub struct GitCache {
     /// commit is filed against the commit it is about, and drawn only if that is
     /// still the open one.
     commit_files: Option<(String, GitSlot<Vec<GitCommitFile>>)>,
+    /// The one comparison, keyed on its pair (D6) — [`Self::commit_files`]'s
+    /// twin, held for the same reason and thrown away the same way.
+    ///
+    /// One and not a map because there is one compare block on the page, and the
+    /// key is the *pair* because moving either end is a different question with
+    /// the same shape.
+    compare_files: Option<(ComparePair, GitSlot<Vec<GitCommitFile>>)>,
     /// The paths a write is in flight for — **the whole of R13's pessimism**.
     ///
     /// A row whose path is in here is drawn dimmed and answers no verb, and it
@@ -2020,6 +2334,49 @@ impl GitCache {
         }
     }
 
+    /// **What two places differ by** (D6) — the compare block's question, and
+    /// the slot it will land in.
+    ///
+    /// Returns `None` — and starts nothing — when this pair is already the one
+    /// in hand, which is what makes the block cost one subprocess per pair and
+    /// not one per frame: the paint asks on every build, and the second ask
+    /// finds its own pair already recorded and declines. [`Self::begin_commit_files`]
+    /// does not need that guard because the gesture that calls it happens once;
+    /// this one is reached from a *derivation*, so the guard is where the
+    /// derivation is.
+    #[must_use]
+    pub fn begin_compare_files(&mut self, a: &str, b: Option<&str>) -> Option<GitQuestion> {
+        let root = self.repo.ready()?.clone();
+        let pair = (a.to_owned(), b.map(str::to_owned));
+        if self
+            .compare_files
+            .as_ref()
+            .is_some_and(|(held, _)| *held == pair)
+        {
+            return None;
+        }
+        self.compare_files = Some((pair, GitSlot::Pending));
+        Some(GitQuestion::CompareFiles {
+            root,
+            a: a.to_owned(),
+            b: b.map(str::to_owned),
+        })
+    }
+
+    /// The comparison's files, when the pair asked about is the one this cache
+    /// holds an answer for.
+    #[must_use]
+    pub fn compare_files(&self, a: &str, b: Option<&str>) -> Option<&GitSlot<Vec<GitCommitFile>>> {
+        match &self.compare_files {
+            Some(((held_a, held_b), slot))
+                if held_a == a && held_b.as_deref() == b.map(str::as_ref) =>
+            {
+                Some(slot)
+            }
+            _ => None,
+        }
+    }
+
     #[allow(dead_code)]
     #[must_use]
     pub fn more_commits(&self) -> Option<GitQuestion> {
@@ -2048,10 +2405,14 @@ impl GitCache {
             // `begin_commit_files`, at the moment the question is built.
             // A checkout's own "already asked" bookkeeping is `checkout`,
             // written by `begin_checkout` at the moment the question is built.
+            // A comparison's own "already asked" bookkeeping is written by
+            // `begin_compare_files`, at the moment the question is built.
             GitQuestion::Log { .. }
             | GitQuestion::Diff { .. }
             | GitQuestion::Show { .. }
+            | GitQuestion::DiffRange { .. }
             | GitQuestion::CommitFiles { .. }
+            | GitQuestion::CompareFiles { .. }
             | GitQuestion::Write { .. }
             | GitQuestion::Checkout { .. } => {}
         }
@@ -2170,6 +2531,26 @@ impl GitCache {
                 *slot = GitSlot::take(outcome);
                 true
             }
+            // The comparison's list, filed exactly as an expansion's is — and
+            // dropped exactly as one is when the far end has moved since.
+            GitAnswer::CompareFiles {
+                root,
+                a,
+                b,
+                outcome,
+            } => {
+                if self.root() != Some(root.as_path()) {
+                    return false;
+                }
+                let Some((held, slot)) = &mut self.compare_files else {
+                    return false;
+                };
+                if *held != (a, b) {
+                    return false;
+                }
+                *slot = GitSlot::take(outcome);
+                true
+            }
             // **The checkout's receipt** (R10), and the asymmetry with a write's
             // is the ruling: a checkout that succeeded changes the branch, the
             // status and the whole history the page is drawn from, so everything
@@ -2197,7 +2578,7 @@ impl GitCache {
             // belong to the preview pool, keyed by their own `PreviewSource`.
             // Nothing here has a slot for them, and inventing one would give the
             // same document two homes.
-            GitAnswer::Diff { .. } | GitAnswer::Show { .. } => false,
+            GitAnswer::Diff { .. } | GitAnswer::Show { .. } | GitAnswer::DiffRange { .. } => false,
         }
     }
 }
@@ -2410,8 +2791,30 @@ mod tests {
     /// with **two** parents, then two ordinary commits.
     ///
     /// Re-recorded 2026-08-16 with `%ae` beside `%an` (v2 ①) — eight fields a
-    /// record where there were seven.
-    const LOG_Z: &[u8] = b"36d3949271716f6d8cd1395f6f5606245c08b914\x0036d3949\x00T\x00t@example.com\x002026-08-15T10:18:24-04:00\x00merge other\x005a18cfe67ca341203166040bfc8f954b899e275e 91d138a3d39811755e479ec386b450a8c8465302\x00HEAD -> refs/heads/main, refs/remotes/origin/main\x0091d138a3d39811755e479ec386b450a8c8465302\x0091d138a\x00T\x00t@example.com\x002026-08-15T10:17:57-04:00\x00other\x00a4499ab318aa13e08d780a084fe865fa8d18e558\x00refs/heads/other\x005a18cfe67ca341203166040bfc8f954b899e275e\x005a18cfe\x00T\x00t@example.com\x002026-08-15T10:18:07-04:00\x00ahead2\x00452220ba3687b9dcf3399962a69310de387b7af9\x00\x00";
+    /// record where there were seven — and again the same day with `%cn`, `%ce`
+    /// and `%b` (v2 ②), which makes it eleven.
+    ///
+    /// The three commits are deliberately unalike in exactly the three ways the
+    /// new fields can be: the merge has no body, the middle one has a body with
+    /// a paragraph break in it, and the oldest was committed by somebody other
+    /// than its author.
+    const LOG_Z: &[u8] = concat!(
+        "36d3949271716f6d8cd1395f6f5606245c08b914\u{0}36d3949\u{0}",
+        "T\u{0}t@example.com\u{0}T\u{0}t@example.com\u{0}",
+        "2026-08-15T10:18:24-04:00\u{0}merge other\u{0}",
+        "5a18cfe67ca341203166040bfc8f954b899e275e 91d138a3d39811755e479ec386b450a8c8465302\u{0}",
+        "HEAD -> refs/heads/main, refs/remotes/origin/main\u{0}\u{0}",
+        "91d138a3d39811755e479ec386b450a8c8465302\u{0}91d138a\u{0}",
+        "T\u{0}t@example.com\u{0}T\u{0}t@example.com\u{0}",
+        "2026-08-15T10:17:57-04:00\u{0}other\u{0}",
+        "a4499ab318aa13e08d780a084fe865fa8d18e558\u{0}refs/heads/other\u{0}",
+        "Why the other branch had to exist.\n\nAnd what it will cost to keep.\n\u{0}",
+        "5a18cfe67ca341203166040bfc8f954b899e275e\u{0}5a18cfe\u{0}",
+        "T\u{0}t@example.com\u{0}Rebase Bot\u{0}bot@example.com\u{0}",
+        "2026-08-15T10:18:07-04:00\u{0}ahead2\u{0}",
+        "452220ba3687b9dcf3399962a69310de387b7af9\u{0}\u{0}\u{0}",
+    )
+    .as_bytes();
 
     /// The instant the `BRANCHES` and `LOG_Z` recordings were made, so that every
     /// age in these tests is a fixed number rather than whatever the clock says
@@ -2793,6 +3196,46 @@ mod tests {
         assert_eq!(page.commits[2].short, "5a18cfe");
     }
 
+    /// v2 ② (D1/D2) — the whole message and the committer arrive with the page.
+    ///
+    /// Its sibling above is about the *stride*, and so is this: `%b` is the one
+    /// field that can hold a newline, and a parse that let a body's second
+    /// paragraph be counted as the next commit's hash would still get the first
+    /// commit right. So the assertion walks to the last record and reads a field
+    /// past every body in the page.
+    #[test]
+    fn a_commit_carries_its_body_with_the_paragraphs_it_was_written_with() {
+        let page = parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE);
+        assert_eq!(page.commits.len(), 3);
+        assert_eq!(page.commits[0].body, "", "a merge with a one-line message");
+        assert_eq!(
+            page.commits[1].body,
+            "Why the other branch had to exist.\n\nAnd what it will cost to keep.",
+            "the blank line between the paragraphs is kept; the one git puts at \
+             the end of every body is not"
+        );
+        // The fields *after* the body of a commit that has one still land where
+        // they belong — which is the stride.
+        assert_eq!(page.commits[2].short, "5a18cfe");
+        assert_eq!(page.commits[2].subject, "ahead2");
+        assert_eq!(
+            page.commits[2].parents,
+            vec!["452220ba3687b9dcf3399962a69310de387b7af9".to_owned()]
+        );
+    }
+
+    /// D2 — who committed it, which is only interesting when it is not who wrote
+    /// it.
+    #[test]
+    fn a_commit_carries_its_committer_beside_its_author() {
+        let page = parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE);
+        assert_eq!(page.commits[0].committer_name, "T");
+        assert_eq!(page.commits[0].committer_email, "t@example.com");
+        assert_eq!(page.commits[2].author_name, "T");
+        assert_eq!(page.commits[2].committer_name, "Rebase Bot");
+        assert_eq!(page.commits[2].committer_email, "bot@example.com");
+    }
+
     /// PIN — a page knows whether there is another, without counting the
     /// repository.
     #[test]
@@ -3030,6 +3473,18 @@ mod tests {
                 root: PathBuf::from(r"D:\repo"),
                 hash: "abc".to_owned(),
             },
+            GitQuestion::CompareFiles {
+                root: PathBuf::from(r"D:\repo"),
+                a: "abc".to_owned(),
+                b: Some("def".to_owned()),
+            },
+            GitQuestion::DiffRange {
+                root: PathBuf::from(r"D:\repo"),
+                a: "abc".to_owned(),
+                b: None,
+                path: "src/main.rs".to_owned(),
+                renamed_from: None,
+            },
         ] {
             let answer = faulted(&question, fault.clone());
             let carried = match &answer {
@@ -3039,7 +3494,9 @@ mod tests {
                 GitAnswer::Log { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Diff { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Show { outcome, .. } => outcome.as_ref().err(),
+                GitAnswer::DiffRange { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::CommitFiles { outcome, .. } => outcome.as_ref().err(),
+                GitAnswer::CompareFiles { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Write { outcome, .. } => outcome.as_ref().err(),
                 GitAnswer::Checkout { outcome, .. } => outcome.as_ref().err(),
             };
@@ -3363,6 +3820,9 @@ mod tests {
             subject: subject.to_owned(),
             author_name: "T".to_owned(),
             author_email: "t@example.com".to_owned(),
+            committer_name: "T".to_owned(),
+            committer_email: "t@example.com".to_owned(),
+            body: String::new(),
             committer_unix: RECORDED_AT,
             committer_offset: 0,
             time_relative: "now".to_owned(),
@@ -3619,6 +4079,7 @@ mod tests {
                 path: "src/main.rs".to_owned(),
                 code: StatusCode::Modified,
                 renamed_from: None,
+                stat: None,
             }]),
         }));
         assert_eq!(
@@ -3638,24 +4099,137 @@ mod tests {
         );
     }
 
-    /// `git show --name-status -z --format=`, decoded — including the two shapes
+    /// D6 — a comparison is asked **once per pair**, however many frames look at
+    /// it.
+    ///
+    /// The guard is in the cache and not in the caller because the compare block
+    /// is derived at paint: the question is reached from a build that runs every
+    /// frame, so "have I asked this already" has to be answerable by the thing
+    /// that holds the answer.
+    ///
+    /// MUTATION: drop the pair check in `begin_compare_files` and this goes red
+    /// on the second call — which on the real machine is a `git diff` per frame.
+    #[test]
+    fn a_comparison_is_asked_once_per_pair_and_again_when_an_end_moves() {
+        let root = std::path::PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Graph);
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        assert_eq!(
+            cache.begin_compare_files(&a, Some(&b)),
+            Some(GitQuestion::CompareFiles {
+                root: root.clone(),
+                a: a.clone(),
+                b: Some(b.clone()),
+            })
+        );
+        assert_eq!(
+            cache.begin_compare_files(&a, Some(&b)),
+            None,
+            "the same pair, a frame later, is not a second subprocess"
+        );
+        assert!(matches!(
+            cache.compare_files(&a, Some(&b)),
+            Some(GitSlot::Pending)
+        ));
+        assert!(cache.accept(GitAnswer::CompareFiles {
+            root: root.clone(),
+            a: a.clone(),
+            b: Some(b.clone()),
+            outcome: Ok(vec![GitCommitFile {
+                path: "src/main.rs".to_owned(),
+                code: StatusCode::Modified,
+                renamed_from: None,
+                stat: Some(GitFileStat {
+                    added: 12,
+                    removed: 3,
+                }),
+            }]),
+        }));
+        assert_eq!(
+            cache
+                .compare_files(&a, Some(&b))
+                .and_then(GitSlot::ready)
+                .map(Vec::len),
+            Some(1)
+        );
+        // The working tree is a *different* far end, not the same one spelled
+        // another way.
+        assert!(cache.begin_compare_files(&a, None).is_some());
+        assert!(
+            cache.compare_files(&a, Some(&b)).is_none(),
+            "one compare block, one pair in hand"
+        );
+    }
+
+    /// A recording of `git show --raw --numstat -z --format=` from the real
+    /// machine (2026-08-16), covering the three shapes that are not one plain
+    /// record per file: a rename, a binary file, and the fact that the stream is
+    /// two blocks rather than one.
+    ///
+    /// Taken verbatim off a scratch repository built for it — one file added,
+    /// one binary rewritten, one text file renamed and edited — because the one
+    /// thing a hand-written fixture cannot pin is the grammar git actually uses,
+    /// and the rename's *extra* NUL after the second tab is exactly the kind of
+    /// detail a hand-written fixture would have left out.
+    const SHOW_RAW_NUMSTAT_Z: &[u8] = concat!(
+        ":000000 100644 000000 587be6b A\u{0}added.txt\u{0}",
+        ":100644 100644 0f49c4a 53aa893 M\u{0}bin.dat\u{0}",
+        ":100644 100644 de98044 d68dd40 R075\u{0}old.txt\u{0}new.txt\u{0}",
+        "1\t0\tadded.txt\u{0}",
+        "-\t-\tbin.dat\u{0}",
+        "1\t0\t\u{0}old.txt\u{0}new.txt\u{0}",
+    )
+    .as_bytes();
+
+    /// `git show --raw --numstat -z --format=`, decoded — including the shapes
     /// that are not one record per file.
     #[test]
     fn a_commit_s_file_list_reads_letters_paths_and_where_a_rename_came_from() {
-        let files = parse_name_status(b"M\0src/main.rs\0A\0new.txt\0R100\0old.txt\0moved.txt\0");
+        let files = parse_diff_files(SHOW_RAW_NUMSTAT_Z);
         assert_eq!(files.len(), 3);
-        assert_eq!(files[0].path, "src/main.rs");
-        assert_eq!(files[0].code, StatusCode::Modified);
-        assert_eq!(files[1].code, StatusCode::Added);
+        assert_eq!(files[0].path, "added.txt");
+        assert_eq!(files[0].code, StatusCode::Added);
+        assert_eq!(files[1].path, "bin.dat");
+        assert_eq!(files[1].code, StatusCode::Modified);
         // A rename spends three fields, and the **new** path is the one the row
         // is about — the same grammar `parse_status` already reads.
         assert_eq!(files[2].code, StatusCode::Renamed);
-        assert_eq!(files[2].path, "moved.txt");
+        assert_eq!(files[2].path, "new.txt");
         assert_eq!(files[2].renamed_from.as_deref(), Some("old.txt"));
 
-        // A merge commit's `--name-status` is empty against its first parent,
-        // and empty is an answer rather than a parse failure.
-        assert!(parse_name_status(b"").is_empty());
+        // A merge commit's `--raw` is empty against its first parent, and empty
+        // is an answer rather than a parse failure.
+        assert!(parse_diff_files(b"").is_empty());
+    }
+
+    /// D4 — the counts arrive in the same breath as the letters, and a file git
+    /// would not count says so rather than saying zero.
+    ///
+    /// MUTATION: give the binary row `Some(GitFileStat::default())` and the row
+    /// claims nothing changed about a file that was replaced whole.
+    #[test]
+    fn the_numstat_block_lands_on_the_rows_the_raw_block_built() {
+        let files = parse_diff_files(SHOW_RAW_NUMSTAT_Z);
+        assert_eq!(
+            files[0].stat,
+            Some(GitFileStat {
+                added: 1,
+                removed: 0
+            })
+        );
+        assert_eq!(
+            files[1].stat, None,
+            "`-\t-` is `git has no lines here`, which is not `nothing changed`"
+        );
+        // A rename's numstat record leaves its own path field empty and writes
+        // the two names after it; the counts belong to the name it went to.
+        assert_eq!(
+            files[2].stat,
+            Some(GitFileStat {
+                added: 1,
+                removed: 0
+            })
+        );
     }
 
     /// **A staged rename's diff is a rename, and only both names make it one.**

@@ -302,6 +302,64 @@ pub const GRAPH_REF_GROUND_ALPHA: i32 = 100;
 /// past the graph column.
 pub const GRAPH_FILE_INDENT_LOGICAL_PX: f32 = 56.0;
 
+// ── the open row's own story (v2 ②, D1/D2/D6/D7 — 2026-08-16) ──────────────
+
+/// The body prose, at the row text's own size less a step.
+///
+/// **12 and not the row's 12.5**: a commit's body is the same *kind* of writing
+/// the subject is and wears the same ink, so it cannot be a step quieter without
+/// reading as a caption; a hair smaller is what says "this is the continuation
+/// and that was the headline".
+pub const GRAPH_BODY_FONT_LOGICAL_PX: f32 = 12.0;
+/// The leading prose is set on — [`crate::tooltip`]'s own `font * 1.4`, which is
+/// the line box every multi-line piece of chrome text in this product is shaped
+/// into. A third number invented here would be a guess at what Segoe reports.
+pub const GRAPH_BODY_LINE_LOGICAL_PX: f32 = GRAPH_BODY_FONT_LOGICAL_PX * 1.4;
+/// How many lines of body the block will draw before it stops (D1).
+///
+/// **Twelve, and the twelfth says it stopped.** A commit message is allowed to
+/// be a essay and some of them are; a graph row that unfolded into three
+/// screens of prose would have turned the list into a document. Twelve is about
+/// a paragraph and a half — enough that a normal "why" is whole — and the full
+/// text is one copy verb away on the same line (D7), which is the honest exit:
+/// this surface is a list, and the thing that reads whole documents is the
+/// document surface next to it.
+pub const GRAPH_BODY_MAX_LINES: usize = 12;
+/// What the last line of a body that did not fit ends with.
+pub const GRAPH_BODY_ELLIPSIS: &str = "\u{2026}";
+/// The meta line — author, date, parents (D2) — at the hash's own size, because
+/// it is the same kind of sentence: facts about the commit rather than the
+/// commit's own words.
+pub const GRAPH_META_FONT_LOGICAL_PX: f32 = crate::git_panel::GIT_HASH_FONT_LOGICAL_PX;
+/// The block's own breathing room, top and bottom.
+pub const GRAPH_DETAIL_PADDING_Y_LOGICAL_PX: f32 = 6.0;
+/// Between the last line of prose and the meta line under it.
+pub const GRAPH_DETAIL_GAP_LOGICAL_PX: f32 = 6.0;
+/// The gap between two parent hashes on the meta line.
+pub const GRAPH_PARENT_GAP_LOGICAL_PX: f32 = 8.0;
+/// What the meta line says before the parents.
+pub const GRAPH_META_PARENTS: &str = "parents: ";
+/// What it says before a committer who is not the author.
+pub const GRAPH_META_COMMITTED_BY: &str = "committed by ";
+/// The `\u{b7}` every clause of the meta line is joined with — the same
+/// separator [`crate::preview::PreviewSource::composed_lead`] uses, because it
+/// is the same job: two facts about one thing on one line.
+pub const GRAPH_META_SEPARATOR: &str = " \u{b7} ";
+/// `Comparing abc1234 \u{2192} def5678` (D6).
+pub const GRAPH_COMPARE_LEAD: &str = "Comparing ";
+pub const GRAPH_COMPARE_ARROW: &str = " \u{2192} ";
+/// What the newer end of a comparison is called when it is the working tree.
+pub const GRAPH_COMPARE_WORKING_TREE: &str = "working tree";
+/// How far a seek will page before it gives up (D2).
+///
+/// **Twenty pages is a thousand commits**, which is further back than any parent
+/// of a commit on screen has ever been in a history laid out in topological
+/// order — and it is also a bound, which is the point: a parent git rewrote out
+/// from under us, or one on a branch this log was never asked about, would
+/// otherwise page to the end of the repository one subprocess at a time while
+/// the reader watched.
+pub const GRAPH_SEEK_MAX_PAGES: usize = 20;
+
 // ── the table's columns (v2 ①, V1/V2 — 2026-08-16) ─────────────────────────
 //
 // **Reserved widths and not measured ones**, which is the whole difference
@@ -529,6 +587,17 @@ pub enum GraphViewRow {
     /// A file the open commit touched (R15's accordion, in the graph's seat), or
     /// a file the working tree has something to say about (V5).
     File(GraphFileRow),
+    /// **The open row's own story** (v2 ②) — the block that stands between a
+    /// commit and its files, holding the rest of its message and the facts about
+    /// it; or, in compare mode, the head of the comparison instead.
+    ///
+    /// One `GraphViewRow` spanning several list rows and not one row per line,
+    /// which is the whole of how a variable-height thing lives in a list whose
+    /// arithmetic is a multiplication: the block claims a *whole number of rows*
+    /// (see [`GraphDetailRow::rows`]) and everything the geometry knows —
+    /// `row_rect`, `row_at`, `window`, `reveal`, the clamp — goes on being one
+    /// height times one index.
+    Detail(GraphDetailRow),
 }
 
 /// One commit, laid out and measured.
@@ -589,6 +658,116 @@ pub struct GraphFileRow {
     /// the two is identical — one path, one indent, one press that opens a
     /// document — and the two facts that differ are exactly these two.
     pub working: Option<GraphWorkingFile>,
+    /// The one letter a **commit's** file wears (D4), through the same
+    /// [`crate::git_panel::GitBadgeInk`] mapping the working tree's letters go
+    /// through — because they mean the same things.
+    ///
+    /// One and not a list, which is the honest difference between the two kinds
+    /// of row: a status entry has an index column and a working-tree column and
+    /// can be two things at once, and a commit is a point with one story about
+    /// each file it touched.
+    pub badge: Option<crate::git_panel::GitBadge>,
+    /// `+N \u{2212}M` (D4) — `None` when git had no lines to count, which is a
+    /// binary file and is drawn as an em dash rather than as two zeroes.
+    pub stat: Option<crate::git::GitFileStat>,
+    /// Set when this row belongs to a **comparison** (D6) rather than to one
+    /// commit: the two ends the diff is between, older first.
+    ///
+    /// It decides which document the row opens and nothing else, which is why it
+    /// is a field beside [`Self::hash`] rather than a third row type: everything
+    /// about the drawing — the indent, the badge, the counts, the path — is the
+    /// same picture of the same file.
+    pub range: Option<(String, Option<String>)>,
+}
+
+/// The block under an open row (D1/D2/D6/D7).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphDetailRow {
+    /// The **first** list row the block stands on.
+    pub index: usize,
+    /// How many list rows it claims. Always at least one.
+    pub rows: usize,
+    pub detail: GraphDetail,
+}
+
+/// Which of the two things a detail block can be.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GraphDetail {
+    /// One commit, opened: the rest of its message and the facts about it.
+    Commit(GraphCommitDetail),
+    /// Two places, compared (D6) — which *replaces* the story rather than
+    /// standing beside it, because a comparison is not a fact about either of
+    /// its ends.
+    Compare(GraphCompareDetail),
+}
+
+/// The open commit's own story.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphCommitDetail {
+    /// The full hash — what the copy verb puts on the clipboard, and what a
+    /// press has to be able to name the commit by.
+    pub hash: String,
+    pub short: String,
+    /// The subject, carried for the copy verb and **not drawn**: it is already
+    /// the row this block hangs off, and a block that repeated it would be the
+    /// page saying the same sentence twice six pixels apart.
+    pub subject: String,
+    /// The body, already wrapped to the description column and already capped
+    /// (D1). Empty when the commit has none, which is most of them.
+    pub body: Vec<String>,
+    /// Everything on the meta line **up to** the parents: the author, the date,
+    /// and the committer when there is one worth naming.
+    pub meta: String,
+    /// How wide [`Self::meta`] is, measured through the font at build time —
+    /// because where the first parent chip stands is where that string ends, and
+    /// only the thing holding the font can say where that is.
+    pub meta_width: f32,
+    pub parents: Vec<GraphParentChip>,
+}
+
+/// One clickable parent hash on the meta line (D2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphParentChip {
+    /// git's own abbreviation of the parent, cut here because a `%P` field is
+    /// full hashes and there is no second question to ask for their short forms.
+    ///
+    /// Seven characters, which is git's own floor and is what every other short
+    /// hash on this page happens to be; unlike the row's own `%h` this one is a
+    /// cut and says so, because the alternative is a `rev-parse` per parent per
+    /// expansion — exactly the reading R31 is about.
+    pub short: String,
+    /// The whole hash, which is what the seek looks for.
+    pub hash: String,
+    pub width: f32,
+}
+
+/// The head of a comparison (D6).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphCompareDetail {
+    /// `Comparing abc1234 \u{2192} def5678`, older on the left.
+    pub head: String,
+    /// The older end — always a commit, because the working tree cannot be
+    /// older than anything.
+    pub a: String,
+    /// The newer end, or the working tree when absent.
+    pub b: Option<String>,
+}
+
+/// A part of a detail block that answers a press of its own.
+///
+/// Its own enum rather than a rectangle list because a hit test's answer is
+/// *which thing*, and the geometry that produced it is not something the caller
+/// should have to keep.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphDetailPart {
+    /// The nth parent hash on the meta line: press it and the graph goes there.
+    Parent(usize),
+    /// Copy the whole hash (D7).
+    CopyHash,
+    /// Copy the subject (D7).
+    CopySubject,
+    /// The compare block's `\u{d7}` — stop comparing.
+    LeaveCompare,
 }
 
 /// What a working-tree file row knows that a commit's file row does not (V5).
@@ -608,6 +787,17 @@ impl GraphViewRow {
             Self::Uncommitted(row) => row.index,
             Self::Commit(row) => row.index,
             Self::File(row) => row.index,
+            Self::Detail(row) => row.index,
+        }
+    }
+
+    /// How many list rows this row claims — one for everything but the detail
+    /// block.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        match self {
+            Self::Detail(row) => row.rows,
+            _ => 1,
         }
     }
 }
@@ -653,6 +843,47 @@ pub struct GraphContent {
     /// Where the open row stands and how many rows it unfolded, in list
     /// coordinates. `None` when nothing is open.
     pub open_rows: Option<(usize, usize)>,
+    /// Where the detail block stands and how many rows it claims, in list
+    /// coordinates (v2 ②) — what the keyboard steps **over**.
+    ///
+    /// A block with no press of its own is not a row the selection should be
+    /// able to land on: `↓` walking through five blank rows of prose would be
+    /// the arrow keys measuring pixels instead of rows, which is the one thing
+    /// V14 said they must not do.
+    pub detail_rows: Option<(usize, usize)>,
+    /// The two rows a comparison is between, in list coordinates (D6) — both of
+    /// which wear the selected ground.
+    ///
+    /// `None` when nothing is being compared, which is the ordinary state.
+    pub compare_rows: Option<(usize, usize)>,
+    /// The two ends the comparison is between, older first — what the question
+    /// is asked about.
+    ///
+    /// Carried on the frame rather than left to be re-derived by the caller for
+    /// [`Self::columns`]'s reason: the ordering rule is written once, here,
+    /// where the rows it is about were laid out, and a caller that re-derived it
+    /// could disagree with the block it is standing under.
+    pub compare_pair: Option<(String, Option<String>)>,
+    /// Where the one expansion hangs, **in commit indices**, and how many rows
+    /// it adds — which is what turns a commit index back into a list row.
+    pub open_commit: Option<(usize, usize)>,
+}
+
+impl GraphContent {
+    /// Which list row the commit at this index of the log stands on.
+    ///
+    /// The inverse of [`item_at`], and the same arithmetic read backwards: the
+    /// working tree's rows above, plus the expansion's when the expansion is
+    /// above this commit. Needed by the seek (D2), which is handed a *commit*
+    /// by the log and has to say which row to scroll to.
+    #[must_use]
+    pub fn commit_row(&self, at: usize) -> usize {
+        let above = self.uncommitted_rows.map_or(0, |files| files + 1);
+        let shift = self
+            .open_commit
+            .map_or(0, |(open, rows)| if at > open { rows } else { 0 });
+        above + at + shift
+    }
 }
 
 /// Everything one open graph document knows.
@@ -995,6 +1226,25 @@ pub struct LaneWidthHold {
     pub until: usize,
 }
 
+/// **What one seat is looking at**, as against what its repository said.
+///
+/// Three fields that always travel together and always came from the same place
+/// — the seat's own [`crate::GraphView`] — gathered into one value since v2 ②,
+/// where a fourth argument of the same type would have made `build` take three
+/// `Option<&str>`s in a row and let any two of them be swapped silently.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphLook<'a> {
+    /// The one row turned over (R15's accordion), or
+    /// [`GRAPH_UNCOMMITTED_HASH`] for the working tree's (V5).
+    pub expanded: Option<&'a str>,
+    /// The **other** end of a comparison (D6), when one is running. Compare mode
+    /// is a property of the expanded row, so this means nothing without
+    /// [`Self::expanded`] and is ignored when it names the same row.
+    pub compare: Option<&'a str>,
+    /// The row wearing the selected ground (V8).
+    pub selected: Option<usize>,
+}
+
 /// Turn what a graph document knows into what it draws.
 ///
 /// `body` and `scroll_px` are here rather than in the painter because **the
@@ -1002,17 +1252,20 @@ pub struct LaneWidthHold {
 /// decided by where the body is and how far down the list is, and a build that
 /// did not know those two things could only build all of them.
 #[must_use]
-#[allow(clippy::too_many_arguments)]
 pub fn build(
     state: &GraphState,
-    expanded: Option<&str>,
-    selected: Option<usize>,
+    look: GraphLook<'_>,
     body: [f32; 4],
     scroll_px: f32,
     hold: LaneWidthHold,
     scale: f32,
     measure: &mut Measure<'_>,
 ) -> GraphContent {
+    let GraphLook {
+        expanded,
+        compare,
+        selected,
+    } = look;
     let mut content = GraphContent {
         scroll_px,
         selected,
@@ -1059,28 +1312,115 @@ pub fn build(
         };
     let head = state.head_lanes().map(|_| head_files.len());
 
+    let above = head.map_or(0, |files| files + 1);
+
+    // Where each end of a comparison stands in the graph's own order: the
+    // working tree is above everything and a commit is where the log puts it.
+    // **Signed, because the working tree's place is "before the first row"** and
+    // an unsigned index has no way to say that — which is exactly the fact the
+    // older/newer ruling below turns on.
+    let order_of = |hash: &str| -> Option<isize> {
+        if hash == GRAPH_UNCOMMITTED_HASH {
+            return head.map(|_| -1);
+        }
+        log.commits
+            .iter()
+            .position(|commit| commit.hash == hash)
+            .and_then(|at| isize::try_from(at).ok())
+    };
+    // **The comparison, if there is one** (D6). It needs both ends and they have
+    // to be different rows: a commit compared with itself is not a comparison,
+    // and a `compare` naming a row that is not in the loaded pages is a
+    // comparison whose picture cannot be drawn.
+    let pair = match (expanded.and_then(order_of), compare.and_then(order_of)) {
+        (Some(one), Some(other)) if one != other => Some((one.max(other), one.min(other))),
+        _ => None,
+    };
+    // That order, back in list coordinates. The working tree's `-1` is row zero
+    // and not "one before the first commit" — it is the only row above them, so
+    // its place is the top of the list rather than an offset from anywhere.
+    let list_row =
+        |order: isize| -> usize { usize::try_from(order).map_or(0, |order| above + order) };
+
     // **Where the accordion is, as a row index.** Held as an index rather than
     // as a hash so that mapping a row number back to what stands on it is
     // arithmetic — see [`item_at`] — which is the other half of what makes a
     // ten-thousand-row list cost a screenful.
-    let open = expanded.and_then(|hash| {
-        let at = log.commits.iter().position(|commit| commit.hash == hash)?;
-        let files = match cache.commit_files(hash) {
-            Some(crate::git::GitSlot::Ready(files)) => files.clone(),
-            _ => Vec::new(),
-        };
-        Some((at, files))
+    //
+    // Under compare it hangs off the **older** of the two rows, which is the
+    // lower one on the page: a block that opened above one of its own ends would
+    // read as belonging to whatever row happened to be under it.
+    let detail_room = detail_text_room(body, content.columns, scale);
+    let expansion = match pair {
+        Some((older, newer)) => {
+            #[allow(clippy::cast_sign_loss)]
+            let at = older.max(0) as usize;
+            #[allow(clippy::cast_sign_loss)]
+            let b = usize::try_from(newer)
+                .ok()
+                .and_then(|newer| log.commits.get(newer))
+                .map(|commit| commit.hash.clone());
+            log.commits.get(at).map(|commit| {
+                let a = commit.hash.clone();
+                let files = match cache.compare_files(&a, b.as_deref()) {
+                    Some(crate::git::GitSlot::Ready(files)) => files.clone(),
+                    _ => Vec::new(),
+                };
+                content.compare_rows = Some((above + at, list_row(newer)));
+                content.compare_pair = Some((a.clone(), b.clone()));
+                Expansion {
+                    at,
+                    detail: Some(GraphDetail::Compare(GraphCompareDetail {
+                        head: compare_sentence(&a, b.as_deref(), log),
+                        a: a.clone(),
+                        b: b.clone(),
+                    })),
+                    range: Some((a, b)),
+                    files,
+                }
+            })
+        }
+        None => expanded.and_then(|hash| {
+            let at = log.commits.iter().position(|commit| commit.hash == hash)?;
+            let commit = log.commits.get(at)?;
+            let files = match cache.commit_files(hash) {
+                Some(crate::git::GitSlot::Ready(files)) => files.clone(),
+                _ => Vec::new(),
+            };
+            Some(Expansion {
+                at,
+                detail: Some(GraphDetail::Commit(commit_detail(
+                    commit,
+                    detail_room,
+                    scale,
+                    measure,
+                ))),
+                range: None,
+                files,
+            })
+        }),
+    };
+    let open = expansion.as_ref().map(|expansion| GraphOpen {
+        at: expansion.at,
+        detail: expansion
+            .detail
+            .as_ref()
+            .map_or(0, |detail| detail_rows(detail, scale)),
+        files: expansion.files.len(),
     });
-    let expansion = open.as_ref().map_or(0, |(_, files)| files.len());
-    let above = head.map_or(0, |files| files + 1);
-    content.total_rows = above + log.commits.len() + expansion;
+    content.total_rows = above + log.commits.len() + open.map_or(0, GraphOpen::rows);
     content.uncommitted_rows = head;
+    if let Some(open) = open.filter(|open| open.detail > 0) {
+        content.detail_rows = Some((above + open.at + 1, open.detail));
+    }
+    content.open_commit = open.map(|open| (open.at, open.rows()));
     // What `Esc` has to collapse, in list coordinates — and `None` when nothing
     // is open, which is the difference between "the working tree's row is drawn"
-    // and "the working tree's row is unfolded".
-    content.open_rows = match (open.as_ref(), head) {
-        (Some((at, files)), _) => Some((above + at, files.len())),
-        (None, Some(files)) if expanded == Some(GRAPH_UNCOMMITTED_HASH) => Some((0, files)),
+    // and "the working tree's row is unfolded". It names the row the **reader**
+    // turned over, which under compare is not the row the block hangs off.
+    content.open_rows = match (open, expanded.and_then(order_of), head) {
+        (Some(open), Some(at), _) => Some((list_row(at), open.rows())),
+        (None, _, Some(files)) if expanded == Some(GRAPH_UNCOMMITTED_HASH) => Some((0, files)),
         _ => None,
     };
 
@@ -1089,11 +1429,10 @@ pub fn build(
 
     // R18's hysteresis, decided over the window that is about to be drawn.
     let lanes = state.lanes();
-    let open_at = open.as_ref().map(|(at, files)| (*at, files.len()));
     let mut needed = 1;
     let mut widest_at = window.start;
     for index in window.clone() {
-        let Some(item) = item_at(index, head, open_at) else {
+        let Some(item) = item_at(index, head, open) else {
             continue;
         };
         // The uncommitted row's own width counts too: it is one lane wide and
@@ -1102,7 +1441,7 @@ pub fn build(
         let row = match item {
             GraphItem::Uncommitted => state.head_lanes(),
             GraphItem::Commit(at) => lanes.get(at),
-            GraphItem::Working(_) | GraphItem::File { .. } => continue,
+            GraphItem::Working(_) | GraphItem::File { .. } | GraphItem::Detail => continue,
         };
         let Some(row) = row else { continue };
         if row.width > needed {
@@ -1121,8 +1460,12 @@ pub fn build(
     let ref_font = GRAPH_REF_FONT_LOGICAL_PX * scale;
     let author_font = GRAPH_AUTHOR_FONT_LOGICAL_PX * scale;
     let author_room = GRAPH_AUTHOR_COLUMN_LOGICAL_PX * scale;
+    // The detail block spans several rows, so the window can start *inside* it:
+    // it is pushed on the first index that lands on it, at the block's own first
+    // row, and not again.
+    let mut detail_pushed = false;
     for index in window {
-        match item_at(index, head, open_at) {
+        match item_at(index, head, open) {
             Some(GraphItem::Uncommitted) => {
                 let Some(count) = state.uncommitted() else {
                     continue;
@@ -1157,6 +1500,30 @@ pub fn build(
                         badges: file.badges.clone(),
                         staged: file.staged,
                     }),
+                    // The working tree's letters are the two it already wears;
+                    // its counts are not asked for, because the status this row
+                    // is read off is a list of *what* changed and never of how
+                    // much (R31: one more question per keystroke is a question
+                    // too many).
+                    badge: None,
+                    stat: None,
+                    range: None,
+                }));
+            }
+            Some(GraphItem::Detail) => {
+                let (Some(expansion), Some(open)) = (expansion.as_ref(), open) else {
+                    continue;
+                };
+                let Some(detail) = expansion.detail.clone() else {
+                    continue;
+                };
+                if std::mem::replace(&mut detail_pushed, true) {
+                    continue;
+                }
+                content.rows.push(GraphViewRow::Detail(GraphDetailRow {
+                    index: above + open.at + 1,
+                    rows: open.detail,
+                    detail,
                 }));
             }
             Some(GraphItem::Commit(at)) => {
@@ -1200,31 +1567,266 @@ pub fn build(
                 }));
             }
             Some(GraphItem::File { commit, file }) => {
-                let Some((_, files)) = open.as_ref() else {
+                let Some(expansion) = expansion.as_ref() else {
                     continue;
                 };
-                let Some(entry) = files.get(file) else {
+                let Some(entry) = expansion.files.get(file) else {
                     continue;
                 };
+                // A comparison's rows belong to its **older** end, which is also
+                // the commit the block hangs off — so one lookup answers both
+                // kinds of expansion.
                 let Some(hash) = log.commits.get(commit).map(|c| c.hash.clone()) else {
                     continue;
                 };
                 content.rows.push(GraphViewRow::File(GraphFileRow {
                     index,
                     hash,
-                    tooltip: match &entry.renamed_from {
-                        Some(from) => format!("{} - renamed from {from}", entry.path),
-                        None => entry.path.clone(),
-                    },
+                    tooltip: file_tooltip(entry),
                     path: entry.path.clone(),
                     renamed_from: entry.renamed_from.clone(),
                     working: None,
+                    badge: Some(crate::git_panel::GitBadge {
+                        letter: entry.code.letter(),
+                        ink: crate::git_panel::GitBadgeInk::of(entry.code),
+                    }),
+                    stat: entry.stat,
+                    range: expansion.range.clone(),
                 }));
             }
             None => {}
         }
     }
     content
+}
+
+/// What the one open row unfolded into, before it is turned into rows.
+///
+/// Held together rather than as three parallel `Option`s because the three are
+/// one answer to one question — *what is open, and what is under it* — and the
+/// combinations that a triple of `Option`s would admit (files with no block, a
+/// range with no files) are combinations that cannot happen.
+struct Expansion {
+    /// The commit the block hangs off, **in commit indices**.
+    at: usize,
+    detail: Option<GraphDetail>,
+    /// Set when the files are a comparison's rather than a commit's.
+    range: Option<(String, Option<String>)>,
+    files: Vec<crate::git::GitCommitFile>,
+}
+
+/// Where the detail block's text may stand: its left edge and how wide it is.
+///
+/// **The file rows' own indent and the description column's own right edge**,
+/// because the block belongs to the same column as everything else under an open
+/// row — prose that started further left than the file paths under it would read
+/// as belonging to the row above rather than to this one.
+fn detail_text_room(body: [f32; 4], columns: GraphColumns, scale: f32) -> f32 {
+    let pad_x = (GRAPH_PADDING_X_LOGICAL_PX * scale).round();
+    let row_box = [body[0] + pad_x, 0.0, body[2] - pad_x, 0.0];
+    let rects = graph_column_rects(row_box, columns, scale);
+    let left = row_box[0] + (GRAPH_FILE_INDENT_LOGICAL_PX * scale).round();
+    (rects.description_right - left).max(1.0)
+}
+
+/// The meta line's own height — the taller of its text and the hover verbs
+/// standing on it, because a button that overflowed its line would overlap the
+/// prose above it.
+fn detail_meta_height(scale: f32) -> f32 {
+    ((GRAPH_META_FONT_LOGICAL_PX * 1.4).max(crate::git_panel::GIT_ACT_LOGICAL_PX) * scale)
+        .round()
+        .max(1.0)
+}
+
+/// How tall a detail block wants to be, in physical pixels.
+fn detail_height(detail: &GraphDetail, scale: f32) -> f32 {
+    let pad = (GRAPH_DETAIL_PADDING_Y_LOGICAL_PX * scale).round();
+    let meta = detail_meta_height(scale);
+    match detail {
+        GraphDetail::Compare(_) => pad * 2.0 + meta,
+        GraphDetail::Commit(commit) => {
+            let line = (GRAPH_BODY_LINE_LOGICAL_PX * scale).round().max(1.0);
+            let gap = (GRAPH_DETAIL_GAP_LOGICAL_PX * scale).round();
+            #[allow(clippy::cast_precision_loss)]
+            let prose = if commit.body.is_empty() {
+                0.0
+            } else {
+                commit.body.len() as f32 * line + gap
+            };
+            pad * 2.0 + prose + meta
+        }
+    }
+}
+
+/// How many **list rows** a detail block claims.
+///
+/// **A whole number of rows, and that is the whole trick** (v2 ②): the graph's
+/// geometry is one height times one index, from `row_rect` to `reveal` to the
+/// scrollbar, and a block of arbitrary height dropped into the middle of it
+/// would have made every one of those a three-case piece of arithmetic that some
+/// caller would eventually get wrong. Rounding *up* buys the block a strip of
+/// slack at its bottom, which reads as padding and costs nothing else.
+fn detail_rows(detail: &GraphDetail, scale: f32) -> usize {
+    let row = (GRAPH_ROW_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rows = (detail_height(detail, scale) / row).ceil() as usize;
+    rows.max(1)
+}
+
+/// The open commit's story, wrapped and measured (D1/D2/D7).
+fn commit_detail(
+    commit: &GitCommit,
+    room: f32,
+    scale: f32,
+    measure: &mut Measure<'_>,
+) -> GraphCommitDetail {
+    let body_font = GRAPH_BODY_FONT_LOGICAL_PX * scale;
+    // **[`crate::tooltip::wrap`] and not the preview's `WrapLayout`**, and the
+    // reason is what each of the two is for: `WrapLayout` wraps a *document* —
+    // it owns byte offsets, a caret, a selection and a mapping back to the
+    // buffer, none of which a line of prose in a list row has or wants — while
+    // `wrap` is the one this product already uses for every multi-line piece of
+    // *chrome* text, takes exactly the measure closure this build is holding,
+    // and treats a `\n` as a hard break, which is precisely what "keep the
+    // body's own paragraph breaks" means.
+    //
+    // Fed **one paragraph at a time**, which is not a different wrap — `wrap`
+    // splits on `\n` itself and would produce the same lines — but a bound on
+    // the work: this runs on every frame the row is open, and a body is capped
+    // at twelve lines, so wrapping the fortieth paragraph of a release note to
+    // then throw it away is measuring text nobody will ever be shown.
+    //
+    // A commit with nothing after its subject has **no block**, which is not the
+    // same as a block with one empty line in it — and `"".split('\n')` is one
+    // empty paragraph, so the emptiness is checked before the walk rather than
+    // discovered inside it.
+    let mut body: Vec<String> = Vec::new();
+    if !commit.body.is_empty() {
+        for paragraph in commit.body.split('\n') {
+            if body.len() > GRAPH_BODY_MAX_LINES {
+                break;
+            }
+            body.extend(crate::tooltip::wrap(paragraph, room, |text| {
+                measure(text, body_font)
+            }));
+        }
+    }
+    if body.len() > GRAPH_BODY_MAX_LINES {
+        body.truncate(GRAPH_BODY_MAX_LINES);
+        // The last line says it stopped. Appended rather than replacing the
+        // line's tail, because a line that already fitted plus one character is
+        // over the bound by one character — which is a hair of overhang at the
+        // right margin, and the alternative is cutting a word to make room for
+        // the mark that says a word was cut.
+        if let Some(last) = body.last_mut() {
+            last.push_str(GRAPH_BODY_ELLIPSIS);
+        }
+    }
+    let mut meta = author_sentence(commit);
+    meta.push_str(GRAPH_META_SEPARATOR);
+    meta.push_str(&crate::git::absolute_time(
+        commit.committer_unix,
+        commit.committer_offset,
+    ));
+    // **Only when they differ** (D2), and by the pair rather than by the name: a
+    // rebase keeps the author's name and takes the address, and two people
+    // called the same thing are two people.
+    if commit.committer_name != commit.author_name || commit.committer_email != commit.author_email
+    {
+        meta.push_str(GRAPH_META_SEPARATOR);
+        meta.push_str(GRAPH_META_COMMITTED_BY);
+        meta.push_str(&committer_sentence(commit));
+    }
+    if !commit.parents.is_empty() {
+        meta.push_str(GRAPH_META_SEPARATOR);
+        meta.push_str(GRAPH_META_PARENTS);
+    }
+    let meta_font = GRAPH_META_FONT_LOGICAL_PX * scale;
+    let meta_width = measure(&meta, meta_font);
+    let parents = commit
+        .parents
+        .iter()
+        .map(|parent| {
+            let short = short_hash(parent);
+            GraphParentChip {
+                width: measure(&short, meta_font),
+                short,
+                hash: parent.clone(),
+            }
+        })
+        .collect();
+    GraphCommitDetail {
+        hash: commit.hash.clone(),
+        short: commit.short.clone(),
+        subject: commit.subject.clone(),
+        body,
+        meta,
+        meta_width,
+        parents,
+    }
+}
+
+/// How many characters of a full hash a parent chip shows.
+///
+/// git's own floor, and the reason it is a cut here rather than git's own
+/// abbreviation is that `%P` hands back full hashes: asking git to shorten each
+/// of them would be a `rev-parse` per parent per expansion, which is a
+/// subprocess spent on seven characters somebody may never look at.
+const GRAPH_PARENT_SHORT: usize = 7;
+
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(GRAPH_PARENT_SHORT).collect()
+}
+
+/// `Comparing abc1234 \u{2192} def5678`, older on the left (D6).
+///
+/// The arrow points the way history runs, which is the only direction a reader
+/// can be expected to read it in: what the diff *says* is how you get from the
+/// left to the right.
+fn compare_sentence(a: &str, b: Option<&str>, log: &crate::git::GitLog) -> String {
+    let named = |hash: &str| {
+        log.commits
+            .iter()
+            .find(|commit| commit.hash == hash)
+            .map_or_else(|| short_hash(hash), |commit| commit.short.clone())
+    };
+    let right = b.map_or_else(|| GRAPH_COMPARE_WORKING_TREE.to_owned(), &named);
+    format!(
+        "{GRAPH_COMPARE_LEAD}{}{GRAPH_COMPARE_ARROW}{right}",
+        named(a)
+    )
+}
+
+/// How this product names the person who committed one: `Name <email>`.
+#[must_use]
+pub fn committer_sentence(commit: &GitCommit) -> String {
+    if commit.committer_email.is_empty() {
+        commit.committer_name.clone()
+    } else {
+        format!("{} <{}>", commit.committer_name, commit.committer_email)
+    }
+}
+
+/// What a commit's file row says when you rest on it.
+fn file_tooltip(entry: &crate::git::GitCommitFile) -> String {
+    let mut text = match &entry.renamed_from {
+        Some(from) => format!("{} - renamed from {from}", entry.path),
+        None => entry.path.clone(),
+    };
+    // The counts again, in words, because the row draws them as two numbers and
+    // two numbers side by side do not say which is which.
+    match entry.stat {
+        Some(stat) => {
+            let added = if stat.added == 1 { "line" } else { "lines" };
+            let removed = if stat.removed == 1 { "line" } else { "lines" };
+            text.push_str(&format!(
+                "\n{} {added} added, {} {removed} removed",
+                stat.added, stat.removed
+            ));
+        }
+        None => text.push_str("\nBinary - git has no lines to count here"),
+    }
+    text
 }
 
 /// One working-tree file under the Uncommitted Changes row (V5).
@@ -1319,8 +1921,35 @@ pub enum GraphItem {
     Working(usize),
     /// The commit at this index of the log.
     Commit(usize),
+    /// One of the rows the detail block claims (v2 ②).
+    Detail,
     /// A file of the one open commit.
     File { commit: usize, file: usize },
+}
+
+/// Where the one open expansion is, and what it unfolded into.
+///
+/// A named triple since v2 ②, where the expansion stopped being one list: the
+/// detail block and the files are two kinds of thing at one place, and three
+/// bare `usize`s in a tuple is three chances for a caller to hand them over in
+/// the wrong order.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphOpen {
+    /// Where the expansion hangs, **in commit indices** — a fact about the log,
+    /// which [`item_at`] translates into list coordinates rather than the caller.
+    pub at: usize,
+    /// How many rows the detail block claims (zero when there is none).
+    pub detail: usize,
+    /// How many file rows follow it.
+    pub files: usize,
+}
+
+impl GraphOpen {
+    /// How many rows the whole expansion adds to the list.
+    #[must_use]
+    pub fn rows(self) -> usize {
+        self.detail + self.files
+    }
 }
 
 /// Which item row `index` is, given the two things that can unfold above it.
@@ -1336,11 +1965,7 @@ pub enum GraphItem {
 /// the log, and translating it into list coordinates is this function's job
 /// rather than the caller's.
 #[must_use]
-pub fn item_at(
-    index: usize,
-    head: Option<usize>,
-    open: Option<(usize, usize)>,
-) -> Option<GraphItem> {
+pub fn item_at(index: usize, head: Option<usize>, open: Option<GraphOpen>) -> Option<GraphItem> {
     let index = match head {
         Some(files) => {
             if index == 0 {
@@ -1353,19 +1978,25 @@ pub fn item_at(
         }
         None => index,
     };
-    let Some((at, files)) = open else {
+    let Some(open) = open else {
         return Some(GraphItem::Commit(index));
     };
-    if index <= at {
+    if index <= open.at {
         return Some(GraphItem::Commit(index));
     }
-    if index <= at + files {
+    // The detail block first, then the files: that is the order they are drawn
+    // in, and the order is the ruling — the story of a commit stands above the
+    // list of what it did, because the list is the *evidence* for the story.
+    if index <= open.at + open.detail {
+        return Some(GraphItem::Detail);
+    }
+    if index <= open.at + open.rows() {
         return Some(GraphItem::File {
-            commit: at,
-            file: index - at - 1,
+            commit: open.at,
+            file: index - open.at - open.detail - 1,
         });
     }
-    Some(GraphItem::Commit(index - files))
+    Some(GraphItem::Commit(index - open.rows()))
 }
 
 /// What a press on a graph row does.
@@ -1387,26 +2018,36 @@ pub fn row_open(
         // one mapping: the staged group is a claim about the index and asks
         // `--cached`, every other group is about the tree. A `git show` of `*`
         // would be a question about a commit that does not exist.
-        GraphViewRow::File(file) => match &file.working {
-            Some(working) => Some(crate::git_panel::GitRowOpen::Document {
-                source: crate::preview::PreviewSource::GitDiff {
+        GraphViewRow::File(file) => Some(crate::git_panel::GitRowOpen::Document {
+            source: match (&file.working, &file.range) {
+                (Some(working), _) => crate::preview::PreviewSource::GitDiff {
                     root: root.to_owned(),
                     path: file.path.clone(),
                     staged: working.staged,
                 },
-                name: crate::git_panel::git_document_name(&file.path),
-                renamed_from: file.renamed_from.clone(),
-            }),
-            None => Some(crate::git_panel::GitRowOpen::Document {
-                source: crate::preview::PreviewSource::GitShow {
+                // **A comparison's file opens the comparison's diff** (D6), and
+                // not this commit's: the row is a claim about what is different
+                // between two places, so pressing it has to show that difference
+                // and never one end of it.
+                (None, Some((a, b))) => crate::preview::PreviewSource::GitDiffRange {
+                    root: root.to_owned(),
+                    a: a.clone(),
+                    b: b.clone(),
+                    path: file.path.clone(),
+                },
+                (None, None) => crate::preview::PreviewSource::GitShow {
                     root: root.to_owned(),
                     hash: file.hash.clone(),
                     path: file.path.clone(),
                 },
-                name: crate::git_panel::git_document_name(&file.path),
-                renamed_from: file.renamed_from.clone(),
-            }),
-        },
+            },
+            name: crate::git_panel::git_document_name(&file.path),
+            renamed_from: file.renamed_from.clone(),
+        }),
+        // **The block is not a row and has no press of its own** — its parts
+        // have (see [`detail_part_at`]), and a press that missed all of them
+        // landed on the padding between them.
+        GraphViewRow::Detail(_) => None,
     }
 }
 
@@ -1429,7 +2070,219 @@ pub fn row_double_open(row: &GraphViewRow) -> Option<crate::git_panel::GitRowOpe
         // **You cannot check out the working tree** — you are standing in it.
         // The second click is the first click again, which folds the row back.
         GraphViewRow::Uncommitted(_) => None,
+        GraphViewRow::Detail(_) => None,
     }
+}
+
+// ── the detail block's own geometry (v2 ②) ─────────────────────────────────
+
+/// Where everything inside a detail block stands.
+///
+/// **One function for the paint and for the hit test** — [`graph_column_rects`]'s
+/// own reason, and here it is what makes "the `\u{d7}` you can press is the
+/// `\u{d7}` you can see" a property of this module rather than something
+/// somebody has to check on a screenshot.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphDetailLayout {
+    /// One box per wrapped line of body, top to bottom.
+    pub body: Vec<[f32; 4]>,
+    /// The meta line — or, in compare mode, the comparison's own sentence.
+    pub meta: [f32; 4],
+    /// The parent hashes standing on the meta line, in git's order.
+    pub parents: Vec<[f32; 4]>,
+    /// The hover verbs at the line's right, right to left as they are laid out.
+    pub tools: Vec<([f32; 4], GraphDetailPart)>,
+}
+
+/// Lay one detail block out inside the rectangle it claims.
+///
+/// `rect` is the block's **whole** box — every row it spans, joined — which is
+/// what the painter has and what the hit test can rebuild from
+/// [`GraphGeometry::row_rect`] and [`GraphDetailRow::rows`].
+#[must_use]
+pub fn detail_layout(
+    rect: [f32; 4],
+    row: &GraphDetailRow,
+    columns: GraphColumns,
+    scale: f32,
+) -> GraphDetailLayout {
+    let pad = (GRAPH_DETAIL_PADDING_Y_LOGICAL_PX * scale).round();
+    let indent = (GRAPH_FILE_INDENT_LOGICAL_PX * scale).round();
+    let left = rect[0] + indent;
+    // The right edge is the description column's, so the block ends where every
+    // message on the page ends rather than under the hash column.
+    let right = graph_column_rects(rect, columns, scale)
+        .description_right
+        .max(left);
+    let line = (GRAPH_BODY_LINE_LOGICAL_PX * scale).round().max(1.0);
+    let gap = (GRAPH_DETAIL_GAP_LOGICAL_PX * scale).round();
+    let meta_height = detail_meta_height(scale);
+    let mut layout = GraphDetailLayout::default();
+    let mut top = rect[1] + pad;
+    if let GraphDetail::Commit(commit) = &row.detail {
+        for _ in &commit.body {
+            layout.body.push([left, top, right, top + line]);
+            top += line;
+        }
+        if !commit.body.is_empty() {
+            top += gap;
+        }
+    }
+    layout.meta = [left, top, right, top + meta_height];
+
+    // The verbs, from the right edge inwards — the order they are pinned in, so
+    // that a block with one of them and a block with two put the first one in
+    // the same place.
+    let act = (crate::git_panel::GIT_ACT_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let act_gap = (crate::git_panel::GIT_ACT_GAP_LOGICAL_PX * scale).round();
+    let act_top = ((layout.meta[1] + layout.meta[3] - act) / 2.0).round();
+    let mut cursor = right;
+    let mut verb = |part: GraphDetailPart, layout: &mut GraphDetailLayout| {
+        let box_ = [cursor - act, act_top, cursor, act_top + act];
+        cursor = box_[0] - act_gap;
+        layout.tools.push((box_, part));
+    };
+    match &row.detail {
+        GraphDetail::Commit(commit) => {
+            verb(GraphDetailPart::CopySubject, &mut layout);
+            verb(GraphDetailPart::CopyHash, &mut layout);
+            // The parents, immediately after the text that names them — which is
+            // why the meta string is measured at build time and carried here.
+            let chip_gap = (GRAPH_PARENT_GAP_LOGICAL_PX * scale).round();
+            let mut chip_left = left + commit.meta_width;
+            for chip in &commit.parents {
+                let box_ = [
+                    chip_left,
+                    layout.meta[1],
+                    chip_left + chip.width,
+                    layout.meta[3],
+                ];
+                chip_left = box_[2] + chip_gap;
+                layout.parents.push(box_);
+            }
+        }
+        GraphDetail::Compare(_) => verb(GraphDetailPart::LeaveCompare, &mut layout),
+    }
+    layout
+}
+
+/// Which part of a detail block the pointer is on, if any.
+#[must_use]
+pub fn detail_part_at(
+    rect: [f32; 4],
+    row: &GraphDetailRow,
+    columns: GraphColumns,
+    scale: f32,
+    x: f32,
+    y: f32,
+) -> Option<GraphDetailPart> {
+    let layout = detail_layout(rect, row, columns, scale);
+    let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
+    // **The verbs first**, because they stand *over* the meta line and a parent
+    // chip that answered a press aimed at the copy button would be the block
+    // seeking to a commit somebody asked to have on their clipboard.
+    if let Some((_, part)) = layout.tools.iter().find(|(box_, _)| inside(*box_)) {
+        return Some(*part);
+    }
+    layout
+        .parents
+        .iter()
+        .position(|box_| inside(*box_))
+        .map(GraphDetailPart::Parent)
+}
+
+// ── the seek (D2) ──────────────────────────────────────────────────────────
+
+/// A walk towards a commit that may not be loaded yet.
+///
+/// **A state and not a loop**, because the thing it is waiting for arrives on
+/// another thread: each page it asks for comes back as an answer to the window,
+/// and the next question can only be decided once it has. So the seek is a
+/// couple of fields the seat carries and one function that says what to do next
+/// — which is also what makes the rule assertable without a window, a worker or
+/// a repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphSeek {
+    /// The full hash being looked for.
+    pub hash: String,
+    /// How many pages have been asked for on its account.
+    pub pages: usize,
+}
+
+/// What a seek should do next.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphSeekStep {
+    /// It is here, at this commit index — reveal it, select it, and stop.
+    Arrived(usize),
+    /// Not yet, and there is more history: ask for another page.
+    NeedPage,
+    /// The repository has not said anything yet — a page is already on its way,
+    /// so the seek costs nothing and asks for nothing.
+    ///
+    /// Its own answer and not `NeedPage`, because the two differ in the one
+    /// thing that matters here: this one must **not** count against the cap, and
+    /// a seek that spent its twenty pages waiting for the first one would give
+    /// up on a commit it had never looked for.
+    Waiting,
+    /// Not here, and there is no honest way to keep looking — say so and stop.
+    GaveUp,
+}
+
+/// One step of a seek, given what the repository has answered so far (D2).
+///
+/// The three answers are decided in this order and the order is the ruling: a
+/// commit that is *here* is arrived at even on the last allowed page, because
+/// the cap is a bound on how long we look and not on when we stop believing
+/// what we found.
+#[must_use]
+pub fn graph_seek_step(state: &GraphState, seek: &GraphSeek) -> GraphSeekStep {
+    let Some(log) = state.cache.log().ready() else {
+        return GraphSeekStep::Waiting;
+    };
+    if let Some(at) = log
+        .commits
+        .iter()
+        .position(|commit| commit.hash == seek.hash)
+    {
+        return GraphSeekStep::Arrived(at);
+    }
+    if log.has_more && seek.pages < GRAPH_SEEK_MAX_PAGES {
+        return GraphSeekStep::NeedPage;
+    }
+    GraphSeekStep::GaveUp
+}
+
+/// How much of what was copied the notice repeats before it elides (D7).
+///
+/// A short hash is seven characters and every subject this window has room to
+/// draw is longer; forty is about where a subject stops being a name and starts
+/// being a sentence, and a card that repeated a whole release note back would be
+/// a notice you had to read to learn something you already knew.
+pub const GRAPH_COPIED_MAX_CHARS: usize = 40;
+
+/// What the window says when something has gone on the clipboard (D7).
+#[must_use]
+pub fn graph_copied(said: &str) -> String {
+    let mut short: String = said.chars().take(GRAPH_COPIED_MAX_CHARS).collect();
+    if said.chars().count() > GRAPH_COPIED_MAX_CHARS {
+        short.push_str(GRAPH_BODY_ELLIPSIS);
+    }
+    format!("Copied {short}")
+}
+
+/// What the window says when a seek runs out of history (D2).
+///
+/// A notice and not a refusal: nothing failed, and nothing the reader did was
+/// wrong — the commit is simply further back than this window has read, which is
+/// a fact about the reading rather than about the repository.
+#[must_use]
+pub fn graph_seek_gave_up(hash: &str) -> String {
+    format!(
+        "Commit {} is further back than the loaded history",
+        short_hash(hash)
+    )
 }
 
 // ── the keyboard (V14) ─────────────────────────────────────────────────────
@@ -1447,6 +2300,15 @@ pub enum GraphKey {
     Home,
     End,
     Enter,
+    /// `Ctrl+Enter` — the keyboard's half of D6's `Ctrl`+click.
+    ///
+    /// The **one** chorded key on this list, and it is here rather than in
+    /// `shortcuts::BINDINGS` for the same reason its five neighbours are: it
+    /// only exists while a graph holds the keyboard, and what it does is a
+    /// property of the list. The table is the registry of chords this window
+    /// *claims from the shell*, and there is no shell listening behind a focused
+    /// preview seat.
+    Compare,
     Escape,
 }
 
@@ -1465,6 +2327,15 @@ pub enum GraphKeyAction {
     Toggle(usize),
     /// Fold the open row shut and stand on it.
     Collapse(usize),
+    /// Compare the open row with this one (D6) — or, when this row is already
+    /// the far end, stop comparing.
+    Compare(usize),
+    /// Stop comparing, keeping the row that was open, open.
+    ///
+    /// `Esc`'s **first** meaning while a comparison is running, which is the
+    /// ladder every dismissible thing on this platform has: the innermost thing
+    /// goes first, and the accordion is still there behind it.
+    LeaveCompare,
     /// **The one key this surface does not claim.** `Esc` with nothing to
     /// collapse belongs to the layer under this one — the float dismissal, and
     /// under that the shell — and eating it here would be this page holding a
@@ -1498,24 +2369,60 @@ pub fn graph_key(content: &GraphContent, key: GraphKey) -> GraphKeyAction {
         // they have just given the keyboard to, and a selection that appeared
         // ten thousand rows away would be the page answering a different
         // question.
-        GraphKey::Up => GraphKeyAction::Select(
+        GraphKey::Up => GraphKeyAction::Select(step_over_detail(
+            content,
             content
                 .selected
                 .map_or(0, |row| row.min(last).saturating_sub(1)),
-        ),
-        GraphKey::Down => {
-            GraphKeyAction::Select(content.selected.map_or(0, |row| (row + 1).min(last)))
-        }
+            false,
+        )),
+        GraphKey::Down => GraphKeyAction::Select(step_over_detail(
+            content,
+            content.selected.map_or(0, |row| (row + 1).min(last)),
+            true,
+        )),
         GraphKey::Home => GraphKeyAction::Select(0),
         GraphKey::End => GraphKeyAction::Select(last),
         GraphKey::Enter => match content.selected {
             Some(row) if row <= last => GraphKeyAction::Toggle(row),
             _ => GraphKeyAction::None,
         },
-        GraphKey::Escape => match content.open_rows {
-            Some((row, _)) => GraphKeyAction::Collapse(row),
-            None => GraphKeyAction::Pass,
+        // **Only with something already open**, because a comparison is a
+        // property of the open row: `Ctrl+Enter` with nothing turned over has no
+        // first end to be the far end of.
+        GraphKey::Compare => match (content.selected, content.open_rows) {
+            (Some(row), Some(_)) if row <= last => GraphKeyAction::Compare(row),
+            _ => GraphKeyAction::None,
         },
+        GraphKey::Escape => match (content.compare_rows, content.open_rows) {
+            (Some(_), _) => GraphKeyAction::LeaveCompare,
+            (None, Some((row, _))) => GraphKeyAction::Collapse(row),
+            (None, None) => GraphKeyAction::Pass,
+        },
+    }
+}
+
+/// Push a row number past the detail block, in the direction it was travelling.
+///
+/// The block claims list rows so that the geometry stays a multiplication, and
+/// this is the price of that: those rows answer no press, so the selection may
+/// not stand on one. Walking *through* rather than jumping over the whole block
+/// would be the same thing said worse — the reader pressed `↓` once and would
+/// have to press it five more times to leave a paragraph.
+///
+/// A row past the end of the list is clamped back, which is the case where the
+/// block is the last thing on the page.
+fn step_over_detail(content: &GraphContent, row: usize, downwards: bool) -> usize {
+    let Some((start, rows)) = content.detail_rows else {
+        return row;
+    };
+    if row < start || row >= start + rows {
+        return row;
+    }
+    if downwards {
+        (start + rows).min(content.total_rows.saturating_sub(1))
+    } else {
+        start.saturating_sub(1)
     }
 }
 
@@ -1525,6 +2432,9 @@ pub fn graph_key(content: &GraphContent, key: GraphKey) -> GraphKeyAction {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GraphHover {
     pub row: Option<usize>,
+    /// Which part of the detail block the pointer is on, when it is on one —
+    /// what lights a hover verb's pill (R12's top rung).
+    pub part: Option<GraphDetailPart>,
 }
 
 /// Draw one commit graph.
@@ -1595,7 +2505,14 @@ pub fn push_graph(
     let visible = |rect: [f32; 4]| rect[3] > viewport[1] && rect[1] < viewport[3];
 
     for row in &content.rows {
-        let rect = geometry.row_rect(row.index());
+        // A row's box is one row tall; the detail block's is every row it
+        // claims, joined — which is the one place the uniform arithmetic has to
+        // be asked twice.
+        let rect = {
+            let first = geometry.row_rect(row.index());
+            let last = geometry.row_rect(row.index() + row.rows() - 1);
+            [first[0], first[1], first[2], last[3]]
+        };
         if !visible(rect) {
             continue;
         }
@@ -1605,7 +2522,14 @@ pub fn push_graph(
         // be: the selection is where the *keyboard* is, and a row that dimmed
         // back to a hover ground when the pointer wandered onto it would be the
         // page forgetting.
-        let selected = content.selected == Some(row.index());
+        //
+        // **Both ends of a comparison are selected** (D6): the pair is what the
+        // block under them is about, and a page where only one of the two rows
+        // was lit would be asking the reader to remember the other one.
+        let selected = content.selected == Some(row.index())
+            || content
+                .compare_rows
+                .is_some_and(|(a, b)| a == row.index() || b == row.index());
         let ground = RowGround {
             selected,
             hovered,
@@ -1640,8 +2564,30 @@ pub fn push_graph(
             }
             GraphViewRow::File(file) => {
                 push_row_ground(rect, ground, palette, sprites, &crop);
-                push_file_row(file, rect, ground, palette, (labels, sprites), &crop);
+                push_file_row(
+                    file,
+                    rect,
+                    content.columns,
+                    ground,
+                    palette,
+                    (labels, sprites),
+                    &crop,
+                );
             }
+            // **No ground of its own.** The block belongs to the row above it and
+            // a fill under it would cut that row off from what it opened; what
+            // separates it from the list is the indent and the ink, exactly as
+            // for the file rows under it.
+            GraphViewRow::Detail(detail) => push_detail(
+                detail,
+                rect,
+                content.columns,
+                hover,
+                ground,
+                palette,
+                (labels, sprites),
+                &crop,
+            ),
         }
     }
 }
@@ -1792,10 +2738,13 @@ fn push_column_header(
     );
 }
 
-/// One file row — a commit's, or the working tree's with its badges (V5).
+/// One file row — a commit's with its letter and its counts (D4), or the
+/// working tree's with its two letters (V5).
+#[allow(clippy::too_many_arguments)]
 fn push_file_row(
     file: &GraphFileRow,
     rect: [f32; 4],
+    columns: GraphColumns,
     ground: RowGround,
     palette: &ChromePalette,
     out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
@@ -1805,7 +2754,17 @@ fn push_file_row(
     let scale = ground.scale;
     let indent = (GRAPH_FILE_INDENT_LOGICAL_PX * scale).round();
     let mut left = rect[0] + indent;
-    if let Some(working) = &file.working {
+    // **One badge for a commit's file and two for the working tree's**, which is
+    // the honest difference between the two rows: a status entry has an index
+    // column and a working-tree column, and a commit is a point with one story
+    // about each file. The drawing is identical, so it is one loop over whichever
+    // list this row has.
+    let badges: Vec<crate::git_panel::GitBadge> = match (&file.working, &file.badge) {
+        (Some(working), _) => working.badges.clone(),
+        (None, Some(badge)) => vec![*badge],
+        (None, None) => Vec::new(),
+    };
+    {
         // The Git page's badge, byte for byte: same size, same radius, same
         // fifteen-percent ground under the same letter. It is composited over
         // whatever *this* row is standing on, which is the pane body here and a
@@ -1819,7 +2778,7 @@ fn push_file_row(
             .max(1.0) as u32;
         let under = ground.fill(palette).unwrap_or(palette.pane_head);
         let top = ((rect[1] + rect[3] - badge) / 2.0).round();
-        for mark in &working.badges {
+        for mark in &badges {
             let box_ = [left, top, left + badge, top + badge];
             let ink = mark.ink.colour(palette);
             sprites.push(ChromeSprite::new(
@@ -1841,14 +2800,56 @@ fn push_file_row(
             });
             left = box_[2] + badge_gap;
         }
-        if !working.badges.is_empty() {
+        if !badges.is_empty() {
             left = left - badge_gap + (GRAPH_ROW_GAP_LOGICAL_PX * scale).round();
+        }
+    }
+    // **The counts stand in the date and hash columns' own space** (D4), which is
+    // the whole reason those columns are reserved widths: the numbers line up
+    // down the page under `DATE` and `COMMIT` because that is where those columns
+    // are, and a file row that measured its own numbers would put every row's in
+    // a different place.
+    let rects = graph_column_rects(rect, columns, scale);
+    let mut right = rects.description_right;
+    if file.working.is_none() {
+        let stat_font = crate::git_panel::GIT_HASH_FONT_LOGICAL_PX * scale;
+        let gap = (GRAPH_ROW_GAP_LOGICAL_PX * scale).round();
+        let mut number = |text: String, box_: Option<[f32; 4]>, ink: [u8; 3]| {
+            let Some(box_) = box_ else { return };
+            labels.push(ChromeLabel {
+                text,
+                rect: box_,
+                font_size_px: stat_font,
+                color: ink,
+                align_right: true,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                // Tabular, so `+9` and `+11` end on the same pixel — the one
+                // thing a column of numbers is for.
+                tabular_numerals: true,
+                clip: Some(crop(box_)),
+            });
+            right = box_[0] - gap;
+        };
+        match file.stat {
+            Some(stat) => {
+                number(
+                    format!("\u{2212}{}", stat.removed),
+                    rects.hash,
+                    palette.status_err,
+                );
+                number(format!("+{}", stat.added), rects.date, palette.status_ok);
+            }
+            // A binary file: git has no lines here, and an em dash is how a
+            // table has always said "this column does not apply to this row".
+            None => number("\u{2014}".to_owned(), rects.hash, ground.muted(palette)),
         }
     }
     let box_ = [
         left,
         rect[1],
-        (rect[2] - (GRAPH_ROW_PADDING_X_LOGICAL_PX * scale).round()).max(left),
+        (right - (GRAPH_ROW_PADDING_X_LOGICAL_PX * scale).round()).max(left),
         rect[3],
     ];
     labels.push(ChromeLabel {
@@ -1863,6 +2864,144 @@ fn push_file_row(
         tabular_numerals: false,
         clip: Some(crop(box_)),
     });
+}
+
+/// The detail block: the rest of the message, the facts about it, and the two
+/// verbs that copy it (D1/D2/D7) — or the head of a comparison (D6).
+#[allow(clippy::too_many_arguments)]
+fn push_detail(
+    row: &GraphDetailRow,
+    rect: [f32; 4],
+    columns: GraphColumns,
+    hover: GraphHover,
+    ground: RowGround,
+    palette: &ChromePalette,
+    out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
+    crop: &dyn Fn([f32; 4]) -> [f32; 4],
+) {
+    let (labels, sprites) = out;
+    let scale = ground.scale;
+    let layout = detail_layout(rect, row, columns, scale);
+    let mut line = |text: String, box_: [f32; 4], font: f32, ink: [u8; 3]| {
+        labels.push(ChromeLabel {
+            text,
+            rect: box_,
+            font_size_px: font,
+            color: ink,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(crop(box_)),
+        });
+    };
+    let body_font = GRAPH_BODY_FONT_LOGICAL_PX * scale;
+    let meta_font = GRAPH_META_FONT_LOGICAL_PX * scale;
+    match &row.detail {
+        GraphDetail::Commit(commit) => {
+            // **The row's own ink and not the muted one** (D1): a commit's body
+            // is the commit *talking*, exactly as its subject is, and setting it
+            // in the quiet grey the dates and paths wear would file the one piece
+            // of writing on this page under furniture.
+            for (text, box_) in commit.body.iter().zip(&layout.body) {
+                line(text.clone(), *box_, body_font, ground.text(palette));
+            }
+            line(
+                commit.meta.clone(),
+                layout.meta,
+                meta_font,
+                ground.muted(palette),
+            );
+            // **The parents wear the accent**, because they are the one thing on
+            // this line you can press — the same claim the accent makes
+            // everywhere else in this window.
+            for (chip, box_) in commit.parents.iter().zip(&layout.parents) {
+                labels.push(ChromeLabel {
+                    text: chip.short.clone(),
+                    rect: *box_,
+                    font_size_px: meta_font,
+                    color: palette.accent,
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: true,
+                    clip: Some(crop(*box_)),
+                });
+            }
+        }
+        GraphDetail::Compare(compare) => line(
+            compare.head.clone(),
+            layout.meta,
+            meta_font,
+            ground.text(palette),
+        ),
+    }
+
+    // R12's three rungs again, on `.pv-tool`'s ladder: absent while the pointer
+    // is elsewhere on the page, seven-tenths once this block has it, whole over
+    // its own pill once the button does.
+    let glyph = (crate::git_panel::GIT_ACT_GLYPH_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let radius = (crate::git_panel::GIT_ACT_RADIUS_LOGICAL_PX * scale)
+        .round()
+        .max(1.0) as u32;
+    let shown = hover.row == Some(row.index);
+    for (box_, part) in &layout.tools {
+        if !shown {
+            continue;
+        }
+        let lit = hover.part == Some(*part);
+        if lit {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill { radius_px: radius },
+                crop(*box_),
+                palette.files_row_hover,
+            ));
+        }
+        let inset = ((box_[2] - box_[0]) - glyph) / 2.0;
+        let glyph_box = [
+            box_[0] + inset,
+            box_[1] + inset,
+            box_[2] - inset,
+            box_[3] - inset,
+        ];
+        let mut mark = ChromeSprite::new(
+            detail_part_mark(*part),
+            crop(glyph_box),
+            if lit {
+                palette.git_head_text
+            } else {
+                palette.git_head_muted
+            },
+        );
+        mark.opacity = if lit {
+            1.0
+        } else {
+            crate::git_panel::GIT_ACT_REVEAL
+        };
+        sprites.push(mark);
+    }
+}
+
+/// The mark a detail verb wears.
+///
+/// The hash gets `Code` and the subject gets `Copy`, and the pairing is not
+/// arbitrary: both verbs copy, so a glyph that only said "copy" would have to be
+/// drawn twice and the reader would have to guess which was which. What
+/// distinguishes them is *what* goes on the clipboard — a hexadecimal name, or
+/// the sentence — and `< >` against the two-rectangles copy idiom is exactly
+/// that difference, in the two marks this product already cut.
+fn detail_part_mark(part: GraphDetailPart) -> ChromeMark {
+    match part {
+        GraphDetailPart::CopyHash => ChromeMark::Code,
+        GraphDetailPart::CopySubject => ChromeMark::Copy,
+        GraphDetailPart::LeaveCompare => ChromeMark::PaneClose,
+        // Never drawn as a glyph — a parent is the text of its own hash.
+        GraphDetailPart::Parent(_) => ChromeMark::Code,
+    }
 }
 
 /// `.ggrow:hover, .ggrow.open { background: var(--hover) }` (G82).
@@ -2277,6 +3416,9 @@ mod tests {
             subject: hash.to_owned(),
             author_name: "t".to_owned(),
             author_email: "t@example.com".to_owned(),
+            committer_name: "t".to_owned(),
+            committer_email: "t@example.com".to_owned(),
+            body: String::new(),
             committer_unix: 0,
             committer_offset: 0,
             time_relative: "now".to_owned(),
@@ -2442,17 +3584,49 @@ mod tests {
     const WIDE: [f32; 4] = [0.0, 0.0, 900.0, 600.0];
 
     fn frame(state: &GraphState, expanded: Option<&str>, body: [f32; 4]) -> GraphContent {
-        let mut measure = |text: &str, _: f32| text.len() as f32 * 6.0;
+        looked(
+            state,
+            GraphLook {
+                expanded,
+                compare: None,
+                selected: None,
+            },
+            body,
+        )
+    }
+
+    /// The same frame, with the whole of what a seat is looking at (v2 ②).
+    ///
+    /// The measurer is six pixels a character, so every width in these tests is
+    /// arithmetic somebody can do in their head — which is what lets a wrap
+    /// assertion say how many characters fit rather than "about this many".
+    fn looked(state: &GraphState, look: GraphLook<'_>, body: [f32; 4]) -> GraphContent {
+        let mut measure = |text: &str, _: f32| text.chars().count() as f32 * 6.0;
         build(
             state,
-            expanded,
-            None,
+            look,
             body,
             0.0,
             LaneWidthHold::default(),
             1.0,
             &mut measure,
         )
+    }
+
+    /// The one detail block a frame has, if it has one.
+    fn detail_of(content: &GraphContent) -> Option<&GraphDetailRow> {
+        content.rows.iter().find_map(|row| match row {
+            GraphViewRow::Detail(detail) => Some(detail),
+            _ => None,
+        })
+    }
+
+    /// The open commit's story, as against a comparison's head.
+    fn story_of(content: &GraphContent) -> Option<&GraphCommitDetail> {
+        match &detail_of(content)?.detail {
+            GraphDetail::Commit(commit) => Some(commit),
+            GraphDetail::Compare(_) => None,
+        }
     }
 
     fn straight(count: usize) -> Vec<GitCommit> {
@@ -2490,8 +3664,11 @@ mod tests {
         };
         let content = build(
             &state,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             body,
             0.0,
             LaneWidthHold::default(),
@@ -2520,8 +3697,11 @@ mod tests {
         let mut deep = |_: &str, _: f32| 30.0;
         let scrolled = build(
             &state,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             body,
             5_000.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
             LaneWidthHold::default(),
@@ -2544,8 +3724,11 @@ mod tests {
         let mut measure = |_: &str, _: f32| 30.0;
         let top = build(
             &state,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             body,
             0.0,
             LaneWidthHold::default(),
@@ -2555,8 +3738,11 @@ mod tests {
         assert!(!top.wants_more, "the top of two hundred wants nothing yet");
         let bottom = build(
             &state,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             body,
             190.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
             LaneWidthHold::default(),
@@ -2568,8 +3754,11 @@ mod tests {
         let whole = state_of(straight(200), false);
         let ended = build(
             &whole,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             body,
             190.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
             LaneWidthHold::default(),
@@ -2590,8 +3779,11 @@ mod tests {
         // straight history needs only one lane.
         let held = build(
             &state,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             body,
             0.0,
             LaneWidthHold { width: 5, until: 3 },
@@ -2602,8 +3794,11 @@ mod tests {
         // Scrolled past it, the column falls back to what the window needs.
         let released = build(
             &state,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             body,
             100.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
             LaneWidthHold { width: 5, until: 3 },
@@ -2617,7 +3812,11 @@ mod tests {
     #[test]
     fn a_row_index_finds_its_item_through_the_open_commit() {
         assert_eq!(item_at(7, None, None), Some(GraphItem::Commit(7)));
-        let open = Some((2, 3));
+        let open = Some(GraphOpen {
+            at: 2,
+            detail: 0,
+            files: 3,
+        });
         assert_eq!(item_at(2, None, open), Some(GraphItem::Commit(2)));
         assert_eq!(
             item_at(3, None, open),
@@ -2655,7 +3854,11 @@ mod tests {
         // And with a commit open under it. The commit's index is a *log* index,
         // so `(1, 2)` is the second commit — row five of a list whose first four
         // rows are the working tree's.
-        let open = Some((1, 2));
+        let open = Some(GraphOpen {
+            at: 1,
+            detail: 0,
+            files: 2,
+        });
         assert_eq!(item_at(4, head, open), Some(GraphItem::Commit(0)));
         assert_eq!(item_at(5, head, open), Some(GraphItem::Commit(1)));
         assert_eq!(
@@ -2796,8 +3999,11 @@ mod tests {
         let mut measure = |text: &str, _: f32| text.len() as f32 * 6.0;
         let scrolled = build(
             &state,
-            None,
-            None,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: None,
+            },
             WIDE,
             20.0 * GRAPH_ROW_HEIGHT_LOGICAL_PX,
             LaneWidthHold::default(),
@@ -3065,8 +4271,11 @@ mod tests {
         let mut measure = |text: &str, _: f32| text.len() as f32 * 6.0;
         let content = build(
             &state,
-            None,
-            Some(4),
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: Some(4),
+            },
             WIDE,
             0.0,
             LaneWidthHold::default(),
@@ -3078,8 +4287,11 @@ mod tests {
         // keyboard standing on it, and the ground follows the keyboard.
         let open = build(
             &state,
-            Some("c2"),
-            Some(9),
+            GraphLook {
+                expanded: Some("c2"),
+                compare: None,
+                selected: Some(9),
+            },
             WIDE,
             0.0,
             LaneWidthHold::default(),
@@ -3157,9 +4369,12 @@ mod tests {
         );
 
         // A commit's accordion, which is three rows further down the list than
-        // its own log index — the working tree and its files stand above it.
+        // its own log index — the working tree and its files stand above it. It
+        // unfolds one row even with no files answered for, because a commit
+        // always has a story: since v2 ② the detail block is there before the
+        // file list is (D1/D2).
         let commit_open = frame(&state, Some("c1"), WIDE);
-        assert_eq!(commit_open.open_rows, Some((2, 0)));
+        assert_eq!(commit_open.open_rows, Some((2, 1)));
         assert_eq!(
             graph_key(&commit_open, GraphKey::Escape),
             GraphKeyAction::Collapse(2)
@@ -3192,8 +4407,11 @@ mod tests {
         let scroll = graph_geometry(WIDE, &top, 1.0).reveal(last);
         let after = build(
             &state,
-            None,
-            Some(last),
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: Some(last),
+            },
             WIDE,
             scroll,
             LaneWidthHold::default(),
@@ -3223,5 +4441,682 @@ mod tests {
         // And it is what the row's tooltip says.
         one.author_email = "weiyi@example.com".to_owned();
         assert!(commit_tooltip(&one).contains("Weiyi Shi <weiyi@example.com>"));
+    }
+
+    // ── v2 ②: the open row's story, and two rows compared ──────────────────
+
+    /// A history whose newest commit has the body, the committer and the two
+    /// parents these tests are about.
+    fn told(body: &str) -> Vec<GitCommit> {
+        let mut commits = straight(20);
+        let told = &mut commits[0];
+        told.body = body.to_owned();
+        told.author_name = "Weiyi Shi".to_owned();
+        told.author_email = "weiyi@example.com".to_owned();
+        told.committer_name = "Weiyi Shi".to_owned();
+        told.committer_email = "weiyi@example.com".to_owned();
+        // In a zone four hours behind UTC, which is what makes the printed date
+        // the date it was made *where* it was made.
+        told.committer_offset = -4 * 3600;
+        told.committer_unix = 1_786_803_504; // 2026-08-15T10:18:24-04:00
+        told.parents = vec!["c1".to_owned(), "c4".to_owned()];
+        commits
+    }
+
+    /// D1 — the body arrives wrapped to the description column, with the
+    /// paragraphs it was written with.
+    ///
+    /// MUTATION: wrap with a helper that treats `\n` as whitespace and the two
+    /// paragraphs run together into one — which is the whole of what "preserve
+    /// the body's own breaks" is about, and it is invisible at any width where
+    /// the text happened to wrap there anyway.
+    #[test]
+    fn a_commit_body_is_wrapped_to_the_description_column_and_keeps_its_paragraphs() {
+        let state = state_of(told("First paragraph.\n\nSecond paragraph."), false);
+        let content = frame(&state, Some("c0"), WIDE);
+        let story = story_of(&content).expect("an open commit tells its story");
+        assert_eq!(
+            story.body,
+            vec![
+                "First paragraph.".to_owned(),
+                String::new(),
+                "Second paragraph.".to_owned(),
+            ],
+            "the blank line between the two is a line of its own"
+        );
+
+        // The width the wrap is against is the **description column's** and not
+        // the seat's, which is what makes the prose start and end where every
+        // message on the page does. Pinned by narrowing the seat and watching the
+        // same paragraph need more lines.
+        let long = "one two three four five six seven eight nine ten eleven twelve \
+                    thirteen fourteen fifteen sixteen seventeen eighteen";
+        let state = state_of(told(long), false);
+        let wide = frame(&state, Some("c0"), WIDE);
+        let narrow = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c0"),
+                compare: None,
+                selected: None,
+            },
+            [0.0, 0.0, 300.0, 600.0],
+        );
+        let wide = story_of(&wide).expect("open").body.len();
+        let narrow = story_of(&narrow).expect("open").body.len();
+        assert!(
+            narrow > wide && wide > 1,
+            "one paragraph, two widths: {wide} lines wide and {narrow} narrow"
+        );
+
+        // A commit with nothing after its subject has no prose block at all —
+        // which is not an empty one.
+        let plain = state_of(straight(20), false);
+        let plain = frame(&plain, Some("c0"), WIDE);
+        assert!(story_of(&plain).expect("open").body.is_empty());
+    }
+
+    /// D1 — twelve lines, and the twelfth says it stopped.
+    #[test]
+    fn a_body_longer_than_twelve_lines_stops_at_twelve_and_says_so() {
+        let long = (0..40)
+            .map(|n| format!("Line number {n}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let state = state_of(told(&long), false);
+        let story = frame(&state, Some("c0"), WIDE);
+        let story = story_of(&story).expect("open");
+        assert_eq!(story.body.len(), GRAPH_BODY_MAX_LINES);
+        assert!(
+            story.body[GRAPH_BODY_MAX_LINES - 1].ends_with(GRAPH_BODY_ELLIPSIS),
+            "the last line it draws says there is more: {:?}",
+            story.body[GRAPH_BODY_MAX_LINES - 1]
+        );
+        assert!(
+            !story.body[0].ends_with(GRAPH_BODY_ELLIPSIS),
+            "and no other line does"
+        );
+        // A body that exactly fits is not marked — the ellipsis is a claim about
+        // text that was left out, not decoration on the last line.
+        let just = (0..GRAPH_BODY_MAX_LINES)
+            .map(|n| format!("Line {n}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let state = state_of(told(&just), false);
+        let story = frame(&state, Some("c0"), WIDE);
+        let story = story_of(&story).expect("open");
+        assert_eq!(story.body.len(), GRAPH_BODY_MAX_LINES);
+        assert!(!story.body[GRAPH_BODY_MAX_LINES - 1].ends_with(GRAPH_BODY_ELLIPSIS));
+    }
+
+    /// D2 — the meta line: who, when, and which commits this one came from.
+    #[test]
+    fn the_meta_line_names_the_author_the_date_and_the_parents() {
+        let state = state_of(told(""), false);
+        let content = frame(&state, Some("c0"), WIDE);
+        let story = story_of(&content).expect("open");
+        assert_eq!(
+            story.meta, "Weiyi Shi <weiyi@example.com> \u{b7} 2026-08-15 10:18 \u{b7} parents: ",
+            "the absolute date and not the relative one: an opened row is being \
+             read rather than scanned"
+        );
+        assert_eq!(
+            story
+                .parents
+                .iter()
+                .map(|parent| parent.short.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c1", "c4"],
+            "both parents, in git's order"
+        );
+        assert_eq!(
+            story.parents[0].hash, "c1",
+            "and the whole hash behind each"
+        );
+
+        // A root commit names no parents, and does not end its line on a colon
+        // with nothing after it.
+        let root = state_of(told(""), false);
+        let root = frame(&root, Some("c19"), WIDE);
+        let root = story_of(&root).expect("open");
+        assert!(root.parents.is_empty());
+        assert!(!root.meta.contains(GRAPH_META_PARENTS));
+    }
+
+    /// D2 — "committed by" appears exactly when the committer is somebody else.
+    ///
+    /// MUTATION: say it always, and every row on the page gains a clause that
+    /// says nothing; say it never, and the one case the field exists for — a
+    /// rebase, a cherry-pick, a patch applied from a list — is the one case the
+    /// page is silent about.
+    #[test]
+    fn the_committer_is_named_only_when_they_are_not_the_author() {
+        let state = state_of(told(""), false);
+        let same = frame(&state, Some("c0"), WIDE);
+        assert!(
+            !story_of(&same)
+                .expect("open")
+                .meta
+                .contains(GRAPH_META_COMMITTED_BY)
+        );
+
+        let mut commits = told("");
+        commits[0].committer_name = "Rebase Bot".to_owned();
+        commits[0].committer_email = "bot@example.com".to_owned();
+        let state = state_of(commits, false);
+        let other = frame(&state, Some("c0"), WIDE);
+        assert!(
+            story_of(&other)
+                .expect("open")
+                .meta
+                .contains("committed by Rebase Bot <bot@example.com>")
+        );
+
+        // The address alone is enough: a rebase keeps the name and takes the
+        // address, and two people called the same thing are two people.
+        let mut commits = told("");
+        commits[0].committer_email = "someone.else@example.com".to_owned();
+        let state = state_of(commits, false);
+        let addressed = frame(&state, Some("c0"), WIDE);
+        assert!(
+            story_of(&addressed)
+                .expect("open")
+                .meta
+                .contains(GRAPH_META_COMMITTED_BY)
+        );
+    }
+
+    /// D7 — the two copy verbs stand at the line's right and answer a press
+    /// there, and the parents answer one at their own place.
+    ///
+    /// The hit test is asked through the **same** layout the paint uses, which is
+    /// what makes "the button you can press is the button you can see" a property
+    /// rather than a screenshot.
+    #[test]
+    fn the_detail_line_answers_a_press_on_a_parent_and_on_each_copy_verb() {
+        let state = state_of(told("Why."), false);
+        let content = frame(&state, Some("c0"), WIDE);
+        let detail = detail_of(&content).expect("open");
+        let geometry = graph_geometry(WIDE, &content, 1.0);
+        let first = geometry.row_rect(detail.index);
+        let last = geometry.row_rect(detail.index + detail.rows - 1);
+        let rect = [first[0], first[1], first[2], last[3]];
+        let layout = detail_layout(rect, detail, content.columns, 1.0);
+        assert_eq!(layout.tools.len(), 2, "copy the hash, copy the subject");
+        assert_eq!(layout.parents.len(), 2);
+
+        let at = |box_: [f32; 4]| {
+            detail_part_at(
+                rect,
+                detail,
+                content.columns,
+                1.0,
+                (box_[0] + box_[2]) / 2.0,
+                (box_[1] + box_[3]) / 2.0,
+            )
+        };
+        assert_eq!(at(layout.parents[0]), Some(GraphDetailPart::Parent(0)));
+        assert_eq!(at(layout.parents[1]), Some(GraphDetailPart::Parent(1)));
+        for (box_, part) in &layout.tools {
+            assert_eq!(at(*box_), Some(*part));
+        }
+        assert!(
+            layout
+                .tools
+                .iter()
+                .any(|(_, part)| *part == GraphDetailPart::CopyHash)
+                && layout
+                    .tools
+                    .iter()
+                    .any(|(_, part)| *part == GraphDetailPart::CopySubject)
+        );
+        // Two verbs, two marks: a glyph drawn twice would leave the reader
+        // guessing which copy is which.
+        assert_ne!(
+            detail_part_mark(GraphDetailPart::CopyHash),
+            detail_part_mark(GraphDetailPart::CopySubject)
+        );
+        // The block's own padding is not a button.
+        assert_eq!(
+            detail_part_at(
+                rect,
+                detail,
+                content.columns,
+                1.0,
+                rect[0] + 1.0,
+                rect[1] + 1.0
+            ),
+            None
+        );
+
+        // And what the `Ok` notice each of them raises says — a hash whole, a
+        // subject only as far as a card can carry it.
+        assert_eq!(graph_copied("36d3949"), "Copied 36d3949");
+        let essay = "z".repeat(GRAPH_COPIED_MAX_CHARS + 10);
+        let said = graph_copied(&essay);
+        assert!(said.ends_with(GRAPH_BODY_ELLIPSIS));
+        assert_eq!(
+            said.chars().count(),
+            "Copied ".chars().count() + GRAPH_COPIED_MAX_CHARS + 1
+        );
+        assert_eq!(
+            graph_copied(&"z".repeat(GRAPH_COPIED_MAX_CHARS)),
+            format!("Copied {}", "z".repeat(GRAPH_COPIED_MAX_CHARS)),
+            "a subject that exactly fits is not marked"
+        );
+    }
+
+    /// D2 — a parent already loaded is arrived at, and the row it stands on is
+    /// the row the reveal is about.
+    #[test]
+    fn a_parent_already_loaded_is_arrived_at_on_its_own_row() {
+        let state = state_with_status(straight(20), DIRTY);
+        let content = frame(&state, Some("c0"), WIDE);
+        let seek = GraphSeek {
+            hash: "c4".to_owned(),
+            pages: 0,
+        };
+        assert_eq!(graph_seek_step(&state, &seek), GraphSeekStep::Arrived(4));
+        // The Uncommitted row stands above the commits — collapsed, because a
+        // commit is what is open — and the open commit's own block stands
+        // between row zero and this one.
+        let block = content.open_commit.expect("c0 is open").1;
+        assert_eq!(content.commit_row(4), 1 + 4 + block);
+        assert_eq!(
+            content.commit_row(0),
+            1,
+            "a commit above the expansion is not shifted by it"
+        );
+    }
+
+    /// D2 — a parent further back than the loaded pages is paged towards, up to
+    /// the cap, and then said out loud.
+    ///
+    /// MUTATION: drop the cap and a parent git rewrote out from under us pages
+    /// to the end of the repository one subprocess at a time, with nothing on
+    /// screen to say why.
+    #[test]
+    fn a_seek_pages_towards_its_commit_and_gives_up_at_the_cap() {
+        let state = state_of(straight(20), true);
+        let mut seek = GraphSeek {
+            hash: "nowhere".to_owned(),
+            pages: 0,
+        };
+        // Every page up to the cap is another ask.
+        while seek.pages < GRAPH_SEEK_MAX_PAGES {
+            assert_eq!(
+                graph_seek_step(&state, &seek),
+                GraphSeekStep::NeedPage,
+                "page {} is still worth asking for",
+                seek.pages
+            );
+            seek.pages += 1;
+        }
+        assert_eq!(graph_seek_step(&state, &seek), GraphSeekStep::GaveUp);
+        assert_eq!(
+            graph_seek_gave_up(&"f".repeat(40)),
+            "Commit fffffff is further back than the loaded history"
+        );
+
+        // A history that has *ended* gives up whatever the count says: there is
+        // no page left to ask for.
+        let ended = state_of(straight(20), false);
+        assert_eq!(
+            graph_seek_step(
+                &ended,
+                &GraphSeek {
+                    hash: "nowhere".to_owned(),
+                    pages: 0,
+                }
+            ),
+            GraphSeekStep::GaveUp
+        );
+        // And the commit is arrived at even on the last allowed page: the cap
+        // bounds how long we look, not when we believe what we found.
+        assert_eq!(
+            graph_seek_step(
+                &ended,
+                &GraphSeek {
+                    hash: "c7".to_owned(),
+                    pages: GRAPH_SEEK_MAX_PAGES,
+                }
+            ),
+            GraphSeekStep::Arrived(7)
+        );
+        // Nothing read yet is not a page spent.
+        let cold = GraphState::new(std::path::PathBuf::from(r"D:\repo"));
+        assert_eq!(
+            graph_seek_step(
+                &cold,
+                &GraphSeek {
+                    hash: "c1".to_owned(),
+                    pages: 0,
+                }
+            ),
+            GraphSeekStep::Waiting
+        );
+    }
+
+    /// D4 — a commit's file row wears its letter and its counts, and a binary
+    /// file says git had no lines to count.
+    #[test]
+    fn a_commits_file_row_wears_its_letter_and_its_counts() {
+        let mut state = state_of(straight(20), false);
+        let hash = "c0".to_owned();
+        assert!(state.cache.begin_commit_files(&hash).is_some());
+        assert!(state.cache.accept(crate::git::GitAnswer::CommitFiles {
+            root: std::path::PathBuf::from(r"D:\repo"),
+            hash,
+            outcome: Ok(vec![
+                crate::git::GitCommitFile {
+                    path: "src/main.rs".to_owned(),
+                    code: crate::git::StatusCode::Modified,
+                    renamed_from: None,
+                    stat: Some(crate::git::GitFileStat {
+                        added: 12,
+                        removed: 3,
+                    }),
+                },
+                crate::git::GitCommitFile {
+                    path: "logo.png".to_owned(),
+                    code: crate::git::StatusCode::Added,
+                    renamed_from: None,
+                    stat: None,
+                },
+            ]),
+        }));
+        let content = frame(&state, Some("c0"), WIDE);
+        let files: Vec<&GraphFileRow> = content
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                GraphViewRow::File(file) => Some(file),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].badge.expect("a letter").letter, 'M');
+        assert_eq!(
+            files[0].stat,
+            Some(crate::git::GitFileStat {
+                added: 12,
+                removed: 3
+            })
+        );
+        assert_eq!(files[1].badge.expect("a letter").letter, 'A');
+        assert_eq!(
+            files[1].stat, None,
+            "binary: git has no lines here, which is not zero lines"
+        );
+        assert!(files[1].tooltip.contains("Binary"));
+        assert!(files[0].tooltip.contains("12 lines added, 3 lines removed"));
+    }
+
+    /// D6 — comparing two commits hangs one block off the **older** of them, and
+    /// lights both.
+    ///
+    /// MUTATION: order the pair by the gesture instead of by the graph, and
+    /// `Comparing` reads backwards half the time — a diff whose arrow points the
+    /// way history does not run.
+    #[test]
+    fn a_comparison_hangs_its_block_off_the_older_row_and_lights_both() {
+        let state = state_with_status(straight(20), DIRTY);
+        // The *newer* row is the one turned over, so this is also the case where
+        // the block does not stand under the row that was opened.
+        let content = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c2"),
+                compare: Some("c6"),
+                selected: None,
+            },
+            WIDE,
+        );
+        let detail = detail_of(&content).expect("a comparison has a head");
+        let GraphDetail::Compare(compare) = &detail.detail else {
+            panic!("compare mode replaces the story rather than standing beside it");
+        };
+        assert_eq!(compare.a, "c6", "older first");
+        assert_eq!(compare.b.as_deref(), Some("c2"));
+        assert_eq!(compare.head, "Comparing c6 \u{2192} c2");
+        assert_eq!(
+            content.compare_pair,
+            Some(("c6".to_owned(), Some("c2".to_owned())))
+        );
+        // The Uncommitted row stands above the commits, so `c6` is row seven and
+        // `c2` is row three; the block stands under the older of the two.
+        assert_eq!(content.compare_rows, Some((7, 3)));
+        assert_eq!(detail.index, 8);
+        // Turning it round changes nothing: the order is the graph's, not the
+        // gesture's.
+        let swapped = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c6"),
+                compare: Some("c2"),
+                selected: None,
+            },
+            WIDE,
+        );
+        assert_eq!(swapped.compare_pair, content.compare_pair);
+        assert_eq!(swapped.compare_rows, content.compare_rows);
+
+        // **Against the working tree** (D6): the far end is absent, because that
+        // is git's own grammar for "what is on disk".
+        let against_tree = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c2"),
+                compare: Some(GRAPH_UNCOMMITTED_HASH),
+                selected: None,
+            },
+            WIDE,
+        );
+        assert_eq!(
+            against_tree.compare_pair,
+            Some(("c2".to_owned(), None)),
+            "the working tree can never be the older end"
+        );
+        assert_eq!(
+            against_tree.compare_rows,
+            Some((3, 0)),
+            "and its row is the top of the list"
+        );
+        let GraphDetail::Compare(compare) = &detail_of(&against_tree).expect("a head").detail
+        else {
+            panic!("a comparison")
+        };
+        assert_eq!(compare.head, "Comparing c2 \u{2192} working tree");
+
+        // A row compared with itself is not a comparison.
+        let same = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c2"),
+                compare: Some("c2"),
+                selected: None,
+            },
+            WIDE,
+        );
+        assert_eq!(same.compare_pair, None);
+        assert!(matches!(
+            detail_of(&same).expect("still open").detail,
+            GraphDetail::Commit(_)
+        ));
+    }
+
+    /// D6 — a comparison's file rows open the diff of the pair, and never of one
+    /// end of it.
+    #[test]
+    fn a_comparisons_file_rows_open_the_diff_of_the_pair() {
+        let mut state = state_of(straight(20), false);
+        assert!(state.cache.begin_compare_files("c6", Some("c2")).is_some());
+        assert!(state.cache.accept(crate::git::GitAnswer::CompareFiles {
+            root: std::path::PathBuf::from(r"D:\repo"),
+            a: "c6".to_owned(),
+            b: Some("c2".to_owned()),
+            outcome: Ok(vec![crate::git::GitCommitFile {
+                path: "src/main.rs".to_owned(),
+                code: crate::git::StatusCode::Modified,
+                renamed_from: None,
+                stat: Some(crate::git::GitFileStat {
+                    added: 1,
+                    removed: 1,
+                }),
+            }]),
+        }));
+        let content = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c2"),
+                compare: Some("c6"),
+                selected: None,
+            },
+            WIDE,
+        );
+        let file = content
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                GraphViewRow::File(file) => Some(file),
+                _ => None,
+            })
+            .expect("the comparison lists its files");
+        let root = std::path::PathBuf::from(r"D:\repo");
+        assert_eq!(
+            row_open(&GraphViewRow::File(file.clone()), &root),
+            Some(crate::git_panel::GitRowOpen::Document {
+                source: crate::preview::PreviewSource::GitDiffRange {
+                    root,
+                    a: "c6".to_owned(),
+                    b: Some("c2".to_owned()),
+                    path: "src/main.rs".to_owned(),
+                },
+                name: crate::git_panel::git_document_name("src/main.rs"),
+                renamed_from: None,
+            })
+        );
+    }
+
+    /// D6 — `Esc` gives up the comparison before it gives up the accordion, and
+    /// `Ctrl+Enter` needs a row already open to be the other end of.
+    #[test]
+    fn escape_leaves_a_comparison_before_it_collapses_the_row() {
+        let state = state_of(straight(20), false);
+        let comparing = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c2"),
+                compare: Some("c6"),
+                selected: Some(6),
+            },
+            WIDE,
+        );
+        assert_eq!(
+            graph_key(&comparing, GraphKey::Escape),
+            GraphKeyAction::LeaveCompare,
+            "the innermost thing goes first"
+        );
+        // With the comparison gone, the same key folds the row.
+        let open = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c2"),
+                compare: None,
+                selected: Some(2),
+            },
+            WIDE,
+        );
+        assert_eq!(
+            graph_key(&open, GraphKey::Escape),
+            GraphKeyAction::Collapse(2)
+        );
+        assert_eq!(
+            graph_key(&open, GraphKey::Compare),
+            GraphKeyAction::Compare(2)
+        );
+        // And with nothing open, `Ctrl+Enter` has no first end to pair with.
+        let shut = looked(
+            &state,
+            GraphLook {
+                expanded: None,
+                compare: None,
+                selected: Some(2),
+            },
+            WIDE,
+        );
+        assert_eq!(graph_key(&shut, GraphKey::Compare), GraphKeyAction::None);
+    }
+
+    /// v2 ② — the arrows step **over** the detail block rather than through it.
+    ///
+    /// The block claims list rows so the geometry stays a multiplication; those
+    /// rows answer no press, so the selection may not stand on one. MUTATION:
+    /// drop [`step_over_detail`] and `↓` off an open commit spends a keypress on
+    /// each line of its own message.
+    #[test]
+    fn the_arrows_step_over_the_detail_block() {
+        let state = state_of(
+            told(
+                "A body long enough that the block is several rows tall, which is what makes this test about more than one row of prose at all.",
+            ),
+            false,
+        );
+        let open = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c0"),
+                compare: None,
+                selected: Some(0),
+            },
+            WIDE,
+        );
+        let (start, rows) = open.detail_rows.expect("an open commit has a block");
+        assert_eq!(start, 1, "the block is the row under the one it belongs to");
+        assert!(rows > 1, "and it is taller than one row: {rows}");
+        assert_eq!(
+            graph_key(&open, GraphKey::Down),
+            GraphKeyAction::Select(start + rows),
+            "one press leaves the whole block, not one line of it"
+        );
+        // And back up over it from the row underneath.
+        let below = looked(
+            &state,
+            GraphLook {
+                expanded: Some("c0"),
+                compare: None,
+                selected: Some(start + rows),
+            },
+            WIDE,
+        );
+        assert_eq!(graph_key(&below, GraphKey::Up), GraphKeyAction::Select(0));
+    }
+
+    /// v2 ② — the block is one row of the list that spans several, and every
+    /// index inside it finds it.
+    #[test]
+    fn every_row_the_detail_block_claims_maps_back_to_it() {
+        let open = GraphOpen {
+            at: 2,
+            detail: 3,
+            files: 2,
+        };
+        assert_eq!(item_at(2, None, Some(open)), Some(GraphItem::Commit(2)));
+        for index in 3..=5 {
+            assert_eq!(
+                item_at(index, None, Some(open)),
+                Some(GraphItem::Detail),
+                "row {index} is the block's"
+            );
+        }
+        assert_eq!(
+            item_at(6, None, Some(open)),
+            Some(GraphItem::File { commit: 2, file: 0 })
+        );
+        assert_eq!(
+            item_at(7, None, Some(open)),
+            Some(GraphItem::File { commit: 2, file: 1 })
+        );
+        assert_eq!(item_at(8, None, Some(open)), Some(GraphItem::Commit(3)));
     }
 }
