@@ -5952,10 +5952,52 @@ struct GraphView {
     /// another document does not carry the last one's scroll into it.
     root: std::path::PathBuf,
     scroll_px: f32,
-    /// The one open commit (R15's accordion, in the graph's seat).
+    /// The one open commit (R15's accordion, in the graph's seat), or
+    /// [`git_graph::GRAPH_UNCOMMITTED_HASH`] when the working tree's row is the
+    /// one turned over (V5).
     expanded: Option<String>,
+    /// The row wearing the selected ground, and where `↑` goes from (V8/V14).
+    ///
+    /// **A row index and not an identity**, unlike the double-click pairing
+    /// beside it, and for the opposite reason: what a selection is *for* is a
+    /// place on the page the keyboard walks from, and every gesture that can move
+    /// a row under it — an accordion opening, a page arriving — either happens
+    /// below it or is the very gesture that set it. A hash would survive a page
+    /// arriving and would then have to be searched for on every keypress, which
+    /// is a walk down ten thousand commits to answer "which row is under this
+    /// one".
+    selected: Option<usize>,
     /// R18's hysteresis, carried frame to frame.
     lane_hold: git_graph::LaneWidthHold,
+}
+
+/// Which of the graph's six verbs a physical key is, if any (V14).
+///
+/// The translation lives here, beside the window that reads winit, and the rule
+/// it translates into lives in [`git_graph::graph_key`] — the same split
+/// `files::tree_command` makes, and for the same reason: what `↓` *does* at the
+/// end of a loaded page is a property of the list and has to be assertable
+/// without a keyboard.
+///
+/// **Bare keys, and therefore not rows of `shortcuts::BINDINGS`.** That table is
+/// the chord registry the future editing panel edits, and every row in it is a
+/// chord — a modifier and a key — precisely because a chord is a thing this
+/// window *claims* from the shell. These six are not claimed from anything: they
+/// only exist while a graph holds the keyboard, at which point there is no shell
+/// listening, and they are the same six keys every list on this platform answers.
+/// The files column's own arrows are out of the table for the identical reason
+/// and were left out by the same audit (`files::tree_command`); putting one of
+/// the two families in and not the other would be the audit saying two things.
+fn graph_key_of(key: &Key) -> Option<git_graph::GraphKey> {
+    match key {
+        Key::Named(NamedKey::ArrowUp) => Some(git_graph::GraphKey::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(git_graph::GraphKey::Down),
+        Key::Named(NamedKey::Home) => Some(git_graph::GraphKey::Home),
+        Key::Named(NamedKey::End) => Some(git_graph::GraphKey::End),
+        Key::Named(NamedKey::Enter) => Some(git_graph::GraphKey::Enter),
+        Key::Named(NamedKey::Escape) => Some(git_graph::GraphKey::Escape),
+        _ => None,
+    }
 }
 
 /// A files tree's own click counter — [`TabClicks`] for rows.
@@ -17819,6 +17861,23 @@ impl Runtime {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
         };
+        // **A graph is a list, not a document** (V14). The seat that holds it is
+        // an ordinary preview seat and got the keyboard the ordinary way — a
+        // press into it focused it — but what its arrows mean is "the row above"
+        // and not "twenty pixels up", so it is asked before the scroll below.
+        //
+        // It is asked and not *told*: a key it does not claim (`Esc` with nothing
+        // to fold) falls through to the scroll, which swallows it as every
+        // focused preview does. The one key that must not be eaten here is the
+        // one this page has no use for, and saying so is the graph's own answer
+        // rather than a condition written twice.
+        if let PreviewSurface::Seat(seat) = surface
+            && self.git_graphs_shown.contains_key(&seat)
+            && let Some(key) = graph_key_of(&event.logical_key)
+            && self.graph_key(seat, key)?
+        {
+            return Ok(true);
+        }
         let scale = self.renderer.metrics().scale_factor as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             // A seat with no body to scroll still owns the key: there is no
@@ -20611,7 +20670,12 @@ impl Runtime {
                     ..GraphView::default()
                 };
             }
-            let (scroll, expanded, hold) = (view.scroll_px, view.expanded.clone(), view.lane_hold);
+            let (scroll, expanded, selected, hold) = (
+                view.scroll_px,
+                view.expanded.clone(),
+                view.selected,
+                view.lane_hold,
+            );
             let Some(state) = self.tabs[active].git_graphs.get(&root) else {
                 continue;
             };
@@ -20621,6 +20685,7 @@ impl Runtime {
             let mut content = git_graph::build(
                 &state,
                 expanded.as_deref(),
+                selected,
                 body,
                 scroll,
                 hold,
@@ -20632,11 +20697,18 @@ impl Runtime {
             // healed here rather than by the layout disagreeing with the number.
             let healed = git_graph::clamp_graph_scroll(body, &content, content.scroll_px, scale);
             content.scroll_px = healed;
+            // The selection gets the same healing and for the same reason: a
+            // list that got shorter under a stored row number — a checkout that
+            // replaced the history, an accordion folded from elsewhere — would
+            // otherwise leave the selected ground on a row that is not there.
+            let selected = selected.filter(|row| *row < content.total_rows);
+            content.selected = selected;
             if content.wants_more {
                 extend.push(root.clone());
             }
             let view = self.tabs[active].git_graph_view.entry(seat).or_default();
             view.scroll_px = healed;
+            view.selected = selected;
             view.lane_hold = git_graph::LaneWidthHold {
                 width: content.lane_width,
                 until: content.lane_width_until,
@@ -20676,9 +20748,16 @@ impl Runtime {
         // the *first* click moves everything below it, and a pair keyed on the
         // index would then be a pair keyed on two different rows.
         let key = match &row {
+            // The working tree is one thing and there is one of it, so its own
+            // name is enough to pair two clicks on.
+            git_graph::GraphViewRow::Uncommitted(_) => git_graph::GRAPH_UNCOMMITTED_HASH.to_owned(),
             git_graph::GraphViewRow::Commit(commit) => commit.hash.clone(),
             git_graph::GraphViewRow::File(file) => format!("{}\u{1f}{}", file.hash, file.path),
         };
+        // **A press is a selection** (V8), whatever the press then goes on to do:
+        // the keyboard walks from where the pointer last was, which is what makes
+        // clicking a row and then pressing `↓` mean the row under it.
+        self.select_graph_row(seat, index);
         let double = self.git_graph_clicks.register(seat, &key, now) == TabClick::Double;
         let open = if double {
             git_graph::row_double_open(&row).or_else(|| git_graph::row_open(&row, &root))
@@ -20699,7 +20778,18 @@ impl Runtime {
         }
     }
 
-    /// Turn one commit's file list over, in the graph (R15).
+    /// Put the selected ground on one row of a graph (V8).
+    ///
+    /// Written whether or not it moved: the caller is a gesture that *means* this
+    /// row, and a press on the row already selected is still that.
+    fn select_graph_row(&mut self, seat: SeatId, index: usize) {
+        let active = self.active_tab;
+        let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+        view.selected = Some(index);
+    }
+
+    /// Turn one commit's file list over, in the graph (R15) — or the working
+    /// tree's (V5).
     fn expand_graph_commit(&mut self, seat: SeatId, root: &Path, hash: &str) -> Result<()> {
         let active = self.active_tab;
         let tab_id = self.tabs[active].id;
@@ -20709,7 +20799,12 @@ impl Runtime {
             view.expanded.clone_from(&opened);
             opened
         };
+        // **The working tree's row asks git nothing** (V5). Its files are the
+        // status this cache already holds — the one answer every role has asked
+        // for since G-1 — so unfolding it spends no subprocess at all, which is
+        // what let the row exist at all under R31's two-condition gate.
         if let Some(hash) = opened
+            && hash != git_graph::GRAPH_UNCOMMITTED_HASH
             && let Some(state) = self.tabs[active].git_graphs.get_mut(root)
             && let Some(question) = state.cache.begin_commit_files(&hash)
             && !self.git_worker.request(git::GitRequest {
@@ -20726,6 +20821,107 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// One key, with a commit graph holding the keyboard (V14).
+    ///
+    /// Answers whether the key was the graph's *verb*. `false` is not "give it to
+    /// the shell" — a focused preview owns every key it is offered — it is "this
+    /// key is not one of the six, so the surface under this one may have it",
+    /// which for `Esc` with nothing open is the whole point: the float dismissal
+    /// and, under that, `vim` are entitled to an `Esc` this page has no use for.
+    fn graph_key(&mut self, seat: SeatId, key: git_graph::GraphKey) -> Result<bool> {
+        let Some(content) = self.git_graphs_shown.get(&seat).cloned() else {
+            return Ok(false);
+        };
+        let Some(root) = self.tabs[self.active_tab]
+            .git_graph_view
+            .get(&seat)
+            .map(|view| view.root.clone())
+        else {
+            return Ok(false);
+        };
+        let action = git_graph::graph_key(&content, key);
+        let selected = match action {
+            git_graph::GraphKeyAction::Pass => return Ok(false),
+            git_graph::GraphKeyAction::None => return Ok(true),
+            git_graph::GraphKeyAction::Select(row) => row,
+            git_graph::GraphKeyAction::Toggle(row) => {
+                // Enter is the row's own press, minus the pointer: whatever a
+                // click on it would have done, through the same door — so a file
+                // row opens its document and a commit row turns over, and neither
+                // gesture had to be written twice.
+                let Some(drawn) = content
+                    .rows
+                    .iter()
+                    .find(|drawn| drawn.index() == row)
+                    .cloned()
+                else {
+                    // **A wheel can carry the selection off the window** — the
+                    // arrows always scroll it back, but a notch does not move it
+                    // — and R23 only builds what is on screen. Rather than act on
+                    // a row nobody can see, bring it back and let the next press
+                    // mean what it says.
+                    self.select_graph_row(seat, row);
+                    self.reveal_graph_row(seat, row);
+                    if self.refresh_chrome() {
+                        self.present_chrome_change()?;
+                    }
+                    return Ok(true);
+                };
+                self.select_graph_row(seat, drawn.index());
+                if let Some(open) = git_graph::row_open(&drawn, &root) {
+                    match open {
+                        git_panel::GitRowOpen::Document {
+                            source,
+                            name,
+                            renamed_from,
+                        } => self.open_git_document_for_graph(&root, source, name, renamed_from)?,
+                        git_panel::GitRowOpen::Expand { hash } => {
+                            self.expand_graph_commit(seat, &root, &hash)?;
+                        }
+                        git_panel::GitRowOpen::Checkout { .. } => {}
+                    }
+                }
+                return Ok(true);
+            }
+            git_graph::GraphKeyAction::Collapse(row) => {
+                let hash = self.tabs[self.active_tab]
+                    .git_graph_view
+                    .get(&seat)
+                    .and_then(|view| view.expanded.clone());
+                if let Some(hash) = hash {
+                    self.expand_graph_commit(seat, &root, &hash)?;
+                }
+                // Standing on what was just folded shut, and not on wherever the
+                // selection had wandered to inside it: the rows it was in have
+                // gone, and the row it came out of is the one still on screen.
+                row
+            }
+        };
+        self.select_graph_row(seat, selected);
+        self.reveal_graph_row(seat, selected);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Scroll a graph until one of its rows is whole on screen (V14).
+    fn reveal_graph_row(&mut self, seat: SeatId, index: usize) {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(content) = self.git_graphs_shown.get(&seat) else {
+            return;
+        };
+        let Some(body) = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
+        else {
+            return;
+        };
+        let wanted = git_graph::graph_geometry(body, content, scale).reveal(index);
+        let active = self.active_tab;
+        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+            view.scroll_px = wanted;
+        }
     }
 
     /// A document opened from the graph rather than from a column.
@@ -34306,6 +34502,73 @@ mod tests {
 
     fn at(x: f64, y: f64) -> PhysicalPosition<f64> {
         PhysicalPosition::new(x, y)
+    }
+
+    /// V14 — the graph's six keys, and only those six.
+    ///
+    /// The negative half is the half worth writing down: every key not in this
+    /// list has to reach the scroll below it, because a focused preview's
+    /// `PageDown` is still a page down and its letters are still swallowed by
+    /// the surface that already swallows them. A translation that claimed one
+    /// key too many would take a verb away from a surface underneath and there
+    /// would be nothing on screen to say so.
+    #[test]
+    fn a_focused_graph_answers_six_keys_and_leaves_every_other_one_alone() {
+        use winit::keyboard::SmolStr;
+        assert_eq!(
+            graph_key_of(&Key::Named(NamedKey::ArrowUp)),
+            Some(git_graph::GraphKey::Up)
+        );
+        assert_eq!(
+            graph_key_of(&Key::Named(NamedKey::ArrowDown)),
+            Some(git_graph::GraphKey::Down)
+        );
+        assert_eq!(
+            graph_key_of(&Key::Named(NamedKey::Home)),
+            Some(git_graph::GraphKey::Home)
+        );
+        assert_eq!(
+            graph_key_of(&Key::Named(NamedKey::End)),
+            Some(git_graph::GraphKey::End)
+        );
+        assert_eq!(
+            graph_key_of(&Key::Named(NamedKey::Enter)),
+            Some(git_graph::GraphKey::Enter)
+        );
+        assert_eq!(
+            graph_key_of(&Key::Named(NamedKey::Escape)),
+            Some(git_graph::GraphKey::Escape)
+        );
+        for other in [
+            Key::Named(NamedKey::PageDown),
+            Key::Named(NamedKey::PageUp),
+            Key::Named(NamedKey::ArrowLeft),
+            Key::Named(NamedKey::ArrowRight),
+            Key::Named(NamedKey::Space),
+            Key::Named(NamedKey::Tab),
+            Key::Character(SmolStr::new("g")),
+        ] {
+            assert_eq!(graph_key_of(&other), None, "{other:?} is not the graph's");
+        }
+        // And none of the six is a row of the chord registry — see
+        // [`graph_key_of`] for why a seat-local key is not a binding.
+        for binding in shortcuts::BINDINGS {
+            assert!(
+                !matches!(
+                    binding.chord.key,
+                    shortcuts::ChordKey::Named(
+                        NamedKey::ArrowUp
+                            | NamedKey::ArrowDown
+                            | NamedKey::Home
+                            | NamedKey::End
+                            | NamedKey::Enter
+                            | NamedKey::Escape
+                    )
+                ),
+                "{:?} claims a key the graph answers bare",
+                binding.action
+            );
+        }
     }
 
     // ── the overlay's z-order (user ruling 2026-08-12) ──────────────────────

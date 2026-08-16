@@ -1316,13 +1316,25 @@ fn commit_row(
         // R16 puts the author in the tooltip and never in the row: a 240-pixel
         // column has room for the message or for who wrote it, and on a machine
         // where almost every commit is yours the message is the one that varies.
+        //
+        // **R16 still holds *here*** after v2 ① gave the graph an author column
+        // (V1): the ruling was about a 240-pixel column, and this is still that
+        // column. What the two surfaces share is the sentence — the graph writes
+        // the same `Name <email>` in its own tooltip, through
+        // [`crate::git_graph::author_sentence`], so one commit does not describe
+        // its author two ways on one screen.
         tooltip: if merge {
             format!(
                 "Merge commit — another branch's history joins here\n{}\n{}",
-                commit.subject, commit.author
+                commit.subject,
+                crate::git_graph::author_sentence(commit)
             )
         } else {
-            format!("{}\n{}", commit.subject, commit.author)
+            format!(
+                "{}\n{}",
+                commit.subject,
+                crate::git_graph::author_sentence(commit)
+            )
         },
         hash: commit.hash.clone(),
         short: commit.short.clone(),
@@ -2861,7 +2873,8 @@ mod tests {
             hash: format!("{short}0000000000000000000000000000000000"),
             short: short.to_owned(),
             subject: subject.to_owned(),
-            author: "Weiyi".to_owned(),
+            author_name: "Weiyi".to_owned(),
+            author_email: "weiyi@example.com".to_owned(),
             committer_unix: 1_760_000_000,
             committer_offset: 0,
             time_relative: "2h".to_owned(),

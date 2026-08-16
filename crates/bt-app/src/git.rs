@@ -728,8 +728,21 @@ pub struct GitCommit {
     /// for a big enough history.
     pub short: String,
     pub subject: String,
-    /// In the tooltip and never in the row (R16).
-    pub author: String,
+    /// Who wrote it — `%an`, git's own spelling of the name.
+    ///
+    /// **In the row since v2 ① (2026-08-16)**, where it is a column of its own
+    /// (V1/V4). It was "in the tooltip and never in the row" (R16) for as long as
+    /// the graph had four columns and no room for a fifth; the table has room,
+    /// and a history nobody can see the authorship of is the one question a
+    /// reader brings to a graph that the graph would not answer.
+    pub author_name: String,
+    /// The same person's `%ae`.
+    ///
+    /// **Tooltip only, and that is the ruling rather than a shortage of pixels**
+    /// (V4): an address is how you *reach* somebody, and a column of them would
+    /// be a column of the same domain repeated down the page. The name is the
+    /// fact a reader is scanning for; the address is the fact they ask for once.
+    pub author_email: String,
     pub committer_unix: i64,
     /// The commit's own UTC offset in seconds — what makes `Aug 5` the date the
     /// commit was made in, which is the date git itself prints.
@@ -1035,27 +1048,33 @@ pub fn parse_name_status(bytes: &[u8]) -> Vec<GitCommitFile> {
 pub fn parse_log(bytes: &[u8], now_unix: i64, skip: usize, wanted: usize) -> GitLog {
     let text = String::from_utf8_lossy(bytes);
     let fields: Vec<&str> = text.split('\0').collect();
-    // Seven fields per commit, NUL between them and a NUL after the last — so
+    // Eight fields per commit, NUL between them and a NUL after the last — so
     // the whole stream divides evenly and `chunks_exact` drops the terminator's
     // empty tail without having to know whether git wrote a separator or a
     // terminator.
+    //
+    // Eight since v2 ① (2026-08-16): `%ae` sits beside `%an` because the author
+    // column and its tooltip are one fact read twice, and a second `git log` to
+    // learn the address of a commit already on screen would be a second reading
+    // of the same history (R31's whole objection).
     let mut commits: Vec<GitCommit> = fields
-        .chunks_exact(7)
+        .chunks_exact(8)
         .map(|record| {
-            let (committer_unix, committer_offset) = parse_iso_strict(record[3]).unwrap_or((0, 0));
+            let (committer_unix, committer_offset) = parse_iso_strict(record[4]).unwrap_or((0, 0));
             GitCommit {
                 hash: record[0].to_owned(),
                 short: record[1].to_owned(),
-                author: record[2].to_owned(),
+                author_name: record[2].to_owned(),
+                author_email: record[3].to_owned(),
                 committer_unix,
                 committer_offset,
                 time_relative: relative_time(committer_unix, committer_offset, now_unix),
-                subject: record[4].to_owned(),
+                subject: record[5].to_owned(),
                 // Space-separated by `%P`, and empty for the root commit — which
                 // is an empty list rather than a missing one, because the root
                 // genuinely has no parents.
-                parents: record[5].split_whitespace().map(str::to_owned).collect(),
-                refs: parse_decoration(record[6]),
+                parents: record[6].split_whitespace().map(str::to_owned).collect(),
+                refs: parse_decoration(record[7]),
             }
         })
         .collect();
@@ -1474,7 +1493,14 @@ pub fn answer(
                     // `--decorate=full` is what makes `%D` say which *kind* of
                     // ref each name is — see [`parse_decoration`].
                     OsStr::new("--decorate=full"),
-                    OsStr::new("--format=%H%x00%h%x00%an%x00%cI%x00%s%x00%P%x00%D"),
+                    // `%ae` joined `%an` in v2 ① (2026-08-16). It is a *field of
+                    // the same record*, not a second command: one more NUL and
+                    // one more `chunks_exact` stride, which is why the page
+                    // append invariant in `GitCache::accept` is untouched —
+                    // that invariant is about how many commits a page holds and
+                    // where it starts, and neither is a function of how many
+                    // fields a commit is spelled with.
+                    OsStr::new("--format=%H%x00%h%x00%an%x00%ae%x00%cI%x00%s%x00%P%x00%D"),
                     OsStr::new(&limit),
                     OsStr::new(&skipped),
                 ],
@@ -2382,7 +2408,10 @@ mod tests {
 
     /// `log --parents --topo-order -z` with this module's format: a merge commit
     /// with **two** parents, then two ordinary commits.
-    const LOG_Z: &[u8] = b"36d3949271716f6d8cd1395f6f5606245c08b914\x0036d3949\x00T\x002026-08-15T10:18:24-04:00\x00merge other\x005a18cfe67ca341203166040bfc8f954b899e275e 91d138a3d39811755e479ec386b450a8c8465302\x00HEAD -> refs/heads/main, refs/remotes/origin/main\x0091d138a3d39811755e479ec386b450a8c8465302\x0091d138a\x00T\x002026-08-15T10:17:57-04:00\x00other\x00a4499ab318aa13e08d780a084fe865fa8d18e558\x00refs/heads/other\x005a18cfe67ca341203166040bfc8f954b899e275e\x005a18cfe\x00T\x002026-08-15T10:18:07-04:00\x00ahead2\x00452220ba3687b9dcf3399962a69310de387b7af9\x00\x00";
+    ///
+    /// Re-recorded 2026-08-16 with `%ae` beside `%an` (v2 ①) — eight fields a
+    /// record where there were seven.
+    const LOG_Z: &[u8] = b"36d3949271716f6d8cd1395f6f5606245c08b914\x0036d3949\x00T\x00t@example.com\x002026-08-15T10:18:24-04:00\x00merge other\x005a18cfe67ca341203166040bfc8f954b899e275e 91d138a3d39811755e479ec386b450a8c8465302\x00HEAD -> refs/heads/main, refs/remotes/origin/main\x0091d138a3d39811755e479ec386b450a8c8465302\x0091d138a\x00T\x00t@example.com\x002026-08-15T10:17:57-04:00\x00other\x00a4499ab318aa13e08d780a084fe865fa8d18e558\x00refs/heads/other\x005a18cfe67ca341203166040bfc8f954b899e275e\x005a18cfe\x00T\x00t@example.com\x002026-08-15T10:18:07-04:00\x00ahead2\x00452220ba3687b9dcf3399962a69310de387b7af9\x00\x00";
 
     /// The instant the `BRANCHES` and `LOG_Z` recordings were made, so that every
     /// age in these tests is a fixed number rather than whatever the clock says
@@ -2711,7 +2740,8 @@ mod tests {
         assert_eq!(merge.hash, "36d3949271716f6d8cd1395f6f5606245c08b914");
         assert_eq!(merge.short, "36d3949", "git's abbreviation, not our cut");
         assert_eq!(merge.subject, "merge other");
-        assert_eq!(merge.author, "T");
+        assert_eq!(merge.author_name, "T");
+        assert_eq!(merge.author_email, "t@example.com");
         assert_eq!(
             merge.parents,
             vec![
@@ -2741,6 +2771,26 @@ mod tests {
             vec!["452220ba3687b9dcf3399962a69310de387b7af9".to_owned()],
             "one parent is a list of one, not an absence"
         );
+    }
+
+    /// v2 ① (V1/V4) — the author column's two facts arrive with the page.
+    ///
+    /// The assertion is on **every** record and not on the first, because what
+    /// `%ae` really changed is the *stride*: a record is eight fields where it
+    /// was seven, and a parser that read the new field but kept counting in
+    /// sevens would still get the first commit right and every commit after it
+    /// wrong. Checking the last one is checking the arithmetic.
+    #[test]
+    fn every_commit_of_a_page_carries_the_name_and_the_address_of_its_author() {
+        let page = parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE);
+        assert_eq!(page.commits.len(), 3);
+        for commit in &page.commits {
+            assert_eq!(commit.author_name, "T");
+            assert_eq!(commit.author_email, "t@example.com");
+        }
+        // And the fields *after* the two new ones still land where they belong.
+        assert_eq!(page.commits[2].subject, "ahead2");
+        assert_eq!(page.commits[2].short, "5a18cfe");
     }
 
     /// PIN — a page knows whether there is another, without counting the
@@ -3311,7 +3361,8 @@ mod tests {
             hash: subject.to_owned(),
             short: subject.to_owned(),
             subject: subject.to_owned(),
-            author: "T".to_owned(),
+            author_name: "T".to_owned(),
+            author_email: "t@example.com".to_owned(),
             committer_unix: RECORDED_AT,
             committer_offset: 0,
             time_relative: "now".to_owned(),

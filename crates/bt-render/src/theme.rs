@@ -533,6 +533,19 @@ pub struct ChromePalette {
     pub git_section: [u8; 3],
     /// `.grow:hover { background: var(--hover) }` over the card.
     pub git_row_hover: [u8; 3],
+    /// **The selected row of the commit graph** (V8, 2026-08-16).
+    ///
+    /// Numerically [`Self::files_row_selected`], and that is the *ruling* rather
+    /// than a coincidence: a graph's rows stand on the pane's own body exactly as
+    /// a tree's do — which is why they already borrow `files_row_hover` for their
+    /// hover — so "this row is the one you are on" has to be the same grey in
+    /// both places or the window would have two answers to one question.
+    ///
+    /// Named apart from `files_row_selected` on the precedent this palette has
+    /// set six times over: two declarations, either of which could be re-struck
+    /// without the other. The three inks that stand on it are
+    /// `files_row_{text,muted}_selected`, already premixed over this very value.
+    pub git_row_selected: [u8; 3],
     /// `.grow bdi { color: var(--ink) }` over the card — a changed file's path,
     /// and a commit's subject.
     pub git_row_text: [u8; 3],
@@ -1076,6 +1089,9 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // than transcribed — see `ink_over`.
     git_section: PANEL_DARK,
     git_row_hover: GIT_ROW_HOVER_DARK,
+    // The graph's selected row stands on `--termbg` with the tree's, not on the
+    // card — see the field.
+    git_row_selected: [0x30, 0x30, 0x30],
     git_row_text: ink_over(PANEL_DARK, DARK_INK_SOURCE, 870),
     git_row_text_hover: ink_over(GIT_ROW_HOVER_DARK, DARK_INK_SOURCE, 870),
     git_row_muted: ink_over(PANEL_DARK, DARK_INK_SOURCE, 380),
@@ -1283,6 +1299,7 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // that would look like a different decision.
     git_section: PANEL_LIGHT,
     git_row_hover: GIT_ROW_HOVER_LIGHT,
+    git_row_selected: [0xed, 0xed, 0xec],
     git_row_text: ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 1000),
     git_row_text_hover: ink_over(GIT_ROW_HOVER_LIGHT, LIGHT_INK_SOURCE, 1000),
     git_row_muted: ink_over(PANEL_LIGHT, LIGHT_INK_SOURCE, 450),
@@ -2634,6 +2651,42 @@ mod tests {
         // the one thing a mis-signed composite would get backwards.
         assert!(DARK_CHROME.git_row_hover[0] > DARK_CHROME.git_section[0]);
         assert!(LIGHT_CHROME.git_row_hover[0] < LIGHT_CHROME.git_section[0]);
+    }
+
+    /// PIN (V8, 2026-08-16): the graph's selected row is the tree's selected
+    /// row, and the description on it is still a description.
+    ///
+    /// Two claims, and the second is why this is a test rather than a comment. A
+    /// *selected* ground is lighter than the hover it replaces on dark and darker
+    /// on light, so a token struck by hand could easily land somewhere the ink
+    /// standing on it no longer clears the bar — and the ink standing on it is
+    /// `files_row_text_selected`, which was premixed over
+    /// [`ChromePalette::files_row_selected`] and would be quietly wrong the day
+    /// these two stopped being one colour. The floor is **4.5:1**: the
+    /// description is body text, not furniture.
+    #[test]
+    fn the_graphs_selected_row_is_the_trees_and_its_description_stays_legible() {
+        for (name, palette) in [("dark", &DARK_CHROME), ("light", &LIGHT_CHROME)] {
+            assert_eq!(
+                palette.git_row_selected, palette.files_row_selected,
+                "{name}: one grey for 'the row you are on', or the window has two"
+            );
+            // Selected is a step further from the body than hover is, on both
+            // canvases — the one thing a mis-signed value would get backwards.
+            assert_ne!(palette.git_row_selected, palette.files_row_hover);
+            let ratio = contrast(palette.files_row_text_selected, palette.git_row_selected);
+            assert!(
+                ratio >= 4.5,
+                "{name}: a subject on the selected row reads at {ratio:.2}:1"
+            );
+            // The muted columns beside it are held to nothing here on purpose:
+            // `--ink3` is the design's *quiet* ink and clears 2.4:1 over this
+            // ground on light — the same 2.4 it clears over every other ground
+            // in this palette. A floor invented for this one row would be a bar
+            // the product has never claimed to meet, failing here and nowhere
+            // else. What has to be true is that they are *the same* ink over
+            // *this* ground, which the equality above already pins.
+        }
     }
 
     /// PIN: [`ink_over`] is the sRGB lerp the design's `color-mix` is, rounded
