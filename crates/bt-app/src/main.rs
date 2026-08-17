@@ -2290,32 +2290,40 @@ fn scroll_bar_layer(
 /// for the reason the block's bar learned the hard way: a surface that guessed
 /// would move its document sideways when the thumb went down.
 ///
-/// `content` is the document's own height — the same number
+/// `content` is the document's own extent **along `axis`** — the same number
 /// [`preview_document_max_scroll`] takes the page out of — so the bar's
 /// `overflow` and the clamp on the stored offset are one quantity by
 /// construction, and a thumb dragged to the far end of its track lands exactly
-/// where the wheel stops. The whole `scroll` is taken rather than its vertical
-/// half so that no caller can hand this the horizontal one.
+/// where the wheel stops. The whole `scroll` is taken and the axis picks out of
+/// it, so a caller cannot hand one axis's bar the other axis's offset.
+///
+/// **The axis was nailed down to `Vertical` here and is now a parameter** (user
+/// report, 2026-08-17). A diff does not reflow — `white-space: pre` is the whole
+/// of what a patch is — so a line longer than the pane runs off its right edge,
+/// and the extent for it was already computed and already reachable by
+/// `Shift`+wheel. What was missing was the *picture*: a page you can scroll and
+/// cannot see the extent of is a page you have to scroll to find the end of,
+/// which is the sentence this bar was written under in the first place. It was
+/// only ever true of one of the two axes.
 fn preview_body_bar(
     body: [f32; 4],
+    axis: preview::ScrollAxis,
     scroll: [f32; 2],
     content: f32,
     scale: f32,
 ) -> Option<preview::ScrollBar> {
+    let offset = match axis {
+        preview::ScrollAxis::Horizontal => scroll[0],
+        preview::ScrollAxis::Vertical => scroll[1],
+    };
     Some(
-        preview::scroll_bar(
-            body,
-            preview::ScrollAxis::Vertical,
-            scroll[1],
-            content,
-            scale,
-        )?
-        // **The target reaches inward, and stops at the surface's edge.** What
-        // is past that edge is a divider's band or the window's own resize
-        // border, and both of them are asked before this window's code is —
-        // see [`preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX`] for the real-machine
-        // finding that this closes.
-        .grown_inward(preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX * scale),
+        preview::scroll_bar(body, axis, offset, content, scale)?
+            // **The target reaches inward, and stops at the surface's edge.** What
+            // is past that edge is a divider's band or the window's own resize
+            // border, and both of them are asked before this window's code is —
+            // see [`preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX`] for the real-machine
+            // finding that this closes.
+            .grown_inward(preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX * scale),
     )
 }
 
@@ -3601,7 +3609,9 @@ struct TabState {
     /// the two above with the block taken out, kept beside them for the same
     /// reason and answering the same "there is one pointer".
     preview_body_drag: Option<PreviewBodyDrag>,
-    preview_body_hover: Option<PreviewSurface>,
+    /// Which bar the pointer is on — the surface *and* the axis, because a
+    /// surface can wear two and only the one under the hand lights.
+    preview_body_hover: Option<(PreviewSurface, preview::ScrollAxis)>,
     /// The surface and link under the pointer, the link held **by its box**
     /// rather than by an index into that surface's list — so a rebuild that moves
     /// or removes it simply stops matching, and there is no stale subscript to
@@ -5467,6 +5477,12 @@ struct PreviewBlockDrag {
 #[derive(Clone, Copy, Debug)]
 struct PreviewBodyDrag {
     surface: PreviewSurface,
+    /// Which of the surface's two bars is in hand.
+    ///
+    /// A surface can wear both at once — an unwrapped file longer and wider than
+    /// its pane — and a gesture that only knew *which surface* would move the
+    /// document down when the hand went sideways.
+    axis: preview::ScrollAxis,
     /// How far into the thumb's own length the hand took hold, so the thumb
     /// stays under the pointer rather than jumping its centre there.
     grab: f32,
@@ -11228,6 +11244,16 @@ enum RowHost {
     Column(SeatId),
     /// `#files-flyout` — a floating tree.
     Float(float::FloatId),
+    /// The **same column standing on its Git page** (user report, 2026-08-17).
+    ///
+    /// A third home for the one gesture and not a third gesture: a row naming a
+    /// file is a row naming a file, and the files tree has answered a resting
+    /// hand with a glance since P143. The Git page is the same column showing
+    /// the same place another way (§7.1.3g ①) and had no answer at all. It is
+    /// its own variant rather than a flag on `Column` because the two pages have
+    /// different rows, different geometry and different documents behind a row —
+    /// which is exactly the confusion this enum exists to prevent.
+    Git(SeatId),
 }
 
 /// A left press being held on one row of a files tree (P81).
@@ -11260,8 +11286,16 @@ struct FilePeek {
     /// a peek keyed on anything that those three do not share would restart its
     /// 350ms on each of them and therefore never fire.
     key: String,
-    /// The full path this row resolves to, taken when the intent was armed.
-    path: PathBuf,
+    /// **What this row resolves to**, taken when the intent was armed.
+    ///
+    /// A `PathBuf` stood here, and it was the whole of why the Git page could
+    /// not have a glance: a change row is about a file on a disk, but a row
+    /// under an expanded commit is about a *reading* of a file that only git
+    /// can produce, and there is no path that names it. The card's surface has
+    /// always been pointed at a [`preview::PreviewSource`] one line later
+    /// (`mature_file_peek`), so what this field carried was a path that was
+    /// immediately turned back into the identity it should have been all along.
+    source: preview::PreviewSource,
     name: String,
     /// The row's box, which is what the card is placed against.
     rect: [f32; 4],
@@ -11324,7 +11358,10 @@ struct FilePeek {
 /// layout, which is why it is asked for separately and only once the shape of the
 /// card has been decided. See [`Runtime::file_peek_layer`].
 struct FilePeekSubject {
-    path: PathBuf,
+    /// The file on the disk this glance is about, when it is about one. `None`
+    /// for a composed document — a commit's reading of a file is on no disk, and
+    /// the one thing this field is for is the picture lane.
+    path: Option<PathBuf>,
     name: String,
     ftype: preview::PreviewFtype,
     /// Whether the buffer has refused to be read at all — a network path, a
@@ -13482,10 +13519,14 @@ fn git_document_answer(
         git::GitAnswer::Diff {
             root,
             path,
-            staged,
+            against,
             outcome,
         } => Ok((
-            preview::PreviewSource::GitDiff { root, path, staged },
+            preview::PreviewSource::GitDiff {
+                root,
+                path,
+                against,
+            },
             outcome,
         )),
         git::GitAnswer::Show {
@@ -13530,10 +13571,14 @@ fn git_document_question(
     renamed_from: Option<String>,
 ) -> Option<git::GitQuestion> {
     match source {
-        preview::PreviewSource::GitDiff { root, path, staged } => Some(git::GitQuestion::Diff {
+        preview::PreviewSource::GitDiff {
+            root,
+            path,
+            against,
+        } => Some(git::GitQuestion::Diff {
             root: root.clone(),
             path: path.clone(),
-            staged: *staged,
+            against: *against,
             renamed_from,
         }),
         preview::PreviewSource::GitShow { root, hash, path } => Some(git::GitQuestion::Show {
@@ -15390,6 +15435,17 @@ impl Runtime {
                 };
                 let body = seats::files_pane_geometry(rect, git_scale, true).body;
                 let geometry = git_panel::git_panel_geometry(body, &page, git_scale);
+                // Which row the verbs are showing on — the same predicate the
+                // painter uses, because a tip is a promise about something on
+                // screen and a hover verb on a resting row is not (see
+                // `git_panel::GIT_ACT_REVEAL`).
+                let revealed_row = match self.seat_pointer.hover {
+                    Some(seats::ChromeTarget::GitRow { seat: on, index })
+                    | Some(seats::ChromeTarget::GitAct {
+                        seat: on, index, ..
+                    }) if on == seat => Some(index),
+                    _ => None,
+                };
                 for (index, row) in page.rows.iter().enumerate() {
                     let box_ = geometry.row_rect(index);
                     // A row scrolled out from under the viewport has no tip:
@@ -15419,7 +15475,9 @@ impl Runtime {
                         row,
                         git_panel::GitRow::Change(change) if change.untracked
                     );
-                    for (act, act_box) in git_panel::act_boxes(row, box_, git_scale) {
+                    for (act, act_box) in
+                        git_panel::act_boxes(row, box_, git_scale, revealed_row == Some(index))
+                    {
                         anchors.push(
                             tooltip::TooltipAnchorId::GitAct(seat, index, act),
                             act_box,
@@ -19837,7 +19895,7 @@ impl Runtime {
         }
         if self
             .preview_body_hover
-            .is_some_and(|surface| !alive.contains(&surface))
+            .is_some_and(|(surface, _)| !alive.contains(&surface))
         {
             self.preview_body_hover = None;
         }
@@ -20238,7 +20296,10 @@ impl Runtime {
         {
             self.preview_body_drag = None;
         }
-        if self.preview_body_hover == Some(surface) {
+        if self
+            .preview_body_hover
+            .is_some_and(|(hovered, _)| hovered == surface)
+        {
             self.preview_body_hover = None;
         }
         if self
@@ -20767,12 +20828,44 @@ impl Runtime {
     fn preview_surface_bar(
         &self,
         surface: PreviewSurface,
+        axis: preview::ScrollAxis,
         body: [f32; 4],
         scale: f32,
     ) -> Option<preview::ScrollBar> {
         let scroll = self.preview_pane(surface)?.scroll;
-        let content = self.preview_surface_document_height(surface, body, scale);
-        preview_body_bar(body, scroll, content, scale)
+        let content = match axis {
+            // **The width the offset is already clamped against**, read back out
+            // of the clamp rather than measured a second time: `max_scroll` is
+            // `content - page` by construction in every one of the four
+            // geometries, so `page + max_scroll` is the content, exactly, for
+            // all of them — and a bar built from a second measurement is a thumb
+            // that stops where the wheel does not.
+            preview::ScrollAxis::Horizontal => {
+                let page = body[2] - body[0];
+                page + self.preview_max_scroll(surface, body, scale)[0]
+            }
+            preview::ScrollAxis::Vertical => {
+                self.preview_surface_document_height(surface, body, scale)
+            }
+        };
+        preview_body_bar(body, axis, scroll, content, scale)
+    }
+
+    /// Both of a surface's bars, in the order their offsets sit in `scroll`.
+    ///
+    /// A surface wears none, one or two: a wrapped markdown page has no
+    /// horizontal axis at all, a short wide patch has only the horizontal, and
+    /// an unwrapped source file longer and wider than its pane has both.
+    fn preview_surface_bars(
+        &self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> [Option<preview::ScrollBar>; 2] {
+        [
+            self.preview_surface_bar(surface, preview::ScrollAxis::Horizontal, body, scale),
+            self.preview_surface_bar(surface, preview::ScrollAxis::Vertical, body, scale),
+        ]
     }
 
     /// That bar, painted — or nothing when the whole document fits.
@@ -20780,19 +20873,25 @@ impl Runtime {
     /// A layer of its own, above whatever it is riding over: see
     /// [`scroll_bar_layer`] for why a bar cannot be more quads on the surface it
     /// belongs to.
-    fn preview_body_bar_layer(
+    fn preview_body_bar_layers(
         &self,
         surface: PreviewSurface,
         body: [f32; 4],
         scale: f32,
-    ) -> Option<marks::OverlayLayer> {
-        let bar = self.preview_surface_bar(surface, body, scale)?;
-        let state = ScrollThumbState::of(
-            self.preview_body_drag
-                .is_some_and(|drag| drag.surface == surface),
-            self.preview_body_hover == Some(surface),
-        );
-        Some(scroll_bar_layer(&bar, state, &bt_render::chrome_palette()))
+    ) -> Vec<marks::OverlayLayer> {
+        let palette = bt_render::chrome_palette();
+        self.preview_surface_bars(surface, body, scale)
+            .into_iter()
+            .flatten()
+            .map(|bar| {
+                let state = ScrollThumbState::of(
+                    self.preview_body_drag
+                        .is_some_and(|drag| drag.surface == surface && drag.axis == bar.axis),
+                    self.preview_body_hover == Some((surface, bar.axis)),
+                );
+                scroll_bar_layer(&bar, state, &palette)
+            })
+            .collect()
     }
 
     /// Every **docked** preview pane's bar, in seat order.
@@ -20807,20 +20906,24 @@ impl Runtime {
         self.seats
             .preview_seats()
             .into_iter()
-            .filter_map(|seat| {
+            .flat_map(|seat| {
                 let surface = PreviewSurface::Seat(seat);
-                let body = self.preview_surface_body_rect(surface, scale)?;
-                self.preview_body_bar_layer(surface, body, scale)
+                let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+                    return Vec::new();
+                };
+                self.preview_body_bar_layers(surface, body, scale)
             })
             .collect()
     }
 
-    /// One preview float's bar, on its own layer above that window.
-    fn preview_float_bar_layer(&self, id: float::FloatId) -> Option<marks::OverlayLayer> {
+    /// One preview float's bars, on their own layers above that window.
+    fn preview_float_bar_layers(&self, id: float::FloatId) -> Vec<marks::OverlayLayer> {
         let scale = self.renderer.metrics().scale_factor as f32;
         let surface = PreviewSurface::Float(id);
-        let body = self.preview_surface_body_rect(surface, scale)?;
-        self.preview_body_bar_layer(surface, body, scale)
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            return Vec::new();
+        };
+        self.preview_body_bar_layers(surface, body, scale)
     }
 
     /// The body bar the pointer is on, and the surface wearing it.
@@ -20836,12 +20939,23 @@ impl Runtime {
         let scale = self.renderer.metrics().scale_factor as f32;
         let at = [position.x as f32, position.y as f32];
         let (surface, body) = self.preview_surface_at(position)?;
-        let bar = self.preview_surface_bar(surface, body, scale)?;
-        (bar.grab[0] <= at[0]
-            && at[0] <= bar.grab[2]
-            && bar.grab[1] <= at[1]
-            && at[1] <= bar.grab[3])
-            .then_some((surface, bar))
+        // **The vertical one first**, which decides the one place the two can
+        // both answer: the corner where a right-edge rule and a bottom-edge rule
+        // cross, each grown sixteen pixels inward. Down is the gesture a hand
+        // arriving at a scrollbar nearly always means, and giving the corner to
+        // whichever happened to be asked first is how a corner becomes a
+        // coin toss.
+        let [across, down] = self.preview_surface_bars(surface, body, scale);
+        [down, across]
+            .into_iter()
+            .flatten()
+            .find(|bar| {
+                bar.grab[0] <= at[0]
+                    && at[0] <= bar.grab[2]
+                    && bar.grab[1] <= at[1]
+                    && at[1] <= bar.grab[3]
+            })
+            .map(|bar| (surface, bar))
     }
 
     /// A press on a body's scroll thumb takes hold of it.
@@ -20855,11 +20969,18 @@ impl Runtime {
         let Some((surface, bar)) = self.preview_body_bar_under(position) else {
             return Ok(false);
         };
+        // Along the bar's own axis, which is what makes the two one gesture:
+        // the hand holds the thumb where it took hold of it, sideways or down.
+        let (near, far) = match bar.axis {
+            preview::ScrollAxis::Horizontal => (bar.thumb[0], bar.thumb[2]),
+            preview::ScrollAxis::Vertical => (bar.thumb[1], bar.thumb[3]),
+        };
         self.preview_body_drag = Some(PreviewBodyDrag {
             surface,
-            grab: (position.y as f32 - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1]),
+            axis: bar.axis,
+            grab: (bar.along([position.x as f32, position.y as f32]) - near).clamp(0.0, far - near),
         });
-        self.preview_body_hover = Some(surface);
+        self.preview_body_hover = Some((surface, bar.axis));
         self.repaint_preview()?;
         Ok(true)
     }
@@ -20879,7 +21000,7 @@ impl Runtime {
         let Some(body) = self.preview_surface_body_rect(drag.surface, scale) else {
             return Ok(true);
         };
-        let Some(bar) = self.preview_surface_bar(drag.surface, body, scale) else {
+        let Some(bar) = self.preview_surface_bar(drag.surface, drag.axis, body, scale) else {
             // The document stopped overflowing — the pane grew, the file
             // changed. The gesture still owns the pointer until the button comes
             // up; there is simply nothing left for it to move.
@@ -20888,10 +21009,13 @@ impl Runtime {
         let along = bar.along([position.x as f32, position.y as f32]);
         let wanted = preview::scroll_dragged_to(&bar, along, drag.grab);
         let scroll = self.preview_pane_mut(drag.surface).scroll;
-        if (wanted - scroll[1]).abs() < f32::EPSILON {
+        let axis = usize::from(drag.axis == preview::ScrollAxis::Vertical);
+        if (wanted - scroll[axis]).abs() < f32::EPSILON {
             return Ok(true);
         }
-        let scrolled = self.clamped_preview_scroll(drag.surface, body, scale, [scroll[0], wanted]);
+        let mut asked = scroll;
+        asked[axis] = wanted;
+        let scrolled = self.clamped_preview_scroll(drag.surface, body, scale, asked);
         self.preview_pane_mut(drag.surface).scroll = scrolled;
         self.repaint_preview()?;
         Ok(true)
@@ -20901,7 +21025,7 @@ impl Runtime {
     fn note_preview_body_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
         let over = position
             .and_then(|position| self.preview_body_bar_under(position))
-            .map(|(surface, _)| surface);
+            .map(|(surface, bar)| (surface, bar.axis));
         if over == self.preview_body_hover {
             return Ok(());
         }
@@ -23628,6 +23752,30 @@ impl Runtime {
                             // Evicted, or never opened — the cancellation,
                             // arriving as a dropped result.
                             let Some(buffer) = tab.preview_pool.get_mut(&source) else {
+                                // **The glance's own slot**, exactly as a head
+                                // read's answer finds it (`apply_preview_results`):
+                                // a hover over a commit's file asks git and never
+                                // enters the pool, so its answer lands here or
+                                // nowhere. Matched by source, so a pointer that
+                                // has moved on is the cancellation arriving as a
+                                // dropped result.
+                                if let Some(peek) = self
+                                    .peek_buffer
+                                    .as_mut()
+                                    .filter(|peek| peek.source == source)
+                                {
+                                    match outcome {
+                                        Ok(text) => peek.accept(preview::HeadOutcome::Read {
+                                            text,
+                                            truncated: false,
+                                            mtime: None,
+                                        }),
+                                        Err(fault) => {
+                                            peek.decline(git_panel::fault_sentence(&fault));
+                                        }
+                                    }
+                                    body |= index == self.active_tab;
+                                }
                                 continue;
                             };
                             match outcome {
@@ -24615,7 +24763,15 @@ impl Runtime {
                 .and_then(git::GitSlot::ready)
                 .map(Vec::as_slice);
             let renderer = &mut self.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
+                renderer.measure_chrome_label(
+                    text,
+                    size,
+                    face.weight,
+                    face.letter_spacing_em,
+                    face.tabular_numerals,
+                )
+            };
             let mut content = git_graph::build(
                 &state,
                 git_graph::GraphLook {
@@ -25269,7 +25425,15 @@ impl Runtime {
                 .get(&seat)
                 .is_some_and(|state| state.git_remotes_open);
             let renderer = &mut self.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
+                renderer.measure_chrome_label(
+                    text,
+                    size,
+                    face.weight,
+                    face.letter_spacing_em,
+                    face.tabular_numerals,
+                )
+            };
             let mut content = git_panel::build(
                 &cache,
                 git_panel::GitPanelLook {
@@ -25529,6 +25693,13 @@ impl Runtime {
     fn row_geometry(&mut self, host: RowHost) -> Option<seats::FilesTreeGeometry> {
         let scale = self.renderer.metrics().scale_factor as f32;
         match host {
+            // A Git page is not a tree and has no tree geometry. Everything that
+            // needs a row's rectangle asks [`Self::peek_row_rect`], which knows
+            // both; this function answers only for the two hosts that really are
+            // one list, and answering `None` here rather than inventing a
+            // geometry is what keeps a drag from starting on a page that has no
+            // rows to drag.
+            RowHost::Git(_) => None,
             RowHost::Column(seat) => {
                 let trees = self.files_trees(Instant::now());
                 let segmented = self.git_panel_on();
@@ -25562,6 +25733,9 @@ impl Runtime {
     /// The rows one host is showing, and the root they hang off.
     fn host_rows(&mut self, host: RowHost) -> Option<(String, Vec<files::TreeRow>)> {
         match host {
+            // The Git page's rows are not tree rows — see [`Self::peek_row`],
+            // which is where the three hosts meet.
+            RowHost::Git(_) => None,
             RowHost::Column(seat) => {
                 let root = self.files_state(seat).root;
                 let trees = self.files_trees(Instant::now());
@@ -25775,19 +25949,13 @@ impl Runtime {
         let Some((host, index)) = host.filter(|_| self.drag.is_none()) else {
             return self.release_file_peek(now);
         };
-        let Some((_, rows)) = self.host_rows(host) else {
-            return self.release_file_peek(now);
-        };
-        let Some(row) = rows
-            .get(index)
-            .filter(|row| matches!(row.kind, files::RowKind::File))
-        else {
+        let Some((key, _, _)) = self.peek_row(host, index) else {
             return self.release_file_peek(now);
         };
         if self
             .file_peek
             .as_ref()
-            .is_some_and(|peek| peek.host == host && peek.key == row.key)
+            .is_some_and(|peek| peek.host == host && peek.key == key)
         {
             // The card's own row, reached from outside its corridor — which is
             // only possible while the intent is still counting down, since a
@@ -25813,18 +25981,11 @@ impl Runtime {
     /// directory, a notice, a column pointed at nothing, a tree that has not been
     /// laid out yet.
     fn armed_file_peek(&mut self, host: RowHost, index: usize, now: Instant) -> Option<FilePeek> {
-        let (root, rows) = self.host_rows(host)?;
-        if root.is_empty() {
-            return None;
-        }
-        let row = rows
-            .get(index)
-            .filter(|row| matches!(row.kind, files::RowKind::File))?;
-        let (key, name) = (row.key.clone(), row.name.clone());
-        let rect = self.row_geometry(host)?.row_rect(index);
+        let (key, name, source) = self.peek_row(host, index)?;
+        let rect = self.peek_row_rect(host, index)?;
         Some(FilePeek {
             host,
-            path: files::full_path(&root, &key),
+            source,
             key,
             name,
             rect,
@@ -25835,6 +25996,69 @@ impl Runtime {
             thumb_grab: None,
             dwell: None,
         })
+    }
+
+    /// **What a glance over this row would be about** — its identity, the name
+    /// on the card's head, and the document behind it.
+    ///
+    /// One function for all three hosts, because "which row is this and what is
+    /// it about" is one question however the row is drawn. `None` for every row
+    /// that offers no glance: a directory, a notice, a branch, a commit, a
+    /// heading, a column pointed at nothing.
+    fn peek_row(
+        &mut self,
+        host: RowHost,
+        index: usize,
+    ) -> Option<(String, String, preview::PreviewSource)> {
+        match host {
+            RowHost::Column(_) | RowHost::Float(_) => {
+                let (root, rows) = self.host_rows(host)?;
+                if root.is_empty() {
+                    return None;
+                }
+                let row = rows
+                    .get(index)
+                    .filter(|row| matches!(row.kind, files::RowKind::File))?;
+                let (key, name) = (row.key.clone(), row.name.clone());
+                let path = files::full_path(&root, &key);
+                Some((key, name, preview::PreviewSource::file(path)))
+            }
+            RowHost::Git(seat) => self.git_peek_row(seat, index),
+        }
+    }
+
+    /// The same, for a row of a column's Git page — the *page's* answer
+    /// ([`git_panel::row_peek`]) with this column's repository put in front of
+    /// it, which is all this window contributes.
+    fn git_peek_row(
+        &self,
+        seat: SeatId,
+        index: usize,
+    ) -> Option<(String, String, preview::PreviewSource)> {
+        let root = self.git_trees.get(&seat).and_then(git::GitCache::root)?;
+        let row = self.git_pages_shown.get(&seat)?.rows.get(index)?;
+        let peek = git_panel::row_peek(row, root)?;
+        Some((peek.key, peek.name, peek.source))
+    }
+
+    /// Where the row a glance would stand beside is.
+    ///
+    /// The tree's geometry for a tree and the page's for the page — each read
+    /// from the same derivation its own painter used, which is what keeps the
+    /// card beside the row instead of beside where the row used to be.
+    fn peek_row_rect(&mut self, host: RowHost, index: usize) -> Option<[f32; 4]> {
+        match host {
+            RowHost::Column(_) | RowHost::Float(_) => {
+                Some(self.row_geometry(host)?.row_rect(index))
+            }
+            RowHost::Git(seat) => {
+                let scale = self.renderer.metrics().scale_factor as f32;
+                let rect = seats::files_pane_rect(&self.seat_layout, seat)?;
+                let body = seats::files_pane_geometry(rect, scale, true).body;
+                let page = self.git_pages_shown.get(&seat)?;
+                Some(git_panel::git_panel_geometry(body, page, scale).row_rect(index))
+            }
+        }
     }
 
     /// **The pointer resting on another row while a card is up** (user ruling,
@@ -25877,12 +26101,7 @@ impl Runtime {
         let over = host
             .filter(|_| self.drag.is_none())
             .and_then(|(host, index)| {
-                let (_, rows) = self.host_rows(host)?;
-                let key = rows
-                    .get(index)
-                    .filter(|row| matches!(row.kind, files::RowKind::File))?
-                    .key
-                    .clone();
+                let (key, _, _) = self.peek_row(host, index)?;
                 let showing = self
                     .file_peek
                     .as_ref()
@@ -26042,7 +26261,11 @@ impl Runtime {
         if peek.due.is_none_or(|due| due > now) {
             return false;
         }
-        let (path, name) = (peek.path.clone(), peek.name.clone());
+        let (source, name) = (peek.source.clone(), peek.name.clone());
+        let git_seat = match peek.host {
+            RowHost::Git(seat) => Some(seat),
+            RowHost::Column(_) | RowHost::Float(_) => None,
+        };
         if let Some(peek) = self.file_peek.as_mut() {
             peek.due = None;
         }
@@ -26051,9 +26274,6 @@ impl Runtime {
         // holds the parsed document, and re-aiming it per frame would be a
         // document key that changed per frame and a markdown file re-parsed at
         // sixty hertz.
-        // A glance is always over a row of a files tree, so what it is about is
-        // always a file.
-        let source = preview::PreviewSource::file(path);
         self.peek_pane = PreviewPane {
             buffer: Some(source.clone()),
             ..PreviewPane::default()
@@ -26083,6 +26303,24 @@ impl Runtime {
         let buffer = preview::PreviewBuffer::new(source.clone(), name);
         let wants_read = buffer.wants_head_read();
         self.peek_buffer = Some(buffer);
+        // **A composed document waits for git and never for a disk.** A glance
+        // over a commit's file is a `GitShow`, and `wants_head_read` answers
+        // `false` for it by construction — so without this the card would sit
+        // empty for as long as the hand did. The question is the one the *pane*
+        // would ask (`git_document_question`), on the column the glance is over,
+        // and its answer comes home through `apply_git_results`.
+        if let Some(seat) = git_seat
+            && let Some(question) = git_document_question(&source, None)
+        {
+            let tab = self.id;
+            if !self.git_worker.request(git::GitRequest {
+                host: git::GitHost::Column(LeafId { tab, seat }),
+                question,
+            }) {
+                self.disable_git_worker();
+            }
+            return true;
+        }
         if wants_read {
             let tab = self.id;
             if !self.preview_worker.request(preview::PreviewRequest {
@@ -26156,7 +26394,7 @@ impl Runtime {
         // row in the same breath it clears `due`, so the two cannot disagree.
         let buffer = self.preview_buffer_on(PreviewSurface::Peek)?;
         Some(FilePeekSubject {
-            path: peek.path.clone(),
+            path: peek.source.file_path().map(Path::to_path_buf),
             name: peek.name.clone(),
             ftype: preview::preview_ftype(&peek.name),
             // A network path or a type this window will not read says so in the
@@ -26294,9 +26532,12 @@ impl Runtime {
         // *capped* height, and the scroll bar's arithmetic needs the uncapped one
         // to know what share of it is showing.
         let mut document = 0.0_f32;
-        let body_kind = match subject.ftype {
-            preview::PreviewFtype::Image => self.file_peek_picture(&subject.path, scale),
-            preview::PreviewFtype::Unknown => file_peek::PeekBody::Refused,
+        let body_kind = match (subject.ftype, subject.path.as_deref()) {
+            // A picture is a picture of a *file*; nothing composed is one.
+            (preview::PreviewFtype::Image, Some(path)) => self.file_peek_picture(path, scale),
+            (preview::PreviewFtype::Image | preview::PreviewFtype::Unknown, _) => {
+                file_peek::PeekBody::Refused
+            }
             _ if subject.refused => file_peek::PeekBody::Refused,
             _ => {
                 let probe = [
@@ -26400,7 +26641,16 @@ impl Runtime {
         // reason: the body has to be drawn *above* the card's own face, and
         // the seats' document lane is a whole pass below the overlays.
         layer.body = self.build_preview_body_in(PreviewSurface::Peek, layout.body);
-        let Some(bar) = preview_body_bar(layout.body, scroll, document, scale) else {
+        // **The card wears one bar and it is the vertical one.** A glance is a
+        // three-hundred-pixel mirror of a pane, and a second rule along its
+        // bottom would be furniture arguing with the thing it is a glance at.
+        let Some(bar) = preview_body_bar(
+            layout.body,
+            preview::ScrollAxis::Vertical,
+            scroll,
+            document,
+            scale,
+        ) else {
             return vec![layer];
         };
         let state = ScrollThumbState::of(
@@ -26475,14 +26725,30 @@ impl Runtime {
                 if self.press_preview_block_thumb(position)? {
                     return Ok(true);
                 }
-                let Some(path) = self.file_peek.as_ref().map(|peek| peek.path.clone()) else {
+                let Some((host, source, name)) = self
+                    .file_peek
+                    .as_ref()
+                    .map(|peek| (peek.host, peek.source.clone(), peek.name.clone()))
+                else {
                     return Ok(false);
                 };
                 // Down before the pane opens rather than after: opening re-solves
                 // the layout, and a card left standing would be placed against a
                 // row that has just moved under it.
                 self.hide_file_peek();
-                self.open_preview(path)?;
+                // **The door leads where the row leads.** A glance over a file
+                // opens the file; a glance over a commit's file opens that
+                // commit's reading of it, through the very door the row itself
+                // uses — so pressing the card and pressing the row behind it
+                // arrive at one document and not at two.
+                match source.file_path().map(Path::to_path_buf) {
+                    Some(path) => self.open_preview(path)?,
+                    None => {
+                        if let RowHost::Git(seat) = host {
+                            self.open_git_document(seat, source, name, None)?;
+                        }
+                    }
+                }
                 Ok(true)
             }
         }
@@ -26555,6 +26821,7 @@ impl Runtime {
         // up with two answers.
         self.preview_surface_bar(
             PreviewSurface::Peek,
+            preview::ScrollAxis::Vertical,
             body,
             self.renderer.metrics().scale_factor as f32,
         )
@@ -27260,6 +27527,15 @@ impl Runtime {
             Some(seats::ChromeTarget::FilesRow { seat, index }) => {
                 Some((RowHost::Column(seat), index))
             }
+            // **A column on its Git page answers the same question** (user
+            // report, 2026-08-17). The verb inside a row counts as the row, the
+            // way a tree row's triangle and its name do: a hand crossing from a
+            // path to the `+` beside it has not left the row, and a glance that
+            // reset there would be a glance that never matured.
+            Some(seats::ChromeTarget::GitRow { seat, index })
+            | Some(seats::ChromeTarget::GitAct { seat, index, .. }) => {
+                Some((RowHost::Git(seat), index))
+            }
             _ => None,
         }
     }
@@ -27752,7 +28028,7 @@ impl Runtime {
                     preview::PreviewSource::GitDiff {
                         root,
                         path: path.clone(),
-                        staged: *group == git::GitGroup::Staged,
+                        against: group.diff_against(),
                     },
                     git_panel::git_document_name(path),
                     renamed_from.clone(),
@@ -30468,6 +30744,7 @@ impl Runtime {
             font,
             bt_render::ChromeLabelWeight::SemiBold,
             float::FLOAT_HEAD_TRACKING_EM,
+            false,
         )
     }
 
@@ -30496,10 +30773,14 @@ impl Runtime {
             // entrance would be a scrollbar arriving before its window.
             let opacity = window.opacity;
             layers.push(window);
-            layers.extend(self.preview_float_bar_layer(id).map(|mut bar| {
-                bar.opacity = opacity;
-                bar
-            }));
+            layers.extend(
+                self.preview_float_bar_layers(id)
+                    .into_iter()
+                    .map(|mut bar| {
+                        bar.opacity = opacity;
+                        bar
+                    }),
+            );
         }
         layers
     }
@@ -33430,11 +33711,11 @@ impl Runtime {
         // ground while the decode was out. Nothing else will move the pointer to
         // rebuild the chrome, so the frame is owed here — and the rebuild is what
         // asks for the resample, which is the next step of the same errand.
-        if self
-            .file_peek
-            .as_ref()
-            .is_some_and(|peek| normalized_local_image_path_key(&peek.path) == cache_key)
-            && self.refresh_overlay()
+        if self.file_peek.as_ref().is_some_and(|peek| {
+            peek.source
+                .file_path()
+                .is_some_and(|path| normalized_local_image_path_key(path) == cache_key)
+        }) && self.refresh_overlay()
         {
             self.present_chrome_change()?;
         }
@@ -43415,7 +43696,7 @@ mod tests {
             preview::PreviewSource::GitDiff {
                 root: PathBuf::from(r"C:\w\repo"),
                 path: "src/main.rs".to_owned(),
-                staged: true,
+                against: preview::GitDiffAgainst::Index,
             },
             "main.rs".to_owned(),
         );
@@ -55075,7 +55356,13 @@ mod tests {
                 rows_height,
                 columns,
             )[1];
-            match preview_body_bar(layout.body, [0.0, 0.0], height, scale) {
+            match preview_body_bar(
+                layout.body,
+                preview::ScrollAxis::Vertical,
+                [0.0, 0.0],
+                height,
+                scale,
+            ) {
                 Some(bar) => {
                     assert!(
                         clamp > 0.0,
@@ -55219,8 +55506,14 @@ mod tests {
             // ① Down the right edge of the body, never across it, and never past
             //    the bottom of the box the document is drawn in — the truncation
             //    bar and the foot stand below `body` and are not scrolled over.
-            let bar = preview_body_bar(body, [0.0, 0.0], content, SCALE)
-                .unwrap_or_else(|| panic!("{what}: a document four pages long wears a bar"));
+            let bar = preview_body_bar(
+                body,
+                preview::ScrollAxis::Vertical,
+                [0.0, 0.0],
+                content,
+                SCALE,
+            )
+            .unwrap_or_else(|| panic!("{what}: a document four pages long wears a bar"));
             assert_eq!(bar.axis, preview::ScrollAxis::Vertical, "{what}");
             assert_eq!([bar.track[1], bar.track[3]], [body[1], body[3]], "{what}");
             assert_eq!(bar.track[2], body[2], "{what}: the bar hugs the far edge");
@@ -55240,8 +55533,14 @@ mod tests {
             // ③ The thumb is a picture of the offset: at rest at the head of the
             //    track, at the end of the document at the end of it.
             assert_eq!(bar.thumb[1], body[1], "{what}: at rest, at the top");
-            let end = preview_body_bar(body, [0.0, bar.overflow], content, SCALE)
-                .expect("still overflowing");
+            let end = preview_body_bar(
+                body,
+                preview::ScrollAxis::Vertical,
+                [0.0, bar.overflow],
+                content,
+                SCALE,
+            )
+            .expect("still overflowing");
             assert!(
                 (end.thumb[3] - body[3]).abs() < 0.5,
                 "{what}: at the end of the file, at the end of the track"
@@ -55278,7 +55577,8 @@ mod tests {
             // ⑥ A document that fits wears nothing at all: a track with no thumb
             //    is a promise of somewhere to go in a pane that has nowhere.
             assert!(
-                preview_body_bar(body, [0.0, 0.0], page, SCALE).is_none(),
+                preview_body_bar(body, preview::ScrollAxis::Vertical, [0.0, 0.0], page, SCALE)
+                    .is_none(),
                 "{what}: a file that fits its pane draws no bar"
             );
         }
@@ -57637,6 +57937,117 @@ mod tests {
         assert!(
             diff_max[0] > 0.0,
             "a patch does not reflow, so it keeps the horizontal scroll it needs"
+        );
+    }
+
+    /// **A patch wider than its pane wears a rule along its bottom, and the
+    /// rule can be taken** (user report, 2026-08-17: long `+# …` lines cut at
+    /// the pane's right edge with no scroller).
+    ///
+    /// The extent was never the missing half — a diff's `max_scroll[0]` has been
+    /// right since the ruling above, and `Shift`+wheel already reached it. What
+    /// was missing was the *picture*: `preview_body_bar` was written with its
+    /// axis nailed to `Vertical`, so the one body kind in this window with a
+    /// horizontal extent had no track, no thumb and nothing to put a hand on.
+    /// The bar is one function and one geometry for both axes
+    /// (`preview::scroll_bar`), so what the patch grew is the bar the card and
+    /// the pane already wear, stood on its side — same thickness, same grab
+    /// tolerance, same linear map from thumb to offset.
+    ///
+    /// Four claims: the extent is there, the bar is there, the thumb reads back
+    /// to an offset at both ends of its track, and the offset actually moves the
+    /// ink.
+    ///
+    /// MUTATION: put `ScrollAxis::Vertical` back into `preview_body_bar` in
+    /// place of the parameter. The `across` binding goes `None` and the patch is
+    /// silently uncrossable again.
+    #[test]
+    fn a_patch_wider_than_its_pane_grows_a_rule_a_hand_can_take() {
+        let body = [0.0, 0.0, 240.0, 60.0];
+        let scale = 1.0;
+        let advance = 8.0;
+        let metrics = seats::preview_diff_metrics(scale);
+        let long = format!("+{}", "# a long comment line".repeat(12));
+        let columns = long.chars().count();
+        let rows = vec![DiffRow {
+            text: long.clone(),
+            kind: preview::DiffLineKind::Add,
+            top: 0.0,
+        }];
+        let document = PreviewDocument::Diff(rows.clone());
+
+        // ① The extent, which is what the whole bar is a picture of.
+        let max = preview_document_max_scroll(
+            &document,
+            body,
+            scale,
+            advance,
+            metrics.line_height,
+            columns,
+        );
+        assert!(
+            max[0] > 0.0,
+            "a patch does not reflow, so it keeps the horizontal scroll it needs"
+        );
+
+        // ② The bar. `page + max_scroll` is the content width by construction —
+        //    the same inverse `preview_surface_bar` takes.
+        let content = (body[2] - body[0]) + max[0];
+        let across = preview_body_bar(
+            body,
+            preview::ScrollAxis::Horizontal,
+            [0.0, 0.0],
+            content,
+            scale,
+        )
+        .expect("a patch wider than its pane has a rule along the bottom");
+        assert_eq!(across.axis, preview::ScrollAxis::Horizontal);
+        assert!(
+            across.track[3] <= body[3] && across.track[1] >= body[1],
+            "the rule lies against the body's own bottom edge, {:?}",
+            across.track
+        );
+        assert!(
+            (across.overflow - max[0]).abs() < 0.01,
+            "and it promises exactly as far as the clamp allows: {} against {}",
+            across.overflow,
+            max[0]
+        );
+
+        // ③ The thumb reads backwards to an offset, at both ends of its track.
+        assert_eq!(
+            preview::scroll_dragged_to(&across, across.track_start(), 0.0),
+            0.0,
+            "the thumb at the near end is the document at its own left"
+        );
+        assert!(
+            (preview::scroll_dragged_to(&across, across.track[2], 0.0) - across.overflow).abs()
+                < 0.01,
+            "and dragged to the far end it lands exactly where the wheel stops"
+        );
+
+        // ④ And the offset moves the ink. The band under an added line does
+        //    *not* move — it is the viewport's, by `band_rect`'s own ruling —
+        //    so this asks the paragraph, which is the text.
+        let palette = bt_render::chrome_palette();
+        let drawn_at = |scroll: [f32; 2]| {
+            let geometry = seats::preview_mono_geometry(
+                body,
+                metrics,
+                metrics.line_height,
+                columns,
+                advance,
+                scroll,
+            );
+            build_preview_diff_body(&geometry, &rows, &palette).paragraphs[0].rect[0]
+        };
+        let still = drawn_at([0.0, 0.0]);
+        let shifted = drawn_at([max[0], 0.0]);
+        assert!(
+            (still - shifted - max[0]).abs() < 0.01,
+            "scrolling to the far end moves the run left by the whole extent: \
+             {still} then {shifted}, extent {}",
+            max[0]
         );
     }
 

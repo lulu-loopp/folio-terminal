@@ -1650,8 +1650,14 @@ mod tests {
             "the fixture overflows the card, or there is no bar to test"
         );
 
-        let bar = crate::preview_body_bar(card.body, [0.0, 0.0], document, SCALE)
-            .expect("a document taller than the card wears a bar");
+        let bar = crate::preview_body_bar(
+            card.body,
+            crate::preview::ScrollAxis::Vertical,
+            [0.0, 0.0],
+            document,
+            SCALE,
+        )
+        .expect("a document taller than the card wears a bar");
         assert_eq!(bar.axis, crate::preview::ScrollAxis::Vertical);
 
         // ① Down the right edge of the body, full height, hugging the far side.
@@ -1670,8 +1676,14 @@ mod tests {
             "the thumb is a picture of how much of the file is showing"
         );
         assert_eq!(bar.thumb[1], card.body[1]);
-        let scrolled = crate::preview_body_bar(card.body, [0.0, bar.overflow], document, SCALE)
-            .expect("still overflowing");
+        let scrolled = crate::preview_body_bar(
+            card.body,
+            crate::preview::ScrollAxis::Vertical,
+            [0.0, bar.overflow],
+            document,
+            SCALE,
+        )
+        .expect("still overflowing");
         assert!(
             (scrolled.thumb[3] - card.body[3]).abs() < 0.5,
             "and at the end of the document it is at the end of the track"
@@ -1715,7 +1727,14 @@ mod tests {
         //    promise of somewhere to go in a card that has nowhere.
         let short = self::layout(&content(lines(2)), row, (1200.0, 800.0), 60.0, 24.0, SCALE);
         assert!(
-            crate::preview_body_bar(short.body, [0.0, 0.0], LINE_HEIGHT * 2.0, SCALE).is_none(),
+            crate::preview_body_bar(
+                short.body,
+                crate::preview::ScrollAxis::Vertical,
+                [0.0, 0.0],
+                LINE_HEIGHT * 2.0,
+                SCALE
+            )
+            .is_none(),
             "a two-line file has nowhere to scroll and says so by drawing nothing"
         );
     }
@@ -1747,8 +1766,14 @@ mod tests {
         let row = [40.0, 300.0, 240.0, 320.0];
         let card = tall_card(row);
         let document = LINE_HEIGHT * 40.0;
-        let bar = crate::preview_body_bar(card.body, [0.0, 0.0], document, SCALE)
-            .expect("the fixture overflows");
+        let bar = crate::preview_body_bar(
+            card.body,
+            crate::preview::ScrollAxis::Vertical,
+            [0.0, 0.0],
+            document,
+            SCALE,
+        )
+        .expect("the fixture overflows");
 
         // ① On the thumb — asked first, and carrying how far into it the hand
         //    took hold.

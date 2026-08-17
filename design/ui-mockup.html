@@ -1684,12 +1684,28 @@
   .gbdot { flex: none; width: 7px; height: 7px; border-radius: 50%;
     border: 1.5px solid var(--ink3); background: transparent; }
   .gbr.cur .gbdot { background: var(--accent); border-color: var(--accent); }
-  /* stage/unstage: a hover verb, zero footprint at rest (§7.1.6 discipline) */
+  /* stage/unstage: a hover verb, zero footprint at rest (§7.1.6 discipline)
+     — and zero now means zero (user report 2026-08-17, DESIGN §7.1.3g ⑪(1)).
+     This rule used to read `visibility: hidden` with a note beside it saying
+     "reserved width: appearing must not nudge the row (user report)". Obeying
+     it kept two button-widths of every row's trailing edge empty at all times,
+     so every row that had no hand on it — which is nearly all of them, nearly
+     always — was drawn thirty-eight pixels short of its own edge for the sake
+     of the one row that did. `display: none` is the pane header's own rule
+     (`.pane:hover .pane-close`) applied here: the control is not there at all
+     until the pointer is in the row, and the row's own content owns those
+     pixels until then. Nothing nudges — the path is left-aligned and does not
+     move — only where it is cut moves. The `+`/`×`/`−` are also unpressable
+     while they are not drawn: the native build's `act_boxes` refuses to hand
+     out a box for a verb it did not paint, so the hit test, the tooltip and
+     the press all lose it together.
+     Keyboard focus does NOT reveal them: the tab strip's own `×` is governed
+     by width tier and not by focus, and there is no second idiom for this in
+     the house. */
   .gact { flex: none; margin-left: auto; width: 18px; height: 18px; border: none; border-radius: 5px;
-    display: grid; place-items: center; background: none; color: var(--ink2);
-    font: 600 13px/1 var(--mono); cursor: pointer;
-    visibility: hidden; }   /* reserved width: appearing must not nudge the row (user report) */
-  .grow:hover .gact { visibility: visible; }
+    display: none; place-items: center; background: none; color: var(--ink2);
+    font: 600 13px/1 var(--mono); cursor: pointer; }
+  .grow:hover .gact { display: grid; }
   .gact:hover { background: var(--active); color: var(--ink); }
   .gcfiles { padding: 3px 7px 7px 32px; display: flex; flex-direction: column; gap: 3px; }
   .gcfiles bdi { color: var(--ink3); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1717,6 +1733,15 @@
      is the scroller; this block must fill it (min-height) and grow with its
      widest line (width:max-content) so line tints span the full scroll width —
      half-width tints and a mid-pane scrollbar were the double bug here. */
+  /* `width: max-content` is what gives a patch its horizontal axis, and the
+     native build now draws the rule for it (user report 2026-08-17, DESIGN
+     §7.1.3g ⑪(5)): the pane's own scroll bar was written vertical-only, so the
+     one body kind in this window with a horizontal extent had a scroll nobody
+     could see and nobody could take. It is the same bar stood on its side —
+     same 2px rule against the body's far edge, same 7px grab, same 16px inward
+     reach, same linear map from thumb to offset — and the corner where the two
+     cross belongs to the vertical one. Shift+wheel and the arrow keys reached
+     this axis all along. */
   .pv-diff { min-height: 100%; width: max-content; min-width: 100%;
     box-sizing: border-box; padding: 12px 0; font: 12.5px/1.65 var(--mono); }
   .pv-diff .dline { padding: 0 16px; white-space: pre; }
@@ -5198,7 +5223,17 @@
     const g = GIT_DEMO[leaf.files.root];
     if (!g) return `<div class="git-view empty">Not a git repository</div>`;
     /* a change row: the row is a verb (open the diff), the hover button is the
-       other verb (stage/unstage) — same grammar as tab rows and their controls */
+       other verb (stage/unstage) — same grammar as tab rows and their controls.
+       Resting on one for 350ms also puts up the files tree's own glance card
+       (user report 2026-08-17, DESIGN §7.1.3g ⑪(4)): this page is the same
+       column showing the same place another way, so a row that names a file
+       answers a resting hand the way a tree row does. What the card shows is
+       not what a press shows — a press opens the DIFF, a rest shows the FILE,
+       because those are two questions. The one row with no file to show is a
+       file under an expanded commit: its card carries that commit's own reading
+       of it (the identical `git show` document the row would open), which is
+       why the native card takes a document rather than a path. A row whose
+       every letter says the file is gone puts up no card at all. */
     const row = (staged) => ([st, p]) => `
       <div class="grow" data-path="${escAttr(p)}" data-staged="${staged ? 1 : 0}" title="${escAttr(p)} — click for diff">
         <span class="gst ${st.toLowerCase()}">${st}</span><bdi>${esc(p)}</bdi>

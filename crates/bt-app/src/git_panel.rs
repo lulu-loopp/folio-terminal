@@ -155,8 +155,18 @@ pub const GIT_ACT_GAP_LOGICAL_PX: f32 = 2.0;
 /// three-step reveal every other hover verb in this product uses, applied here
 /// in place of the mock-up's two-step `visibility: hidden` (mock-up 1642-1648).
 ///
-/// The mock-up's own note beside that rule is why the box is reserved either
-/// way: *appearing must not nudge the row (user report)*.
+/// **The room is not reserved** (user report, 2026-08-17 — the ruling that
+/// replaced the one written here before). The mock-up's note beside that rule
+/// read *appearing must not nudge the row*, and it was obeyed by keeping two
+/// button-widths of the trailing edge empty at all times. What that bought was a
+/// row permanently thirty-eight pixels short of its own edge so that nothing
+/// would move on hover — and what it cost was every resting row, which is all of
+/// them nearly all of the time. The rule the rest of this window follows is the
+/// pane head's `×` (`seats.rs`, `.pane:hover .pane-close`): a hover verb is not
+/// there at all until the pointer is in the row, and the row's own content owns
+/// those pixels until then. Nothing *nudges* — the name is left-aligned and does
+/// not move — it is only cut shorter while a hand is over it, which is the same
+/// thing every list on this desk does with a trailing control.
 pub const GIT_ACT_REVEAL: f32 = crate::seats::PREVIEW_TOOL_REVEAL;
 
 /// `.ggr { width: 14px; height: 27px }` — the mini graph's column.
@@ -379,10 +389,16 @@ impl GitAct {
     /// **One of the six is, and it is the one that is a door rather than a
     /// verb.** R12's three rungs are about hover verbs — controls that act on
     /// the row they sit in, and whose whole discipline is zero footprint at rest
-    /// (mock-up 1611). The masthead's `Graph` is not one of those: it opens
-    /// another surface, it is the only way in to that surface, and the mock-up
-    /// draws it as a plain always-there button (`.gopen`, line 1567). A door
-    /// nobody can see is a feature nobody finds.
+    /// (mock-up 1611, and see [`GIT_ACT_REVEAL`] for what "zero" now costs).
+    /// The masthead's `Graph` is not one of those: it opens another surface, it
+    /// is the only way in to that surface, and the mock-up draws it as a plain
+    /// always-there button (`.gopen`, line 1567). A door nobody can see is a
+    /// feature nobody finds.
+    ///
+    /// [`GitAct::LoadMore`] answers `false` and is nevertheless always offered:
+    /// it is not asked here at all, because it has no corner to hide in — the
+    /// whole row is the button and its sentence is drawn whatever the pointer is
+    /// doing. [`act_boxes`] settles it before the reveal is consulted.
     #[must_use]
     pub fn rests_visible(self) -> bool {
         matches!(self, Self::OpenGraph)
@@ -881,16 +897,20 @@ pub fn git_document_name(path: &str) -> String {
 #[must_use]
 pub fn row_document(row: &GitRow, root: &Path) -> Option<GitRowOpen> {
     match row {
-        // **R25's whole mapping.** A row under STAGED is a claim about the
-        // index, so the diff it opens is the index's; every other group's row is
-        // about the working tree. An untracked row asks the working tree too and
-        // gets nothing, which is the honest answer — git has no copy of that
-        // file to differ from, and the pane says so in one line.
+        // **R25's whole mapping**, and the third reading beside it. A row
+        // under STAGED is a claim about the index, so the diff it opens is the
+        // index's; a row under CHANGES is about the working tree. An UNTRACKED
+        // row used to be sent down the CHANGES road, and git's answer to *how
+        // does the working tree differ from the index* about a file that is in
+        // neither is nothing at all — so the pane said "No changes to show"
+        // about a file that is nothing but change (user report, 2026-08-17). It
+        // now asks the question that has an answer: the whole file, against
+        // nothing. See [`crate::git::GitGroup::diff_against`].
         GitRow::Change(change) => Some(GitRowOpen::Document {
             source: PreviewSource::GitDiff {
                 root: root.to_owned(),
                 path: change.path.clone(),
-                staged: change.group == GitGroup::Staged,
+                against: change.group.diff_against(),
             },
             name: git_document_name(&change.path),
             renamed_from: change.renamed_from.clone(),
@@ -935,6 +955,85 @@ pub fn row_document(row: &GitRow, root: &Path) -> Option<GitRowOpen> {
 
 /// Whether a press on this row opens or shuts the REMOTES sub-group (T9).
 ///
+/// **What a glance over this row would show** (user report, 2026-08-17).
+///
+/// Beside [`row_document`] rather than folded into it, because a press and a
+/// rest are two questions about one row and they do not have the same answer: a
+/// press on a change row opens the *diff*, and a hand resting on it wants the
+/// file — the same thing the files tree has answered with since P143, over what
+/// is after all the same place seen another way (§7.1.3g ①).
+///
+/// **Two kinds of row, two kinds of document.** A row under Changes, Staged or
+/// Untracked names a file that is on the disk right now. A row under an expanded
+/// commit names a file *as that commit left it*, which is on no disk — so the
+/// glance takes the commit's own reading of it, the identical
+/// [`PreviewSource::GitShow`] the row would open into a pane, which is what makes
+/// the card and the pane one document instead of two.
+///
+/// **A row whose every letter says the file is gone has no glance.** There is
+/// nothing at that path to look at, and a card reading "No preview" over a
+/// deletion says the window is broken rather than that the file is not there. It
+/// keeps the silence a directory row keeps.
+///
+/// The key is the row's identity within its page and carries the group, because
+/// R11 puts one file in two groups at once and two rows answering to one key
+/// would hand the card back and forth for ever.
+#[must_use]
+pub fn row_peek(row: &GitRow, root: &Path) -> Option<GitRowPeek> {
+    match row {
+        GitRow::Change(change) => {
+            let gone = !change.badges.is_empty()
+                && change
+                    .badges
+                    .iter()
+                    .all(|badge| badge.ink == GitBadgeInk::Gone);
+            if gone {
+                return None;
+            }
+            Some(GitRowPeek {
+                key: format!("{:?}\u{1f}{}", change.group, change.path),
+                name: change
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&change.path)
+                    .to_owned(),
+                source: PreviewSource::file(root.join(&change.path)),
+            })
+        }
+        GitRow::CommitFile(file) => Some(GitRowPeek {
+            key: format!("{}\u{1f}{}", file.hash, file.path),
+            name: git_document_name(&file.path),
+            source: PreviewSource::GitShow {
+                root: root.to_owned(),
+                hash: file.hash.clone(),
+                path: file.path.clone(),
+            },
+        }),
+        GitRow::Masthead(_)
+        | GitRow::Heading { .. }
+        | GitRow::Remotes { .. }
+        | GitRow::Branch(_)
+        | GitRow::Commit(_)
+        | GitRow::LoadMore
+        | GitRow::Notice(_) => None,
+    }
+}
+
+/// What a glance over one Git row is about: which row, what to call it, and the
+/// document behind it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRowPeek {
+    /// The row's identity within its page — **not** its index, for
+    /// [`crate::FilePeek`]'s own reason: an index is stale the moment a group
+    /// above it grows a file.
+    pub key: String,
+    /// The name on the card's head.
+    pub name: String,
+    /// What the card reads.
+    pub source: PreviewSource,
+}
+
 /// Beside [`row_document`] rather than folded into it for the reason that
 /// function's own doc gives: what a press *means* is a fact about the page, and
 /// a sub-group toggle is not a document — putting it into `GitRowOpen` would
@@ -987,7 +1086,63 @@ pub struct GitPanelContent {
 /// reason every other measured caption in this codebase is: only the thing
 /// holding the font can say how wide a string is, and a second measurer is a
 /// second answer.
-pub type Measure<'a> = dyn FnMut(&str, f32) -> f32 + 'a;
+///
+/// It takes a [`MeasureFace`] because one answer is not enough: the same string
+/// is a different width in a different weight and with different figures, and a
+/// measurement taken in the wrong one is a box the ink does not fit.
+pub type Measure<'a> = dyn FnMut(&str, f32, MeasureFace) -> f32 + 'a;
+
+/// The face a string will be **drawn** in, handed to the measurer along with it.
+///
+/// # A width is only worth having if it was taken wearing what the paint wears
+///
+/// The float's `DOCK` learned this about weight and tracking (`bt_render`'s
+/// `a_chrome_labels_measured_width_is_the_width_its_glyphs_take`). This page
+/// learned it about **figures** (user report, 2026-08-17): `tabular_numerals`
+/// gives every digit the *widest* digit's advance, so `1h`, `Aug 10` and a short
+/// hash with a `1` in it each shape about a pixel and a half wider than the same
+/// string measured proportionally. The meta column's box is cut from the
+/// measurement and the label inside it is right-aligned, so the shaper clamps
+/// the run's left edge to the box's left and the last glyph runs off the right,
+/// where the clip cuts it in half — which is exactly the `main 1h` the report
+/// arrived with, and the `Aug 1(` beside it.
+///
+/// The three fields are `chrome_label_attrs`'s three, one for one, so there is
+/// no fourth thing a label can carry that a measurement can miss.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasureFace {
+    pub weight: ChromeLabelWeight,
+    pub letter_spacing_em: f32,
+    pub tabular_numerals: bool,
+}
+
+impl MeasureFace {
+    /// Regular weight, no tracking, proportional figures — most of this page.
+    pub const PLAIN: Self = Self {
+        weight: ChromeLabelWeight::Regular,
+        letter_spacing_em: 0.0,
+        tabular_numerals: false,
+    };
+    /// The meta columns: an age, a short hash, a pill's count. Everything this
+    /// page draws with `tabular_numerals: true`.
+    pub const FIGURES: Self = Self {
+        weight: ChromeLabelWeight::Regular,
+        letter_spacing_em: 0.0,
+        tabular_numerals: true,
+    };
+
+    /// The same face at a named weight — a ref pill's name is `600`, the
+    /// masthead's branch name is `600` when it is a name and regular when it is
+    /// the words *detached HEAD*.
+    #[must_use]
+    pub const fn weighted(weight: ChromeLabelWeight) -> Self {
+        Self {
+            weight,
+            letter_spacing_em: 0.0,
+            tabular_numerals: false,
+        }
+    }
+}
 
 /// **What one column is doing**, as against what its repository said.
 ///
@@ -1298,8 +1453,22 @@ fn branch_row(
         ));
     }
     GitBranchRow {
-        name_width: measure(&branch.name, font),
-        time_width: measure(&branch.committerdate_relative, time_font),
+        // `.gbr bdi` is `--ink2` at the regular weight and `--ink` at 500 for
+        // the branch you are on, so the two are measured apart.
+        name_width: measure(
+            &branch.name,
+            font,
+            MeasureFace::weighted(if branch.is_head {
+                ChromeLabelWeight::Medium
+            } else {
+                ChromeLabelWeight::Regular
+            }),
+        ),
+        time_width: measure(
+            &branch.committerdate_relative,
+            time_font,
+            MeasureFace::FIGURES,
+        ),
         // The mock-up's own two sentences (G36), and the second one is the only
         // place this page names the verb a branch row carries. A remote row
         // carries no verb (T9), so it says what it *is* instead of promising a
@@ -1344,7 +1513,7 @@ fn masthead(
     let Some(status) = status else {
         return GitHead {
             branch: GIT_READING.to_owned(),
-            branch_width: measure(GIT_READING, font),
+            branch_width: measure(GIT_READING, font, MeasureFace::PLAIN),
             named: false,
             pills: Vec::new(),
             muted: false,
@@ -1373,7 +1542,18 @@ fn masthead(
         ));
     }
     GitHead {
-        branch_width: measure(&branch, font),
+        // `600` for a name and regular for the words *detached HEAD* — the
+        // masthead's own two inks have two weights behind them, and a name
+        // measured at the lighter one is a name clipped at its own box.
+        branch_width: measure(
+            &branch,
+            font,
+            MeasureFace::weighted(if named {
+                ChromeLabelWeight::SemiBold
+            } else {
+                ChromeLabelWeight::Regular
+            }),
+        ),
         branch,
         named,
         pills,
@@ -1396,7 +1576,7 @@ fn pill(
 ) -> GitPill {
     let text = format!("{arrow} {count}");
     GitPill {
-        text_width: measure(&text, font),
+        text_width: measure(&text, font, MeasureFace::FIGURES),
         text,
         // "1 commit ahead", not "1 commits ahead". The plural is one `if` and
         // the alternative is a sentence that is wrong every time the count is
@@ -1453,13 +1633,17 @@ fn commit_row(
     let time_font = GIT_TIME_FONT_LOGICAL_PX * scale;
     let ref_font = crate::git_graph::GRAPH_REF_FONT_LOGICAL_PX * scale;
     GitCommitRow {
-        short_width: measure(&commit.short, hash_font),
-        time_width: measure(&commit.time_relative, time_font),
+        short_width: measure(&commit.short, hash_font, MeasureFace::FIGURES),
+        time_width: measure(&commit.time_relative, time_font, MeasureFace::FIGURES),
         refs: commit
             .refs
             .iter()
             .map(|reference| GitRefPill {
-                text_width: measure(&reference.name, ref_font),
+                text_width: measure(
+                    &reference.name,
+                    ref_font,
+                    MeasureFace::weighted(ChromeLabelWeight::SemiBold),
+                ),
                 name: reference.name.clone(),
                 head: reference.head,
             })
@@ -1668,13 +1852,26 @@ pub fn clamp_git_scroll(
     scroll_px.clamp(0.0, max)
 }
 
-/// Where a row's verbs are, right to left from its trailing edge.
+/// Where a row's verbs are, right to left from its trailing edge — and whether
+/// there are any.
 ///
 /// **One derivation for the painter and the hit test**, which is the rule this
 /// module's siblings already follow: a list that computes its buttons twice is a
 /// list whose press lands on the button beside the one you can see.
+///
+/// `revealed` is that rule taken one step further: a verb that is not drawn is
+/// not in this list, so it cannot be hit-tested, cannot carry a tooltip and
+/// cannot be pressed. Only [`GitAct::rests_visible`] survives a `false` — the
+/// masthead's door out to the graph, which is not a hover verb. See
+/// [`GIT_ACT_REVEAL`] for why the row keeps its own pixels until the pointer
+/// arrives.
 #[must_use]
-pub fn act_boxes(row: &GitRow, rect: [f32; 4], scale: f32) -> Vec<(GitAct, [f32; 4])> {
+pub fn act_boxes(
+    row: &GitRow,
+    rect: [f32; 4],
+    scale: f32,
+    revealed: bool,
+) -> Vec<(GitAct, [f32; 4])> {
     let acts: Vec<GitAct> = match row {
         // Right to left, so the *destructive* verb is furthest from the trailing
         // edge a pointer travels along: `+` sits at the end, `×` inside it. A
@@ -1696,9 +1893,16 @@ pub fn act_boxes(row: &GitRow, rect: [f32; 4], scale: f32) -> Vec<(GitAct, [f32;
         GitRow::LoadMore => vec![GitAct::LoadMore],
         _ => Vec::new(),
     };
+    // Asked before the reveal, because the reveal is about a *corner* of a row
+    // and this verb has none: the row's own sentence is drawn whether or not a
+    // hand is near it, so the button it is cannot be hidden either.
     if acts == [GitAct::LoadMore] {
         return vec![(GitAct::LoadMore, rect)];
     }
+    let acts: Vec<GitAct> = acts
+        .into_iter()
+        .filter(|act| revealed || act.rests_visible())
+        .collect();
     let box_ = (GIT_ACT_LOGICAL_PX * scale).round().max(1.0);
     let gap = (GIT_ACT_GAP_LOGICAL_PX * scale).round();
     let middle = ((rect[1] + rect[3] - box_) / 2.0).round();
@@ -1733,9 +1937,22 @@ fn act_trailing_padding(row: &GitRow) -> f32 {
 }
 
 /// Which verb the pointer is on, inside a row.
+///
+/// `revealed` is the same fact [`act_boxes`] takes, and it is a parameter rather
+/// than an assumption because the two callers know it differently: the hit test
+/// has already established that the pointer is inside this row — which *is* the
+/// reveal — while the tooltip list is walking every row on the page and knows
+/// only which one the pointer is on.
 #[must_use]
-pub fn act_at(row: &GitRow, rect: [f32; 4], scale: f32, x: f32, y: f32) -> Option<GitAct> {
-    act_boxes(row, rect, scale)
+pub fn act_at(
+    row: &GitRow,
+    rect: [f32; 4],
+    scale: f32,
+    revealed: bool,
+    x: f32,
+    y: f32,
+) -> Option<GitAct> {
+    act_boxes(row, rect, scale, revealed)
         .into_iter()
         .find(|(_, box_)| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3])
         .map(|(act, _)| act)
@@ -1883,11 +2100,27 @@ pub fn push_git_panel(
         match row {
             GitRow::Masthead(head) => {
                 push_git_masthead(head, rect, scale, palette, (labels, sprites), &crop);
-                push_acts(row, rect, hover, hovered, scale, palette, sprites, &crop);
+                push_acts(
+                    &act_boxes(row, rect, scale, hovered),
+                    row,
+                    hover,
+                    scale,
+                    palette,
+                    sprites,
+                    &crop,
+                );
             }
             GitRow::Heading { label, count, .. } => {
                 push_heading(label, *count, rect, scale, palette, labels, &crop);
-                push_acts(row, rect, hover, hovered, scale, palette, sprites, &crop);
+                push_acts(
+                    &act_boxes(row, rect, scale, hovered),
+                    row,
+                    hover,
+                    scale,
+                    palette,
+                    sprites,
+                    &crop,
+                );
             }
             // The sub-group's own word, with a disclosure triangle in front of
             // it: the same glyph at the same angle a directory row turns, so
@@ -1905,16 +2138,21 @@ pub fn push_git_panel(
             }
             GitRow::Change(change) => {
                 push_row_ground(rect, hovered, scale, palette, sprites, &crop);
+                // Derived once and read twice: the room the name gives up is
+                // the room these boxes stand in, and two derivations of that is
+                // a path clipped short of a button that is not there.
+                let acts = act_boxes(row, rect, scale, hovered);
                 push_change(
                     change,
                     rect,
                     hovered,
+                    &acts,
                     scale,
                     palette,
                     (labels, sprites),
                     &crop,
                 );
-                push_acts(row, rect, hover, hovered, scale, palette, sprites, &crop);
+                push_acts(&acts, row, hover, scale, palette, sprites, &crop);
             }
             GitRow::Branch(branch) => {
                 push_row_ground(
@@ -2357,11 +2595,18 @@ fn push_remotes_heading(
     });
 }
 
+/// One changed file: its status letters, and its path.
+///
+/// `acts` is the row's verbs **as they will be drawn this frame** — the same
+/// list [`push_acts`] paints, handed in rather than derived a second time, so
+/// that the room the name gives up and the room the buttons stand in cannot
+/// disagree about how many there are or whether any are showing at all.
 #[allow(clippy::too_many_arguments)]
 fn push_change(
     change: &GitChangeRow,
     rect: [f32; 4],
     hovered: bool,
+    acts: &[(GitAct, [f32; 4])],
     scale: f32,
     palette: &ChromePalette,
     out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
@@ -2424,21 +2669,15 @@ fn push_change(
     // The badges' own gap is 3; the gap between the last badge and the path is
     // the row's 8.
     let name_left = left - badge_gap + gap;
-    // The verbs' reserved width, whether or not they are showing: *appearing
-    // must not nudge the row* (mock-up 1646).
-    let reserved = reserved_act_width(
-        match change.group {
-            GitGroup::Staged => 1,
-            GitGroup::Changes | GitGroup::Untracked => 2,
-        },
-        scale,
-    );
-    let name_rect = [
-        name_left,
-        rect[1],
-        (rect[2] - pad - reserved).max(name_left),
-        rect[3],
-    ];
+    // **The verbs' room, and only while they are in it** (user report,
+    // 2026-08-17; see [`GIT_ACT_REVEAL`]). A resting row's name runs to its own
+    // padding like every other row on the page; a hovered row's stops where the
+    // leftmost button standing in it begins. The name is left-aligned, so
+    // nothing moves — the cut moves. Read off the boxes themselves, which is why
+    // a row whose write is in flight (no verbs at all, R13) reads full width
+    // under the pointer as well as away from it.
+    let name_right = acts.last().map_or(rect[2] - pad, |(_, box_)| box_[0] - gap);
+    let name_rect = [name_left, rect[1], name_right.max(name_left), rect[3]];
     let text = if hovered {
         palette.git_row_text_hover
     } else {
@@ -2535,22 +2774,14 @@ fn push_commit_file(
     });
 }
 
-/// How much room `count` verbs keep at a row's trailing edge.
-fn reserved_act_width(count: usize, scale: f32) -> f32 {
-    if count == 0 {
-        return 0.0;
-    }
-    let box_ = (GIT_ACT_LOGICAL_PX * scale).round().max(1.0);
-    let gap = (GIT_ACT_GAP_LOGICAL_PX * scale).round();
-    box_ * count as f32 + gap * (count - 1) as f32
-}
-
-#[allow(clippy::too_many_arguments)]
+/// A row's verbs, as [`act_boxes`] has already decided them.
+///
+/// The list arrives rather than being asked for here, because the row's own
+/// content has to be laid out against the same answer — see [`push_change`].
 fn push_acts(
+    acts: &[(GitAct, [f32; 4])],
     row: &GitRow,
-    rect: [f32; 4],
     hover: GitHover,
-    hovered: bool,
     scale: f32,
     palette: &ChromePalette,
     sprites: &mut Vec<ChromeSprite>,
@@ -2566,10 +2797,10 @@ fn push_acts(
     // `--panel` card, so a button up there wears the body's inks — the same
     // split the branch name and the group headings already live by.
     let on_body = matches!(row, GitRow::Masthead(_));
-    for (act, box_) in act_boxes(row, rect, scale) {
-        if !hovered && !act.rests_visible() {
-            continue;
-        }
+    // The reveal is now [`act_boxes`]'s own answer rather than a second filter
+    // here: what is drawn and what can be pressed are the same list, so a verb
+    // cannot be one and not the other.
+    for &(act, box_) in acts {
         let lit = hover.act == Some(act);
         if lit {
             sprites.push(ChromeSprite::new(
@@ -3065,7 +3296,12 @@ mod tests {
     /// know is that a longer string pushes further — not what the face's advance
     /// for `M` is. A fake with that one property makes the arithmetic checkable
     /// by hand, which is the point.
-    fn ruler(text: &str, size: f32) -> f32 {
+    ///
+    /// The face is taken and ignored: a fake advance has no weight axis and no
+    /// figures. What the real measurer does with it is `bt_render`'s business
+    /// and is pinned there
+    /// (`a_chrome_labels_measured_width_is_the_width_its_glyphs_take`).
+    fn ruler(text: &str, size: f32, _: MeasureFace) -> f32 {
         text.chars().count() as f32 * size * 0.5
     }
 
@@ -3364,7 +3600,7 @@ mod tests {
         let content = rows_of(&answered(b"", Vec::new(), false));
         let masthead = &content.rows[0];
         assert!(matches!(masthead, GitRow::Masthead(_)));
-        let acts: Vec<GitAct> = act_boxes(masthead, [0.0, 0.0, 240.0, 30.0], 1.0)
+        let acts: Vec<GitAct> = act_boxes(masthead, [0.0, 0.0, 240.0, 30.0], 1.0, false)
             .into_iter()
             .map(|(act, _)| act)
             .collect();
@@ -3683,14 +3919,14 @@ mod tests {
         let row = &content.rows[index];
         let rect = [0.0, 100.0, 240.0, 127.0];
         assert_eq!(
-            act_boxes(row, rect, 1.0),
+            act_boxes(row, rect, 1.0, true),
             vec![(GitAct::LoadMore, rect)],
             "the box is the row"
         );
         // Every corner of it, not only the middle: a button whose left half was
         // dead would be the same defect in a smaller place.
         for (x, y) in [(2.0, 102.0), (120.0, 113.0), (238.0, 125.0)] {
-            assert_eq!(act_at(row, rect, 1.0, x, y), Some(GitAct::LoadMore));
+            assert_eq!(act_at(row, rect, 1.0, true, x, y), Some(GitAct::LoadMore));
         }
         assert_eq!(
             press_outcome(GitAct::LoadMore, false),
@@ -3784,7 +4020,15 @@ mod tests {
         );
         // A pending row offers no verbs: pressing `+` twice must not be two
         // `git add`s racing each other for `index.lock`.
-        assert!(act_boxes(&GitRow::Change(row(&during)), [0.0, 0.0, 200.0, 27.0], 1.0).is_empty());
+        assert!(
+            act_boxes(
+                &GitRow::Change(row(&during)),
+                [0.0, 0.0, 200.0, 27.0],
+                1.0,
+                true
+            )
+            .is_empty()
+        );
         assert!(
             cache
                 .begin_write(GitWriteVerb::Stage, vec!["work.rs".to_owned()])
@@ -3973,7 +4217,7 @@ mod tests {
                 Some(index),
                 "row {index} answers for its own middle"
             );
-            let boxes = act_boxes(row, rect, 1.0);
+            let boxes = act_boxes(row, rect, 1.0, true);
             if let (GitRow::Change(_), Some((_, outermost))) = (row, boxes.first()) {
                 assert_eq!(
                     rect[2] - outermost[2],
@@ -3984,7 +4228,7 @@ mod tests {
             for (act, box_) in boxes {
                 let inside = ((box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0);
                 assert_eq!(
-                    act_at(row, rect, 1.0, inside.0, inside.1),
+                    act_at(row, rect, 1.0, true, inside.0, inside.1),
                     Some(act),
                     "the verb answers for its own box"
                 );
@@ -4132,7 +4376,7 @@ mod tests {
                 source: PreviewSource::GitDiff {
                     root: PathBuf::from(ROOT),
                     path: "staged.txt".to_owned(),
-                    staged: true,
+                    against: crate::preview::GitDiffAgainst::Index,
                 },
                 name: "staged.txt.diff".to_owned(),
                 renamed_from: None,
@@ -4148,7 +4392,7 @@ mod tests {
                 source: PreviewSource::GitDiff {
                     root: PathBuf::from(ROOT),
                     path: "mod.txt".to_owned(),
-                    staged: false,
+                    against: crate::preview::GitDiffAgainst::WorkingTree,
                 },
                 name: "mod.txt.diff".to_owned(),
                 renamed_from: None,
@@ -4165,9 +4409,138 @@ mod tests {
         };
         assert!(name.ends_with(".diff"), "the display name wears the suffix");
         assert!(
-            matches!(source, PreviewSource::GitDiff { staged: false, .. }),
-            "and the buffer is a diff because the *source* says so, not the name"
+            matches!(
+                source,
+                PreviewSource::GitDiff {
+                    against: crate::preview::GitDiffAgainst::Nothing,
+                    ..
+                }
+            ),
+            "and the buffer is a diff because the *source* says so, not the name \
+             — against nothing, because git has no copy of this file to differ from"
         );
+    }
+
+    /// **Every row that names a file answers a resting hand** (user report,
+    /// 2026-08-17: *git file rows have no hover peek, unlike the files column*).
+    ///
+    /// The Git page is the same column showing the same place another way
+    /// (§7.1.3g ①), so a hand resting on a row that names a file gets the same
+    /// 350ms glance the tree has given since P143. What the glance shows is not
+    /// what a press shows, and that is the point of this being its own function
+    /// beside [`row_document`]: a press on a change row opens the *diff*, and a
+    /// hand resting on it wants the file.
+    ///
+    /// A commit's file is the one row with no file to look at, and it is the
+    /// reason the card had to learn to take a document instead of a path: what
+    /// it shows is the commit's own reading, `GitShow`, the same source the row
+    /// would open into a pane — so the two are one buffer and the second costs
+    /// no subprocess.
+    ///
+    /// MUTATION: hand a change row its `GitDiff` instead of its file. The first
+    /// assertion fails, and the card starts showing a patch where the tree shows
+    /// the file — two answers to one gesture on one column.
+    #[test]
+    fn every_git_row_that_names_a_file_offers_the_same_glance_the_tree_does() {
+        let root = Path::new(ROOT);
+        let content = rows_of(&answered(THREE_WAYS, Vec::new(), false));
+
+        // ① A working-tree row is about the file, at the repository's own path.
+        let changed = row_peek(change_named(&content, "mod.txt"), root)
+            .expect("a changed file offers a glance");
+        assert_eq!(
+            changed.source,
+            PreviewSource::file(PathBuf::from(ROOT).join("mod.txt")),
+            "a hand resting on a change row wants the file, not the patch"
+        );
+        assert_eq!(changed.name, "mod.txt");
+
+        // ② And so is an untracked one — the file is there whether or not git
+        //    has a copy of it.
+        let untracked = row_peek(change_named(&content, "new.txt"), root)
+            .expect("an untracked file offers a glance");
+        assert_eq!(
+            untracked.source,
+            PreviewSource::file(PathBuf::from(ROOT).join("new.txt"))
+        );
+
+        // ③ One file in two groups is two rows, and two glances: R11's own case,
+        //    which a key that was only the path would have collapsed.
+        let both = rows_of(&answered(b"## main\0MM both.rs\0", Vec::new(), false));
+        let keys: Vec<String> = both
+            .rows
+            .iter()
+            .filter_map(|row| row_peek(row, root))
+            .map(|peek| peek.key)
+            .collect();
+        assert_eq!(keys.len(), 2, "one file, two rows — {keys:?}");
+        assert_ne!(keys[0], keys[1], "and two identities — {keys:?}");
+
+        // ④ A row whose every letter says the file is gone keeps a directory
+        //    row's silence.
+        let deleted = rows_of(&answered(b"## main\0 D del.txt\0", Vec::new(), false));
+        let gone = deleted
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::Change(change) if change.path == "del.txt"))
+            .expect("the deletion is on the page");
+        assert_eq!(
+            row_peek(gone, root),
+            None,
+            "there is nothing at that path to glance at"
+        );
+
+        // ⑤ A commit's file has no file, so the glance is the commit's own
+        //    reading of it — the same source the row opens into a pane.
+        let hash = commit("aaaaaaa", "newest", 1).hash;
+        let mut cache = answered(b"## main\0", vec![commit("aaaaaaa", "newest", 1)], false);
+        assert!(cache.begin_commit_files(&hash).is_some());
+        assert!(cache.accept(GitAnswer::CommitFiles {
+            root: PathBuf::from(ROOT),
+            hash: hash.clone(),
+            outcome: Ok(vec![crate::git::GitCommitFile {
+                path: "src/main.rs".to_owned(),
+                code: StatusCode::Modified,
+                renamed_from: None,
+                stat: None,
+            }]),
+        }));
+        let opened = build(&cache, look(&hash), 1.0, &mut ruler);
+        let file = opened
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::CommitFile(_)))
+            .expect("the commit's file is drawn");
+        let peek = row_peek(file, root).expect("a commit's file offers a glance");
+        assert_eq!(
+            peek.source,
+            PreviewSource::GitShow {
+                root: PathBuf::from(ROOT),
+                hash: hash.clone(),
+                path: "src/main.rs".to_owned(),
+            },
+            "the card reads what the pane would read, so the two are one buffer"
+        );
+        // Which is exactly the source the row itself opens — said as an
+        // assertion, because "one buffer" is the whole reason the glance costs
+        // no second subprocess.
+        assert_eq!(
+            row_document(file, root).and_then(|open| match open {
+                GitRowOpen::Document { source, .. } => Some(source),
+                GitRowOpen::Expand { .. } | GitRowOpen::Checkout { .. } => None,
+            }),
+            Some(peek.source)
+        );
+
+        // ⑥ And nothing that is not a file offers one.
+        for row in &content.rows {
+            let names_a_file = matches!(row, GitRow::Change(_) | GitRow::CommitFile(_));
+            assert_eq!(
+                row_peek(row, root).is_some(),
+                names_a_file,
+                "{row:?} offers a glance only if it names a file"
+            );
+        }
     }
 
     /// **③ R15's accordion — one commit open, never two.**
@@ -4334,7 +4707,7 @@ mod tests {
                 source: PreviewSource::GitDiff {
                     root: PathBuf::from(ROOT),
                     path: "renamed.txt".to_owned(),
-                    staged: true,
+                    against: crate::preview::GitDiffAgainst::Index,
                 },
                 name: "renamed.txt.diff".to_owned(),
                 renamed_from: Some("was.txt".to_owned()),
@@ -4401,6 +4774,21 @@ mod tests {
         out
     }
 
+    /// The same page drawn into a column of a given width, with a row lit.
+    fn painted_at(content: &GitPanelContent, width: f32, height: f32, hover: GitHover) -> Painted {
+        let mut quads = Vec::new();
+        let mut out = Painted::default();
+        push_git_panel(
+            [0.0, 0.0, width, height],
+            content,
+            hover,
+            1.0,
+            &bt_render::chrome_palette(),
+            (&mut quads, &mut out.labels, &mut out.sprites),
+        );
+        out
+    }
+
     /// Where a piece of text was drawn: its left and its right edge.
     fn at(painted: &Painted, text: &str) -> (f32, f32) {
         let label = painted
@@ -4409,6 +4797,192 @@ mod tests {
             .find(|label| label.text == text)
             .unwrap_or_else(|| panic!("`{text}` was drawn"));
         (label.rect[0], label.rect[2])
+    }
+
+    /// **The meta column stays inside the card it stands on, at every width**
+    /// (user report, 2026-08-17: `main 1h` with half the `h` gone, `Aug 1(`,
+    /// and `8c56194` cut against the card's right edge in a 485-pixel column).
+    ///
+    /// The report's own cause was a *measurement* and is pinned where the
+    /// measurer lives (`bt_render`'s
+    /// `a_chrome_labels_measured_width_is_the_width_its_glyphs_take`): the ages
+    /// and the hashes are drawn with tabular figures and were measured with
+    /// proportional ones, so their boxes came out a pixel and a half too narrow
+    /// and the right-aligned run ran off the end of its own clip. This is the
+    /// other half — the *geometry* a correct measurement is placed in — held
+    /// across the whole range of widths a column can be dragged to, because a
+    /// page that is right at 240 and wrong at 485 is a page with a second edge
+    /// in its arithmetic somewhere.
+    ///
+    /// Every right-aligned label is asked two things: that it ends inside the
+    /// card's own padding, and that its clip is not narrower than itself — a
+    /// clip that cuts a box the layout thought was clear is exactly what the
+    /// report looked like on screen.
+    ///
+    /// MUTATION: lay the rows out against `viewport[2]` instead of
+    /// `viewport[2] - pad_x` in `git_panel_geometry`. Every width fails at once.
+    #[test]
+    fn the_meta_column_never_reaches_past_the_card_it_stands_on() {
+        let cache = with_branches(
+            answered(
+                PORCELAIN,
+                vec![
+                    commit("8c56194", "the whole control alphabet reaches the shell", 1),
+                    commit(
+                        "02911a0",
+                        "the window's picture goes out through a visual",
+                        2,
+                    ),
+                ],
+                true,
+            ),
+            vec![
+                branch("main", true, 1, 0),
+                branch("worktree-agent-a2c278e0a6006f5c9", false, 0, 3),
+            ],
+        );
+        let content = rows_of(&cache);
+        let card_pad = GIT_SECTION_PADDING_LOGICAL_PX.round();
+        // From a sliver up past the width the report was taken at, one pixel at
+        // a time: a rounding that only bites at one width is stepped over by a
+        // coarser sweep.
+        for width in (40..=520).map(|width| width as f32) {
+            let height = 2_000.0;
+            let glass = painted_at(&content, width, height, GitHover::default());
+            let cards = git_panel_geometry([0.0, 0.0, width, height], &content, 1.0)
+                .cards()
+                .to_vec();
+            for label in glass.labels.iter().filter(|label| label.align_right) {
+                let inside = cards.iter().any(|card| {
+                    label.rect[1] >= card[1]
+                        && label.rect[3] <= card[3]
+                        && label.rect[2] <= card[2] - card_pad
+                });
+                assert!(
+                    inside,
+                    "width {width}: `{}` ends at {} and no card it stands on reaches that far",
+                    label.text, label.rect[2]
+                );
+                let clip = label
+                    .clip
+                    .expect("a row's label is cropped to the viewport");
+                assert!(
+                    clip[2] >= label.rect[2],
+                    "width {width}: `{}` is laid out to {} and clipped at {}",
+                    label.text,
+                    label.rect[2],
+                    clip[2]
+                );
+            }
+        }
+    }
+
+    /// **A row's verbs are not there until the pointer is** (user report,
+    /// 2026-08-17), and the room they take is not there either.
+    ///
+    /// The mock-up reserved the corner at all times — *appearing must not nudge
+    /// the row* — and the price was every resting row cut two button-widths
+    /// short of its own edge for the sake of the one row under the hand. The
+    /// house's rule for a hover verb is the pane head's `×`: not there until the
+    /// pointer is in the row, and the row's content owns those pixels until
+    /// then. Nothing moves when it arrives, because the path is left-aligned —
+    /// only the cut moves.
+    ///
+    /// The second half is that the reveal governs the *hit test* too. A `+` that
+    /// is not drawn must not be pressable, or a hand that lands on a resting
+    /// row's trailing corner stages a file it never saw a button for.
+    ///
+    /// MUTATION: make `act_boxes` ignore `revealed`. The resting assertions fail
+    /// — the boxes come back, `act_at` answers `Stage`, and the path is cut
+    /// short with nothing standing in the room it gave up.
+    #[test]
+    fn a_rows_verbs_and_their_room_arrive_with_the_pointer() {
+        let content = rows_of(&answered(PORCELAIN, Vec::new(), false));
+        let index = content
+            .rows
+            .iter()
+            .position(|row| matches!(row, GitRow::Change(change) if change.path == "src/main.rs"))
+            .expect("the changed file is on the page");
+        let row = &content.rows[index];
+        let geometry = git_panel_geometry([0.0, 0.0, 240.0, 2_000.0], &content, 1.0);
+        let rect = geometry.row_rect(index);
+
+        let resting = act_boxes(row, rect, 1.0, false);
+        assert!(
+            resting.is_empty(),
+            "a resting change row offers no verbs, saw {resting:?}"
+        );
+        let revealed = act_boxes(row, rect, 1.0, true);
+        assert_eq!(
+            revealed.iter().map(|(act, _)| *act).collect::<Vec<_>>(),
+            vec![GitAct::Stage, GitAct::Discard],
+            "the destructive verb still sits inside the one at the edge"
+        );
+
+        // The `+`'s own middle: pressable while it is drawn, and nothing at all
+        // while it is not.
+        let plus = revealed[0].1;
+        let (x, y) = ((plus[0] + plus[2]) / 2.0, (plus[1] + plus[3]) / 2.0);
+        assert_eq!(act_at(row, rect, 1.0, true, x, y), Some(GitAct::Stage));
+        assert_eq!(
+            act_at(row, rect, 1.0, false, x, y),
+            None,
+            "a verb nobody can see is a verb nobody can press"
+        );
+
+        // And the path: the whole padded row at rest, cut back to the leftmost
+        // button's edge under the pointer.
+        let pad = GIT_ROW_PADDING_X_LOGICAL_PX.round();
+        let gap = GIT_ROW_GAP_LOGICAL_PX.round();
+        let path_right = |hover: GitHover| {
+            painted_at(&content, 240.0, 2_000.0, hover)
+                .labels
+                .iter()
+                .find(|label| label.text == "src/main.rs")
+                .expect("the path is drawn")
+                .rect[2]
+        };
+        assert_eq!(
+            path_right(GitHover::default()),
+            rect[2] - pad,
+            "a resting row's path runs to its own padding"
+        );
+        let leftmost = revealed.last().expect("the row has verbs when it is lit").1;
+        assert_eq!(
+            path_right(GitHover {
+                row: Some(index),
+                act: None,
+            }),
+            leftmost[0] - gap,
+            "a lit row's path stops a gap short of the first button"
+        );
+    }
+
+    /// The masthead's door out to the graph is **not** a hover verb, and the
+    /// reveal must not take it (R12's own carve-out, [`GitAct::rests_visible`]).
+    ///
+    /// MUTATION: drop the `rests_visible` term from `act_boxes`'s filter. A
+    /// repository's only way in to its own history disappears until somebody
+    /// happens to point at the branch name.
+    #[test]
+    fn the_graph_door_is_there_before_the_pointer_is() {
+        let content = rows_of(&answered(b"## main\0", Vec::new(), false));
+        let masthead = content
+            .rows
+            .iter()
+            .find(|row| matches!(row, GitRow::Masthead(_)))
+            .expect("the masthead is drawn");
+        let rect = [0.0, 0.0, 240.0, 30.0];
+        for revealed in [false, true] {
+            assert_eq!(
+                act_boxes(masthead, rect, 1.0, revealed)
+                    .iter()
+                    .map(|(act, _)| *act)
+                    .collect::<Vec<_>>(),
+                vec![GitAct::OpenGraph],
+                "revealed = {revealed}"
+            );
+        }
     }
 
     /// **R21, ruled 2026-08-16** — the panel's commit row is the graph's:

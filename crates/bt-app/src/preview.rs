@@ -1418,18 +1418,18 @@ pub enum PreviewSource {
     /// A file on a disk. Deliberately the whole path: two files called `main.rs`
     /// are two buffers.
     File(PathBuf),
-    /// One file's diff in one repository, staged or not.
+    /// One file's diff in one repository, against one of three things.
     ///
     /// `root` is the repository's top level (`rev-parse --show-toplevel`) and
     /// `path` is repo-relative in git's own grammar — forward slashes, no drive
     /// — because that is what a `git diff` command takes and what its output
-    /// names. `staged` is the whole of the `--cached` mapping (R25): the staged
-    /// and unstaged diffs of one file are two different documents, so they are
-    /// two different buffers.
+    /// names. [`GitDiffAgainst`] carries R25's `--cached` mapping and the third
+    /// reading beside it: the three are three different documents of one file,
+    /// so they are three different buffers.
     GitDiff {
         root: PathBuf,
         path: String,
-        staged: bool,
+        against: GitDiffAgainst,
     },
     /// **One commit's reading of one file** (R15) — `git show {hash} -- {path}`.
     ///
@@ -1564,12 +1564,39 @@ impl PreviewSource {
 
 /// What a composed document with nothing in it says.
 ///
-/// The two ways to arrive here are both ordinary: an untracked file has no
-/// working-tree diff, because git has never had a copy to differ from, and a
-/// commit's reading of a file it did not touch is empty by definition. Neither
-/// is a failure, so neither gets the refusal card — they get one line where the
-/// body would have been.
+/// **One way in, not two.** It used to be reached by an untracked file as well,
+/// and that was the bug and not the sentence: a file git has never had a copy of
+/// has no `git diff` reading, so `git diff -- <path>` printed nothing and exited
+/// clean and the pane said *No changes to show* about a file that was nothing
+/// but change (user report, 2026-08-17). The reading an untracked file has is
+/// against **nothing** — see [`GitDiffAgainst::Nothing`] — and it is a whole
+/// file of green. What is left here is the honest empty: a commit's reading of a
+/// file it did not touch, and a tracked file whose two copies agree. Neither is
+/// a failure, so neither gets the refusal card; they get one line where the body
+/// would have been.
 pub const GIT_DOCUMENT_EMPTY: &str = "No changes to show";
+
+/// Which of a repository's copies of a file a diff is taken **against**.
+///
+/// # Three, and not a `staged: bool`
+///
+/// A tracked file has two readings and a bool was enough for them: the index as
+/// against `HEAD`, and the working tree as against the index (R25). An untracked
+/// file has neither, and the bool had no way to say so — it answered `false`,
+/// which means "the working tree against the index", and git's answer to that
+/// about a file it has never seen is an empty patch and exit 0. The third state
+/// is not a shade of the second; it is a different command, because the thing
+/// the file is being compared to is not in the repository at all.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GitDiffAgainst {
+    /// `git diff --cached` — the index as against `HEAD`. R25's STAGED rows.
+    Index,
+    /// `git diff` — the working tree as against the index. CHANGES rows.
+    WorkingTree,
+    /// `git diff --no-index -- /dev/null <path>` — the file as against nothing,
+    /// which reads as one addition of the whole of it. UNTRACKED rows.
+    Nothing,
+}
 
 /// One buffer's live content.
 ///
@@ -3031,18 +3058,18 @@ mod tests {
     fn two_repositories_and_two_stages_are_four_identities_no_string_could_keep_apart() {
         let repo_a = PathBuf::from(r"C:\w\repo");
         let repo_b = PathBuf::from(r"D:\w\repo");
-        let diff = |root: &PathBuf, staged| PreviewSource::GitDiff {
+        let diff = |root: &PathBuf, against| PreviewSource::GitDiff {
             root: root.clone(),
             path: "src/main.rs".to_owned(),
-            staged,
+            against,
         };
 
         let mut pool = PreviewPool::default();
         for (source, name) in [
-            (diff(&repo_a, false), "main.rs"),
-            (diff(&repo_a, true), "main.rs"),
-            (diff(&repo_b, false), "main.rs"),
-            (diff(&repo_b, true), "main.rs"),
+            (diff(&repo_a, GitDiffAgainst::WorkingTree), "main.rs"),
+            (diff(&repo_a, GitDiffAgainst::Index), "main.rs"),
+            (diff(&repo_b, GitDiffAgainst::WorkingTree), "main.rs"),
+            (diff(&repo_b, GitDiffAgainst::Index), "main.rs"),
             // The pseudo-path the mock-up would have minted for the first of
             // them, arriving as what it literally is: a file name.
             (PreviewSource::file(r"git:C:\w\repo:src/main.rs"), "main.rs"),
@@ -3058,18 +3085,22 @@ mod tests {
 
         // Asked for again, each is the buffer that is already there — the whole
         // of "finding beats making", now for an identity that has no path.
-        pool.open(diff(&repo_a, true), "main.rs".to_owned(), &[])
-            .dirty = true;
+        pool.open(
+            diff(&repo_a, GitDiffAgainst::Index),
+            "main.rs".to_owned(),
+            &[],
+        )
+        .dirty = true;
         assert_eq!(pool.len(), 5, "a repeat of one triple opens nothing new");
         assert!(
-            pool.get(&diff(&repo_a, true))
+            pool.get(&diff(&repo_a, GitDiffAgainst::Index))
                 .expect("staged, repo A")
                 .dirty,
             "and it is the same buffer, edits and all"
         );
         assert!(
             !pool
-                .get(&diff(&repo_a, false))
+                .get(&diff(&repo_a, GitDiffAgainst::WorkingTree))
                 .expect("unstaged, repo A")
                 .dirty,
             "while the *unstaged* diff of the same file in the same repo is a \
@@ -3077,7 +3108,7 @@ mod tests {
         );
         assert!(
             !pool
-                .get(&diff(&repo_b, true))
+                .get(&diff(&repo_b, GitDiffAgainst::Index))
                 .expect("staged, repo B")
                 .dirty,
             "and so is the same question asked of another repository"
@@ -3085,7 +3116,7 @@ mod tests {
 
         // A source has no path unless it is a file, and a file's path is never
         // read as anything but a path.
-        assert_eq!(diff(&repo_a, false).file_path(), None);
+        assert_eq!(diff(&repo_a, GitDiffAgainst::WorkingTree).file_path(), None);
         assert_eq!(PreviewSource::GitGraph { root: repo_a }.file_path(), None);
         // G-4 — the graph is its own view and waits for no body: it is a
         // picture the chrome draws, not text a subprocess is fetching.
@@ -3123,7 +3154,7 @@ mod tests {
             PreviewSource::GitDiff {
                 root: PathBuf::from(r"C:\w\repo"),
                 path: "src/main.rs".to_owned(),
-                staged: false,
+                against: GitDiffAgainst::WorkingTree,
             },
             "main.rs".to_owned(),
         );
@@ -4321,7 +4352,7 @@ mod tests {
             PreviewSource::GitDiff {
                 root: root.clone(),
                 path: "crates/bt-app/src/main.rs".to_owned(),
-                staged: true,
+                against: GitDiffAgainst::Index,
             }
             .composed_lead()
             .as_deref(),
@@ -4381,7 +4412,7 @@ mod tests {
             PreviewSource::GitDiff {
                 root: root.clone(),
                 path: "crates/bt-app/src/main.rs".to_owned(),
-                staged: false,
+                against: GitDiffAgainst::WorkingTree,
             }
             .repo_file(),
             Some(root.join("crates/bt-app/src/main.rs"))
@@ -4428,7 +4459,7 @@ mod tests {
         let source = PreviewSource::GitDiff {
             root: PathBuf::from(r"D:\repo"),
             path: "logo.png".to_owned(),
-            staged: false,
+            against: GitDiffAgainst::WorkingTree,
         };
         let mut binary = PreviewBuffer::new(source.clone(), "logo.png.diff".to_owned());
         binary.accept(read(
