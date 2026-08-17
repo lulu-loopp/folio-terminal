@@ -390,6 +390,19 @@ pub enum Text {
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
     DragReplacePane,
+
+    // ── the two colour-scheme rows (§7.1.6c-4a) ────────────────────────────
+    /// Appended here rather than beside the other `Row*` entries: this table is
+    /// a list whose order is its own, and a slice that inserted into the middle
+    /// of it would show as a diff across every line below the insertion.
+    RowLightScheme,
+    RowDarkScheme,
+    DescLightScheme,
+    DescDarkScheme,
+    /// The title of the card raised for a scheme file that would not parse. Its
+    /// body names the file and the reason and is therefore a value-carrying
+    /// string — see [`scheme_file_skipped`].
+    SchemeFileSkipped,
 }
 
 impl Text {
@@ -543,6 +556,23 @@ impl Text {
                 "How large grid text is drawn, before the display's scaling",
                 "网格文字画多大，尚未乘显示器的缩放",
             ),
+            Self::RowLightScheme => pick(lang, "Light scheme", "浅色配色"),
+            Self::RowDarkScheme => pick(lang, "Dark scheme", "深色配色"),
+            // The pair carries one fact each and the folder is named once, on
+            // the second of the two, for the reason the font pair states its
+            // left-out once: they are read together and a path repeated twice
+            // reads as two paths.
+            Self::DescLightScheme => pick(
+                lang,
+                "The colours a Light window is drawn in, terminal and chrome alike",
+                "浅色窗口所用的颜色，终端与窗口自身同出一套",
+            ),
+            Self::DescDarkScheme => pick(
+                lang,
+                "The same for a Dark window. Files: %APPDATA%\\Folio\\schemes",
+                "深色窗口同理。文件放在 %APPDATA%\\Folio\\schemes",
+            ),
+            Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
             Self::OptionSystem => pick(lang, "System", "系统"),
             Self::OptionLight => pick(lang, "Light", "浅色"),
@@ -763,7 +793,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 129] = [
+    pub const ALL: [Self; 134] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -893,6 +923,11 @@ impl Text {
         Self::HyperlinkBlocked,
         Self::DragSwapPanes,
         Self::DragReplacePane,
+        Self::RowLightScheme,
+        Self::RowDarkScheme,
+        Self::DescLightScheme,
+        Self::DescDarkScheme,
+        Self::SchemeFileSkipped,
     ];
 }
 
@@ -937,6 +972,21 @@ pub fn psreadline_invite_body(found: &str, patched: &str, path: &str) -> String 
              错位，Folio 发出的修复指令不起作用。安装会把 PSReadLine {patched} 写入 \
              {path}，对此后新开的 PowerShell 会话生效，并可在设置 ▸ 终端中移除。"
         ),
+    }
+}
+
+/// The card a scheme file that would not parse raises: which file, and why.
+///
+/// Both halves are parameters because both come from outside the product — the
+/// name is whatever the user called the file, and the reason is
+/// `SchemeParseError`'s own sentence, which names the offending key. A card that
+/// said only "a scheme could not be read" would leave a folder of eleven files
+/// to be opened one at a time.
+#[must_use]
+pub fn scheme_file_skipped(file: &str, reason: &str) -> String {
+    match current() {
+        Lang::English => format!("{file} — {reason}"),
+        Lang::Chinese => format!("{file} —— {reason}"),
     }
 }
 

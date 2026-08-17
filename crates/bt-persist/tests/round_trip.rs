@@ -560,13 +560,15 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 8,
+        SETTINGS_SCHEMA_VERSION, 9,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
-         language the v6→v7, and the grid's face, its size and the PSReadLine \
+         language the v6→v7, the grid's face, its size and the PSReadLine \
          invitation's state the v7→v8 — three keys in one bump because all three \
-         arrive with their readers in one change (§1.3)"
+         arrive with their readers in one change (§1.3) — and the two colour \
+         schemes the v8→v9, two keys in one bump because they are one decision's \
+         two halves and `theme_mode` still decides which of them is in force"
     );
     assert!(
         defaults.display_formulas,
@@ -704,6 +706,108 @@ fn settings_v7_fixture_migrates_to_v8_with_an_unnamed_face_and_disturbs_nothing(
         LanguageV1::Chinese,
         "v7→v8 is structural: every sibling crosses untouched"
     );
+}
+
+/// PIN (the colour-scheme row, 2026-08-17) — a v8 settings file migrates to v9
+/// with neither side of the theme naming a palette, and every sibling crosses
+/// untouched.
+///
+/// The fixture is non-default in all ten of its older fields (§1.3 rule 1), the
+/// three v8 keys deliberately among them: they are the siblings added one
+/// version ago, and therefore the ones a copy-paste of the step above would most
+/// plausibly reset while inserting its own pair.
+///
+/// Two empty strings and not this build's two default palette names is the half
+/// worth pinning, and it is `v3_to_v4`'s ruling arriving a third time. A v8
+/// build painted one light palette and one dark one because they were the only
+/// two it had; naming them here would be indistinguishable from a user who
+/// opened the list and picked them, and would go on being written into files
+/// long after the built-in palette had been renamed or improved around them.
+/// That *both* are empty is the other half: a step that filled one side in would
+/// leave the other for the reader to guess at, which is what having two fields
+/// exists to prevent.
+#[test]
+fn settings_v8_fixture_migrates_to_v9_with_no_scheme_named_and_disturbs_nothing() {
+    let (v9, report) = read_settings(&fixture_path("settings_v8_scheme_absent.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v9.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        v9.light_scheme, "",
+        "a v8 build never asked which palette to paint the grid in, so the \
+         migration must write the answer that defers rather than one that decides"
+    );
+    assert_eq!(
+        v9.dark_scheme, "",
+        "and it must defer on both sides — filling one in would leave the other \
+         to be guessed at the first time the theme flipped"
+    );
+    assert_eq!(v9.theme_mode, ThemeModeV1::Light);
+    assert!(!v9.display_formulas);
+    assert!(v9.inline_formulas);
+    assert_eq!(v9.default_profile, "gitbash");
+    assert!(!v9.git_panel);
+    assert_eq!(v9.split_direction, SplitDirectionV1::Down);
+    assert_eq!(v9.language, LanguageV1::Chinese);
+    assert_eq!(v9.terminal_font_family, "Cascadia Mono");
+    assert_eq!(v9.terminal_font_size, 20);
+    assert_eq!(
+        v9.psreadline_invite,
+        PsReadLineInviteV1::Installed,
+        "v8→v9 is structural: every sibling crosses untouched"
+    );
+}
+
+/// PIN — a v9 file that *names* both schemes is loaded without migration and
+/// hands both names back exactly as written.
+///
+/// The companion to the migration test above, and it pins the opposite failure.
+/// That one proves an unasked user is not answered for; this one proves an
+/// answered user is not overruled. The names go through this crate opaquely: it
+/// does not know whether "Solarized Light" resolves to anything on this machine,
+/// and must not decide that a spelling it cannot resolve is wrong — resolving is
+/// the reading build's question, and its answer is §5.4 逐叶降级.
+#[test]
+fn a_v9_settings_file_that_names_both_schemes_keeps_both_names() {
+    let (v9, report) = read_settings(&fixture_path("settings_v9_solarized_pair.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v9.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(v9.light_scheme, "Solarized Light");
+    assert_eq!(v9.dark_scheme, "Solarized Dark");
+    assert_eq!(
+        v9.theme_mode,
+        ThemeModeV1::System,
+        "a user who follows the system is exactly who needs both sides named"
+    );
+    assert!(v9.display_formulas);
+    assert!(!v9.inline_formulas);
+    assert_eq!(v9.default_profile, "wsl");
+    assert!(!v9.git_panel);
+    assert_eq!(v9.split_direction, SplitDirectionV1::Right);
+    assert_eq!(v9.language, LanguageV1::English);
+    assert_eq!(v9.terminal_font_family, "MS Gothic");
+    assert_eq!(v9.terminal_font_size, 14);
+    assert_eq!(v9.psreadline_invite, PsReadLineInviteV1::Declined);
+
+    // And back out again, byte-for-byte in meaning: the pair a user chose is the
+    // pair the next launch reads.
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v9-schemes-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &v9).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains("\"light_scheme\": \"Solarized Light\"")
+            && on_disk.contains("\"dark_scheme\": \"Solarized Dark\""),
+        "a scheme is written as its name, never as an index into a list that is \
+         part built-in and part user-supplied: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, v9);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// PIN (R1 / the master switch, 2026-08-15) — a v4 settings file migrates to v5

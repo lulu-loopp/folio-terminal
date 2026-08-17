@@ -14,16 +14,27 @@ use serde::{Deserialize, Serialize};
 /// v2 adds `display_formulas`, v3 adds `inline_formulas`, v4 adds
 /// `default_profile`, v5 adds `git_panel`, v6 adds `split_direction`, v7 adds
 /// `language`, v8 adds `terminal_font_family`, `terminal_font_size` and
-/// `psreadline_invite`. §2's "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is
-/// satisfied the way §1.3 intends it to be: each field arrives in the same
-/// change that gives it a reader, not ahead of one.
+/// `psreadline_invite`, v9 adds `light_scheme` and `dark_scheme`. §2's
+/// "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is satisfied the way §1.3
+/// intends it to be: each field arrives in the same change that gives it a
+/// reader, not ahead of one.
 ///
 /// **v8 carries three fields and it is one bump**, because all three arrive with
 /// their readers in the same change: the Appearance block's two font rows and
 /// the Terminal page's PSReadLine row. What v8 deliberately does *not* carry is
 /// `interface_font_family` — the chrome's own face stays fixed in this version,
 /// so a field for it would be §2's "只写字段 = 死规格" exactly.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 8;
+///
+/// **v9 carries two fields and it is also one bump**, for v8's reason and one of
+/// its own. The reason of its own is that the two are not two decisions: a
+/// person choosing colour schemes chooses the pair, because `theme_mode` still
+/// decides which of the two is in force and neither half answers the question
+/// alone. A file naming only a dark scheme would leave the Light side to be
+/// guessed at, and a build that guessed would be picking on the user's behalf on
+/// every machine whose Windows is set to light. Both arrive with their reader in
+/// the same change — the Appearance block's scheme row, which offers the pair
+/// and writes the pair.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 9;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -57,10 +68,35 @@ pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "";
 /// rather than changing it.
 pub const DEFAULT_TERMINAL_FONT_SIZE: u8 = 16;
 
-/// `settings.json` v8 — docs/M2-persistence-schema-v1.md §2:
+/// The scheme in force under a Light theme when the file has never named one.
+///
+/// The empty string, and it is [`DEFAULT_PROFILE_UNSET`]'s ruling reaching a
+/// third table — first a shell, then a face, now a palette. This crate does not
+/// know which schemes exist: the list is a product table plus whatever the user
+/// has dropped into the schemes folder, and it is assembled a whole crate away.
+/// `"Folio Light"` written here would be a settings file asserting a fact about
+/// that table, would go on being written into every file long after the built-in
+/// default had been renamed or retired around it, and — the half that actually
+/// costs something — could not be told apart from a user who opened the list and
+/// picked Folio Light deliberately. An unnamed scheme means "whatever this
+/// build's default palette is", which every reader already has to handle,
+/// because a scheme the file names may equally have been deleted since.
+pub const DEFAULT_LIGHT_SCHEME: &str = "";
+
+/// The scheme in force under a Dark theme when the file has never named one.
+///
+/// [`DEFAULT_LIGHT_SCHEME`]'s reasoning, unchanged, on the other side of the
+/// theme. The two are a pair rather than one field with a mode attached because
+/// `theme_mode` already owns the mode: it decides which of the two is read, and
+/// these two decide what is read *as*. A single `scheme` field would force a
+/// user who follows the system to accept one palette in both, which is the one
+/// thing a light-and-dark product must not make them do.
+pub const DEFAULT_DARK_SCHEME: &str = "";
+
+/// `settings.json` v9 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 8,
+///   "schema_version": 9,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -70,7 +106,9 @@ pub const DEFAULT_TERMINAL_FONT_SIZE: u8 = 16;
 ///   "language": "System" | "English" | "Chinese",
 ///   "terminal_font_family": "Consolas" | "Cascadia Mono" | … | "",
 ///   "terminal_font_size": 10..=24,
-///   "psreadline_invite": "NotAsked" | "Declined" | "Installed" | "Dismissed"
+///   "psreadline_invite": "NotAsked" | "Declined" | "Installed" | "Dismissed",
+///   "light_scheme": "Solarized Light" | … | "",
+///   "dark_scheme": "Nord" | … | ""
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +243,46 @@ pub struct SettingsV1 {
     /// and said no; asking again every launch is the behaviour this field exists
     /// to make impossible.
     pub psreadline_invite: PsReadLineInviteV1,
+    /// Which colour scheme the window is painted in while the theme resolves to
+    /// Light (`docs/DESIGN.md` §7.1.6c-4a).
+    ///
+    /// **The whole window, grid and chrome alike** — and that is the opposite of
+    /// `terminal_font_family`'s distinction, deliberately. A scheme is
+    /// twenty-one colours: the ANSI sixteen, plus a background, a foreground, a
+    /// cursor, a selection and an accent. The window's own hundred-and-thirty-odd
+    /// surface colours are *derived* from those by the renderer and stored
+    /// nowhere, which is what stops a scheme from being a skin: nobody has to
+    /// name a divider, and no scheme can produce a window whose tab strip
+    /// disagrees with the terminal beside it. Nothing about that derivation is
+    /// this crate's business; what is stored here is a name.
+    ///
+    /// It is stored **beside** `theme_mode` rather than folded into it because
+    /// the two answer different questions and a user changes them at different
+    /// rates. `theme_mode` says light or dark, possibly by deferring to Windows;
+    /// this says what light *looks like* when it comes. Someone who follows the
+    /// system gets both of their choices honoured, one per side, without the
+    /// file having to record which side happened to be showing the day they
+    /// chose.
+    ///
+    /// A scheme **name**, never a path or an index: the file a scheme lives in
+    /// moves when the user reorganises their schemes folder, and a number into a
+    /// list that is part built-in and part user-supplied means a different
+    /// palette the moment either half changes. This crate does not validate it —
+    /// a name no scheme answers to is the ordinary case (deleted, renamed,
+    /// written by a newer build), and the reader's answer is §5.4 逐叶降级: fall
+    /// to the build's default palette, which is where
+    /// [`DEFAULT_LIGHT_SCHEME`] arrives from the other side.
+    pub light_scheme: String,
+    /// Which colour scheme the grid is painted in while the theme resolves to
+    /// Dark — [`Self::light_scheme`]'s twin, and everything said there holds
+    /// here.
+    ///
+    /// Both are read on every startup and whenever the resolved theme flips;
+    /// only one of the two is in force at a time, and which one is
+    /// `theme_mode`'s answer, not this field's. The pair is why a user who runs
+    /// Windows on a light-at-noon schedule does not get one palette forced on
+    /// them at both ends of the day.
+    pub dark_scheme: String,
 }
 
 impl Default for SettingsV1 {
@@ -221,6 +299,8 @@ impl Default for SettingsV1 {
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             psreadline_invite: PsReadLineInviteV1::default(),
+            light_scheme: DEFAULT_LIGHT_SCHEME.to_owned(),
+            dark_scheme: DEFAULT_DARK_SCHEME.to_owned(),
         }
     }
 }
@@ -477,6 +557,73 @@ mod tests {
             let read: SettingsV1 = serde_json::from_str(&text).unwrap();
             assert_eq!(read.terminal_font_family, family);
             assert_eq!(read.terminal_font_size, size);
+            assert_eq!(read, settings);
+        }
+    }
+
+    /// PIN — a settings file that has never been asked which palette to paint
+    /// the grid in names neither scheme, and says so with two empty strings
+    /// rather than with this build's two default names.
+    ///
+    /// It is the font row's ruling one field over, and the trap is the same one
+    /// wearing a different hat. `"Folio Dark"` on disk is indistinguishable from
+    /// a user who opened the list and picked Folio Dark, so the day the built-in
+    /// default palette is renamed, retired or improved, every file ever written
+    /// pins the old name and the user never sees the new one. The pair is also
+    /// pinned as a *pair*: a default that filled in only one side would leave
+    /// the other to be guessed, which is the thing having two fields exists to
+    /// prevent.
+    #[test]
+    fn the_default_schemes_are_unnamed_on_both_sides_of_the_theme() {
+        let defaults = SettingsV1::default();
+        assert_eq!(defaults.light_scheme, DEFAULT_LIGHT_SCHEME);
+        assert_eq!(defaults.dark_scheme, DEFAULT_DARK_SCHEME);
+        assert_eq!(
+            DEFAULT_LIGHT_SCHEME, "",
+            "an unnamed scheme means `this build's default palette`, which every \
+             reader already handles because a named scheme may equally have been \
+             deleted since"
+        );
+        assert_eq!(DEFAULT_DARK_SCHEME, "");
+        let wire = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(wire["light_scheme"], serde_json::Value::from(""));
+        assert_eq!(wire["dark_scheme"], serde_json::Value::from(""));
+        assert!(
+            wire["light_scheme"].is_string() && wire["dark_scheme"].is_string(),
+            "a scheme is named, never numbered — an index into a list that is part \
+             built-in and part user-supplied means a different palette the moment \
+             either half changes"
+        );
+    }
+
+    /// PIN — a chosen pair survives a round trip, including a name this build
+    /// has never heard of and a pair that names one side only.
+    ///
+    /// Both of the odd cases are the point. A scheme this build cannot resolve
+    /// is the ordinary case rather than corruption — deleted, renamed, or
+    /// written by a newer build — and this crate's job is to hand the name back
+    /// unchanged rather than to correct it against a table it does not own. And
+    /// a file that names a dark scheme while leaving Light unset is a user who
+    /// has only ever run dark; the empty side must stay empty rather than being
+    /// helpfully filled in with the other one.
+    #[test]
+    fn a_chosen_pair_of_schemes_survives_a_round_trip_including_unknown_names() {
+        for (light, dark) in [
+            ("Solarized Light", "Solarized Dark"),
+            ("", "Nord"),
+            ("Folio Light", ""),
+            ("a-scheme-this-build-never-heard-of", "Gruvbox Dark"),
+            ("", ""),
+        ] {
+            let settings = SettingsV1 {
+                light_scheme: light.to_owned(),
+                dark_scheme: dark.to_owned(),
+                ..SettingsV1::default()
+            };
+            let text = serde_json::to_string(&settings).unwrap();
+            let read: SettingsV1 = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.light_scheme, light);
+            assert_eq!(read.dark_scheme, dark);
             assert_eq!(read, settings);
         }
     }

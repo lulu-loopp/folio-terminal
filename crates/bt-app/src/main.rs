@@ -30,6 +30,7 @@ mod preview_edit;
 mod profiles;
 mod psreadline;
 mod restore;
+mod schemes;
 mod search;
 mod seats;
 mod seed;
@@ -13804,6 +13805,12 @@ impl Runtime {
                 .create_window(attributes)
                 .context("create native window")?,
         );
+        // **Before `set_theme`**, which is the whole of why it is here: the
+        // theme's own atomic caches the background it resolves to, and that
+        // background is now a colour of the scheme rather than a constant. A
+        // pair adopted afterwards would leave the first frame painted on the
+        // canvas of whichever scheme the process was born with.
+        adopt_stored_schemes(settings_store.loaded());
         let resolved_theme = resolve_theme_mode(theme_mode, window.theme());
         if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
             eprintln!(
@@ -14267,6 +14274,10 @@ impl Runtime {
             source: FrameSource::Expose,
         })?;
         runtime.redraw()?;
+        // Said now rather than at the moment of the scan, because the scan
+        // happens before there is a window to say it in — and said once, because
+        // the catalogue is read once (see `schemes::catalogue`).
+        runtime.report_skipped_schemes()?;
         let background_visible = startup_started.elapsed();
         runtime.background_visible = Some(background_visible);
         if trace_startup {
@@ -17725,6 +17736,8 @@ impl Runtime {
                 &self.settings_store.loaded().terminal_font_family,
             ),
             font_size: settings::font_size_index(self.settings_store.loaded().terminal_font_size),
+            light_scheme: settings::scheme_index(&self.settings_store.loaded().light_scheme, true),
+            dark_scheme: settings::scheme_index(&self.settings_store.loaded().dark_scheme, false),
             psreadline: self.psreadline_row_state(),
             psreadline_install_available: psreadline::install_available(
                 psreadline::probe(),
@@ -18633,6 +18646,12 @@ impl Runtime {
                 self.psreadline_size_changed = true;
             }
         }
+        if let Some(name) = settings::light_scheme_requested(target) {
+            self.apply_scheme(Some(name.to_owned()), None)?;
+        }
+        if let Some(name) = settings::dark_scheme_requested(target) {
+            self.apply_scheme(None, Some(name.to_owned()))?;
+        }
         if let Some(install) = settings::psreadline_requested(target) {
             self.apply_psreadline(install)?;
         }
@@ -19036,20 +19055,7 @@ impl Runtime {
             }
             ThemeChange::Unchanged => Ok(false),
             ThemeChange::Changed => {
-                install_theme_class_background(&self.window)?;
-                self.sync_math_layout_key();
-                // The one thing a rail's key cannot see. A palette is not a fact
-                // about a pane, so [`cmdrail::RailKey`] does not carry one — which
-                // means a rail built under the old ink would be handed back
-                // unchanged, and a light window would keep a dark window's ticks.
-                for cache in self.command_rails.values_mut() {
-                    cache.clear();
-                }
-                self.refresh_chrome();
-                self.publish_frame(FrameTrigger {
-                    occurred_at: Instant::now(),
-                    source: FrameSource::Expose,
-                })?;
+                self.adopt_new_palette()?;
                 Ok(true)
             }
         }
@@ -19217,6 +19223,84 @@ impl Runtime {
         }
         self.toast(notice.kind, notice.anchor, None, notice.body)?;
         Ok(true)
+    }
+
+    /// **Everything a new palette costs this window**, whichever door it came
+    /// through.
+    ///
+    /// One function and not a block inside `apply_theme`, because there are now
+    /// two doors: the theme flipping, and one of the two schemes being replaced
+    /// under a theme that did not move. The second is the one that would have
+    /// been missed — its symptom is a terminal in the new colours inside chrome
+    /// still wearing the old ones, which reads as a redraw bug rather than as a
+    /// step nobody ran.
+    fn adopt_new_palette(&mut self) -> Result<()> {
+        install_theme_class_background(&self.window)?;
+        self.sync_math_layout_key();
+        // The one thing a rail's key cannot see. A palette is not a fact about a
+        // pane, so [`cmdrail::RailKey`] does not carry one — which means a rail
+        // built under the old ink would be handed back unchanged, and a light
+        // window would keep a dark window's ticks.
+        for cache in self.command_rails.values_mut() {
+            cache.clear();
+        }
+        self.refresh_chrome();
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
+    }
+
+    /// **A colour scheme, changed while the window is up** (§7.1.6c-4a).
+    ///
+    /// One argument per row and both optional, because a press moves exactly one
+    /// of the pair and the other has to keep the name it already had — passing
+    /// both every time would mean the caller reading a value back out of the
+    /// store only to write it in again.
+    ///
+    /// **No restart card.** The whole point of deriving the chrome rather than
+    /// storing it is that a scheme change is the theme-switch path arriving
+    /// through another door: `set_schemes` re-derives both palettes and the ANSI
+    /// sixteen and advances `theme_revision`, which is the revision every
+    /// artefact keyed on a palette is already invalidated by. Nothing here is a
+    /// second invalidation list.
+    fn apply_scheme(&mut self, light: Option<String>, dark: Option<String>) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        if let Some(light) = light {
+            settings.light_scheme = light;
+        }
+        if let Some(dark) = dark {
+            settings.dark_scheme = dark;
+        }
+        if &settings == self.settings_store.loaded() {
+            return Ok(false);
+        }
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        if adopt_stored_schemes(self.settings_store.loaded()) == ThemeChange::Unchanged {
+            return Ok(false);
+        }
+        self.adopt_new_palette()?;
+        Ok(true)
+    }
+
+    /// Say, once, which files in the scheme folder were skipped and why.
+    ///
+    /// An Error card per file rather than one card listing them, because the
+    /// reason is per file and the toast host already caps and stacks — and
+    /// because a user with three broken files has three things to fix, not one.
+    fn report_skipped_schemes(&mut self) -> Result<()> {
+        for reject in schemes::catalogue().rejects() {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                Some(i18n::Text::SchemeFileSkipped.text().to_owned()),
+                i18n::scheme_file_skipped(&reject.file, &reject.reason),
+            )?;
+        }
+        Ok(())
     }
 
     /// **The grid's face and size, changed while the window is up.**
@@ -41742,6 +41826,22 @@ fn trace_surface_size_clamp(
         presentation.swapchain_size.1,
         presentation.max_texture_dimension_2d,
     );
+}
+
+/// Put the stored pair of schemes in force, resolving each name against this
+/// build's catalogue.
+///
+/// A free function rather than a method because the startup path calls it before
+/// there is a runtime to be a method on, and the two callers must not be two
+/// resolutions: a name the catalogue does not hold falls to Folio's own here
+/// exactly as `settings::scheme_index` makes the picker's tick fall to it, so
+/// the window and the row cannot disagree about which scheme is in force.
+fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {
+    let catalogue = schemes::catalogue();
+    bt_render::set_schemes(
+        catalogue.resolve(&settings.light_scheme, true),
+        catalogue.resolve(&settings.dark_scheme, false),
+    )
 }
 
 fn install_theme_class_background(window: &Window) -> Result<()> {

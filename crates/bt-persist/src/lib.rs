@@ -25,6 +25,10 @@
 //! - [`write_tracker`] — the write-failure alert cadence (§5.3): one alert
 //!   per failure streak, not per attempt.
 //! - [`sentinel`] — the crash-vs-clean-exit sentinel file primitives (§5.5).
+//! - [`scheme`] — one Windows Terminal colour-scheme object, parsed. The one
+//!   reader here that is not versioned by this crate, because the format is
+//!   somebody else's; where scheme files live and which of them exist is
+//!   `bt-app`'s question, and deliberately not this crate's.
 
 mod atomic;
 mod debounce;
@@ -32,6 +36,7 @@ mod error;
 mod keybindings;
 mod layout;
 mod migrate;
+mod scheme;
 mod sentinel;
 mod session;
 mod settings;
@@ -49,6 +54,7 @@ pub use migrate::{
     FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, ReadReport, SESSION_MIGRATIONS,
     SETTINGS_MIGRATIONS,
 };
+pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme};
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
     DegradationReport, GraphFilterV1, PreviewPaneV1, PreviewPoolEntryV1, RecentEntryV1,
@@ -57,8 +63,9 @@ pub use session::{
     WindowStateV1,
 };
 pub use settings::{
-    DEFAULT_PROFILE_UNSET, DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_SIZE, LanguageV1,
-    PsReadLineInviteV1, SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1, ThemeModeV1,
+    DEFAULT_DARK_SCHEME, DEFAULT_LIGHT_SCHEME, DEFAULT_PROFILE_UNSET, DEFAULT_TERMINAL_FONT_FAMILY,
+    DEFAULT_TERMINAL_FONT_SIZE, LanguageV1, PsReadLineInviteV1, SETTINGS_SCHEMA_VERSION,
+    SettingsV1, SplitDirectionV1, ThemeModeV1,
 };
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};
 

@@ -4,10 +4,12 @@
 use std::{
     ffi::OsStr,
     sync::{
-        OnceLock,
+        OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
+
+use crate::scheme::{ColourScheme, FOLIO_DARK, FOLIO_LIGHT};
 
 /// The product's terminal defaults, from `design/ui-mockup.html` (the approved
 /// styling): dark `--termbg #1B1B1B`, ink `rgba(255,255,255,.87)` composited
@@ -16,7 +18,7 @@ use std::{
 pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [0x1b, 0x1b, 0x1b];
 pub const LIGHT_BACKGROUND_RGB: [u8; 3] = [0xff, 0xff, 0xff];
 pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xe1, 0xe1, 0xe1];
-const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
+pub(crate) const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
 /// The mock-up's `--cursor` on dark.
 pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xd4, 0xd4, 0xd4];
 /// The mock-up's `--cursor` on light — `:root { --cursor: #37352F }`, which on
@@ -30,11 +32,7 @@ pub(crate) const LIGHT_CURSOR_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
 /// [`current_theme`]'s: under a `BT_BG` override the caret follows the canvas
 /// it is actually drawn on.
 pub(crate) fn cursor_for_background(background: [u8; 3]) -> [u8; 3] {
-    if background_is_light(background) {
-        LIGHT_CURSOR_RGB
-    } else {
-        DEFAULT_CURSOR_RGB
-    }
+    scheme_for_background(background).cursor
 }
 
 /// The caret ink in force, from the same atomic snapshot as its background.
@@ -71,15 +69,33 @@ pub(crate) const UNFOCUSED_CURSOR_ALPHA_PERCENT: i32 = 45;
 /// arithmetic is the same either way, which is the point of there being one.
 #[must_use]
 pub const fn ink_over(canvas: [u8; 3], ink: [u8; 3], alpha: i32) -> [u8; 3] {
+    ink_over_bp(canvas, ink, alpha * 10)
+}
+
+/// [`ink_over`] with `alpha` in **ten-thousandths**.
+///
+/// One design token needs it and the whole ladder is defined in terms of it so
+/// there is still one compositor: `.pring .track` is `--border` at
+/// `opacity: .7`, which is `.094 × .7 = .0658` on night and `.088 × .7 = .0616`
+/// on paper. Rounded to a thousandth the second becomes `.062`, and `.062` puts
+/// the track over a hovered tab one level off the value the design's own
+/// renderer produces. Ten-thousandths carry it exactly.
+///
+/// [`ink_over`]'s answers are unchanged by construction: `(10x + 5000)/10000`
+/// and `(x + 500)/1000` are the same integer for every `x`, in both signs, so
+/// `ink_over(c, i, a)` and `ink_over_bp(c, i, a * 10)` are one function called
+/// two ways rather than two roundings that happen to agree today.
+#[must_use]
+pub const fn ink_over_bp(canvas: [u8; 3], ink: [u8; 3], alpha: i32) -> [u8; 3] {
     let mut faded = [0u8; 3];
     let mut channel = 0;
     while channel < 3 {
         let base = canvas[channel] as i32;
         let scaled = (ink[channel] as i32 - base) * alpha;
         let step = if scaled >= 0 {
-            (scaled + 500) / 1000
+            (scaled + 5000) / 10000
         } else {
-            (scaled - 500) / 1000
+            (scaled - 5000) / 10000
         };
         faded[channel] = (base + step) as u8;
         channel += 1;
@@ -118,7 +134,7 @@ pub const GRAPH_LANE_COUNT: usize = 8;
 
 /// The lane wheel on the dark canvas — HSL S 52% L 66%, hues 225 265 305 350 35
 /// 75 145 190. See [`ChromePalette::graph_lanes`] for the derivation.
-const GRAPH_LANES_DARK: [[u8; 3]; GRAPH_LANE_COUNT] = [
+pub(crate) const GRAPH_LANES_DARK: [[u8; 3]; GRAPH_LANE_COUNT] = [
     [0x7b, 0x92, 0xd5],
     [0xa1, 0x7b, 0xd5],
     [0xd5, 0x7b, 0xce],
@@ -131,7 +147,7 @@ const GRAPH_LANES_DARK: [[u8; 3]; GRAPH_LANE_COUNT] = [
 
 /// The same eight hues on the light canvas — S 55% L 38%, which is where they
 /// clear white by the same margin the dark set clears `#1b1b1b`.
-const GRAPH_LANES_LIGHT: [[u8; 3]; GRAPH_LANE_COUNT] = [
+pub(crate) const GRAPH_LANES_LIGHT: [[u8; 3]; GRAPH_LANE_COUNT] = [
     [0x2c, 0x46, 0x96],
     [0x58, 0x2c, 0x96],
     [0x96, 0x2c, 0x8d],
@@ -160,15 +176,6 @@ const GIT_ACT_PILL_DARK: [u8; 3] = ink_over(GIT_ROW_HOVER_DARK, DARK_INK_SOURCE,
 /// The same on light.
 const GIT_ACT_PILL_LIGHT: [u8; 3] = ink_over(GIT_ROW_HOVER_LIGHT, LIGHT_INK_SOURCE, 90);
 
-/// [`DEFAULT_CURSOR_RGB`] faded over `--termbg #1B1B1B`:
-/// 27 + (212 − 27) × .45 = 110.25 → #6E6E6E.
-pub(crate) const DEFAULT_UNFOCUSED_CURSOR_RGB: [u8; 3] =
-    cursor_ink_faded_over(DEFAULT_BACKGROUND_RGB, DEFAULT_CURSOR_RGB);
-/// [`LIGHT_CURSOR_RGB`] faded over `--termbg #FFFFFF`:
-/// 255 − (255 − 55) × .45 = 165 and its two companions → #A5A4A1.
-pub(crate) const LIGHT_UNFOCUSED_CURSOR_RGB: [u8; 3] =
-    cursor_ink_faded_over(LIGHT_BACKGROUND_RGB, LIGHT_CURSOR_RGB);
-
 /// The unfocused caret's ink, paired with its canvas.
 ///
 /// The caret does not change shape when the window loses focus — a bar stays
@@ -179,11 +186,7 @@ pub(crate) const LIGHT_UNFOCUSED_CURSOR_RGB: [u8; 3] =
 /// surface under a caret *is* known — it is the terminal canvas — so the
 /// composite is knowable, and here it is.
 pub(crate) fn unfocused_cursor_for_background(background: [u8; 3]) -> [u8; 3] {
-    if background_is_light(background) {
-        LIGHT_UNFOCUSED_CURSOR_RGB
-    } else {
-        DEFAULT_UNFOCUSED_CURSOR_RGB
-    }
+    cursor_ink_faded_over(background, cursor_for_background(background))
 }
 
 /// The unfocused caret ink in force, from the same atomic snapshot as its
@@ -233,11 +236,7 @@ pub(crate) const LIGHT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0xc1, 0xcd, 0xf3];
 /// canvas there. A selection fill that followed the theme instead would be the
 /// one colour on that screen still dressed for the other canvas.
 pub(crate) fn selection_background_for_background(background: [u8; 3]) -> [u8; 3] {
-    if background_is_light(background) {
-        LIGHT_SELECTION_BACKGROUND_RGB
-    } else {
-        DEFAULT_SELECTION_BACKGROUND_RGB
-    }
+    scheme_for_background(background).selection
 }
 
 /// The selection fill in force, read through the same atomic snapshot as the
@@ -266,12 +265,19 @@ pub(crate) fn selection_background_rgb() -> [u8; 3] {
 // not reproduce the design's own value, and the surface under a hit is known.
 
 /// `--accent` over a dark canvas.
-const DARK_ACCENT_RGB: [u8; 3] = [0x7a, 0x99, 0xff];
+pub(crate) const DARK_ACCENT_RGB: [u8; 3] = [0x7a, 0x99, 0xff];
 /// `--accent` over a light one.
-const LIGHT_ACCENT_RGB: [u8; 3] = [0x30, 0x59, 0xd8];
+pub(crate) const LIGHT_ACCENT_RGB: [u8; 3] = [0x30, 0x59, 0xd8];
 
 /// `--accent #7A99FF` at 30% over `--termbg #1B1B1B`: 27 + (122 − 27)×.3 = 55.5,
 /// 27 + (153 − 27)×.3 = 64.8, 27 + (255 − 27)×.3 = 95.4 → #38415F.
+///
+/// The value this product's own dark scheme produces. It is no longer read at
+/// draw time — the ground in force is computed from whichever accent and canvas
+/// the scheme in force names, see [`search_match_for_background`] — so it stays
+/// as the record of the rule and as the pin that holds the computation to it,
+/// which is the same footing [`DARK_CHROME`] now stands on.
+#[cfg(test)]
 pub(crate) const DEFAULT_SEARCH_MATCH_RGB: [u8; 3] =
     ink_over(DEFAULT_BACKGROUND_RGB, DARK_ACCENT_RGB, 300);
 /// The same over `--termbg #FFFFFF` → #C1CDF3.
@@ -284,6 +290,7 @@ pub(crate) const DEFAULT_SEARCH_MATCH_RGB: [u8; 3] =
 /// written out again here rather than aliased because the two are free to move
 /// apart the day either ruling does, and because the dark canvas already has
 /// them apart (`#264F78` against `#38415F`).
+#[cfg(test)]
 pub(crate) const LIGHT_SEARCH_MATCH_RGB: [u8; 3] =
     ink_over(LIGHT_BACKGROUND_RGB, LIGHT_ACCENT_RGB, 300);
 
@@ -295,20 +302,13 @@ pub(crate) const LIGHT_SEARCH_MATCH_RGB: [u8; 3] =
 /// followed the theme instead would be the one mark on that screen still dressed
 /// for the other canvas.
 pub(crate) fn search_match_for_background(background: [u8; 3]) -> [u8; 3] {
-    if background_is_light(background) {
-        LIGHT_SEARCH_MATCH_RGB
-    } else {
-        DEFAULT_SEARCH_MATCH_RGB
-    }
+    let scheme = scheme_for_background(background);
+    ink_over(scheme.background, scheme.accent, 300)
 }
 
 /// The current hit's ground: the accent, solid.
 pub(crate) fn search_current_for_background(background: [u8; 3]) -> [u8; 3] {
-    if background_is_light(background) {
-        LIGHT_ACCENT_RGB
-    } else {
-        DARK_ACCENT_RGB
-    }
+    scheme_for_background(background).accent
 }
 
 /// The ordinary hit's ground in force, from the same atomic snapshot as its canvas.
@@ -1213,9 +1213,15 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     tab_pin_state_on_hovered_tab: [0xe4, 0xe4, 0xe4],
     body_hint_text: [0x75, 0x75, 0x75],
     // `--ink` is white at .87 over `--termbg #1B1B1B` = 27: 27 + 228×.87 = 225.4
-    // — the same value the selected row's ink resolves to, arrived at over the
-    // bare body rather than over the selection fill.
-    preview_body_text: [0xe4, 0xe4, 0xe4],
+    // — which is #E1, the terminal's own default ink, arrived at over the bare
+    // body rather than over the selection fill.
+    //
+    // **Corrected 2026-08-17 by the derivation pin.** It read #E4 for a year:
+    // that is `--ink` over the *selection fill* (`files_row_text_selected`),
+    // transcribed onto a surface it does not stand on, while the comment above
+    // it had the right sum all along. The light half of this field is `--ink`
+    // itself, so the two halves now say one thing.
+    preview_body_text: [0xe1, 0xe1, 0xe1],
     // `--border-soft` (white .06) over `--termbg` 27: 27 + 228×.06 = 40.7.
     preview_grid_line: [0x29, 0x29, 0x29],
     // `--panel #252525` = 37, and the same hairline over *it*:
@@ -1263,11 +1269,17 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     files_row_text: [0x98, 0x98, 0x98],
     files_row_text_hover: [0x9e, 0x9e, 0x9e],
     files_row_text_selected: [0xe4, 0xe4, 0xe4],
-    // `--ink3` (white .38) over the same three: 27 + 228×.38 = 113.6,
-    // 39.5 + 215.5×.38 = 121.4, 47.5 + 207.5×.38 = 126.4.
+    // `--ink3` (white .38) over the same three: 27 + 228×.38 = 113.6, then over
+    // the two fills **as they are painted** — 40 and 48, the very bytes two
+    // fields above — 40 + 215×.38 = 121.7 and 48 + 207×.38 = 126.7.
+    //
+    // **Corrected 2026-08-17 by the derivation pin.** These two read 0x79 and
+    // 0x7E, computed from the unrounded 39.5 and 47.5 while the fills under
+    // them go to the GPU as 40 and 48. An ink is composited over the surface
+    // that is drawn, not over the real number that surface was rounded from.
     files_row_muted: [0x72, 0x72, 0x72],
-    files_row_muted_hover: [0x79, 0x79, 0x79],
-    files_row_muted_selected: [0x7e, 0x7e, 0x7e],
+    files_row_muted_hover: [0x7a, 0x7a, 0x7a],
+    files_row_muted_selected: [0x7f, 0x7f, 0x7f],
     // The same eight over `--win #202020` = 32, which is the ground inside a
     // floating window:
     //   `--hover`  white .055 → 32 + 223×.055 = 44.3
@@ -1609,9 +1621,12 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     tab_badge_on_resting_tab: [0xe6, 0xe6, 0xe3],
     // `--ink` #37352F is opaque in this theme, so it lands unchanged.
     tab_badge_text_on_active_tab: [0x37, 0x35, 0x2f],
-    // `--ink2` (the same ink at .65) over the resting and hovered fills.
+    // `--ink2` (the same ink at .65) over the resting and hovered fills, each
+    // taken as painted. The hovered one's blue was 0x6B until the derivation
+    // pin of 2026-08-17: that level comes from compositing over the unrounded
+    // 217.27 rather than over the `#DCDCD9` the pill is actually drawn in.
     tab_badge_text_on_resting_tab: [0x74, 0x73, 0x6e],
-    tab_badge_text_on_hovered_tab: [0x71, 0x6f, 0x6b],
+    tab_badge_text_on_hovered_tab: [0x71, 0x6f, 0x6a],
     // `--ink3` (the ink at .45) over `--menu` #FFFFFF — which in this theme is
     // the same white as `--win`, so it agrees with `dialog_muted_text` exactly.
     menu_item_hint_text: [0xa5, 0xa4, 0xa1],
@@ -1633,8 +1648,12 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     rail_tab_active: [0xe6, 0xe6, 0xe3],
     // `--ink` #37352F is opaque on this canvas: it composites to itself.
     rail_tab_active_text: [0x37, 0x35, 0x2f],
-    // `--ink2` (the ink at .65) over `--hover`-over-`--panel` 236.4/236.3/234.1.
-    rail_tab_hover_text: [0x77, 0x75, 0x70],
+    // `--ink2` (the ink at .65) over `--hover`-over-`--panel`, which is painted
+    // as `#ECECEA` — the value `caption_hover` already carries. Its red was
+    // 0x77 until the derivation pin of 2026-08-17, from the unrounded 236.4
+    // landing at 118.50 and rounding away from zero where the painted 236
+    // lands at 118.
+    rail_tab_hover_text: [0x76, 0x75, 0x70],
     // `--ink3` (the ink at .45) over the selection fill 229.7/229.5/227.2.
     rail_glyph_on_active_tab: [0x97, 0x96, 0x92],
     // `--border` (black at .088) over `--panel`: 247×.912 = 225.26, 245×.912.
@@ -1655,11 +1674,114 @@ pub fn chrome_palette() -> ChromePalette {
 }
 
 fn chrome_palette_for_background(background: [u8; 3]) -> ChromePalette {
+    let schemes = active_schemes();
     if background_is_light(background) {
-        LIGHT_CHROME
+        schemes.light_chrome
     } else {
-        DARK_CHROME
+        schemes.dark_chrome
     }
+}
+
+// ---------------------------------------------------------------------------
+// The two schemes in force, and the chrome each one derives.
+//
+// Kept beside the theme's own atomic rather than inside it, because they are a
+// different shape of state: the atomic exists so a render thread can read the
+// background with one uncontended load, and twenty-one colours plus a
+// hundred-and-thirty-nine derived ones do not fit in sixty-four bits. What ties
+// the two together is `theme_revision`. A scheme change bumps it exactly as a
+// dark/light switch does, so every artefact keyed on it — CPU math rasters,
+// their GPU textures, the composed-row cache — is invalidated by one mechanism
+// and not by a second list somebody has to remember to extend.
+//
+// The palettes are derived **once, here**, and not per call: `chrome_palette()`
+// has 201 call sites and some of them are inside per-frame loops, so a
+// derivation on the read path would run the whole ladder a few hundred times a
+// frame to produce the same answer.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct ActiveSchemes {
+    light: ColourScheme,
+    dark: ColourScheme,
+    light_chrome: ChromePalette,
+    dark_chrome: ChromePalette,
+}
+
+impl ActiveSchemes {
+    fn new(light: ColourScheme, dark: ColourScheme) -> Self {
+        Self {
+            light,
+            dark,
+            light_chrome: ChromePalette::derive(&light),
+            dark_chrome: ChromePalette::derive(&dark),
+        }
+    }
+}
+
+fn process_schemes() -> &'static RwLock<ActiveSchemes> {
+    static SCHEMES: OnceLock<RwLock<ActiveSchemes>> = OnceLock::new();
+    SCHEMES.get_or_init(|| RwLock::new(ActiveSchemes::new(FOLIO_LIGHT, FOLIO_DARK)))
+}
+
+// A poisoned lock is read through rather than panicked on. Nothing in here can
+// be left half-written — the write path replaces the whole struct in one move —
+// so the worst a panicking writer can have done is fail before assigning, and
+// the previous palette is a better answer than taking every window down.
+fn active_schemes() -> ActiveSchemes {
+    *process_schemes()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The scheme whose canvas this background belongs to.
+///
+/// Keyed on the background's own luma and not on [`current_theme`], for the
+/// reason every `*_for_background` reader already gives: under a `BT_BG`
+/// override the two disagree on purpose, and a default colour that followed the
+/// theme would be the one thing on that screen still dressed for the other
+/// canvas.
+pub(crate) fn scheme_for_background(background: [u8; 3]) -> ColourScheme {
+    let schemes = active_schemes();
+    if background_is_light(background) {
+        schemes.light
+    } else {
+        schemes.dark
+    }
+}
+
+/// The scheme in force for a theme, whatever canvas is currently painted.
+pub(crate) fn scheme_for_theme(theme: Theme) -> ColourScheme {
+    let schemes = active_schemes();
+    match theme {
+        Theme::Dark => schemes.dark,
+        Theme::Light => schemes.light,
+    }
+}
+
+/// Put a pair of schemes in force and bump [`theme_revision`].
+///
+/// **One call for both**, because a window only ever wears one of them and the
+/// other is a fact about what happens when the theme flips; setting them
+/// separately would mean two revisions and one wasted repaint for a change
+/// nobody can see yet. Returns [`ThemeChange::Unchanged`] when neither moved,
+/// so a settings write that did not touch the schemes costs nothing.
+///
+/// A `BT_BG` override keeps its canvas — that is the whole of what the lock
+/// means — but the chrome still re-derives, because the override was only ever
+/// a claim about the terminal's background.
+pub fn set_schemes(light: ColourScheme, dark: ColourScheme) -> ThemeChange {
+    {
+        let mut schemes = process_schemes()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if schemes.light == light && schemes.dark == dark {
+            return ThemeChange::Unchanged;
+        }
+        *schemes = ActiveSchemes::new(light, dark);
+    }
+    process_theme().refresh();
+    ThemeChange::Changed
 }
 
 /// A seat title bar's height, in logical pixels (`.panehead { height: 30px }`).
@@ -2331,11 +2453,8 @@ impl Theme {
         }
     }
 
-    const fn background(self) -> [u8; 3] {
-        match self {
-            Self::Dark => DEFAULT_BACKGROUND_RGB,
-            Self::Light => LIGHT_BACKGROUND_RGB,
-        }
+    fn background(self) -> [u8; 3] {
+        scheme_for_theme(self).background
     }
 }
 
@@ -2418,6 +2537,35 @@ impl ThemeState {
     }
 }
 
+impl ThemeState {
+    // Re-read the background from the scheme now in force and advance the
+    // revision. The theme itself does not move: a scheme never overrides the
+    // Light/Dark/System decision, it only says what that decision *looks* like.
+    fn refresh(&self) {
+        let mut current = self.load();
+        loop {
+            let locked = current & LOCKED_BIT != 0;
+            let theme = unpack_theme(current);
+            let background = if locked {
+                unpack_background(current)
+            } else {
+                theme.background()
+            };
+            let revision = unpack_revision(current).saturating_add(1).min(REVISION_MAX);
+            let next = pack_theme_state(theme, background, locked, revision);
+            match self.packed.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
 fn process_theme() -> &'static ThemeState {
     static THEME: OnceLock<ThemeState> = OnceLock::new();
     THEME.get_or_init(|| ThemeState::from_environment(std::env::var_os("BT_BG").as_deref(), true))
@@ -2484,7 +2632,16 @@ pub fn theme_revision() -> u64 {
     unpack_revision(process_theme().load())
 }
 
-fn background_is_light(background: [u8; 3]) -> bool {
+/// Which canvas a background belongs to — the one dark/light decision the whole
+/// product takes, at one threshold.
+///
+/// Public because the app has to file a scheme under the row whose canvas it
+/// can actually wear: a light scheme in the dark slot would paint a light
+/// canvas and then be handed the dark scheme's chrome, and the only way to make
+/// that unreachable is for the picker to ask the same question the renderer
+/// asks.
+#[must_use]
+pub fn background_is_light(background: [u8; 3]) -> bool {
     let background_luma = u32::from(background[0]) * 299
         + u32::from(background[1]) * 587
         + u32::from(background[2]) * 114;
@@ -2492,11 +2649,7 @@ fn background_is_light(background: [u8; 3]) -> bool {
 }
 
 fn foreground_for_background(background: [u8; 3]) -> [u8; 3] {
-    if background_is_light(background) {
-        LIGHT_BACKGROUND_FOREGROUND_RGB
-    } else {
-        DEFAULT_FOREGROUND_RGB
-    }
+    crate::scheme::foreground_of(&scheme_for_background(background))
 }
 
 pub(crate) fn parse_background_rgb(value: &str) -> Option<[u8; 3]> {
@@ -2513,7 +2666,7 @@ pub(crate) fn parse_background_rgb(value: &str) -> Option<[u8; 3]> {
 
 /// ANSI colors 0-15 from Windows Terminal's built-in Campbell scheme, in normal then bright
 /// order. This is the dark theme's compatibility palette and must remain byte-for-byte Campbell.
-const DARK_ANSI_16_RGB: [[u8; 3]; 16] = [
+pub(crate) const DARK_ANSI_16_RGB: [[u8; 3]; 16] = [
     [0x0c, 0x0c, 0x0c],
     [0xc5, 0x0f, 0x1f],
     [0x13, 0xa1, 0x0e],
@@ -2533,7 +2686,7 @@ const DARK_ANSI_16_RGB: [[u8; 3]; 16] = [
 ];
 
 /// ANSI colors 0-15 for the light theme, using macOS Terminal.app's default palette.
-const LIGHT_ANSI_16_RGB: [[u8; 3]; 16] = [
+pub(crate) const LIGHT_ANSI_16_RGB: [[u8; 3]; 16] = [
     [0x00, 0x00, 0x00],
     [0x99, 0x00, 0x00],
     [0x00, 0xa6, 0x00],
@@ -2553,15 +2706,17 @@ const LIGHT_ANSI_16_RGB: [[u8; 3]; 16] = [
 ];
 
 /// The explicit ANSI palette selected by the process theme.
-pub(crate) fn ansi_16_rgb() -> &'static [[u8; 3]; 16] {
+///
+/// By value rather than by `&'static`, which is the whole cost of the sixteen
+/// becoming a *scheme's* sixteen: there is no longer a static to borrow, and
+/// forty-eight bytes copied at the three call sites is cheaper than a lock held
+/// across a caller's loop.
+pub(crate) fn ansi_16_rgb() -> [[u8; 3]; 16] {
     ansi_16_rgb_for(current_theme())
 }
 
-const fn ansi_16_rgb_for(theme: Theme) -> &'static [[u8; 3]; 16] {
-    match theme {
-        Theme::Dark => &DARK_ANSI_16_RGB,
-        Theme::Light => &LIGHT_ANSI_16_RGB,
-    }
+fn ansi_16_rgb_for(theme: Theme) -> [[u8; 3]; 16] {
+    scheme_for_theme(theme).ansi
 }
 
 #[cfg(test)]
@@ -2631,8 +2786,8 @@ mod tests {
             [0x00, 0xe6, 0xe6],
             [0xe6, 0xe6, 0xe6],
         ];
-        assert_eq!(ansi_16_rgb_for(Theme::Dark), &CAMPBELL);
-        assert_eq!(ansi_16_rgb_for(Theme::Light), &MAC_TERMINAL);
+        assert_eq!(ansi_16_rgb_for(Theme::Dark), CAMPBELL);
+        assert_eq!(ansi_16_rgb_for(Theme::Light), MAC_TERMINAL);
     }
 
     /// PIN: the selection fill is a *default* colour, so it follows the same
@@ -3748,6 +3903,72 @@ mod tests {
             DARK_CHROME.modal_scrim, LIGHT_CHROME.modal_scrim,
             "a scrim is not a surface of either palette"
         );
+    }
+
+    /// PIN — a scheme change advances the one revision every palette-keyed
+    /// artefact is invalidated by, and a `BT_BG` lock keeps its canvas while
+    /// still repainting.
+    ///
+    /// Against a *local* `ThemeState`, like every other test in this module:
+    /// the process-wide one is read by every palette assertion here, so a test
+    /// that moved it would be a test that broke its neighbours on a thread
+    /// schedule.
+    #[test]
+    fn adopting_schemes_advances_the_revision_and_respects_the_environment_lock() {
+        let state = ThemeState::new(Theme::Dark, DEFAULT_BACKGROUND_RGB, false);
+        let before = unpack_revision(state.load());
+        state.refresh();
+        assert!(unpack_revision(state.load()) > before);
+        assert_eq!(
+            unpack_theme(state.load()),
+            Theme::Dark,
+            "the mode does not move"
+        );
+
+        let locked = ThemeState::from_environment(Some(OsStr::new("#123456")), false);
+        let canvas = unpack_background(locked.load());
+        let revision = unpack_revision(locked.load());
+        locked.refresh();
+        assert_eq!(
+            unpack_background(locked.load()),
+            canvas,
+            "`BT_BG` owns the canvas; that is the whole of what the lock means"
+        );
+        assert!(
+            unpack_revision(locked.load()) > revision,
+            "the chrome still re-derives, so every window still has to repaint"
+        );
+    }
+
+    /// PIN — the process is born wearing Folio's own pair, and asking for the
+    /// pair already in force costs nothing.
+    ///
+    /// Read-only by construction: `Unchanged` is the assertion *and* the reason
+    /// this may touch the process-wide store where the test above may not.
+    #[test]
+    fn the_process_is_born_wearing_folios_own_pair() {
+        assert_eq!(
+            set_schemes(FOLIO_LIGHT, FOLIO_DARK),
+            ThemeChange::Unchanged,
+            "and so a settings write that did not touch the schemes repaints nothing"
+        );
+        assert_eq!(scheme_for_theme(Theme::Dark), FOLIO_DARK);
+        assert_eq!(scheme_for_theme(Theme::Light), FOLIO_LIGHT);
+        assert_eq!(ansi_16_rgb_for(Theme::Dark), DARK_ANSI_16_RGB);
+        assert_eq!(ansi_16_rgb_for(Theme::Light), LIGHT_ANSI_16_RGB);
+    }
+
+    /// A pair of schemes derives a pair of palettes, each from its own half.
+    #[test]
+    fn each_half_of_a_pair_derives_from_its_own_scheme() {
+        let nord = ColourScheme {
+            background: [0x2e, 0x34, 0x40],
+            ..FOLIO_DARK
+        };
+        let schemes = ActiveSchemes::new(FOLIO_LIGHT, nord);
+        assert_eq!(schemes.dark_chrome.seat_body, nord.background);
+        assert_eq!(schemes.light_chrome, LIGHT_CHROME);
+        assert_ne!(schemes.dark_chrome, DARK_CHROME);
     }
 
     #[test]
