@@ -48,7 +48,12 @@ use serde::{Deserialize, Serialize};
 /// rather than in a v11 because a schema version is a **file format** and not a
 /// changelog: bumping twice for one afternoon's rows would cost every reader a
 /// second migration step to express the same one-day difference.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 10;
+///
+/// **v11 carries one field**, `advanced_open`, and it is a bump of its own for
+/// the reason v10 gives for *not* being two: it arrived on a different day with
+/// a different reader. It is also the first list-valued field in this document,
+/// which is a shape change and not only a new key — see [`SettingsV1::advanced_open`].
+pub const SETTINGS_SCHEMA_VERSION: u32 = 11;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -147,10 +152,10 @@ pub const DEFAULT_BACKGROUND_OPACITY: u8 = 100;
 /// made unreadable.
 pub const MINIMUM_BACKGROUND_OPACITY: u8 = 30;
 
-/// `settings.json` v10 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v11 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 10,
+///   "schema_version": 11,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -168,7 +173,8 @@ pub const MINIMUM_BACKGROUND_OPACITY: u8 = 30;
 ///   "background_image_opacity": 0..=100,
 ///   "background_opacity": 30..=100,
 ///   "acrylic": true | false,
-///   "always_on_top": true | false
+///   "always_on_top": true | false,
+///   "advanced_open": ["appearance", …]
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +395,27 @@ pub struct SettingsV1 {
     /// A window posture and not a ground colour, and the one field in this block
     /// that is visible with a picture, a blur and an opacity all switched off.
     pub always_on_top: bool,
+    /// **Which settings pages have their `Advanced` group open** (user ruling
+    /// 2026-08-17, `docs/DESIGN.md` §7.1.6c-5).
+    ///
+    /// A list of page keys and not a flag per page, and the shape is the ruling
+    /// read literally: disclosure is per page, so what is recorded is *which*
+    /// pages a reader has opened — and a page that has never been opened leaves
+    /// no line in the file, exactly as an unedited shortcut leaves none in
+    /// `keybindings.json`. A fresh install writes `[]`.
+    ///
+    /// This crate does not validate the keys. A key naming a page the reading
+    /// build has no page for is the ordinary case rather than corruption — a
+    /// page retired between builds, or a file written by a newer one — and the
+    /// reader's answer is §5.4 逐叶降级: `bt_app::settings::AdvancedOpen::from_keys`
+    /// drops what it does not know and honours everything beside it.
+    ///
+    /// It is a preference and not a window shape, which is why it is here and
+    /// not in `session.json`: a person who has decided they want to see the
+    /// background-picture rows has decided it about the product, not about the
+    /// window they happened to have open.
+    #[serde(default)]
+    pub advanced_open: Vec<String>,
 }
 
 impl Default for SettingsV1 {
@@ -413,6 +440,10 @@ impl Default for SettingsV1 {
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             acrylic: false,
             always_on_top: false,
+            // Every group shut, which is the ruling's own default: progressive
+            // disclosure that arrived already disclosed would be a longer page
+            // with a triangle on it.
+            advanced_open: Vec::new(),
         }
     }
 }

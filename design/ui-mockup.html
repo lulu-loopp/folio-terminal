@@ -869,17 +869,23 @@
      terminal, dimmer, so you can see where you left off */
   .frow.sel { background: var(--active); color: var(--ink); }
   .files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px var(--accent); }
-  .frow .tri {
+  /* `.adv-head` rides these three declarations rather than drawing a second
+     triangle of its own (§7.1.6c-5): the settings dialog's Advanced group is a
+     disclosure, this is what a disclosure looks like in this window, and a
+     reader who has opened a folder here has already learned the glyph and the
+     120ms it turns in. Two glyphs would have taught them that the two are
+     different things. */
+  .frow .tri, .adv-head .tri {
     width: 10px; height: 10px; flex: none; color: var(--ink3);
     transition: transform 120ms cubic-bezier(.2,0,0,1);
   }
-  .frow.open > .tri { transform: rotate(90deg); }
+  .frow.open > .tri, .adv.open > .adv-head > .tri { transform: rotate(90deg); }
   .frow .tri.leaf { visibility: hidden; }
   .frow .fico { width: 15px; height: 15px; flex: none; }
   .frow .fico.folder { color: var(--accent); }
   .frow .fico.file { color: var(--ink3); }
   .frow .fname { overflow: hidden; text-overflow: ellipsis; }
-  @media (prefers-reduced-motion: reduce) { .frow .tri { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .frow .tri, .adv-head .tri { transition: none; } }
 
   /* Vertical rail */
   .rail {
@@ -2195,6 +2201,28 @@
        surface - this is still a modal you dismiss, not a place you go. */
     width: min(720px, 92%);
     margin: 54px auto 0;
+    /* THE HEIGHT IS THE TALLEST PAGE'S, WHATEVER PAGE IS UP (§7.1.6c-5, user
+       ruling 2026-08-17). It used to be the height of the page showing, so the
+       frame, the header and the `×` all jumped every time a word in the rail was
+       pressed — a dialog resizing under a pointer that is walking a list of
+       five. A rail is a table of contents, and a table of contents does not move
+       the book.
+
+       The prototype says it with an explicit `height` on THIS box, measured once
+       from the tallest page (`lockSettingsHeight`), and not by stacking every
+       page in flow under `visibility: hidden`. Two things decided that.
+
+       A `height` is clamped by the `max-height` below it, and a `min-height` is
+       not — a minimum beats a maximum in CSS, so a tallest page taller than the
+       window pushed the body straight out through the bottom of its own frame.
+       `height` is what makes "as tall as its tallest page" and "never taller
+       than the window" one sentence rather than two fighting ones.
+
+       And the SCROLL then lands where the native build puts it: `.content`
+       flexes into whatever the frame has left and scrolls only when its own page
+       overruns that, so a short page leaves its body empty below its rows and
+       cannot be scrolled at all. Pages stacked in one box would have handed
+       every short page the tallest one's scroll extent, and a bar over nothing. */
     max-height: calc(100% - 72px);     /* never taller than the window it sits in */
     display: flex; flex-direction: column;
     background: var(--win);
@@ -2221,7 +2249,26 @@
   .dlg-close svg { width: 10px; height: 10px; }
   .dlg-close:hover { background: var(--hover); color: var(--ink); }
   .dlg-close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .settings .content { padding: 2px 22px 18px; overflow-y: auto; }
+  /* TEN AND NOT TWO, AND THE CUT IS AT THE CONTENT BOX (§7.1.6c-5).
+
+     CSS clips an `overflow-y` box at its PADDING box, so at 2px the fold fell one
+     hairline under the dialog's lid: a row scrolling out of the page came in
+     sliced through the middle of its own title, hard against the header, with
+     nothing between the two to say the slice was a fold rather than a rendering
+     fault. (User report, a screenshot from 4b.) Ten is the rail's own
+     `padding-top`, which is the argument for the number rather than a taste for
+     more air — the body has two columns, they begin at the same y, and content
+     that scrolls away disappears under the same inset the words beside it start
+     at.
+
+     The native build goes the rest of the way and cuts at the CONTENT box, on
+     the VERTICAL axis only: there is no horizontal overflow here — `overflow-y`
+     is the whole declaration — and the focus ring reaches past a combo's right
+     edge into the gutter, so a clip inset on the sides would shave the ring
+     rather than protect anything from it. A browser has no way to say "clip at
+     the content box on one axis", so the rule is recorded here and the 10px is
+     the visible half of it. */
+  .settings .content { padding: 10px 22px 18px; overflow-y: auto; }
   .group-label {
     font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
     color: var(--ink3); margin: 10px 0 2px;
@@ -2236,9 +2283,32 @@
   .row .title { font-size: 13.5px; color: var(--ink); }
   .row .desc { font-size: 12px; color: var(--ink3); margin-top: 1px; }
 
-  .combo { position: relative; flex: none; }
+  /* A PICKER IS AS WIDE AS ITS WORDS, BETWEEN A FLOOR AND A HALF (§7.1.6c-5).
+
+     118 is a `min-width` and has always been one: a `<button>` in a browser
+     grows past its `min-width` to hold its content, so this file has always
+     drawn a picker wide enough to say its own value. The native build read the
+     118 as THE width, and the row that caught it is `Split direction` below,
+     whose longest answer is `Auto (longer edge)` and whose button printed
+     `Auto (long…` — a control that could not say its own value, with the
+     untruncated form reachable only by opening the menu. The stylesheet was
+     right and the implementation was wrong; nothing about the floor changes.
+
+     `max-width: 50%` is the cap the native build needs and the browser never
+     had, and the row beside it is the reason: `.row .text { flex: 1;
+     min-width: 0 }` means the sentence gives way to the control without limit,
+     so a machine with a 40-character font family installed would draw a picker
+     with a title and no room for the line under it. Half is the share that keeps
+     two columns readable as two columns. `min-width` beats `max-width` in CSS,
+     which is the precedence wanted rather than an accident of it: a control is
+     drawn at the size the design gives it, and the row is what gives way.
+
+     A label that does not fit the half ellipsises in the button and is read
+     whole in the menu — which is what `.combo-menu`'s `min-width: 100%` floor is
+     for, and why the ellipsis lives on `.value` and not on the popup. */
+  .combo { position: relative; flex: none; max-width: 50%; }
   .combo > button {
-    min-width: 118px;
+    min-width: 118px; max-width: 100%;
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
     background: none;
     border: 1px solid var(--border);
@@ -2249,10 +2319,29 @@
     cursor: pointer;
   }
   .combo > button:hover { background: var(--hover); }
-  .combo .chev { font-size: 8.5px; color: var(--ink3); }
+  /* The value is what gives way at the cap, never the chevron: a picker with no
+     chevron is a button, and the one thing a truncated label must not lose is
+     the mark that says there is a list behind it. */
+  .combo .value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .combo .chev { font-size: 8.5px; color: var(--ink3); flex: none; }
+  /* EIGHT ITEMS, AND THEN IT SCROLLS (user ruling 2026-08-17).
+
+     230 = eight items of 27.5, the 4px padding on both sides, and the two
+     hairlines. The number is a fact about the LIST rather than about the window:
+     the Terminal font picker holds whatever faces this machine has installed —
+     thirty or forty on an ordinary desk — and an uncapped popup for that row is
+     taller than the screen. It flipped up, ran off the top, and left its first
+     items behind the caption bar.
+
+     The bar is this file's one bar and not a second one: `body *` already carries
+     `scrollbar-width: thin` with a `--thumb` colour (line 95), so nothing is
+     styled again here. The native build reuses `preview::scroll_bar` for the
+     same reason — a popup is not the place a house grows a second scrollbar. */
   .combo-menu {
     position: absolute; right: 0; top: calc(100% + 4px);
     min-width: 100%;
+    max-height: calc(8 * 27.5px + 2 * 4px + 2 * 1px);
+    overflow-y: auto;
     background: var(--menu);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -2261,7 +2350,17 @@
     display: none; z-index: 50;
   }
   .combo.open .combo-menu { display: block; }
-  /* no room below → open upwards instead of spilling out of the window */
+  /* DOWN BY DEFAULT; UP ONLY WHEN THE ROOM BELOW WILL NOT HOLD THE CAPPED BOX.
+
+     The room is measured to the WINDOW's bottom edge, never to the dialog's
+     `.content`: against `.content` a picker near the foot of a page flipped up
+     into the header and had its first item cut off, which is the artefact the
+     rule exists to prevent. And it is measured against the CAPPED height, which
+     is the whole reason for capping first — the direction has to be decided
+     about the box that will actually be drawn, not about the list it came from,
+     or a forty-face font picker flips up on a row with ample room for eight
+     items. With the cap in force the exception is rare: 230px fits below almost
+     every row of almost every window this dialog opens in. */
   .combo.flip-up .combo-menu { top: auto; bottom: calc(100% + 4px); }
   .combo-item {
     display: flex; align-items: center; gap: 8px;
@@ -2386,6 +2485,45 @@
   .settings-page { display: none; }
   .settings-page.shown { display: block; }
 
+  /* ── THE ADVANCED DISCLOSURE, born 2026-08-17 (§7.1.6c-5) ──────────────────
+     PER PAGE, AND THERE IS NO GLOBAL "SHOW ADVANCED SETTINGS" SWITCH (user
+     ruling). A dialog-wide switch would make every page's contents depend on a
+     control the reader cannot see from the page it changes, and it would put the
+     two colour-scheme rows and a background picture behind the same door. So the
+     group is a page's own: `Appearance` grows one because eight of its rows are
+     answers to questions most people never ask, and `General`, `Terminal` and
+     `Rendered blocks` grow none at all — the PSReadLine row in particular stays
+     in plain sight, because it is the one row in this dialog that repairs
+     something the reader has already watched go wrong, and so it is the last row
+     that may be hidden.
+
+     THE HEADING IS A `.row`, and its WHOLE BAND is the control. A 10px triangle
+     is not a thing to ask anybody to hit, and the word beside it is what they
+     were aiming at — the files tree settled this already, and this borrows its
+     glyph and its turn rather than restating them (see `.frow .tri`). It is a
+     focus stop and Enter/Space turns it, which is what `tabindex` and the
+     keydown handler are for: a disclosure reachable only by pointer hides its
+     contents from the keyboard entirely.
+
+     `display: none` AND NOT `visibility` OR AN OPACITY: a hidden row is simply
+     not there — no gap where it stood, no focus ring passing through it, no hit
+     target under the pointer. Anything softer leaves the page claiming a height
+     for rows it is not drawing.
+
+     Default collapsed, and open/closed is remembered in settings: a reader who
+     has decided they want the background-picture rows in front of them has
+     decided it about the product, and a disclosure that shut itself at every
+     launch would be asking them again every day. */
+  .adv-head { cursor: pointer; user-select: none; gap: 8px; }
+  .adv-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
+  .adv-rows { display: none; }
+  .adv.open .adv-rows { display: block; }
+  /* Shut, the heading IS the page's last row, and `.row:last-child`'s rule
+     applies to it for that rule's own reason: a list does not end on a hairline
+     with nothing under it. Open, it separates itself from the rows it heads
+     exactly as every other row does. */
+  .adv:not(.open) .adv-head { border-bottom: none; }
+
   /* ── the shortcut editor, born the same day ────────────────────────────────
      A shortcut line IS a `.row` — a title with a muted line under it on the
      left, controls on the right — so it keeps `.row`'s padding, gap and two type
@@ -2422,7 +2560,14 @@
      off the group above it. No confirmation: this dialog has no dirty gate to
      route one through — every choice in it is written the instant it is made —
      and a question here would be the first modal over a modal in the product. */
-  .sc-foot { display: flex; justify-content: flex-end; margin-top: 14px; }
+  /* `.adv-foot` joins it rather than declaring a second 14 (§7.1.6c-5): the
+     Advanced group's `Reset to defaults` and this page's `Restore all defaults`
+     are ONE gesture — a button that undoes the table it sits under — and two
+     numbers would be two answers to how far a foot stands off its list. 140 and
+     not 152 because the verb says less: the shortcut page's has a whole table in
+     scope and says so, this one has the group it closes and nothing else. */
+  .sc-foot, .adv-foot { display: flex; justify-content: flex-end; margin-top: 14px; }
+  .adv-foot .btn { width: 140px; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
 </style>
 </head>
@@ -2860,6 +3005,146 @@
           </div>
         </div>
 
+        <!-- THE GRID'S FACE, AND NOT THE WINDOW'S (§7.1.6c-3b).
+
+             Two rows and not one, next to each other, because they are one
+             decision made in two halves — and a reader who has changed either
+             is about to look for the other. Both are hot: the DPI path already
+             exists to re-measure a grid and tell every shell its new column
+             count, and a font change is that same event arriving through
+             another door.
+
+             The description names what the row does NOT move, because "font" on
+             a terminal's settings page reads as "all the text". The window's own
+             labels keep their face, and that is a stated left-out rather than an
+             oversight: `chrome_cap_height_ratio` is resolved once because a
+             chrome face cannot change, and the font loader deliberately never
+             enumerates `Fonts/` at startup. Both would have to move first.
+
+             The family list is every monospaced family DirectWrite reports
+             (`IDWriteFont1::IsMonospacedFont`), alphabetical without regard to
+             case, with the default always among them — a combo whose selected
+             row is missing from its own list draws as a blank. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Terminal font</div>
+            <div class="desc">The face the grid is drawn in; the window's own labels keep theirs</div>
+          </div>
+          <div class="combo" data-combo="termfont">
+            <button aria-haspopup="listbox"><span class="value">Consolas</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="cascadia" role="option"><span class="tick">✓</span>Cascadia Mono</div>
+              <div class="combo-item selected" data-v="consolas" role="option"><span class="tick">✓</span>Consolas</div>
+              <div class="combo-item" data-v="lucida" role="option"><span class="tick">✓</span>Lucida Console</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- A list and not a spinner, which is every other picker's ruling here:
+             a control that accepts any number owes the user a validator, a clamp
+             and an answer to what happens at 4 and at 400. One-pixel steps
+             through the range anybody reads at, then two-pixel steps above it —
+             at 20 logical pixels a single pixel is a 5% change nobody picking
+             from a list is trying to express. 16 is the default and the size
+             every frame before this row existed was drawn at. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Font size</div>
+            <div class="desc">How large grid text is drawn, before the display's scaling</div>
+          </div>
+          <div class="combo" data-combo="fontsize">
+            <button aria-haspopup="listbox"><span class="value">16</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="12" role="option"><span class="tick">✓</span>12</div>
+              <div class="combo-item" data-v="14" role="option"><span class="tick">✓</span>14</div>
+              <div class="combo-item selected" data-v="16" role="option"><span class="tick">✓</span>16</div>
+              <div class="combo-item" data-v="18" role="option"><span class="tick">✓</span>18</div>
+              <div class="combo-item" data-v="20" role="option"><span class="tick">✓</span>20</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- THE CARET'S OWN SHAPE, under the two rows that say what the grid is
+             written in, because a reader who has just changed the face is
+             looking at the same text the caret sits in. Three answers and no
+             fourth: a caret is one of three shapes on every terminal anybody has
+             used, and a width in pixels would be a number nobody can picture. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Cursor</div>
+            <div class="desc">Focused cursor shape</div>
+          </div>
+          <div class="combo" data-combo="cursor">
+            <button aria-haspopup="listbox"><span class="value">Bar</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="bar" role="option"><span class="tick">✓</span>Bar</div>
+              <div class="combo-item" data-v="block" role="option"><span class="tick">✓</span>Block</div>
+              <div class="combo-item" data-v="underline" role="option"><span class="tick">✓</span>Underline</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Tab layout</div>
+            <div class="desc">Choose where tabs appear in the window</div>
+          </div>
+          <div class="combo" data-combo="layout">
+            <button aria-haspopup="listbox"><span class="value">Horizontal</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="horizontal" role="option"><span class="tick">✓</span>Horizontal</div>
+              <div class="combo-item" data-v="vertical" role="option"><span class="tick">✓</span>Vertical</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Waiting badge</div>
+            <div class="desc">A pill in the title bar counts sessions waiting for your input. Off hides the pill; Ctrl+Shift+A still jumps to the longest-waiting one</div>
+          </div>
+          <div class="combo" data-combo="attnchip">
+            <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── THE ORDER CHANGED HERE, AND SO DID WHAT CARRIES THE DEPENDENCY
+             (user ruling 2026-08-17, §7.1.6c-5).
+
+             What stood here was a flat list in the order the rows had been
+             built in: Theme, the two schemes, then the six ground rows, Tab
+             layout, and only then the two font rows — a page most people open
+             to change exactly those two, with six questions about a background
+             picture standing in front of them. The rows above are now the order
+             of a DECISION rather than of a history: what the window is made of
+             (theme, then the palette for each of its two canvases), what the
+             grid is written in (face, then size), what the caret looks like, and
+             where the tabs go.
+
+             `Waiting badge` keeps its place at the end of that run because it is
+             not one of the eight rows the ruling named: nothing is advanced
+             unless it was named, and a row swept in by resemblance is a row
+             nobody ruled on.
+
+             SIDEBAR NO LONGER TOUCHES TAB LAYOUT. Every slice until this one
+             kept the two adjacent on the ground that Sidebar reads as Tab
+             layout's dependent — it only exists while the tabs run down the
+             side. The ruling files it under Advanced and leaves Tab layout on
+             top, so that adjacency is gone and the CONDITION carries the
+             dependency alone: the row is not in the group at all while the tabs
+             run across the top, exactly as before. That is enough, and it was
+             always the half that was actually true — the adjacency was a hint
+             about a rule the visibility already enforced. -->
+        <div class="adv" id="adv-appearance">
+        <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-appearance-rows">
+          <svg class="tri"><use href="#i-tri"/></svg>
+          <div class="text"><div class="title">Advanced</div></div>
+        </div>
+        <div class="adv-rows" id="adv-appearance-rows">
         <!-- ── THE WINDOW'S GROUND: A PICTURE, AND HOW MUCH OF IT (§7.1.6c-4b) ──
 
              Four rows for the ground and two for the window, in the order a
@@ -2973,79 +3258,6 @@
           </div>
         </div>
 
-        <div class="row">
-          <div class="text">
-            <div class="title">Tab layout</div>
-            <div class="desc">Choose where tabs appear in the window</div>
-          </div>
-          <div class="combo" data-combo="layout">
-            <button aria-haspopup="listbox"><span class="value">Horizontal</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="horizontal" role="option"><span class="tick">✓</span>Horizontal</div>
-              <div class="combo-item" data-v="vertical" role="option"><span class="tick">✓</span>Vertical</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- THE GRID'S FACE, AND NOT THE WINDOW'S (§7.1.6c-3b).
-
-             Two rows and not one, next to each other, because they are one
-             decision made in two halves — and a reader who has changed either
-             is about to look for the other. Both are hot: the DPI path already
-             exists to re-measure a grid and tell every shell its new column
-             count, and a font change is that same event arriving through
-             another door.
-
-             The description names what the row does NOT move, because "font" on
-             a terminal's settings page reads as "all the text". The window's own
-             labels keep their face, and that is a stated left-out rather than an
-             oversight: `chrome_cap_height_ratio` is resolved once because a
-             chrome face cannot change, and the font loader deliberately never
-             enumerates `Fonts/` at startup. Both would have to move first.
-
-             The family list is every monospaced family DirectWrite reports
-             (`IDWriteFont1::IsMonospacedFont`), alphabetical without regard to
-             case, with the default always among them — a combo whose selected
-             row is missing from its own list draws as a blank. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Terminal font</div>
-            <div class="desc">The face the grid is drawn in; the window's own labels keep theirs</div>
-          </div>
-          <div class="combo" data-combo="termfont">
-            <button aria-haspopup="listbox"><span class="value">Consolas</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="cascadia" role="option"><span class="tick">✓</span>Cascadia Mono</div>
-              <div class="combo-item selected" data-v="consolas" role="option"><span class="tick">✓</span>Consolas</div>
-              <div class="combo-item" data-v="lucida" role="option"><span class="tick">✓</span>Lucida Console</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- A list and not a spinner, which is every other picker's ruling here:
-             a control that accepts any number owes the user a validator, a clamp
-             and an answer to what happens at 4 and at 400. One-pixel steps
-             through the range anybody reads at, then two-pixel steps above it —
-             at 20 logical pixels a single pixel is a 5% change nobody picking
-             from a list is trying to express. 16 is the default and the size
-             every frame before this row existed was drawn at. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Font size</div>
-            <div class="desc">How large grid text is drawn, before the display's scaling</div>
-          </div>
-          <div class="combo" data-combo="fontsize">
-            <button aria-haspopup="listbox"><span class="value">16</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="12" role="option"><span class="tick">✓</span>12</div>
-              <div class="combo-item" data-v="14" role="option"><span class="tick">✓</span>14</div>
-              <div class="combo-item selected" data-v="16" role="option"><span class="tick">✓</span>16</div>
-              <div class="combo-item" data-v="18" role="option"><span class="tick">✓</span>18</div>
-              <div class="combo-item" data-v="20" role="option"><span class="tick">✓</span>20</div>
-            </div>
-          </div>
-        </div>
-
         <div class="row" id="row-railmode">
           <div class="text">
             <div class="title">Sidebar</div>
@@ -3066,18 +3278,41 @@
           </div>
         </div>
 
+        <!-- THE ROW THAT PROVED A PICKER IS AS WIDE AS ITS WORDS (§7.1.6c-5).
+             `Auto` says what it does in a parenthesis, against the ruling that a
+             picker item is a name and not a sentence about it — the two are not
+             in conflict, because `Auto` alone names nothing: every other item
+             here names a direction, and the one that names a RULE has to say
+             which rule. That parenthesis is the string that came out of the
+             button as `Auto (long…`, and the reason `.combo`'s width now comes
+             from the words. -->
         <div class="row">
           <div class="text">
-            <div class="title">Waiting badge</div>
-            <div class="desc">A pill in the title bar counts sessions waiting for your input. Off hides the pill; Ctrl+Shift+A still jumps to the longest-waiting one</div>
+            <div class="title">Split direction</div>
+            <div class="desc">Where a split with no direction of its own puts the new pane</div>
           </div>
-          <div class="combo" data-combo="attnchip">
-            <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
+          <div class="combo" data-combo="splitdir">
+            <button aria-haspopup="listbox"><span class="value">Auto (longer edge)</span><span class="chev">▼</span></button>
             <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
-              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+              <div class="combo-item selected" data-v="auto" role="option"><span class="tick">✓</span>Auto (longer edge)</div>
+              <div class="combo-item" data-v="right" role="option"><span class="tick">✓</span>Right</div>
+              <div class="combo-item" data-v="down" role="option"><span class="tick">✓</span>Down</div>
             </div>
           </div>
+        </div>
+
+        <!-- IT RESETS THIS PAGE'S ADVANCED ROWS ONLY, HOT, and says which page in
+             an Ok toast — `Appearance ▸ Advanced is back to its defaults`. Only
+             the group's rows, because the group is what the button closes: a
+             reader pressing the foot of a table is undoing the table, not the
+             seven rows above it that they may have spent the session getting
+             right. No confirmation, which is `Restore all defaults`' own ruling
+             for its own page: this dialog has no dirty gate to route a question
+             through, every choice in it is written the instant it is made, and
+             what this discards is exactly the rows the reader is looking at
+             while they press it. -->
+        <div class="adv-foot"><button class="btn adv-reset">Reset to defaults</button></div>
+        </div>
         </div>
         </section>
 
@@ -6486,6 +6721,11 @@
     $("win").classList.toggle("rail-icons",
       state.layoutMode === "vertical" && state.railMode === "icons" && !state.railCollapsed);
     $("row-railmode").style.display = state.layoutMode === "vertical" ? "" : "none";
+    /* Sidebar arriving or leaving changes the Appearance page's height, and the
+       dialog's frame is the TALLEST page's — so it is re-measured rather than
+       left describing a page that no longer exists. Only while the dialog is up:
+       a `display: none` overlay measures every page at zero. */
+    if ($("settings-overlay").classList.contains("show")) lockSettingsHeight();
     $("win").classList.toggle("block-capped", state.blockMax > 0);
     $("win").style.setProperty("--blockmax", state.blockMax + "px");
     $("win").dataset.wrap = state.wrap ? "on" : "off";
@@ -8488,7 +8728,52 @@
     const content = $("settings-overlay").querySelector(".content");
     if (content) content.scrollTop = 0;
   });
-  $("btn-settings").addEventListener("click", () => $("settings-overlay").classList.add("show"));
+  /* THE FRAME IS THE TALLEST PAGE'S, WHATEVER PAGE IS UP (§7.1.6c-5) — see
+     `.settings`' own comment for why a dialog that resizes under the rail is the
+     bug this closes, and for why the answer is a `height` and not a `min-height`.
+
+     Each page is shown alone for one measurement and put back, which is the only
+     way to read a `display: none` box's height — and what is read is the
+     SCROLLPORT's `scrollHeight`, not the section's own `offsetHeight`. A section
+     has no padding of its own, so its first heading's `margin-top` collapses
+     straight out of it and `offsetHeight` comes back ten pixels short; the
+     scrollport has the padding that stops the collapse, and its `scrollHeight`
+     is the page's whole stack, paddings included — which is the number the
+     native build's `page_height` returns.
+
+     The rail is taken into the same maximum: five words never overflow a dialog
+     already as tall as its window, but a rail longer than the shortest page's
+     rows would be cut off by a frame that fitted a page exactly. Header and
+     borders on top, and the `max-height` above does the capping.
+
+     Re-run whenever a page's height can have changed — the disclosure turning,
+     and the Sidebar row arriving or leaving with the tab layout. */
+  function lockSettingsHeight() {
+    const dlg = $("settings-overlay").querySelector(".settings");
+    const content = dlg.querySelector(".content");
+    const pages = [...content.querySelectorAll(".settings-page")];
+    const shown = pages.map((page) => page.classList.contains("shown"));
+    dlg.style.height = "";
+    let tallest = 0;
+    /* every page down first: the scrollport measures what is IN it, so the page
+       already up would have been stacked under each one being measured */
+    pages.forEach((page) => page.classList.remove("shown"));
+    pages.forEach((page) => {
+      page.classList.add("shown");
+      tallest = Math.max(tallest, content.scrollHeight);
+      page.classList.remove("shown");
+    });
+    pages.forEach((page, i) => page.classList.toggle("shown", shown[i]));
+    const body = Math.max(tallest, $("settings-nav").scrollHeight);
+    const frame = dlg.offsetHeight - dlg.clientHeight;   /* the two hairlines */
+    dlg.style.height = Math.ceil(body + dlg.querySelector("header").offsetHeight + frame) + "px";
+  }
+  $("btn-settings").addEventListener("click", () => {
+    $("settings-overlay").classList.add("show");
+    /* after `show`, never before: a `display: none` overlay measures every page
+       at zero and would lock the frame to the header alone */
+    lockSettingsHeight();
+  });
   $("btn-close-settings").addEventListener("click", () => $("settings-overlay").classList.remove("show"));
   $("settings-overlay").addEventListener("click", (e) => {
     if (e.target === $("settings-overlay")) $("settings-overlay").classList.remove("show");
@@ -8507,12 +8792,30 @@
       closeAllPopups();                       /* one popup at a time, combos included */
       combo.classList.toggle("open", !wasOpen);
       if (combo.classList.contains("open")) {
-        /* measure where it landed; flip it up if it would spill out of whatever
-           actually clips it — its scroll container if it has one, else the window */
+        /* DOWN BY DEFAULT; UP ONLY WHEN THE ROOM BELOW WILL NOT HOLD THE CAPPED
+           BOX (§7.1.6c-5). Two things changed here.
+
+           The clip is the WINDOW, always — it used to be "the scroll container if
+           it has one, else the window", and inside this dialog that container is
+           `.content`, against which a picker near the foot of a page flipped up
+           INTO the header and had its first item cut off. A popup is not clipped
+           by the box it hangs off; it is clipped by the window it is drawn in.
+
+           And the rect is read AFTER `open`, so `max-height` is already in force
+           and `menu.bottom` is the capped box's — which is the whole reason for
+           capping first. Measured off the uncapped list, a forty-face font
+           picker would flip up on a row with ample room for its eight items. */
         combo.classList.remove("flip-up");
         const menu = combo.querySelector(".combo-menu").getBoundingClientRect();
-        const clip = (combo.closest(".content") || $("win")).getBoundingClientRect();
+        const clip = $("win").getBoundingClientRect();
         if (menu.bottom > clip.bottom - 8) combo.classList.add("flip-up");
+        /* The current item is brought into view on open, `block: "nearest"` —
+           minimal movement, so an item already showing does not shift the list
+           under it. The native build does the same on ↑/↓, which keep the
+           highlighted item in view as they walk; this prototype has no keyboard
+           walk inside a picker at all, so that half of the rule is recorded here
+           and owned by the native build (`menu_scroll_to_show`). */
+        combo.querySelector(".combo-item.selected")?.scrollIntoView({ block: "nearest" });
       }
     });
     combo.querySelectorAll(".combo-item").forEach(item =>
@@ -8523,6 +8826,13 @@
         combo.querySelector(".value").textContent = item.dataset.v[0].toUpperCase() + item.dataset.v.slice(1);
         combo.classList.remove("open");
         const kind = combo.dataset.combo;
+        if (kind === "splitdir") {
+          /* The item's own words, not the data value capitalised: `Auto (longer
+             edge)` is the string that will not fit a 118px button, and printing
+             `Auto` here would hide the very thing this row is in the file to
+             show. */
+          combo.querySelector(".value").textContent = item.lastChild.textContent.trim();
+        }
         if (kind === "layout") { state.layoutMode = item.dataset.v; render(); }
         if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
         if (kind === "railmode") {
@@ -8565,6 +8875,51 @@
       }));
   });
   document.addEventListener("click", () => document.querySelectorAll(".combo").forEach(c => c.classList.remove("open")));
+
+  /* ── THE ADVANCED DISCLOSURE (§7.1.6c-5) ──
+     The whole band turns it, not the 10px triangle: the heading is the control,
+     exactly as a files-tree row is, and the word is what anybody aims at. It is
+     a focus stop and Enter/Space turn it — Space is `preventDefault`ed because
+     the browser's own answer to Space on a focused element is to scroll the page
+     under it, which is the one thing a disclosure must not do while it is
+     changing that page's height.
+
+     The defaults are snapshotted at load, because in a prototype with no
+     settings file that is what "defaults" means: the value each control ships
+     with in the markup above. `Reset` replays them THROUGH each item's own click
+     handler rather than writing the labels itself — the same rule the native
+     build states as "through the same applier the row's own picker goes
+     through", and the reason the Sidebar row's live re-render comes back for
+     free. The two sliders are static in this file and are named as a left-out
+     rather than faked. */
+  document.querySelectorAll("#settings-overlay .adv").forEach((group) => {
+    const head = group.querySelector(".adv-head");
+    const shipped = [...group.querySelectorAll(".combo")].map(
+      (combo) => [combo, combo.querySelector(".combo-item.selected")?.dataset.v]);
+    const turn = () => {
+      const open = !group.classList.contains("open");
+      group.classList.toggle("open", open);
+      head.setAttribute("aria-expanded", open ? "true" : "false");
+      /* the page just got taller or shorter; the frame must not follow it, so
+         the tallest-page measurement is taken again */
+      lockSettingsHeight();
+    };
+    head.addEventListener("click", turn);
+    head.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); turn(); }
+    });
+    group.querySelector(".adv-reset").addEventListener("click", (e) => {
+      e.stopPropagation();
+      shipped.forEach(([combo, v]) => combo
+        .querySelector(`.combo-item[data-v="${v}"]`)
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      /* The page is named, because the verb is a page's own and the toast is
+         read somewhere else — "Advanced is back to its defaults" alone would not
+         say which Advanced. */
+      const page = group.closest(".settings-page").querySelector(".group-label").textContent;
+      notifyToast(`${page} ▸ Advanced is back to its defaults`);
+    });
+  });
 
   $("btn-rail").addEventListener("click", () => {
     state.railCollapsed = !state.railCollapsed;

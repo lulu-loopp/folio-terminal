@@ -214,6 +214,15 @@ enum AppEvent {
     /// must wake only the seat that asked rather than every tree, every preview
     /// and every formula in the tab.
     GitReady,
+    /// **The PSReadLine probe answered** (§7.1.6c-5).
+    ///
+    /// The fifth of the same family and separate for the same reason, read from
+    /// the other end: it is the only one whose answer can land while a *modal*
+    /// is up. A dialog standing on the Terminal page draws a row that says
+    /// "Checking this machine's PSReadLine", and while it is up there is no
+    /// shell output, no hover and no keystroke to produce the frame that would
+    /// replace that line — so the probe has to ask for one itself.
+    PsReadLineProbed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -3889,6 +3898,14 @@ struct Runtime {
     /// shuts, because a button-up that arrives after the dialog is gone is a
     /// button-up with nothing to end.
     settings_slider_drag: Option<settings::SettingsRow>,
+    /// How far into the open picker's thumb the hand took hold, while it is
+    /// holding it (§7.1.6c-5).
+    ///
+    /// The distance and not the fact, for `file_peek`'s reason: a thumb grabbed
+    /// two thirds of the way down must not jump its own head under the pointer,
+    /// so what is remembered is where the hand landed on it. Cleared on release
+    /// and whenever the dialog shuts.
+    settings_menu_bar_drag: Option<f32>,
     /// Whether this Windows knows what a system backdrop is, asked once
     /// (`bt_platform::system_backdrop_available`).
     acrylic_available: bool,
@@ -6817,6 +6834,15 @@ fn graph_key_of(key: &Key, modifiers: ModifiersState) -> Option<git_graph::Graph
 /// Auto-repeat walks and does not press: holding Down runs down a picker, while
 /// holding Enter chooses once. A repeat of an activating key is a key the user
 /// is *still* holding, not a second decision.
+/// Whether a physical-pixel rectangle holds a pointer position.
+///
+/// Half-open on both axes, exactly as `settings::hit`'s own `contains` is, so
+/// two boxes that share an edge cannot both answer for the pixel on it.
+fn contains_point(rect: [f32; 4], position: PhysicalPosition<f64>) -> bool {
+    let (x, y) = (position.x as f32, position.y as f32);
+    x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
+}
+
 fn settings_key_of(key: &Key, modifiers: ModifiersState, repeat: bool) -> settings::SettingsKey {
     if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
         return settings::SettingsKey::Other;
@@ -13980,6 +14006,17 @@ impl Runtime {
         // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
         // for why the door exists and what it deliberately does not override.
         psreadline::install_probe_override();
+        // And how the answer gets back to a window that may be sitting on a
+        // modal when it lands (§7.1.6c-5). Installed here, once, because the
+        // wake belongs to this process's event loop rather than to whichever of
+        // the probe's two triggers fires first — the pane starts it, the dialog
+        // needs the repaint, and they are not the same call.
+        {
+            let proxy = proxy.clone();
+            psreadline::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::PsReadLineProbed);
+            });
+        }
         // **The language, before anything is measured.** Every width in this
         // window is measured from the words that go in it, and the first of
         // those measurements happens as soon as a chrome frame is built — so the
@@ -14333,6 +14370,7 @@ impl Runtime {
             image_pick_pending: false,
             background_picture: None,
             settings_slider_drag: None,
+            settings_menu_bar_drag: None,
             acrylic_available,
             translucency_available,
             custom_window_frame,
@@ -17999,32 +18037,45 @@ impl Runtime {
         }
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         let scale = self.renderer.metrics().scale_factor as f32;
-        let font_px = settings::MENU_ITEM_FONT_LOGICAL_PX * scale;
-        // Only the open row's own options can be drawn, so only they are measured;
-        // a shut picker measures nothing at all.
-        let widest_option = self.settings.menu().map_or(0.0, |row| {
-            row.option_labels()
-                .map(|label| self.renderer.measure_chrome_text(label, font_px))
-                .fold(0.0_f32, f32::max)
-        });
         // Read fresh every time rather than cached: the Sidebar row appears and
         // disappears with the Tab layout combo, the shortcut lines change as the
         // user records, and the height, the hit test and the draw all come off
         // this one call, so all three follow it in the same frame.
         let rows = settings::visible_rows(self.rail.layout);
         let shortcuts = self.shortcuts.editor_rows();
+        let content = self.settings_dialog(&rows, &shortcuts);
+        // **The probe's second trigger** (§7.1.6c-5), and it is here because this
+        // is the one place that knows which page is being shown *and* is reached
+        // by every road to showing it — the gear, a press on the rail, an arrow
+        // walking it, and a page the dialog fell back to because the one it was
+        // on lost its rows. A trigger hung off those four separately is a
+        // trigger with a fifth door somebody will add later. Idempotent and an
+        // atomic load after the first call — see `psreadline::begin_probe`.
+        if content.probes_psreadline(self.settings.category()) {
+            psreadline::begin_probe();
+        }
+        let category = self.settings.category();
+        let menu = self.settings.menu();
+        let scroll = self.settings_scroll;
+        let menu_scroll = self.settings.menu_scroll();
+        // **Every picker's width is measured, not only the open one's**
+        // (§7.1.6c-5): a button is as wide as its own longest option now, so the
+        // geometry needs the font for every row on the page and not just for the
+        // popup. Handed over as a closure for `build`'s own reason — the
+        // renderer owns the face, and the geometry stays a pure function of what
+        // it is told.
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         settings::layout_for_menu(
             width as f32,
             height as f32,
             scale,
-            self.settings.menu(),
-            settings::SettingsContent {
-                rows: &rows,
-                shortcuts: &shortcuts,
-            },
-            self.settings.category(),
-            widest_option,
-            self.settings_scroll,
+            menu,
+            content,
+            category,
+            scroll,
+            menu_scroll,
+            &mut measure,
         )
     }
 
@@ -18040,6 +18091,38 @@ impl Runtime {
         (
             settings::visible_rows(self.rail.layout),
             self.shortcuts.editor_rows(),
+        )
+    }
+
+    /// The two lists plus the third fact the dialog is holding: which pages have
+    /// their Advanced group open (§7.1.6c-5).
+    ///
+    /// A function and not a field, for `settings_content`'s own reason: the
+    /// disclosure state lives in `settings.json` and this reads it there, so the
+    /// height, the focus order and the draw cannot be built from a copy that has
+    /// drifted from the file. Resolving the stored keys here is also where an
+    /// unknown one is dropped — §5.4 逐叶降级, and `AdvancedOpen::from_keys` is
+    /// the one place it happens.
+    fn settings_dialog<'a>(
+        &self,
+        rows: &'a [settings::SettingsRow],
+        shortcuts: &'a [shortcuts::ShortcutRow],
+    ) -> settings::SettingsContent<'a> {
+        settings::SettingsContent {
+            rows,
+            shortcuts,
+            advanced: self.advanced_open(),
+        }
+    }
+
+    /// Which pages have their Advanced group open, as the settings file says.
+    fn advanced_open(&self) -> settings::AdvancedOpen {
+        settings::AdvancedOpen::from_keys(
+            self.settings_store
+                .loaded()
+                .advanced_open
+                .iter()
+                .map(String::as_str),
         )
     }
 
@@ -18939,10 +19022,8 @@ impl Runtime {
     /// button claiming to be reachable through a modal.
     fn toggle_settings_panel(&mut self) -> Result<()> {
         let (rows, shortcuts) = self.settings_content();
-        self.settings.toggle(settings::SettingsContent {
-            rows: &rows,
-            shortcuts: &shortcuts,
-        });
+        self.settings
+            .toggle(self.settings_dialog(&rows, &shortcuts));
         // A dialog opens at its top. The distance belongs to the sitting the
         // wheel moved, not to the preference the dialog edits, so it does not
         // outlive the dialog being shut.
@@ -19042,14 +19123,139 @@ impl Runtime {
         if let Some(enabled) = settings::always_on_top_requested(target) {
             self.apply_always_on_top(enabled)?;
         }
+        if let settings::SettingsTarget::Advanced(category) = target {
+            self.toggle_advanced_group(category)?;
+        }
+        if let settings::SettingsTarget::ResetAdvanced(category) = target {
+            self.reset_advanced_group(category)?;
+        }
         // Tab layout is the one choice that changes which rows exist, and the
-        // focus may be standing on the row it just deleted.
+        // focus may be standing on the row it just deleted. So is the
+        // disclosure, which is the same sentence with eight rows in it.
         let (rows, shortcuts) = self.settings_content();
-        self.settings
-            .keep_focus_reachable(settings::SettingsContent {
-                rows: &rows,
-                shortcuts: &shortcuts,
-            });
+        let content = self.settings_dialog(&rows, &shortcuts);
+        self.settings.keep_focus_reachable(content);
+        Ok(())
+    }
+
+    /// Turn one page's Advanced triangle, and write it down (§7.1.6c-5).
+    ///
+    /// Persisted, because the ruling says the state is remembered: a reader who
+    /// has decided they want the background-picture rows in front of them has
+    /// decided it about the product, and a disclosure that shut itself at every
+    /// launch would be asking them again every day.
+    fn toggle_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
+        let mut open = self.advanced_open();
+        open.toggle(category);
+        let mut settings = self.settings_store.loaded().clone();
+        settings.advanced_open = open.keys();
+        self.settings_store.store(settings);
+        // The page got taller or shorter under a scroll that was measured against
+        // the other length. Not reset to the top — the reader is looking at the
+        // heading they just pressed, and sending them to the top would move it
+        // out from under their eye — but clamped, which the layout does for us on
+        // the next call and is stated here so the number the runtime holds is not
+        // left describing a page that no longer exists.
+        if let Some(layout) = self.settings_layout() {
+            self.settings_scroll = self.settings_scroll.clamp(0.0, layout.max_scroll());
+        }
+        Ok(())
+    }
+
+    /// **Put one page's advanced rows back**, hot, and say which page
+    /// (§7.1.6c-5).
+    ///
+    /// Derived from the row table and not from a list of fields: the rows are
+    /// `SettingsContent::advanced_rows`, which is `SettingsRow::advanced`
+    /// filtered by page, so a row that joins the group is reset by this verb
+    /// without the verb being edited — and a row that leaves it stops being.
+    ///
+    /// **No confirmation**, which is the shortcut page's own ruling for its own
+    /// `Restore all defaults`: this dialog has no dirty gate to route a question
+    /// through, every choice in it is written the instant it is made, and what
+    /// this discards is exactly the eight rows the reader is looking at while
+    /// they press it.
+    fn reset_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
+        let (rows, shortcuts) = self.settings_content();
+        let advanced = self
+            .settings_dialog(&rows, &shortcuts)
+            .advanced_rows(category);
+        for row in advanced {
+            self.reset_advanced_row(row)?;
+        }
+        self.toast(
+            toast::ToastKind::Ok,
+            toast::ToastAnchor::Window,
+            None,
+            // The rail's word and not the page's heading: `label` is
+            // upper-cased at the source because it is a heading, and a heading
+            // dropped into a sentence shouts. `nav_label` is the same page
+            // named in running text, which is what a card is.
+            i18n::advanced_reset_toast(category.nav_label()),
+        )?;
+        Ok(())
+    }
+
+    /// One advanced row, back to the value a fresh install has.
+    ///
+    /// Every arm goes through the same applier the row's own picker goes
+    /// through, which is `apply_settings_choice`'s founding rule read once more:
+    /// a value reachable two ways whose *effect* lives on one of them is a value
+    /// that half applies. The default itself comes from
+    /// `bt_persist::SettingsV1::default()` and is never written out here — a
+    /// second copy of a default is the copy that goes stale.
+    ///
+    /// The non-advanced rows are named rather than swept into a `_`, exactly as
+    /// [`settings::SettingsRow::advanced`] names them: a row added to the group
+    /// tomorrow must not silently reset to nothing.
+    fn reset_advanced_row(&mut self, row: settings::SettingsRow) -> Result<()> {
+        use settings::SettingsRow as Row;
+        let defaults = bt_persist::SettingsV1::default();
+        match row {
+            Row::BackgroundImage => {
+                self.apply_background_image(defaults.background_image)?;
+            }
+            Row::ImageFit => {
+                self.apply_image_fit(defaults.background_fit)?;
+            }
+            Row::ImageOpacity => {
+                self.apply_slider(row, defaults.background_image_opacity)?;
+            }
+            Row::BackgroundOpacity => {
+                self.apply_slider(row, defaults.background_opacity)?;
+            }
+            Row::Acrylic => {
+                self.apply_acrylic(defaults.acrylic)?;
+            }
+            Row::AlwaysOnTop => {
+                self.apply_always_on_top(defaults.always_on_top)?;
+            }
+            // The one advanced row whose value is a window shape rather than a
+            // preference: it lives in `session.json` with the tab layout it
+            // depends on, so its default is `RailMode`'s and not the settings
+            // file's.
+            Row::Sidebar => {
+                self.set_rail_state(rail_state_for(self.rail.layout, seats::RailMode::default()))?;
+            }
+            Row::SplitDirection => {
+                self.apply_split_direction(defaults.split_direction)?;
+            }
+            // Not in any group, and therefore never handed here — see
+            // `SettingsContent::advanced_rows`, which is what this loop walks.
+            Row::Theme
+            | Row::LightScheme
+            | Row::DarkScheme
+            | Row::TerminalFont
+            | Row::FontSize
+            | Row::Cursor
+            | Row::TabLayout
+            | Row::Formulas
+            | Row::InlineFormulas
+            | Row::GitPanel
+            | Row::DefaultProfile
+            | Row::Language
+            | Row::PsReadLine => {}
+        }
         Ok(())
     }
 
@@ -19085,11 +19291,8 @@ impl Runtime {
         }
         self.store_keybindings();
         let (rows, shortcuts) = self.settings_content();
-        self.settings
-            .keep_focus_reachable(settings::SettingsContent {
-                rows: &rows,
-                shortcuts: &shortcuts,
-            });
+        let content = self.settings_dialog(&rows, &shortcuts);
+        self.settings.keep_focus_reachable(content);
         Ok(())
     }
 
@@ -19184,11 +19387,8 @@ impl Runtime {
                     self.store_keybindings();
                 }
                 let (rows, shortcuts) = self.settings_content();
-                self.settings
-                    .keep_focus_reachable(settings::SettingsContent {
-                        rows: &rows,
-                        shortcuts: &shortcuts,
-                    });
+                let content = self.settings_dialog(&rows, &shortcuts);
+                self.settings.keep_focus_reachable(content);
             }
         }
         if self.refresh_chrome() {
@@ -19210,7 +19410,10 @@ impl Runtime {
         // below turns it away: a gesture that began on a track can finish
         // anywhere, and a thumb that kept following the pointer after the button
         // came up would be a control stuck to the hand.
-        if state == ElementState::Released && self.settings_slider_drag.take().is_some() {
+        if state == ElementState::Released
+            && (self.settings_slider_drag.take().is_some()
+                || self.settings_menu_bar_drag.take().is_some())
+        {
             if let Some(position) = self.pointer_position {
                 let hover = settings::hit(layout, self.settings_values(), position.x, position.y);
                 self.settings.set_hover(Some(hover));
@@ -19223,6 +19426,20 @@ impl Runtime {
         if state != ElementState::Pressed || button != MouseButton::Left {
             return Ok(());
         }
+        // **The open picker's bar is asked before anything else**, which is the
+        // glance card's own precedence (`file_peek::press_at`): a thumb lies over
+        // the last pixels of the item beside it, and asking the item first would
+        // make the bar undraggable exactly where it is drawn. It is deliberately
+        // not a `SettingsTarget` — the ring never goes to a scrollbar, and a
+        // focus stop for one would be a Tab stop nobody wants.
+        if let Some(bar) = layout.menu_bar()
+            && contains_point(bar.grab, position)
+        {
+            let held = (position.y as f32 - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1]);
+            self.settings_menu_bar_drag = Some(held);
+            self.drag_settings_menu_bar(&bar, position)?;
+            return Ok(());
+        }
         let target = settings::hit(layout, self.settings_values(), position.x, position.y);
         // The focus follows the finger, with the ring off — the pointer half of
         // `:focus-visible`. Stated before the verb below, because closing the
@@ -19232,7 +19449,15 @@ impl Runtime {
         match target {
             settings::SettingsTarget::Scrim => self.settings.close(),
             settings::SettingsTarget::Close => self.settings.close(),
-            settings::SettingsTarget::Combo(row) => self.settings.toggle_menu(row),
+            settings::SettingsTarget::Combo(row) => {
+                self.settings.toggle_menu(row);
+                // The list opens showing the answer it already has, whatever
+                // page of it that answer is on — a capped picker whose thirty
+                // faces begin at `Agency FB` would otherwise open nowhere near
+                // the one that is ticked. Asked after the open, because only
+                // then is there a menu whose body can say where the item is.
+                self.show_open_settings_choice(row);
+            }
             // A press on a track is a jump to the pointer AND the first frame of
             // a drag — one gesture, so one door (`SettingsLayout::slider_at`).
             // Grabbing the thumb and not moving is a press that asked for the
@@ -19259,6 +19484,14 @@ impl Runtime {
             settings::SettingsTarget::Record(index) => self.settings.begin_recording(index),
             target @ (settings::SettingsTarget::RestoreRow(_)
             | settings::SettingsTarget::RestoreAll) => self.apply_shortcut_edit(target)?,
+            // Both leave through the same door the keyboard's Enter leaves
+            // through, which is `apply_settings_choice`'s founding rule: a verb
+            // reachable two ways whose body lives on one of them is a verb that
+            // half works.
+            target @ (settings::SettingsTarget::Advanced(_)
+            | settings::SettingsTarget::ResetAdvanced(_)) => {
+                self.apply_settings_choice(target)?;
+            }
             // A press on the dialog's own body, or inside the open menu but on
             // none of its items, lands nowhere. It notably does *not* close: the
             // mock-up closes on the scrim and on the `×`, and nothing else.
@@ -26617,10 +26850,8 @@ impl Runtime {
         // Two strings, measured once per frame rather than once per column: they
         // are the same two words in every column in the window, and the only
         // thing that could make them differ is the font, which is one font.
-        let widths = [
-            self.renderer.measure_chrome_text("Files", font),
-            self.renderer.measure_chrome_text("Git", font),
-        ];
+        let widths =
+            seats::FilesView::ALL.map(|view| self.renderer.measure_chrome_text(view.label(), font));
         let active = self.active_tab;
         self.seats
             .files()
@@ -35876,6 +36107,15 @@ impl Runtime {
                 }
                 return Ok(());
             }
+            // The same sentence for the picker's own bar, and for the same
+            // reason: a gesture that began on a thumb keeps following the hand
+            // wherever it wanders.
+            if self.settings_menu_bar_drag.is_some()
+                && let Some(bar) = layout.menu_bar()
+            {
+                self.drag_settings_menu_bar(&bar, position)?;
+                return Ok(());
+            }
             let hover = settings::hit(&layout, self.settings_values(), position.x, position.y);
             if self.settings.set_hover(Some(hover)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
@@ -39363,6 +39603,51 @@ impl Runtime {
         }
     }
 
+    /// Read the open picker's thumb backwards into an offset (§7.1.6c-5).
+    ///
+    /// `preview::scroll_dragged_to` and not arithmetic of its own: a thumb is a
+    /// picture of the offset, and dragging one is reading that picture backwards
+    /// — a second implementation is how a bar and its own hit test come apart.
+    fn drag_settings_menu_bar(
+        &mut self,
+        bar: &preview::ScrollBar,
+        position: PhysicalPosition<f64>,
+    ) -> Result<()> {
+        let held = self.settings_menu_bar_drag.unwrap_or_default();
+        let along = bar.along([position.x as f32, position.y as f32]);
+        let scrolled = preview::scroll_dragged_to(bar, along, held);
+        if !self.settings.scroll_menu(scrolled) {
+            return Ok(());
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Bring a picker's own answer into view the moment it opens or moves**
+    /// (§7.1.6c-5).
+    ///
+    /// Asked after the state has changed, because only then is there a layout
+    /// whose menu body can say where the item landed — the same order
+    /// `scroll_to_show` is asked in for the page. `menu_scroll_to_show` moves by
+    /// the minimum, so a list already showing the item does not twitch.
+    fn show_open_settings_choice(&mut self, row: settings::SettingsRow) {
+        let index = row
+            .selected_index(self.settings_values())
+            .unwrap_or_default();
+        self.show_settings_choice_at(index);
+    }
+
+    /// The same, for an index the keyboard has just walked onto.
+    fn show_settings_choice_at(&mut self, index: usize) {
+        let Some(layout) = self.settings_layout() else {
+            return;
+        };
+        let scrolled = layout.menu_scroll_to_show(index, self.settings.menu_scroll());
+        self.settings.scroll_menu(scrolled);
+    }
+
     /// A wheel notch anywhere over the settings modal.
     ///
     /// Anywhere, and not only over the content box: the dialog is modal, so the
@@ -39375,6 +39660,31 @@ impl Runtime {
         layout: &settings::SettingsLayout,
         delta: MouseScrollDelta,
     ) -> Result<()> {
+        // **An open picker takes the wheel from under the pointer** (§7.1.6c-5),
+        // and only from under it: a notch over the dialog while a capped menu
+        // hangs somewhere else is still the page's, which is the same rule the
+        // rail and the tab strip already answer to — a scroller owns the notches
+        // over its own box. The menu is the innermost box, so it is asked first,
+        // which is `hit`'s own smallest-target-first ruling read for the wheel.
+        if let Some(body) = layout.menu_body()
+            && let Some(position) = self.pointer_position
+            && contains_point(body, position)
+        {
+            let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
+            let scrolled =
+                (self.settings.menu_scroll() - travel).clamp(0.0, layout.menu_max_scroll());
+            if !self.settings.scroll_menu(scrolled) {
+                return Ok(());
+            }
+            let moved = self.settings_layout();
+            self.settings.set_hover(moved.map(|layout| {
+                settings::hit(&layout, self.settings_values(), position.x, position.y)
+            }));
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         let content = layout.content_box();
         let travel = self.vertical_wheel_travel(delta, content[3] - content[1]);
         let scrolled = (self.settings_scroll - travel).clamp(0.0, layout.max_scroll());
@@ -39952,10 +40262,7 @@ impl Runtime {
             let key = settings_key_of(&event.logical_key, self.modifiers, event.repeat);
             let before = self.settings.category();
             let (rows, shortcuts) = self.settings_content();
-            let content = settings::SettingsContent {
-                rows: &rows,
-                shortcuts: &shortcuts,
-            };
+            let content = self.settings_dialog(&rows, &shortcuts);
             let verdict = self.settings.key(key, content, self.settings_values());
             // Turning a page puts the reader at its top — the wheel's distance
             // belonged to the page they left. Read off the panel rather than
@@ -40006,6 +40313,15 @@ impl Runtime {
                         self.settings.set_hover(Some(hover));
                     }
                 }
+            }
+            // **And the picker's own list follows the highlight** (§7.1.6c-5),
+            // which is the same rule inside the second scrolling region: an
+            // arrow that walks onto the ninth of thirty faces has to bring it
+            // into a body that shows eight, or the keyboard would be moving a
+            // selection nobody can see. Minimal movement again, so a highlight
+            // already in view does not shift the list under it.
+            if let Some(settings::SettingsTarget::Choice(_, index)) = self.settings.focus() {
+                self.show_settings_choice_at(index);
             }
             if self.refresh_chrome() {
                 self.present_chrome_change()?;
@@ -41433,6 +41749,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // this window is read and where the debounce can either fire or ask
             // for a later wake-up.
             AppEvent::GitChanged => {}
+            // The answer is already in `psreadline::probe()`; what is owed is a
+            // frame that reads it. `refresh_chrome` rebuilds the row's sentence
+            // from scratch — `SettingsRow::description` asks `row_state` afresh
+            // every time — so there is nothing to apply, only something to draw.
+            AppEvent::PsReadLineProbed => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && runtime.refresh_chrome()
+                    && let Err(error) = runtime.present_chrome_change()
+                {
+                    self.fail(event_loop, error);
+                }
+            }
         }
     }
 
@@ -48343,6 +48671,7 @@ mod tests {
         panel.toggle(settings::SettingsContent {
             rows: &rows,
             shortcuts: &[],
+            advanced: settings::AdvancedOpen::default(),
         });
         assert!(panel.is_open(), "the gear's verb is 'open the dialog'");
         assert_eq!(

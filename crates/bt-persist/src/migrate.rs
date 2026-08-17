@@ -45,6 +45,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (7, migrate_settings_v7_to_v8),
     (8, migrate_settings_v8_to_v9),
     (9, migrate_settings_v9_to_v10),
+    (10, migrate_settings_v10_to_v11),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -252,6 +253,18 @@ fn migrate_settings_v9_to_v10(mut value: Value) -> Value {
         );
         object.insert("acrylic".to_owned(), Value::from(false));
         object.insert("always_on_top".to_owned(), Value::from(false));
+    }
+    value
+}
+
+/// One key, and it carries no behaviour forward because there is none to carry:
+/// every v10 file was written by a build with no Advanced group at all, so the
+/// honest reading of one is "no page has been opened", which is also the
+/// default. See `SettingsV1::advanced_open`.
+fn migrate_settings_v10_to_v11(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(11));
+        object.insert("advanced_open".to_owned(), Value::Array(Vec::new()));
     }
     value
 }

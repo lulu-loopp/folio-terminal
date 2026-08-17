@@ -9811,7 +9811,8 @@ pub fn push_files_seg(
     let (_quads, labels, sprites) = out;
     let underline = (FILES_SEG_UNDERLINE_LOGICAL_PX * scale).round().max(1.0);
     let inset = (FILES_SEG_UNDERLINE_INSET_LOGICAL_PX * scale).round();
-    for (each, text) in [(FilesView::Files, "Files"), (FilesView::Git, "Git")] {
+    for each in FilesView::ALL {
+        let text = each.label();
         let box_ = geometry.button(each);
         if box_[2] <= box_[0] {
             continue;
@@ -11961,6 +11962,27 @@ pub enum FilesView {
 }
 
 impl FilesView {
+    /// Both pages, in the order the switch draws them.
+    ///
+    /// The paint and the measuring both walk this, which is what keeps the width
+    /// reserved for a word and the word drawn in it from being two lists — the
+    /// bug that would otherwise arrive on the day a third page does, or on the
+    /// day one of the two words gets longer in one language.
+    pub const ALL: [Self; 2] = [Self::Files, Self::Git];
+
+    /// The word on this half of the switch.
+    ///
+    /// **The last two bare literals in the chrome** until §7.1.6c-5: they were
+    /// printed straight into `push_files_seg`, so a Chinese window drew a Chinese
+    /// tree under an English switch.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Files => crate::i18n::Text::FilesViewFiles.text(),
+            Self::Git => crate::i18n::Text::FilesViewGit.text(),
+        }
+    }
+
     /// The other one. A segmented switch of two is a toggle, and the chord that
     /// works it (R28) is written as one.
     #[must_use]
@@ -14349,10 +14371,12 @@ mod tests {
             crate::settings::SettingsContent {
                 rows: &rows,
                 shortcuts: &[],
+                advanced: crate::settings::AdvancedOpen::default(),
             },
             crate::settings::SettingsCategory::Appearance,
             0.0,
             0.0,
+            &mut |_, _| 0.0,
         )
         .expect("this window hosts the dialog");
 
@@ -25258,6 +25282,51 @@ mod tests {
         assert_eq!(
             strip[1], off.body[1],
             "the strip starts where the list would have"
+        );
+    }
+
+    /// PIN (§7.1.6c-5) — **the switch speaks the window's language.**
+    ///
+    /// Its two words were bare literals inside `push_files_seg` from the day the
+    /// Git page was born, which is the whole bug: a Chinese window drew a
+    /// Chinese tree under an English switch, and the widths measured for the hit
+    /// test were measured from the same two literals, so nothing disagreed and
+    /// nothing complained.
+    ///
+    /// Red gate: put `"Files"` back into either the paint or the measuring and
+    /// the Chinese half of this goes red. The English half is here so that the
+    /// fix cannot be "translate it and forget the language it was written in".
+    ///
+    /// The languages are read through `Text::in_lang` rather than by installing
+    /// one, which is this whole suite's rule: [`crate::i18n::install`] is a
+    /// process-wide answer and a test that moved it would move it under every
+    /// other test running beside it.
+    #[test]
+    fn the_files_columns_switch_names_its_two_pages_in_the_windows_own_language() {
+        use crate::i18n::{Lang, Text};
+        assert_eq!(
+            FilesView::ALL.map(FilesView::label),
+            [Text::FilesViewFiles.text(), Text::FilesViewGit.text()],
+            "both halves come out of the table, in the order the two measured \
+             widths ride in"
+        );
+        assert_eq!(
+            [
+                Text::FilesViewFiles.in_lang(Lang::English),
+                Text::FilesViewGit.in_lang(Lang::English)
+            ],
+            ["Files", "Git"],
+            "the words the switch shipped with"
+        );
+        assert_eq!(
+            Text::FilesViewFiles.in_lang(Lang::Chinese),
+            "文件",
+            "a Chinese window draws a Chinese switch"
+        );
+        assert_eq!(
+            Text::FilesViewGit.in_lang(Lang::Chinese),
+            "Git",
+            "the program's name is the program's name in both"
         );
     }
 
