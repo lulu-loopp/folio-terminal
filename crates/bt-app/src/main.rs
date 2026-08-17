@@ -6744,6 +6744,22 @@ fn stepped_command_mark(count: usize, at: Option<usize>, step: Step) -> Option<u
     }
 }
 
+/// `.cmdrail.srch-mode` — whether one pane's rail is carrying search results
+/// rather than its command ledger (§7.1.5d, S4).
+///
+/// **Two conditions, and the second is not the prototype's.** `srchRail()` marks
+/// the rail the moment a capsule exists on the pane, so its commands recede at
+/// `Ctrl+F`, before a letter is typed — a rail going grey to answer a question
+/// nobody has asked, which a reader reads as their history having gone away. An
+/// empty field has asked nothing; the takeover begins with the first character.
+///
+/// A free function so the four cases can be stated without a window: the search is
+/// a singleton, so "which pane" is a comparison and not a lookup, and the whole of
+/// the mode switch is these two clauses.
+fn rail_is_searching(search_seat: Option<SeatId>, query: &str, seat: SeatId) -> bool {
+    search_seat == Some(seat) && !query.is_empty()
+}
+
 /// Which presentation row of `frame` is showing `anchor`, or `None` when the
 /// content it names is not on the glass at all.
 ///
@@ -15254,9 +15270,17 @@ impl Runtime {
             && let Some(host) = cmdrail::peek_host(cache.rail(), index)
             && let Some(leaf) = self.sessions.get(&seat)
         {
-            let (text, muted) = cmdrail::peek_text(&tick, leaf.session.command_marks());
+            // The matched line's own text, for a tick the search put there —
+            // read once, here, because it is the only place a rail ever needs a
+            // line rather than a command.
+            let line = match tick.target {
+                cmdrail::Target::Match(hit) => self.search_hit_line_text(hit),
+                cmdrail::Target::Command(_) => None,
+            };
+            let (text, muted) =
+                cmdrail::peek_text(&tick, leaf.session.command_marks(), line.as_deref());
             anchors.push_faced(
-                tooltip::TooltipAnchorId::CommandTick(seat, tick.mark),
+                tooltip::TooltipAnchorId::CommandTick(seat, tick.target),
                 host,
                 text,
                 tooltip::TipFace::Peek { muted },
@@ -15590,6 +15614,128 @@ impl Runtime {
         )
     }
 
+    /// **The rail's ordinal stack for one pane — "one rail, two sources"**
+    /// (§7.1.5d, S4).
+    ///
+    /// The plain command ledger, unless a capsule is open on this very pane with
+    /// something typed in it; then the ledger and the matched lines merged into
+    /// one stack in document order. The two sides are put in one line space by
+    /// [`bt_viewport::search_address`] — the function the highlighter already uses
+    /// to place a cell against a hit — so a command's prompt row and a hit on that
+    /// same row are recognisably the same line rather than two ticks a pixel
+    /// apart.
+    ///
+    /// **The hits are deduplicated per line here and not in [`cmdrail::merge`]**,
+    /// because this is where the hits are: the search keeps them in document order
+    /// grouped by line already, so the dedup is `last()` and not a set. B56's own
+    /// asymmetry lands in these four lines — *the rail counts lines, the counter
+    /// counts hits* — and it is what stops a `grep` output, where every line
+    /// matches several times, from drawing a rail nobody can read.
+    fn command_rail_stack(&self, seat: SeatId) -> cmdrail::Stack {
+        let Some(leaf) = self.sessions.get(&seat) else {
+            return cmdrail::Stack::default();
+        };
+        let marks = leaf.session.command_marks();
+        if self.command_rail_search(seat).is_none() {
+            return cmdrail::commands(marks);
+        }
+        let commands: Vec<cmdrail::CommandLine> = marks
+            .iter()
+            .map(|mark| cmdrail::CommandLine {
+                mark: mark.id,
+                line: leaf
+                    .session
+                    .command_mark_anchor(mark.start)
+                    .and_then(bt_viewport::search_address)
+                    .map(|(line, _)| line),
+                failed: mark.failed(),
+            })
+            .collect();
+        let current = self.search.current().map(|hit| hit.line);
+        let mut matches: Vec<cmdrail::MatchLine> = Vec::new();
+        for (index, hit) in self.search.hits().iter().enumerate() {
+            if matches.last().is_some_and(|last| last.line == hit.line) {
+                continue;
+            }
+            matches.push(cmdrail::MatchLine {
+                line: hit.line,
+                hit: index,
+                current: current == Some(hit.line),
+            });
+        }
+        cmdrail::merge(&commands, &matches)
+    }
+
+    /// What the search contributes to this pane's [`cmdrail::RailKey`], or `None`
+    /// when the pane is carrying no search.
+    ///
+    /// **`None` for an empty field**, which is the one place this parts company
+    /// with the prototype: `srchRail()` marks the rail the moment a capsule exists,
+    /// so its commands recede at `Ctrl+F` before anything has been asked. An empty
+    /// query has asked nothing, and a rail that greys out to answer nothing is a
+    /// rail that has told the reader their history went away.
+    fn command_rail_search(&self, seat: SeatId) -> Option<cmdrail::RailSearch> {
+        if !rail_is_searching(self.search.seat(), self.search.query(), seat) {
+            return None;
+        }
+        Some(cmdrail::RailSearch {
+            query: self.search_revision,
+            hits: self.search.revision(),
+            current: self.search.current_index(),
+        })
+    }
+
+    /// Fold every rail that is changing mode this frame — see
+    /// [`cmdrail::RailCache::fold_for_mode`].
+    fn fold_rails_on_mode_change(&mut self) {
+        let modes: Vec<(SeatId, bool)> = self
+            .command_rails
+            .keys()
+            .map(|seat| (*seat, self.command_rail_search(*seat).is_some()))
+            .collect();
+        for (seat, searching) in modes {
+            if let Some(cache) = self.command_rails.get_mut(&seat) {
+                cache.fold_for_mode(searching);
+            }
+        }
+    }
+
+    /// The text of the line one hit stands on, for the glance card over its tick
+    /// (B36).
+    ///
+    /// Read from the plane the hit names rather than from the frame, because a
+    /// tick can point at a line that is nowhere near the viewport — which is the
+    /// whole reason a results rail is worth having. History is a binary search
+    /// (the frozen deque is ordered by id and holds up to a hundred thousand
+    /// lines); the two volatile planes are tens of rows and are walked.
+    ///
+    /// The volatile planes are re-joined through [`search::live_row`], the same
+    /// function that produced the text the match was *found* in, so the card
+    /// cannot quote a line the scan never saw.
+    fn search_hit_line_text(&self, hit: usize) -> Option<String> {
+        let seat = self.search.seat()?;
+        let line = self.search.hits().get(hit)?.line;
+        let leaf = self.sessions.get(&seat)?;
+        match line {
+            bt_viewport::SearchLine::History(id) => {
+                let frozen = leaf.session.transcript().frozen();
+                let at = frozen.binary_search_by_key(&id, |line| line.id).ok()?;
+                Some(frozen[at].text.clone())
+            }
+            bt_viewport::SearchLine::Staging(id) => leaf
+                .session
+                .transcript()
+                .staged_rows()
+                .find(|staged| staged.id == id)
+                .map(|staged| search::live_row(0, &staged.row.cells).text),
+            bt_viewport::SearchLine::Live { row } => leaf
+                .session
+                .live_rows()
+                .get(row as usize)
+                .map(|captured| search::live_row(row, &captured.cells).text),
+        }
+    }
+
     /// Every rail on screen, at whatever temperature its own clocks have reached,
     /// with the jump flash under them.
     ///
@@ -15606,6 +15752,10 @@ impl Runtime {
         let motion = self.motion;
         let now = Instant::now();
         let flash = self.command_flash_layer(&palette, scale);
+        // Before anything is keyed: a rail that is changing mode folds whatever
+        // the fisheye had open, because the stack it was open over is about to be
+        // replaced. See [`cmdrail::RailCache::fold_for_mode`].
+        self.fold_rails_on_mode_change();
         // Pass one, under a shared borrow: every rail that is drawn this frame,
         // and — for the ones whose key has moved — the geometry to draw it with.
         // See [`cmdrail::RailCache::needs_rebuild`] for why the question and the
@@ -15626,6 +15776,7 @@ impl Runtime {
                         .command_rails
                         .get(&seat)
                         .and_then(|cache| cache.pointer().expanded()),
+                    search: self.command_rail_search(seat),
                 };
                 let stale = self
                     .command_rails
@@ -15635,7 +15786,7 @@ impl Runtime {
                     seat,
                     key,
                     stale.then(|| {
-                        cmdrail::lay_out(body, leaf.session.command_marks(), scale, key.expanded)
+                        cmdrail::lay_out(body, &self.command_rail_stack(seat), scale, key.expanded)
                     }),
                 ))
             })
@@ -15888,7 +16039,7 @@ impl Runtime {
         let scale = self.renderer.metrics().scale_factor as f32;
         let resolved = cmdrail::resolve(
             body,
-            leaf.session.command_marks(),
+            &self.command_rail_stack(seat),
             scale,
             cache.pointer().expanded(),
             position.y as f32,
@@ -15898,6 +16049,7 @@ impl Runtime {
             body,
             scale,
             expanded: resolved.expanded,
+            search: self.command_rail_search(seat),
         };
         Some((seat, key, resolved))
     }
@@ -15926,7 +16078,7 @@ impl Runtime {
     fn command_tick_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
         let (seat, index) = self.command_rail_hover?;
         let tick = self.command_rails.get(&seat)?.rail().ticks.get(index)?;
-        Some(tooltip::TooltipAnchorId::CommandTick(seat, tick.mark))
+        Some(tooltip::TooltipAnchorId::CommandTick(seat, tick.target))
     }
 
     /// While any rail still owes a frame to one of its four clocks, one frame at
@@ -15955,20 +16107,32 @@ impl Runtime {
         Ok(())
     }
 
-    /// A press on a rail: jump to the tick under the pointer.
+    /// A press on a rail — **and the one place the rail's two sources part
+    /// company** (B40-B41).
+    ///
+    /// *"Clicking a match tick SELECTS that match (current advances there, count
+    /// follows); a plain command tick keeps its normal jump."* Both verbs are
+    /// older than this fork: the jump has been here since S1 and
+    /// [`search::SearchState::set_current`] since S3, which is why the takeover
+    /// costs one `match` and not a second press path. Which of the two a tick
+    /// means was decided when the tick was built — see [`cmdrail::Entry::target`]
+    /// — so nothing here asks the search whether it is open.
     fn press_command_rail(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let Some((seat, index)) = self.command_rail_at(position) else {
             return Ok(false);
         };
-        let Some(mark) = self
+        let Some(target) = self
             .command_rails
             .get(&seat)
             .and_then(|cache| cache.rail().ticks.get(index))
-            .map(|tick| tick.mark)
+            .map(|tick| tick.target)
         else {
             return Ok(false);
         };
-        self.jump_to_command_mark(seat, mark)?;
+        match target {
+            cmdrail::Target::Command(mark) => self.jump_to_command_mark(seat, mark)?,
+            cmdrail::Target::Match(hit) => self.select_search_hit(hit)?,
+        }
         Ok(true)
     }
 
@@ -16314,6 +16478,32 @@ impl Runtime {
         if self.search.step(forwards).is_none() {
             return Ok(());
         }
+        self.after_current_hit_moved()
+    }
+
+    /// **A press on a match tick of the results rail** (B40-B41, S4).
+    ///
+    /// Neither a step forwards nor a step back — *"this one"* — which is why
+    /// `SearchState` has had `set_current` since S3 waiting for exactly this
+    /// caller. Everything after the selection is the walk's own tail, shared
+    /// below rather than restated, so a tick and the `▼` button leave the window
+    /// in states that cannot drift apart.
+    ///
+    /// An index the hit set no longer holds does nothing at all. It is reachable
+    /// only through a rail built against a hit set that has since been replaced —
+    /// one frame's worth of staleness at most — and moving the reader to a hit
+    /// they did not point at would be worse than the press appearing not to land.
+    fn select_search_hit(&mut self, index: usize) -> Result<()> {
+        if self.search.set_current(index).is_none() {
+            return Ok(());
+        }
+        self.after_current_hit_moved()
+    }
+
+    /// What both ways of choosing a match owe the window: the viewport reveals it
+    /// if it is off screen, the projection is handed the new current ground, and
+    /// the counter is rebuilt around it.
+    fn after_current_hit_moved(&mut self) -> Result<()> {
         self.reveal_current_search_hit()?;
         if let Some(seat) = self.search.seat() {
             self.install_search_highlights(seat);
@@ -44857,6 +45047,35 @@ mod tests {
         // A lone command: the viewport is on it, and both keys are silent.
         assert_eq!(stepped_command_mark(1, Some(0), Step::Forward), None);
         assert_eq!(stepped_command_mark(1, Some(0), Step::Back), None);
+    }
+
+    /// **The takeover begins with the first character, not with the capsule**
+    /// (§7.1.5d, S4).
+    ///
+    /// One search in the window, so the pane it is on is the only pane whose rail
+    /// changes — and an empty field leaves even that one alone. The fourth case is
+    /// the one the prototype gets wrong and the reason this predicate has a name.
+    ///
+    /// MUTATION: drop the `is_empty` clause and `Ctrl+F` recedes the command
+    /// history to a fifth of its opacity before a question has been asked; drop the
+    /// seat comparison and every pane in the window answers one pane's query.
+    #[test]
+    fn a_rail_carries_results_only_on_the_searched_pane_and_only_once_something_is_typed() {
+        let searched = SeatId(3);
+        let other = SeatId(4);
+        assert!(rail_is_searching(Some(searched), "cargo", searched));
+        assert!(
+            !rail_is_searching(Some(searched), "", searched),
+            "an open capsule with nothing typed has asked nothing"
+        );
+        assert!(
+            !rail_is_searching(Some(searched), "cargo", other),
+            "one search, one pane"
+        );
+        assert!(
+            !rail_is_searching(None, "cargo", searched),
+            "the query outlives the capsule (B62), the takeover does not"
+        );
     }
 
     /// The jump's flash lands on the row that is **showing** the command, and on

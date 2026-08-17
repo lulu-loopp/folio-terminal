@@ -245,17 +245,23 @@ pub enum TooltipAnchorId {
     /// One tick of a pane's command marks rail — *"hover **glances** the command"*
     /// (mock 4604).
     ///
-    /// It carries the **mark** and not the tick's index, and the difference is the
-    /// fisheye: a bucket opening under the pointer renumbers every tick below it,
-    /// so an index would have the card follow the pointer's *position* through a
-    /// re-layout while the hand had not moved. A `CommandMarkId` survives
-    /// aggregation, expansion, eviction and resize, which is exactly the set of
-    /// things that can happen underneath a card that is already up.
+    /// It carries the tick's **subject** and not the tick's index, and the
+    /// difference is the fisheye: a bucket opening under the pointer renumbers
+    /// every tick below it, so an index would have the card follow the pointer's
+    /// *position* through a re-layout while the hand had not moved. A
+    /// `CommandMarkId` survives aggregation, expansion, eviction and resize, which
+    /// is exactly the set of things that can happen underneath a card that is
+    /// already up.
+    ///
+    /// A [`crate::cmdrail::Target`] rather than a bare mark since S4: while a
+    /// search is open the same rail also carries matched lines, and a card over a
+    /// match has to be a different card from the one over the command beside it.
     ///
     /// There is deliberately **no plain tip on a tick beside this**. "Jump to this
     /// command" would be a second box explaining a first one; the card *is* the
-    /// tip, and what it says is the command.
-    CommandTick(bt_layout::SeatId, bt_term::CommandMarkId),
+    /// tip, and what it says is the command — or, while the results rail is up,
+    /// the line.
+    CommandTick(bt_layout::SeatId, crate::cmdrail::Target),
     /// One control of the in-pane search capsule (§7.1.5d, B66).
     ///
     /// It carries the *element* and not a seat, because there is one capsule in
@@ -1787,7 +1793,10 @@ mod tests {
     #[test]
     fn the_glance_card_arrives_on_the_tips_own_delay_and_takes_the_tips_own_fade() {
         let seat = bt_layout::SeatId(3);
-        let anchor = TooltipAnchorId::CommandTick(seat, bt_term::CommandMarkId(11));
+        let anchor = TooltipAnchorId::CommandTick(
+            seat,
+            crate::cmdrail::Target::Command(bt_term::CommandMarkId(11)),
+        );
         let mut host = TooltipHost::default();
         let now = Instant::now();
         host.observe(Some(anchor), now);
@@ -1810,7 +1819,10 @@ mod tests {
         let mut anchors = TooltipAnchors::default();
         anchors.push(TooltipAnchorId::NewTab, [0.0, 0.0, 10.0, 10.0], "New tab");
         anchors.push_faced(
-            TooltipAnchorId::CommandTick(bt_layout::SeatId(1), bt_term::CommandMarkId(4)),
+            TooltipAnchorId::CommandTick(
+                bt_layout::SeatId(1),
+                crate::cmdrail::Target::Command(bt_term::CommandMarkId(4)),
+            ),
             [20.0, 0.0, 60.0, 10.0],
             "command",
             TipFace::Peek { muted: true },
@@ -1823,7 +1835,10 @@ mod tests {
         // And an anchor with nothing to say is still not an anchor, whichever
         // face it asked for.
         anchors.push_faced(
-            TooltipAnchorId::CommandTick(bt_layout::SeatId(1), bt_term::CommandMarkId(5)),
+            TooltipAnchorId::CommandTick(
+                bt_layout::SeatId(1),
+                crate::cmdrail::Target::Command(bt_term::CommandMarkId(5)),
+            ),
             [70.0, 0.0, 90.0, 10.0],
             "   ",
             TipFace::Peek { muted: false },

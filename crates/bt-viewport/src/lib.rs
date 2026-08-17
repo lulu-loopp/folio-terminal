@@ -205,7 +205,15 @@ impl SearchHighlights {
 /// selection: a hit set is rebuilt on every transcript change, so an anchor whose line has been
 /// rewritten under it is at most one frame old, and comparing generations here would blank the
 /// highlight for that frame rather than repaint it.
-fn search_address(anchor: &ContentAnchor) -> Option<(SearchLine, u32)> {
+///
+/// **Public because S4 needs the same translation for a different reason.** When the search is open
+/// the command rail merges the command ledger into the hit set, and a merge needs both sides in one
+/// line space: a command mark carries a [`ContentAnchor`] and a hit carries a [`SearchLine`], and
+/// this is the function that already turns the first into the second. A second copy of it beside
+/// the rail would be a second opinion about where a line is, and the two would drift the day the
+/// live grid grows a plane.
+#[must_use]
+pub fn search_address(anchor: &ContentAnchor) -> Option<(SearchLine, u32)> {
     match anchor {
         ContentAnchor::History { id, offset, .. } => Some((SearchLine::History(*id), offset.0)),
         ContentAnchor::Staging { id, offset, .. } => Some((SearchLine::Staging(*id), offset.0)),

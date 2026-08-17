@@ -841,6 +841,20 @@ pub struct ChromePalette {
     /// its own hue, because a signal does not stop being one when it is pointed
     /// at.
     pub command_tick_fail_crest: [u8; 3],
+    /// `.cmdrail.srch-mode.hot .cmdtick.crest { background: var(--ink2) }` — the
+    /// crest **while the rail is carrying search results** (S4, mock 1546).
+    ///
+    /// Grey and not the accent, and that is the whole reason it needs a name of
+    /// its own: while a search is open the accent belongs to the *matches*, so a
+    /// command crest deepening into it would say "this is a hit". The rail's two
+    /// sources are told apart by hue, and the crest — the one tick the pointer
+    /// has singled out — must not be the exception that breaks the reading.
+    ///
+    /// Numerically [`Self::files_row_text`] on both canvases, because both are
+    /// `--ink2` over `--termbg`; named separately on the precedent that governs
+    /// this whole struct — two declarations, either of which could be re-struck
+    /// without the other.
+    pub command_tick_search_crest: [u8; 3],
     /// A floating window's face — `--menu`, worn by `.float-win`, the term menu
     /// and the hover-peek flyout. It is deliberately *not* `title_bar`: a window
     /// that floats over content is a different plane from the chrome that frames
@@ -1324,6 +1338,9 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     command_tick: [0x72, 0x72, 0x72],
     command_tick_crest: [0x69, 0x84, 0xdb],
     command_tick_fail_crest: [0xf4, 0x3f, 0x5e],
+    // `--ink2` (white .72) over the dark `--termbg` — the same mix a file row's
+    // name is set in.
+    command_tick_search_crest: [0x98, 0x98, 0x98],
     menu_surface: [0x2a, 0x2a, 0x2a],
     menu_border: [0xff, 0xff, 0xff],
     menu_border_alpha: 24,
@@ -1545,6 +1562,8 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     command_tick: [0xa5, 0xa4, 0xa1],
     command_tick_crest: [0x29, 0x4d, 0xba],
     command_tick_fail_crest: [0xbe, 0x12, 0x3c],
+    // `--ink2` (black .72) over the light `--termbg`.
+    command_tick_search_crest: [0x7d, 0x7c, 0x78],
     menu_surface: [0xff, 0xff, 0xff],
     menu_border: [0x00, 0x00, 0x00],
     menu_border_alpha: 22,
@@ -2911,6 +2930,34 @@ mod tests {
             luminance(LIGHT_CHROME.command_tick_fail_crest) < luminance(LIGHT_CHROME.status_err)
         );
         assert!(luminance(DARK_CHROME.command_tick_fail_crest) < luminance(DARK_CHROME.status_err));
+    }
+
+    /// The search crest (S4): `--ink2` over `--termbg`, and **not** the accent.
+    ///
+    /// MUTATION: point `command_tick_search_crest` at the accent and a command
+    /// tick under the pointer becomes indistinguishable from a match — which is
+    /// the one distinction the results rail exists to draw.
+    #[test]
+    fn the_search_crest_is_grey_because_the_accent_belongs_to_the_matches() {
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_eq!(
+                palette.command_tick_search_crest, palette.files_row_text,
+                "--ink2 on --termbg"
+            );
+            assert_ne!(palette.command_tick_search_crest, palette.accent);
+            assert_ne!(
+                palette.command_tick_search_crest,
+                palette.command_tick_crest
+            );
+            // Deeper than the resting tick, which is `--ink3` over the same
+            // ground: the crest is the tick that has been singled out, and it is
+            // singled out by standing further from the background than its
+            // neighbours rather than by changing hue.
+            assert_ne!(
+                luminance(palette.command_tick_search_crest),
+                luminance(palette.pane_title)
+            );
+        }
     }
 
     /// Relative luminance, sRGB, as WCAG defines it — the one arithmetic a

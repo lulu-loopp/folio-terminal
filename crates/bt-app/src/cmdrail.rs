@@ -42,12 +42,36 @@
 //! one peak and a pointer resting on the exact midpoint between two ticks lights
 //! one of them fully rather than both at half height.
 //!
-//! # What this slice does not do
+//! # One rail, two sources (S4)
 //!
-//! S3 owns the search capsule and S4 the takeover, where matches join this same
-//! ordinal stack and the peek's noun changes from `commands` to `lines`. This
-//! file draws the rail at every temperature, answers which mark a press or a
-//! chord means, and says what the card beside the crest reads.
+//! While a search capsule is open on the pane **with something typed in it**, the
+//! ordinal stack stops being the command ledger and becomes the *merge* of the
+//! ledger and the matched lines — `[...new Set([...cmdLines, ...sSet])].sort()`
+//! (mock 4633-4639). Everything above survives it untouched: the density floor,
+//! the buckets, the fisheye, the cosine skirt and the glance card are all asked
+//! of [`Entry`] rather than of a command, and a command is simply the kind of
+//! entry that was there before. That is the sentence §7.1.5d asks this slice to
+//! make true — *"the rail machinery is reused whole; only what a tick is a
+//! picture of changes"*.
+//!
+//! Three things do change, and they are the three the mock-up itself changes:
+//!
+//! * **Ink.** `.cmdrail.srch-mode` recedes every command tick to a fainter grey
+//!   and lifts the matched ones to the accent, so hue tells the two sources
+//!   apart (A45-A50). A tick carries the strongest signal in it —
+//!   [`Signal`], max-wins, the tab dot's own rule — and [`Signal::Fail`] outranks
+//!   a plain match, which is **a deliberate departure from the stylesheet**: see
+//!   [`Signal::Fail`] for D-9.
+//! * **What a press means.** A match tick *selects* its hit; a command tick still
+//!   jumps (B40-B41). [`Target`] is that fork, and it is a field on the tick
+//!   rather than a question asked at the press, because the tick is the thing
+//!   that knows which of the two it was drawn as.
+//! * **What the card says.** The noun follows the source: `k lines` where it said
+//!   `k commands`, and both counts when one bucket holds both (B36).
+//!
+//! Close the capsule, or empty the field, and the stack is the ledger again —
+//! bit for bit, which is what [`Stack`] being an input rather than a mode flag
+//! inside this file buys and what the restore test asserts.
 
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
@@ -56,6 +80,7 @@ use bt_render::{
     ChromePalette, OverlayQuad, TERMINAL_SCROLL_LANE_LOGICAL_PX, rounded_overlay_fill,
 };
 use bt_term::{CommandMark, CommandMarkId};
+use bt_viewport::SearchLine;
 
 use crate::marks::OverlayLayer;
 use crate::tooltip::NAME_PLACE_SEPARATOR;
@@ -142,6 +167,33 @@ pub const TICK_FAIL_HOT_OPACITY: f32 = 0.65;
 /// `.cmdrail.hot .cmdtick.crest { opacity: 1 }` — *"the SELECTED tick:
 /// unmistakable"*.
 pub const TICK_CREST_OPACITY: f32 = 1.0;
+/// `.cmdrail.srch-mode .cmdtick { opacity: .22 }` (mock 1544) — a command tick
+/// **while the rail is carrying results**.
+///
+/// Half of the resting `.45`, which is the stylesheet saying the thing out loud:
+/// the commands have not gone, they have stepped back. They are still there to be
+/// counted, still there to be clicked (B62), and the reader's eye is not
+/// competing with them for the matches.
+pub const TICK_SEARCH_REST_OPACITY: f32 = 0.22;
+/// `.cmdrail.srch-mode.hot .cmdtick { opacity: .35 }` (mock 1545) — the same
+/// receded grey, lifted because a hand is on the rail.
+pub const TICK_SEARCH_HOT_OPACITY: f32 = 0.35;
+/// `.cmdrail.srch-mode.hot .cmdtick.crest { opacity: .9 }` (mock 1546) — a
+/// *command* crest during a search.
+///
+/// Nine tenths and not the full opacity a crest wears otherwise, and it is the
+/// stylesheet keeping one step of headroom above it for the thing that does reach
+/// `1`: the current match.
+pub const TICK_SEARCH_CREST_OPACITY: f32 = 0.9;
+/// `.cmdrail.srch-mode .cmdtick.smt { opacity: .6 }` (mock 1547) — **a match is
+/// lit at rest**.
+///
+/// The `.fail` doctrine applied to a second signal: *"signals earn colour at
+/// rest"*. A reader who has typed a query and taken their hand off the mouse can
+/// still see where in the scrollback the answers are.
+pub const TICK_MATCH_REST_OPACITY: f32 = 0.6;
+/// `.cmdrail.srch-mode.hot .cmdtick.smt { opacity: .75 }` (mock 1548).
+pub const TICK_MATCH_HOT_OPACITY: f32 = 0.75;
 /// `transition: width .1s ease` (mock 1369) — the crest travelling from one
 /// ordinal to the next.
 ///
@@ -201,23 +253,155 @@ pub const JUMP_FLASH_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// so it reads as a line *in* a page instead of a page that begins there.
 pub const JUMP_TOP_INSET_LOGICAL_PX: f32 = 8.0;
 
-/// One drawn tick, and the command a press on it means.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Tick {
-    /// Which command this tick jumps to.
+/// What a press on a tick means — the rail's two sources, at the one point they
+/// differ (B40-B41).
+///
+/// *"Clicking a match tick **SELECTS** that match (current advances there, count
+/// follows); a plain command tick keeps its **normal jump**"* (mock 8519-8525).
+/// Both verbs already existed before this slice — `jump_to_command_mark` since
+/// S1, `SearchState::set_current` since S3 — so the fork is the whole of the new
+/// code and it is one `match` at one press.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Target {
+    /// Scroll to this command's own row and flash it (S1).
     ///
     /// For a bucket of several it is the **newest** member, which is the mock-up's
     /// own `data-line="${members[members.length - 1]}"` (4666). A collapsed bucket
     /// is a range of history and the newest end of it is the one a reader is
     /// looking for; S2's fisheye is what makes the older members reachable exactly.
-    pub mark: CommandMarkId,
-    /// How many commands this tick stands for. One at every density the pane can
+    Command(CommandMarkId),
+    /// Make this hit current — an index into `SearchState::hits`.
+    ///
+    /// The **first** hit on the line the tick stands for, which is the mock-up's
+    /// `srch.marks.findIndex(m => m.line === line)`. A line with six matches on it
+    /// is one tick (B56's per-line dedup), and pressing it puts the reader at the
+    /// top of that line's six rather than at an arbitrary one of them; `Enter`
+    /// walks the other five from there.
+    Match(usize),
+}
+
+/// The four inks one tick can be drawn in, weakest first.
+///
+/// **Maximum wins**, which is not a rule invented here: *"a collapsed bucket
+/// carries its strongest member's signal — a match inside lights it, the current
+/// match deepens it (**same maximum-wins rule as the tab dot**)"* (mock
+/// 4660-4663, inventory B19/B56). Deriving [`Ord`] in this declaration order *is*
+/// the rule, so the folding code is one `max` and there is no table of cases to
+/// get out of step with the stylesheet.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Signal {
+    /// A command that did not fail. Grey — `.cmdtick` at rest, or the receded
+    /// `.cmdrail.srch-mode .cmdtick` while a search is open.
+    #[default]
+    Command,
+    /// `.smt` — a line carrying at least one search hit. The accent, at rest.
+    Match,
+    /// `.fail` — a command whose exit code was not zero. Red, at rest.
+    ///
+    /// # D-9: the red survives the search, and the stylesheet says it does not
+    ///
+    /// `.cmdtick.fail` has specificity (0,2,0) and `.cmdrail.srch-mode .cmdtick`
+    /// has (0,3,0), so in the mock-up a failure opening a search turns grey — and
+    /// there is no `.cmdrail.srch-mode .cmdtick.fail` rule anywhere to stop it.
+    /// That is an **accident of the cascade** rather than a decision: the same
+    /// stylesheet's own comment beside the resting red is *"signals earn permanent
+    /// colour"*, and the sentence introducing the results rail names `.fail` as
+    /// the doctrine the match ticks are following. A signal that stops signalling
+    /// because a search box is open is a signal the reader learns not to trust.
+    ///
+    /// So the red stays, and it outranks a match: a line that both failed and
+    /// matched is red, because "this command failed" is the rarer and the more
+    /// consequential of the two things it has to say. Recorded as an intentional
+    /// deviation in `docs/DESIGN.md` §7.1.5d and pinned by
+    /// `a_failed_commands_tick_keeps_its_red_while_the_search_is_open`.
+    Fail,
+    /// `.smt.cur` — the line holding the current match. The deepened accent, at
+    /// rest and at every temperature: *"the current match tick is the deep accent
+    /// even unhovered"* (mock 1542-1543).
+    Current,
+}
+
+/// One line of the ordinal stack, before density has decided how many of them
+/// share a tick.
+///
+/// A line and not a command, because the merge is a set union over *lines*: a
+/// command's own prompt row can be a row the query matches, and the mock-up's
+/// `new Set([...cmdLines, ...sSet])` gives that row one entry rather than two.
+/// Such an entry carries both — which is why the two fields are independent
+/// `Option`s rather than a two-armed enum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Entry {
+    /// The command whose prompt row this line is, when it is one.
+    pub mark: Option<CommandMarkId>,
+    /// The first hit on this line, when the query matched it.
+    pub hit: Option<usize>,
+    /// The strongest of what this line carries.
+    pub signal: Signal,
+}
+
+impl Entry {
+    /// What a press on this line means.
+    ///
+    /// **A match wins**, which is the mock-up's own order of tests: `if (searching
+    /// && the line is a match line) srchSetCur; else jumpToPromptLine`. A prompt
+    /// row that matched is a place in the *search*, because the reader is holding
+    /// a query and looking at a lit tick.
+    ///
+    /// The colour is decided separately, by [`Signal`]'s maximum, so a failed
+    /// command whose prompt row matched is a red tick that selects a hit. The two
+    /// questions genuinely are different: the ink says what this line *is*, the
+    /// press says what the reader is doing.
+    #[must_use]
+    pub fn target(&self) -> Target {
+        match (self.hit, self.mark) {
+            (Some(hit), _) => Target::Match(hit),
+            (None, Some(mark)) => Target::Command(mark),
+            // Unreachable by construction — every entry comes from [`commands`]
+            // or [`merge`], and both give every entry at least one source. Stated
+            // as the newest command rather than as a panic because a rail is a
+            // decoration and a decoration may not take the window down.
+            (None, None) => Target::Command(CommandMarkId(0)),
+        }
+    }
+}
+
+/// The ordinal stack, and which of the two modes it was built in.
+///
+/// The mode is carried beside the entries rather than derived from them because
+/// the two are genuinely independent: a search with **no hits at all** still
+/// recedes the commands to `.22` — the reader typed something and the rail is
+/// answering "not here" — while a rail of ticks that happen to all be matches is
+/// not in search mode unless a capsule is open. The mock-up spells this the same
+/// way: `srch-mode` is a class on the rail, `data-slines` is its content.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stack {
+    pub entries: Vec<Entry>,
+    /// `.cmdrail.srch-mode` — a capsule is open on this pane **and there is
+    /// something typed in it**.
+    ///
+    /// The second half is this file's, not the mock-up's: the prototype adds the
+    /// class the moment a capsule exists, so its rail goes grey at `Ctrl+F` before
+    /// a key is pressed. An empty field has asked nothing, so there is nothing for
+    /// the commands to recede behind.
+    pub searching: bool,
+}
+
+/// One drawn tick: where it is, what it stands for, and what a press on it means.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tick {
+    /// The verb this tick carries — the newest member's, for a bucket.
+    pub target: Target,
+    /// How many entries this tick stands for. One at every density the pane can
     /// actually hold; more only once the four-pixel floor has been passed.
     pub members: usize,
-    /// Whether any member of this tick failed — **maximum wins**, the same rule
-    /// the tab dot has followed since 2026-07-18. A bucket carries its strongest
-    /// member's signal, and a failure is the strongest signal a command has.
-    pub failed: bool,
+    /// How many of those entries carry a search hit — the glance card's `k lines`.
+    pub matched: usize,
+    /// How many of them are commands — the glance card's `m commands`. It and
+    /// [`Self::matched`] can sum past [`Self::members`], because a line that is
+    /// both a prompt row and a match is one entry counted in both.
+    pub commanded: usize,
+    /// The strongest signal any member carries — [`Signal`], maximum wins.
+    pub signal: Signal,
     /// Which **bucket** this tick belongs to — the mock-up's `data-slot`.
     ///
     /// It is the identity the fisheye is keyed on, and the reason the members of
@@ -298,16 +482,57 @@ pub struct Rail {
     /// The scale the geometry above was laid out at, kept so the paint can round
     /// its radii the same way the layout rounded its boxes.
     pub scale: f32,
+    /// [`Stack::searching`], carried through so that [`paint`] can read it.
+    ///
+    /// The ink a *command* tick is drawn in depends on the mode and not on the
+    /// tick — `.45` grey normally, `.22` while the rail is carrying results — so
+    /// the mode has to survive the layout. Carried rather than re-derived from the
+    /// ticks for [`Stack::searching`]'s own reason: a search with no hits has no
+    /// match tick to be recognised by, and it is exactly the search whose rail
+    /// most needs to look answered.
+    pub searching: bool,
+}
+
+/// What the search contributes to a rail's identity — the second half of
+/// [`RailKey`] (S4).
+///
+/// Three numbers, and between them they name every input the merge has. Not the
+/// hits themselves, and not a hash of them: a hit set is up to a hundred thousand
+/// entries and the rail is asked whether it is stale on every frame, so the key
+/// has to be a constant-size fingerprint of the *things that produce* the hits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RailSearch {
+    /// What was typed and how it was switched — `Runtime::search_revision`,
+    /// bumped by every edit of the field and every toggle.
+    ///
+    /// Kept beside [`Self::hits`] rather than folded into it because they answer
+    /// different questions: this one moves when the reader does, and a query that
+    /// finds the same lines twice in a row still asks a new question.
+    pub query: u64,
+    /// `SearchState::revision` — bumped whenever the hit set is replaced, which
+    /// is what makes new output re-merge the rail (R2, ticket item 6).
+    pub hits: u64,
+    /// `SearchState::current_index` — which tick wears [`Signal::Current`].
+    ///
+    /// An index rather than the hit, because `Enter` walking from one identical
+    /// line to another identical one still moves the `.cur` tick.
+    pub current: Option<usize>,
 }
 
 /// What a laid-out rail is a function of, and therefore what may invalidate one.
 ///
-/// Four things and no fifth. **Not the scroll offset** — an ordinal stack does
-/// not move when the page does — and **not the crest**, whose whole travel is a
-/// set of widths grown leftward out of rectangles this key already fixed. What
-/// *is* here beside the ledger and the pane is the unfolded bucket, because a
-/// fisheye genuinely moves ticks: it is a different arrangement of the same
-/// marks and not a different colour on the same arrangement.
+/// **Not the scroll offset** — an ordinal stack does not move when the page does
+/// — and **not the crest**, whose whole travel is a set of widths grown leftward
+/// out of rectangles this key already fixed. What *is* here beside the ledger and
+/// the pane is the unfolded bucket, because a fisheye genuinely moves ticks: it
+/// is a different arrangement of the same marks and not a different colour on the
+/// same arrangement.
+///
+/// [`Self::search`] is the fifth, and its being an `Option` is the mode switch
+/// itself: `None` is the plain command rail, and a key that goes from `Some` back
+/// to `None` differs from the key it wore before the search opened only if
+/// something else moved too — which is exactly the "zero residue" the acceptance
+/// anchor asks for, stated as an equality rather than as a clean-up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RailKey {
     /// [`bt_term::DualPlaneSession::command_marks_revision`] — bumped by ledger
@@ -318,6 +543,8 @@ pub struct RailKey {
     pub scale: f32,
     /// Which bucket, if any, is open under the pointer.
     pub expanded: Option<usize>,
+    /// The search this rail is carrying, or `None` when it is carrying none.
+    pub search: Option<RailSearch>,
 }
 
 /// A vector of numbers easing to a vector of numbers, on one clock.
@@ -573,6 +800,25 @@ impl RailCache {
         &mut self.pointer
     }
 
+    /// Fold whatever the fisheye had open, if the rail is about to change mode
+    /// (S4).
+    ///
+    /// `srchRail()` and `closeSearch()` both do `rail.__expanded = null` before
+    /// they re-render (mock 8613, 8672), and it is not housekeeping: an open
+    /// bucket is a statement about *these* entries at *these* heights, and the
+    /// mode switch replaces every entry in the stack. Leaving slot 7 open across
+    /// it would unfold whatever three things happen to land in slot 7 of the new
+    /// stack — a bucket the hand never asked for, under a hand that has not
+    /// moved.
+    ///
+    /// Asked before [`RailKey`] is computed, because the key carries the open
+    /// bucket and a fold that arrived after it would be a frame late.
+    pub fn fold_for_mode(&mut self, searching: bool) {
+        if self.rail.searching != searching {
+            self.pointer.expand(None);
+        }
+    }
+
     /// Take the rail's own picture for this frame: the cached resting layer while
     /// nothing is happening to it, a fresh one while something is.
     #[must_use]
@@ -636,15 +882,137 @@ pub fn curve_length(delta: i64) -> f32 {
     TICK_LENGTH_LOGICAL_PX * (1.0 + 2.0 * (u * PI / 2.0).cos().powi(2))
 }
 
-/// Place the ticks for `marks` inside a pane body, in physical pixels, with
-/// bucket `expanded` — if there is one, and if it holds more than one command —
+/// One command as the merge sees it (S4).
+///
+/// `line` is an `Option` because a command's anchor can have been degraded out
+/// from under it — the output it names was cleared, or evicted past the quota —
+/// and the honest answer to "which line is it on" is then "no longer sayable".
+/// Such a command is **not dropped**: see [`merge`] for where it goes and why.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandLine {
+    pub mark: CommandMarkId,
+    pub line: Option<SearchLine>,
+    pub failed: bool,
+}
+
+/// One matched line as the merge sees it (S4).
+///
+/// **One per line, not one per hit** — B56's own note: *"the rail dedups by line;
+/// a line with several matches gets one tick, while the counter counts hits"*. A
+/// `grep` output where every line matches would otherwise draw a tick per hit and
+/// the rail would say nothing at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MatchLine {
+    pub line: SearchLine,
+    /// The index of the **first** hit on this line, in the search's own order.
+    pub hit: usize,
+    /// Whether the current match is one of this line's.
+    pub current: bool,
+}
+
+/// The plain rail's stack: one entry per command, in ledger order.
+#[must_use]
+pub fn commands(marks: &[CommandMark]) -> Stack {
+    Stack {
+        entries: marks
+            .iter()
+            .map(|mark| Entry {
+                mark: Some(mark.id),
+                hit: None,
+                signal: if mark.failed() {
+                    Signal::Fail
+                } else {
+                    Signal::Command
+                },
+            })
+            .collect(),
+        searching: false,
+    }
+}
+
+/// The results rail's stack: the ledger and the matched lines, merged into one
+/// ordinal stack in document order (B8).
+///
+/// # Why a merge and not a sort
+///
+/// The mock-up writes `[...new Set([...cmdLines, ...sSet])].sort(asc)`, which it
+/// can afford because both its sides are integers into one array. Ours are not:
+/// a command carries a [`CommandLine::line`] that may be `None`, and a `sort`
+/// would have to invent a place for it. A two-pointer merge does not — both
+/// inputs are already ascending (the ledger appends, the scan walks the document
+/// in order), so walking them together is both cheaper and the only formulation
+/// in which *"a command whose line cannot be named keeps its ledger slot"* is a
+/// consequence rather than a special case. A rail that quietly lost a tick
+/// because a search was open would break the acceptance anchor on the way back
+/// out.
+///
+/// # Where a line that is both goes
+///
+/// Into one entry carrying both, which is what the mock-up's `Set` does. Its ink
+/// is [`Signal`]'s maximum of the two and its verb is [`Entry::target`]'s — see
+/// both for why those two answers are allowed to disagree.
+///
+/// `matches` must be ascending and already deduplicated per line; `commands` must
+/// be in ledger order, which is document order for every command whose line is
+/// still sayable.
+#[must_use]
+pub fn merge(commands: &[CommandLine], matches: &[MatchLine]) -> Stack {
+    let of_match = |line: &MatchLine| Entry {
+        mark: None,
+        hit: Some(line.hit),
+        signal: if line.current {
+            Signal::Current
+        } else {
+            Signal::Match
+        },
+    };
+    let mut entries = Vec::with_capacity(commands.len() + matches.len());
+    let mut next = 0;
+    for command in commands {
+        let command_signal = if command.failed {
+            Signal::Fail
+        } else {
+            Signal::Command
+        };
+        let mut hit = None;
+        let mut signal = command_signal;
+        if let Some(line) = command.line {
+            while next < matches.len() && matches[next].line < line {
+                entries.push(of_match(&matches[next]));
+                next += 1;
+            }
+            if next < matches.len() && matches[next].line == line {
+                hit = Some(matches[next].hit);
+                signal = command_signal.max(of_match(&matches[next]).signal);
+                next += 1;
+            }
+        }
+        entries.push(Entry {
+            mark: Some(command.mark),
+            hit,
+            signal,
+        });
+    }
+    entries.extend(matches[next..].iter().map(of_match));
+    Stack {
+        entries,
+        searching: true,
+    }
+}
+
+/// Place the ticks for `stack` inside a pane body, in physical pixels, with
+/// bucket `expanded` — if there is one, and if it holds more than one entry —
 /// unfolded into its members.
 ///
 /// # The arithmetic, and the one place it knowingly leaves the mock-up standing
 ///
-/// Everything here is `renderRailTicks` (mock 4640-4670) with the search branch
-/// removed: `avail` from the pane, `capacity` from the four-pixel density floor,
-/// `k` from `capacity`, `pitch` from `avail`, and `gap` from `pitch`.
+/// Everything here is `renderRailTicks` (mock 4640-4670): `avail` from the pane,
+/// `capacity` from the four-pixel density floor, `k` from `capacity`, `pitch`
+/// from `avail`, and `gap` from `pitch` — and the *whole* of it, search branch
+/// included, because [`Stack`] has already made the two sources one list. That is
+/// the mock-up's own arrangement and the point of it: `renderRailTicks` has one
+/// body, and the takeover changes what `lines` holds rather than what the
+/// function does with it.
 ///
 /// **The mock-up's own arithmetic is not self-consistent, and S2 is where it gets
 /// corrected (inventory B15).** `pitch` is computed there from the *unaggregated*
@@ -668,16 +1036,20 @@ pub fn curve_length(delta: i64) -> f32 {
 /// two-pixel floor does the block grow, and then it grows symmetrically about the
 /// pane's middle, which is where it was centred to begin with.
 #[must_use]
-pub fn lay_out(body: [f32; 4], marks: &[CommandMark], scale: f32, expanded: Option<usize>) -> Rail {
-    // An empty ledger draws nothing at all — no box, no band, no error (inventory
+pub fn lay_out(body: [f32; 4], stack: &Stack, scale: f32, expanded: Option<usize>) -> Rail {
+    let marks = &stack.entries;
+    // An empty stack draws nothing at all — no box, no band, no error (inventory
     // C13). `cmd.exe` never sends an OSC 133 and a PowerShell without the
     // integration script never sends one either, so this is the *ordinary* state
     // of a large fraction of panes and not an edge case. The mock-up emits the
-    // rail element regardless because S4's search results need a surface to hang
-    // off; there is no element here to emit, so the empty rail is simply empty.
+    // rail element regardless, because its search takeover needs a surface to hang
+    // results off; there is no element here to emit, so the empty rail is simply
+    // empty — and a search *with* results puts entries in the stack, which is the
+    // same thing said without an element.
     if marks.is_empty() || body[2] <= body[0] || body[3] <= body[1] {
         return Rail {
             scale,
+            searching: stack.searching,
             ..Rail::default()
         };
     }
@@ -708,10 +1080,12 @@ pub fn lay_out(body: [f32; 4], marks: &[CommandMark], scale: f32, expanded: Opti
     let mut ticks: Vec<Tick> = Vec::with_capacity(folded + bucket_size);
     for (slot, members) in marks.chunks(bucket_size).enumerate() {
         if open == Some(slot) {
-            ticks.extend(members.iter().map(|mark| Tick {
-                mark: mark.id,
+            ticks.extend(members.iter().map(|entry| Tick {
+                target: entry.target(),
                 members: 1,
-                failed: mark.failed(),
+                matched: usize::from(entry.hit.is_some()),
+                commanded: usize::from(entry.mark.is_some()),
+                signal: entry.signal,
                 slot,
                 sub: true,
                 rect: [0.0; 4],
@@ -719,9 +1093,17 @@ pub fn lay_out(body: [f32; 4], marks: &[CommandMark], scale: f32, expanded: Opti
         } else {
             ticks.push(Tick {
                 // The newest member (mock 4666), which for a chunk is its last.
-                mark: members[members.len() - 1].id,
+                target: members[members.len() - 1].target(),
                 members: members.len(),
-                failed: members.iter().any(CommandMark::failed),
+                matched: members.iter().filter(|entry| entry.hit.is_some()).count(),
+                commanded: members.iter().filter(|entry| entry.mark.is_some()).count(),
+                // Maximum wins — the bucket carries its strongest member's
+                // signal, which for [`Signal`] is literally its maximum.
+                signal: members
+                    .iter()
+                    .map(|entry| entry.signal)
+                    .max()
+                    .unwrap_or_default(),
                 slot,
                 sub: false,
                 rect: [0.0; 4],
@@ -795,6 +1177,7 @@ pub fn lay_out(body: [f32; 4], marks: &[CommandMark], scale: f32, expanded: Opti
         bucket_size,
         gap,
         scale,
+        searching: stack.searching,
     }
 }
 
@@ -896,7 +1279,7 @@ fn group_span(rail: &Rail, slot: usize) -> Option<[f32; 2]> {
 #[must_use]
 pub fn resolve(
     body: [f32; 4],
-    marks: &[CommandMark],
+    stack: &Stack,
     scale: f32,
     expanded: Option<usize>,
     y: f32,
@@ -905,12 +1288,12 @@ pub fn resolve(
     // and the one geometry here that does not depend on what is currently open.
     // It is laid out once, before the loop, because it is the same rail on every
     // pass — which is the same sentence as "this terminates".
-    let folded = lay_out(body, marks, scale, None);
+    let folded = lay_out(body, stack, scale, None);
     let opens = nearest_ordinal(&folded, y)
         .and_then(|index| (folded.ticks[index].members > 1).then_some(folded.ticks[index].slot));
     let mut open = expanded;
     let mut rail = match open {
-        Some(slot) => lay_out(body, marks, scale, Some(slot)),
+        Some(slot) => lay_out(body, stack, scale, Some(slot)),
         None => folded.clone(),
     };
     for _ in 0..FISHEYE_RELAYOUT_CAP {
@@ -922,7 +1305,7 @@ pub fn resolve(
         }
         open = opens;
         rail = match open {
-            Some(slot) => lay_out(body, marks, scale, Some(slot)),
+            Some(slot) => lay_out(body, stack, scale, Some(slot)),
             None => folded.clone(),
         };
     }
@@ -952,6 +1335,91 @@ pub fn build(rail: &Rail, palette: &ChromePalette) -> OverlayLayer {
     )
 }
 
+/// The three (ink, opacity) pairs one tick travels between.
+///
+/// Three and not two because the stylesheet's cascade has three levels for a
+/// tick — the rule on `.cmdtick`, the one under `.cmdrail.hot`, and the one under
+/// `.cmdrail.hot .cmdtick.crest` — and every state this rail can be in is one of
+/// those three or a point between two of them. [`paint`] does the travelling; this
+/// says where.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TickInk {
+    /// No pointer on the rail at all.
+    pub rest: ([u8; 3], f32),
+    /// A hand somewhere on the rail, this tick not the one it singled out.
+    pub hot: ([u8; 3], f32),
+    /// The tick the pointer selected.
+    pub crest: ([u8; 3], f32),
+}
+
+/// The stylesheet's whole tick palette, as one table (mock 1370-1374 and
+/// 1544-1551).
+///
+/// # Why one table rather than four `if`s at the paint
+///
+/// Because there are now eight rules across two modes, and the interesting ones
+/// are the *absences*: `.fail` has no `srch-mode` variant in the stylesheet and
+/// `.smt` has none outside it. Written as branches those absences become things a
+/// reader has to notice; written as a table they become rows, and D-9 — the one
+/// place this table deliberately does not follow the cascade — is a row with a
+/// comment on it rather than a missing branch.
+///
+/// [`Signal::Match`] and [`Signal::Current`] cannot occur with `searching` false:
+/// a match is a thing only a query produces, and [`commands`] gives every entry
+/// one of the other two signals. They fall to the command rows there rather than
+/// to a panic, on this file's standing rule that a decoration may not take the
+/// window down.
+#[must_use]
+pub fn tick_ink(signal: Signal, searching: bool, palette: &ChromePalette) -> TickInk {
+    // `.cmdtick.fail` / `.cmdrail.hot .cmdtick.fail` / `.cmdrail.hot
+    // .cmdtick.crest.fail` — **and the same three while a search is open**, which
+    // is D-9: the cascade would swallow the red and the doctrine says it may not.
+    // See [`Signal::Fail`].
+    if signal == Signal::Fail {
+        return TickInk {
+            rest: (palette.status_err, TICK_FAIL_REST_OPACITY),
+            hot: (palette.status_err, TICK_FAIL_HOT_OPACITY),
+            crest: (palette.command_tick_fail_crest, TICK_CREST_OPACITY),
+        };
+    }
+    if !searching {
+        return TickInk {
+            rest: (palette.command_tick, TICK_REST_OPACITY),
+            hot: (palette.accent, TICK_HOT_OPACITY),
+            crest: (palette.command_tick_crest, TICK_CREST_OPACITY),
+        };
+    }
+    match signal {
+        // `.cmdrail.srch-mode .cmdtick.smt.cur` — the deepened accent at full
+        // opacity, **at rest**: *"the current match tick is the deep accent even
+        // unhovered"*. All three levels are the same value, which is the
+        // stylesheet saying there is nothing above this one to travel to.
+        Signal::Current => {
+            let deep = (palette.command_tick_crest, TICK_CREST_OPACITY);
+            TickInk {
+                rest: deep,
+                hot: deep,
+                crest: deep,
+            }
+        }
+        // `.cmdrail.srch-mode .cmdtick.smt` — lit at rest, because a signal earns
+        // its colour without being pointed at.
+        Signal::Match => TickInk {
+            rest: (palette.accent, TICK_MATCH_REST_OPACITY),
+            hot: (palette.accent, TICK_MATCH_HOT_OPACITY),
+            crest: (palette.command_tick_crest, TICK_CREST_OPACITY),
+        },
+        // `.cmdrail.srch-mode .cmdtick` — the commands, receded. The crest is
+        // `--ink2` and not the accent: the accent belongs to the matches now, and
+        // a command crest borrowing it would say "this is a hit".
+        Signal::Command | Signal::Fail => TickInk {
+            rest: (palette.command_tick, TICK_SEARCH_REST_OPACITY),
+            hot: (palette.command_tick, TICK_SEARCH_HOT_OPACITY),
+            crest: (palette.command_tick_search_crest, TICK_SEARCH_CREST_OPACITY),
+        },
+    }
+}
+
 /// The rail at whatever moment its four clocks have reached.
 ///
 /// # The three transitions, and what each of them is a transition *of*
@@ -961,13 +1429,15 @@ pub fn build(rail: &Rail, palette: &ChromePalette) -> OverlayLayer {
 /// card has no transition at all, it is `display: none` and then `display: block`.
 /// They compose in the order the stylesheet's cascade does:
 ///
-/// * the **rail** warms from `--ink3` to `--accent` and from `.45` to `.55` (a
-///   failure from its red at `.6` to the same red at `.65` — *"signals earn
-///   permanent colour"*, so it moves in opacity only);
-/// * the **crest** then deepens out of whatever that left, to the 86%-black accent
-///   mix at full opacity;
+/// * the **rail** warms from its resting ink to its hot one (a failure from its
+///   red at `.6` to the same red at `.65` — *"signals earn permanent colour"*, so
+///   it moves in opacity only);
+/// * the **crest** then deepens out of whatever that left;
 /// * every tick's **length** travels along [`curve_length`] toward its distance
 ///   from the crest.
+///
+/// The three ends of those travels come out of [`tick_ink`], which is where the
+/// stylesheet's two modes live. Nothing below knows what a match is.
 ///
 /// *"Width only grows leftward, so vertical layout never shifts and there is no
 /// jitter"* (mock 1367-1368): the right edge of every quad here is the right edge
@@ -992,29 +1462,15 @@ pub fn paint(
             .iter()
             .enumerate()
             .flat_map(|(index, tick)| {
-                let (rest, rest_alpha) = if tick.failed {
-                    (palette.status_err, TICK_FAIL_REST_OPACITY)
-                } else {
-                    (palette.command_tick, TICK_REST_OPACITY)
-                };
-                let (warm, warm_alpha) = if tick.failed {
-                    (palette.status_err, TICK_FAIL_HOT_OPACITY)
-                } else {
-                    (palette.accent, TICK_HOT_OPACITY)
-                };
-                let peak = if tick.failed {
-                    palette.command_tick_fail_crest
-                } else {
-                    palette.command_tick_crest
-                };
+                let TickInk {
+                    rest: (rest, rest_alpha),
+                    hot: (warm, warm_alpha),
+                    crest: (peak, peak_alpha),
+                } = tick_ink(tick.signal, rail.searching, palette);
                 let deepen = crest_ink.get(index).copied().unwrap_or(0.0);
                 let lift = crest_alpha.get(index).copied().unwrap_or(0.0);
                 let ink = mix(mix(rest, warm, hot_ink), peak, deepen);
-                let alpha = lerp(
-                    lerp(rest_alpha, warm_alpha, hot_alpha),
-                    TICK_CREST_OPACITY,
-                    lift,
-                );
+                let alpha = lerp(lerp(rest_alpha, warm_alpha, hot_alpha), peak_alpha, lift);
                 let length =
                     widths.get(index).copied().unwrap_or(TICK_LENGTH_LOGICAL_PX) * rail.scale;
                 rounded_overlay_fill(
@@ -1051,40 +1507,99 @@ pub fn peek_host(rail: &Rail, index: usize) -> Option<[f32; 4]> {
     ])
 }
 
+/// What the glance card says about a **match** tick whose line no longer has any
+/// text to quote.
+///
+/// The mirror of [`PEEK_EMPTY_TEXT`], and it exists for the same reason: a hit on
+/// a line the transcript has since evicted is a real state, and a blank card would
+/// read as the card being broken rather than as the line being gone.
+pub const PEEK_EMPTY_LINE_TEXT: &str = "line";
+
 /// What the glance card says about one tick, and whether it says it in the muted
 /// ink.
 ///
-/// Four readings, and the mock-up only had two of them because the mock-up has no
-/// exit codes and no ledger to be honestly empty:
+/// # The readings
 ///
-/// * a **folded bucket** — `"{k} commands · latest: {text}"` (mock 8468). The noun
-///   is a constant here and becomes a variable in S4, where the same stack also
-///   carries search matches and the word is `lines`.
-/// * a command **still running** — `D` never arrived, so there is no status to
-///   report and the card says the one thing that is true of it.
-/// * a mark whose **text the ledger never got**, which is a real state and not a
-///   failure: `command_marks.rs` leaves `command_text` empty when `C` and the
-///   output that scrolled the prompt off the grid arrived in the same PTY read.
-///   The card says [`PEEK_EMPTY_TEXT`] in the muted ink — *"a one-liner that says
-///   nothing would read as a broken card, and the gap is the ledger's, honestly"*.
-/// * anything else — the command, verbatim.
+/// * a **single command tick** — the command, verbatim; or `"running · {cmd}"`
+///   when `D` never arrived, so there is no status to report and the card says the
+///   one thing that is true of it; or [`PEEK_EMPTY_TEXT`] in the muted ink when
+///   the ledger never got the text at all (`command_marks.rs` leaves it empty when
+///   `C` and the output that scrolled the prompt off the grid arrived in one PTY
+///   read) — *"a one-liner that says nothing would read as a broken card, and the
+///   gap is the ledger's, honestly"*.
+/// * a **single match tick** (S4) — the matched line, as `line_text` gives it.
+///   Not the query and not the match's own substring: the reader knows what they
+///   typed, and what they are choosing between is the *lines*.
+/// * a **folded bucket** — `"{k} {noun}{sep}latest: {text}"` (mock 8468).
+///
+/// # The noun (B36), and the case the mock-up does not have
+///
+/// The prototype's noun is a two-way switch: `srch-mode ? "lines" : "commands"`.
+/// It can afford that because its buckets are homogeneous by accident of how it
+/// counts — but ours genuinely are not, since the merged stack interleaves the two
+/// sources and a bucket of three can hold two commands and a match. So the rule is
+/// stated over the counts the tick already carries:
+///
+/// * all commands — `"{m} commands"`, the prototype's non-search reading;
+/// * all matches — `"{k} lines"`, the prototype's search reading;
+/// * both — `"{k} lines, {m} commands"`, which is the reading the prototype has no
+///   case for.
+///
+/// **Lines are named first** in the mixed reading, which is the ticket's *"ties go
+/// to lines while searching"* landing where it can still be seen: a bucket is
+/// mixed only while a search is open, and while a search is open the lines are
+/// what the reader came for. And there is no majority to take, because naming both
+/// counts leaves a majority nothing to decide — the more specific rule wins, and it
+/// is the honest one: a card that said "3 lines" over a bucket holding one would be
+/// wrong in the only way a glance card can be wrong.
+///
+/// `k + m` may exceed the member count, and that is not an error either: one line
+/// can be both a prompt row and a match, and it is counted in both because it *is*
+/// both.
 #[must_use]
-pub fn peek_text(tick: &Tick, marks: &[CommandMark]) -> (String, bool) {
-    let latest = marks.iter().find(|mark| mark.id == tick.mark);
-    let text = latest.map_or("", |mark| mark.command_text.trim());
-    let muted = text.is_empty();
-    let body = if muted { PEEK_EMPTY_TEXT } else { text };
-    let text = if tick.members > 1 {
-        format!(
-            "{} commands{NAME_PLACE_SEPARATOR}latest: {body}",
-            tick.members
-        )
-    } else if latest.is_some_and(|mark| mark.finished.is_none()) {
-        format!("running{NAME_PLACE_SEPARATOR}{body}")
-    } else {
-        body.to_owned()
+pub fn peek_text(tick: &Tick, marks: &[CommandMark], line_text: Option<&str>) -> (String, bool) {
+    let (body, muted) = match tick.target {
+        Target::Match(_) => {
+            let text = line_text.unwrap_or("").trim();
+            if text.is_empty() {
+                (PEEK_EMPTY_LINE_TEXT, true)
+            } else {
+                (text, false)
+            }
+        }
+        Target::Command(mark) => {
+            let text = marks
+                .iter()
+                .find(|candidate| candidate.id == mark)
+                .map_or("", |mark| mark.command_text.trim());
+            if text.is_empty() {
+                (PEEK_EMPTY_TEXT, true)
+            } else {
+                (text, false)
+            }
+        }
     };
-    (text, muted)
+    if tick.members > 1 {
+        let count = match (tick.matched, tick.commanded) {
+            (0, commanded) => format!("{commanded} commands"),
+            (matched, 0) => format!("{matched} lines"),
+            (matched, commanded) => format!("{matched} lines, {commanded} commands"),
+        };
+        return (
+            format!("{count}{NAME_PLACE_SEPARATOR}latest: {body}"),
+            muted,
+        );
+    }
+    // *"running · {cmd}"* — a command with no `D` yet. Only ever a command: a
+    // matched line has no lifetime of its own to report.
+    if let Target::Command(mark) = tick.target
+        && marks
+            .iter()
+            .any(|candidate| candidate.id == mark && candidate.finished.is_none())
+    {
+        return (format!("running{NAME_PLACE_SEPARATOR}{body}"), muted);
+    }
+    (body.to_owned(), muted)
 }
 
 /// Two inks, `t` of the way from the first to the second.
@@ -1200,7 +1715,20 @@ mod tests {
     const BODY: [f32; 4] = [100.0, 50.0, 500.0, 850.0];
 
     fn rail_of(marks: &[CommandMark]) -> Rail {
-        lay_out(BODY, marks, 1.0, None)
+        lay_out(BODY, &commands(marks), 1.0, None)
+    }
+
+    /// The command a tick jumps to, for the tests written before the stack had a
+    /// second source.
+    fn mark_of(tick: &Tick) -> CommandMarkId {
+        match tick.target {
+            Target::Command(mark) => mark,
+            Target::Match(hit) => panic!("tick {hit} is a match, not a command"),
+        }
+    }
+
+    fn is_failed(tick: &Tick) -> bool {
+        tick.signal == Signal::Fail
     }
 
     /// The x every pointer test uses: the middle of the resting band, which is
@@ -1263,8 +1791,8 @@ mod tests {
                 .all(|tick| tick.rect[2] - tick.rect[0] == TICK_LENGTH_LOGICAL_PX)
         );
         // Oldest at the top.
-        assert_eq!(rail.ticks[0].mark, CommandMarkId(1));
-        assert_eq!(rail.ticks[4].mark, CommandMarkId(5));
+        assert_eq!(mark_of(&rail.ticks[0]), CommandMarkId(1));
+        assert_eq!(mark_of(&rail.ticks[4]), CommandMarkId(5));
         // 5 ticks × 2px + 4 gaps × 7px = 38, centred on the body's middle of 450.
         let block = (rail.ticks[0].rect[1], rail.ticks[4].rect[3]);
         assert_eq!(block, (431.0, 469.0));
@@ -1283,7 +1811,7 @@ mod tests {
     /// widening the lane moves this assertion with the pixels.
     #[test]
     fn the_ticks_sit_inboard_of_the_reserved_scroll_lane() {
-        let rail = lay_out(BODY, &[ok(1)], 2.0, None);
+        let rail = lay_out(BODY, &commands(&[ok(1)]), 2.0, None);
         let inset = BODY[2] - rail.ticks[0].rect[2];
         assert_eq!(
             inset,
@@ -1310,8 +1838,8 @@ mod tests {
         assert_eq!(rail.ticks[0].members, 3);
         assert_eq!(rail.ticks[133].members, 1, "400 = 133×3 + 1");
         // A bucket jumps to its newest member.
-        assert_eq!(rail.ticks[0].mark, CommandMarkId(3));
-        assert_eq!(rail.ticks[1].mark, CommandMarkId(6));
+        assert_eq!(mark_of(&rail.ticks[0]), CommandMarkId(3));
+        assert_eq!(mark_of(&rail.ticks[1]), CommandMarkId(6));
         // Under the floor nothing is bucketed at all.
         let few: Vec<_> = (1..=160).map(ok).collect();
         assert_eq!(rail_of(&few).bucket_size, 1);
@@ -1354,9 +1882,12 @@ mod tests {
         marks[4] = failed(5);
         let rail = rail_of(&marks);
         assert_eq!(rail.bucket_size, 3);
-        assert!(rail.ticks[1].failed, "marks 4,5,6 — the middle one failed");
-        assert!(!rail.ticks[0].failed);
-        assert!(!rail.ticks[2].failed);
+        assert!(
+            is_failed(&rail.ticks[1]),
+            "marks 4,5,6 — the middle one failed"
+        );
+        assert!(!is_failed(&rail.ticks[0]));
+        assert!(!is_failed(&rail.ticks[2]));
         let palette = bt_render::chrome_palette();
         let layer = build(&rail, &palette);
         assert!(
@@ -1374,7 +1905,7 @@ mod tests {
     fn a_command_still_running_is_not_a_failed_command() {
         let rail = rail_of(&[mark(1, None)]);
         assert_eq!(rail.ticks.len(), 1, "the tick is drawn all the same");
-        assert!(!rail.ticks[0].failed);
+        assert!(!is_failed(&rail.ticks[0]));
     }
 
     /// The pointer picks an ordinal, not a pixel: one peak, ties to the older tick,
@@ -1498,7 +2029,7 @@ mod tests {
                 .iter()
                 .find(|quad| quad.rect[1] >= tick.rect[1] && quad.rect[3] <= tick.rect[3])
                 .expect("every tick draws");
-            let expected = match (index == 1, tick.failed) {
+            let expected = match (index == 1, is_failed(tick)) {
                 (true, true) => palette.command_tick_fail_crest,
                 (true, false) => palette.command_tick_crest,
                 (false, true) => palette.status_err,
@@ -1621,7 +2152,7 @@ mod tests {
         let marks: Vec<_> = (1..=400).map(ok).collect();
         let folded = rail_of(&marks);
         assert_eq!(folded.bucket_size, 3);
-        let open = lay_out(BODY, &marks, 1.0, Some(7));
+        let open = lay_out(BODY, &commands(&marks), 1.0, Some(7));
         // Two more ticks than the folded rail: one bucket of three became three.
         assert_eq!(open.ticks.len(), folded.ticks.len() + 2);
         let members: Vec<_> = open.ticks.iter().filter(|tick| tick.sub).collect();
@@ -1633,7 +2164,7 @@ mod tests {
             "members keep the bucket's slot id — that is what the hysteresis is keyed on"
         );
         assert_eq!(
-            members.iter().map(|tick| tick.mark).collect::<Vec<_>>(),
+            members.iter().map(|tick| mark_of(tick)).collect::<Vec<_>>(),
             vec![CommandMarkId(22), CommandMarkId(23), CommandMarkId(24)],
             "slot 7 of buckets of three is commands 22, 23 and 24"
         );
@@ -1683,11 +2214,11 @@ mod tests {
         // opens under each — the exhaustive version of "a pointer on the seam".
         for slot in [0_usize, 1, 7, 60, 133] {
             let seed = centre(&folded.ticks[slot]);
-            let first = resolve(BODY, &marks, 1.0, None, seed);
+            let first = resolve(BODY, &commands(&marks), 1.0, None, seed);
             let mut state = first.expanded;
             let mut rail = first.rail.clone();
             for frame in 0..4 {
-                let next = resolve(BODY, &marks, 1.0, state, seed);
+                let next = resolve(BODY, &commands(&marks), 1.0, state, seed);
                 assert_eq!(
                     next.expanded, first.expanded,
                     "slot {slot} changed its mind on frame {frame}"
@@ -1705,8 +2236,8 @@ mod tests {
                 span[1] + 0.5,
                 (span[0] + span[1]) / 2.0,
             ] {
-                let once = resolve(BODY, &marks, 1.0, Some(open), edge);
-                let twice = resolve(BODY, &marks, 1.0, once.expanded, edge);
+                let once = resolve(BODY, &commands(&marks), 1.0, Some(open), edge);
+                let twice = resolve(BODY, &commands(&marks), 1.0, once.expanded, edge);
                 assert_eq!(
                     once.expanded, twice.expanded,
                     "slot {open} flapped at {edge}"
@@ -1723,7 +2254,7 @@ mod tests {
     fn walking_through_an_expansion_keeps_it_open_and_leaving_it_hands_it_to_the_next_bucket() {
         let marks: Vec<_> = (1..=400).map(ok).collect();
         let folded = rail_of(&marks);
-        let opened = resolve(BODY, &marks, 1.0, None, centre(&folded.ticks[7]));
+        let opened = resolve(BODY, &commands(&marks), 1.0, None, centre(&folded.ticks[7]));
         assert_eq!(opened.expanded, Some(7));
         // Every member of the open group holds it open, including the far ends,
         // which is the whole of the mock-up's hysteresis sentence.
@@ -1736,22 +2267,34 @@ mod tests {
             .collect();
         assert_eq!(members.len(), 3);
         for y in members {
-            let held = resolve(BODY, &marks, 1.0, Some(7), y);
+            let held = resolve(BODY, &commands(&marks), 1.0, Some(7), y);
             assert_eq!(held.expanded, Some(7));
             assert!(held.rail.ticks[held.nearest.expect("a crest")].sub);
         }
         // Far away is another bucket, and the expansion moves with the hand.
-        let elsewhere = resolve(BODY, &marks, 1.0, Some(7), centre(&folded.ticks[60]));
+        let elsewhere = resolve(
+            BODY,
+            &commands(&marks),
+            1.0,
+            Some(7),
+            centre(&folded.ticks[60]),
+        );
         assert_eq!(elsewhere.expanded, Some(60));
         // A rail with nothing to aggregate never opens anything.
         let few: Vec<_> = (1..=5).map(ok).collect();
         let single = rail_of(&few);
-        let plain = resolve(BODY, &few, 1.0, None, centre(&single.ticks[2]));
+        let plain = resolve(BODY, &commands(&few), 1.0, None, centre(&single.ticks[2]));
         assert_eq!(plain.expanded, None);
         assert_eq!(plain.nearest, Some(2));
         // And a stale slot — the ledger shrank under an open group — folds back
         // rather than laying out a bucket that is not there.
-        let stale = resolve(BODY, &few, 1.0, Some(90), centre(&single.ticks[2]));
+        let stale = resolve(
+            BODY,
+            &commands(&few),
+            1.0,
+            Some(90),
+            centre(&single.ticks[2]),
+        );
         assert_eq!(stale.expanded, None);
     }
 
@@ -1770,35 +2313,40 @@ mod tests {
             },
         ];
         let tick = |mark: u64, members: usize| Tick {
-            mark: CommandMarkId(mark),
+            target: Target::Command(CommandMarkId(mark)),
             members,
-            failed: false,
+            matched: 0,
+            commanded: members,
+            signal: Signal::Command,
             slot: 0,
             sub: false,
             rect: [0.0; 4],
         };
         assert_eq!(
-            peek_text(&tick(1, 1), &marks),
+            peek_text(&tick(1, 1), &marks, None),
             ("cargo test --workspace".to_owned(), false)
         );
         assert_eq!(
-            peek_text(&tick(2, 4), &marks),
+            peek_text(&tick(2, 4), &marks, None),
             ("4 commands · latest: git status".to_owned(), false)
         );
         assert_eq!(
-            peek_text(&tick(4, 1), &marks),
+            peek_text(&tick(4, 1), &marks, None),
             ("running · sleep 30".to_owned(), false)
         );
         // The ledger's honest empty — a word, in the muted ink.
-        assert_eq!(peek_text(&tick(3, 1), &marks), ("command".to_owned(), true));
         assert_eq!(
-            peek_text(&tick(3, 9), &marks),
+            peek_text(&tick(3, 1), &marks, None),
+            ("command".to_owned(), true)
+        );
+        assert_eq!(
+            peek_text(&tick(3, 9), &marks, None),
             ("9 commands · latest: command".to_owned(), true)
         );
         // A mark that is no longer in the ledger says the same honest thing rather
         // than nothing at all.
         assert_eq!(
-            peek_text(&tick(99, 1), &marks),
+            peek_text(&tick(99, 1), &marks, None),
             ("command".to_owned(), true)
         );
     }
@@ -1887,6 +2435,7 @@ mod tests {
             body: BODY,
             scale: 1.0,
             expanded: None,
+            search: None,
         };
         cache.install(key, rail_of(&marks), &palette);
         let ticks = cache.rail().ticks.len();
@@ -1901,7 +2450,11 @@ mod tests {
             expanded: Some(7),
             ..key
         };
-        cache.install(opened, lay_out(BODY, &marks, 1.0, Some(7)), &palette);
+        cache.install(
+            opened,
+            lay_out(BODY, &commands(&marks), 1.0, Some(7)),
+            &palette,
+        );
         let ticks = cache.rail().ticks.len();
         assert_eq!(ticks, 136, "the bucket of three opened");
         let later = now + Duration::from_millis(20);
@@ -1932,12 +2485,13 @@ mod tests {
             body: BODY,
             scale: 1.0,
             expanded: None,
+            search: None,
         };
         let mut cache = RailCache::default();
         assert!(cache.needs_rebuild(key));
         cache.install(
             key,
-            lay_out(key.body, &marks, key.scale, key.expanded),
+            lay_out(key.body, &commands(&marks), key.scale, key.expanded),
             &palette,
         );
         assert_eq!(cache.rail().ticks.len(), 5);
@@ -1982,6 +2536,7 @@ mod tests {
                 body: BODY,
                 scale: 1.0,
                 expanded: None,
+                search: None,
             },
             rail_of(&marks),
             &palette,
@@ -2043,5 +2598,508 @@ mod tests {
         assert_eq!((left, right), (100.0, 500.0));
         assert!(flash_quads([100.0, 200.0, 100.0, 218.0], 0.22, 1.0, &palette).is_empty());
         assert!(flash_quads([100.0, 218.0, 500.0, 218.0], 0.22, 1.0, &palette).is_empty());
+    }
+    // ────────────────────────── S4: one rail, two sources ──────────────────────────
+
+    fn history(id: u64) -> SearchLine {
+        SearchLine::History(bt_transcript::TranscriptId(id))
+    }
+
+    /// A command standing on history line `line`.
+    fn at(mark: u64, line: u64) -> CommandLine {
+        CommandLine {
+            mark: CommandMarkId(mark),
+            line: Some(history(line)),
+            failed: false,
+        }
+    }
+
+    /// A matched line, and which hit of the search's own list it selects.
+    fn hit(line: u64, hit: usize) -> MatchLine {
+        MatchLine {
+            line: history(line),
+            hit,
+            current: false,
+        }
+    }
+
+    /// **B8.** The two sources become one stack in document order, a line that
+    /// matches several times gets one entry, and a line that is both a prompt row
+    /// and a match gets one entry carrying both.
+    ///
+    /// MUTATION: append the matches after the commands instead of merging them and
+    /// the rail stops being an ordinal picture of the pane — every match sinks to
+    /// the bottom of a stack whose whole claim is that position carries order.
+    #[test]
+    fn a_search_merges_its_lines_into_the_ledger_in_document_order() {
+        // Commands on lines 10, 30 and 50; matches on 5, 30 and 40. Line 30 is
+        // both — the mock-up's `new Set` gives it one place, and so does this.
+        let commands = [at(1, 10), at(2, 30), at(3, 50)];
+        // The hit indices are the search's own: line 30 is its third hit because
+        // line 5 carried two.
+        let matches = [hit(5, 0), hit(30, 2), hit(40, 3)];
+        let stack = merge(&commands, &matches);
+        assert!(stack.searching);
+        assert_eq!(stack.entries.len(), 5, "six sources, one line shared");
+        assert_eq!(
+            stack
+                .entries
+                .iter()
+                .map(|entry| (entry.mark, entry.hit))
+                .collect::<Vec<_>>(),
+            vec![
+                (None, Some(0)),
+                (Some(CommandMarkId(1)), None),
+                (Some(CommandMarkId(2)), Some(2)),
+                (None, Some(3)),
+                (Some(CommandMarkId(3)), None),
+            ]
+        );
+        // Per-line dedup: six hits on one line are one entry, and it is the
+        // *first* of them the entry selects — `srch.marks.findIndex`.
+        let crowded = merge(&[], &[hit(7, 4)]);
+        assert_eq!(crowded.entries.len(), 1);
+        assert_eq!(crowded.entries[0].target(), Target::Match(4));
+    }
+
+    /// A command whose anchor has been degraded out from under it keeps its slot.
+    ///
+    /// MUTATION: drop the unnameable commands and a search opened over a cleared
+    /// scrollback silently shortens the rail — and the closing test's byte-for-byte
+    /// identity is the thing that would notice, one interaction too late.
+    #[test]
+    fn a_command_whose_line_can_no_longer_be_named_keeps_its_place_in_the_ledger() {
+        let gone = CommandLine {
+            mark: CommandMarkId(2),
+            line: None,
+            failed: false,
+        };
+        let stack = merge(&[at(1, 10), gone, at(3, 50)], &[hit(20, 0), hit(60, 1)]);
+        assert_eq!(
+            stack
+                .entries
+                .iter()
+                .map(|entry| (entry.mark, entry.hit))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(CommandMarkId(1)), None),
+                (Some(CommandMarkId(2)), None),
+                (None, Some(0)),
+                (Some(CommandMarkId(3)), None),
+                (None, Some(1)),
+            ],
+            "the placeless command stays between its neighbours in the ledger"
+        );
+        assert_eq!(stack.entries.len(), 5, "and is not dropped");
+    }
+
+    /// **B40-B41, the fork.** A match tick selects; a command tick jumps; and a
+    /// line that is both selects, because the reader is holding a query.
+    ///
+    /// MUTATION: prefer the command in [`Entry::target`] and a prompt row that
+    /// matched becomes the one tick on a lit rail that does not answer the search.
+    #[test]
+    fn a_press_means_select_on_a_match_tick_and_jump_on_a_command_one() {
+        let stack = merge(&[at(1, 10), at(2, 30)], &[hit(30, 7), hit(40, 9)]);
+        let targets: Vec<_> = stack.entries.iter().map(Entry::target).collect();
+        assert_eq!(
+            targets,
+            vec![
+                Target::Command(CommandMarkId(1)),
+                Target::Match(7),
+                Target::Match(9),
+            ]
+        );
+        // And the plain rail has only the one verb.
+        let plain = commands(&[ok(1), ok(2)]);
+        assert!(
+            plain
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.target(), Target::Command(_))),
+            "no search, no second verb"
+        );
+    }
+
+    /// **A45-A50, and D-9.** Every kind of tick, at all three temperatures.
+    ///
+    /// MUTATION: give the search crest the accent and a command the pointer landed
+    /// on becomes indistinguishable from the match beside it — the one distinction
+    /// the results rail exists to draw.
+    #[test]
+    fn each_kind_of_tick_wears_its_own_ink_while_the_search_is_open() {
+        let palette = bt_render::chrome_palette();
+        let command = tick_ink(Signal::Command, true, &palette);
+        assert_eq!(command.rest, (palette.command_tick, 0.22));
+        assert_eq!(command.hot, (palette.command_tick, 0.35));
+        assert_eq!(command.crest, (palette.command_tick_search_crest, 0.9));
+        let matched = tick_ink(Signal::Match, true, &palette);
+        assert_eq!(matched.rest, (palette.accent, 0.6));
+        assert_eq!(matched.hot, (palette.accent, 0.75));
+        assert_eq!(matched.crest, (palette.command_tick_crest, 1.0));
+        // The current match is the deepened accent at rest — *"even unhovered"* —
+        // so all three levels are the same and there is nowhere for the pointer to
+        // move it to.
+        let current = tick_ink(Signal::Current, true, &palette);
+        assert_eq!(current.rest, (palette.command_tick_crest, 1.0));
+        assert_eq!(current.rest, current.hot);
+        assert_eq!(current.rest, current.crest);
+        // The commands really do recede: half the opacity they wear on a plain
+        // rail, in the same ink.
+        let plain = tick_ink(Signal::Command, false, &palette);
+        assert_eq!(plain.rest.0, command.rest.0);
+        assert!(command.rest.1 < plain.rest.1 / 2.0 + 0.001);
+        assert_eq!(
+            plain.hot.0, palette.accent,
+            "the accent is free when nobody is searching"
+        );
+    }
+
+    /// **D-9, the intentional deviation.** The mock-up's cascade swallows the red
+    /// — `.cmdrail.srch-mode .cmdtick` (0,3,0) beats `.cmdtick.fail` (0,2,0) and
+    /// there is no `srch-mode` rule for `.fail` anywhere. Ours keeps it.
+    ///
+    /// MUTATION: let a failure fall through to the receded grey and *"signals earn
+    /// permanent colour"* becomes "signals earn colour until somebody opens a
+    /// search box", which is the same as not earning it.
+    #[test]
+    fn a_failed_commands_tick_keeps_its_red_while_the_search_is_open() {
+        let palette = bt_render::chrome_palette();
+        assert_eq!(
+            tick_ink(Signal::Fail, true, &palette),
+            tick_ink(Signal::Fail, false, &palette),
+            "the search changes nothing at all about a failure"
+        );
+        assert_eq!(
+            tick_ink(Signal::Fail, true, &palette).rest.0,
+            palette.status_err
+        );
+        // And it is red on the glass, not merely in the table: a rail carrying one
+        // failed command and one match paints both signals at rest.
+        let stack = merge(
+            &[CommandLine {
+                mark: CommandMarkId(1),
+                line: Some(history(10)),
+                failed: true,
+            }],
+            &[hit(30, 0)],
+        );
+        let layer = build(&lay_out(BODY, &stack, 1.0, None), &palette);
+        assert!(
+            layer
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.status_err)
+        );
+        assert!(layer.quads.iter().any(|quad| quad.color == palette.accent));
+    }
+
+    /// **B19/B56, max wins over four levels.** `current > fail > match > command`,
+    /// and the order is the enum's own so there is no table to fall out of step.
+    ///
+    /// MUTATION: take the *last* member's signal instead of the maximum and a
+    /// bucket holding the current match reports whatever happened to be newest —
+    /// which for a rail whose whole job is "where are the answers" is the one
+    /// reading that must not be lost.
+    #[test]
+    fn a_bucket_carries_the_strongest_of_the_four_signals_in_it() {
+        assert!(Signal::Current > Signal::Fail);
+        assert!(Signal::Fail > Signal::Match);
+        assert!(Signal::Match > Signal::Command);
+        // Four hundred entries bucket into threes; each of the four signals is
+        // planted in a bucket of its own alongside two plain commands.
+        let mut commands: Vec<CommandLine> = (1..=400).map(|id| at(id, id * 10)).collect();
+        commands[4].failed = true; // slot 1 — marks 4, 5, 6
+        let matches = [
+            MatchLine {
+                line: history(80),
+                hit: 0,
+                current: false,
+            }, // command 8 — slot 2
+            MatchLine {
+                line: history(110),
+                hit: 1,
+                current: true,
+            }, // command 11 — slot 3
+        ];
+        let stack = merge(&commands, &matches);
+        assert_eq!(
+            stack.entries.len(),
+            400,
+            "both matches landed on prompt rows"
+        );
+        let rail = lay_out(BODY, &stack, 1.0, None);
+        assert_eq!(rail.bucket_size, 3);
+        assert_eq!(rail.ticks[0].signal, Signal::Command);
+        assert_eq!(rail.ticks[1].signal, Signal::Fail);
+        assert_eq!(rail.ticks[2].signal, Signal::Match);
+        assert_eq!(rail.ticks[3].signal, Signal::Current);
+        // A bucket holding a failure *and* the current match reports the current
+        // match: it is the stronger of the two, and it is the one the reader is
+        // standing on.
+        let both = [
+            Entry {
+                mark: Some(CommandMarkId(1)),
+                hit: None,
+                signal: Signal::Fail,
+            },
+            Entry {
+                mark: None,
+                hit: Some(0),
+                signal: Signal::Current,
+            },
+        ];
+        assert_eq!(
+            [both[0].signal, both[1].signal].into_iter().max(),
+            Some(Signal::Current)
+        );
+    }
+
+    /// **B36.** The card's noun follows what the bucket is made of, and a bucket
+    /// made of both says so rather than picking a side.
+    ///
+    /// MUTATION: hard-code `lines` whenever a search is open and a bucket of three
+    /// commands under a query reads "3 lines", which is a card lying about a thing
+    /// the reader can count.
+    #[test]
+    fn the_glance_card_names_lines_commands_or_both_by_what_the_bucket_holds() {
+        let marks = vec![said(1, "cargo build")];
+        let bucket = |members: usize, matched: usize, commanded: usize, target: Target| Tick {
+            target,
+            members,
+            matched,
+            commanded,
+            signal: Signal::Command,
+            slot: 0,
+            sub: false,
+            rect: [0.0; 4],
+        };
+        // All commands — the prototype's non-search reading, unchanged.
+        assert_eq!(
+            peek_text(
+                &bucket(3, 0, 3, Target::Command(CommandMarkId(1))),
+                &marks,
+                None
+            ),
+            ("3 commands · latest: cargo build".to_owned(), false)
+        );
+        // All matches — the prototype's search reading.
+        assert_eq!(
+            peek_text(&bucket(3, 3, 0, Target::Match(0)), &marks, Some("total 42")),
+            ("3 lines · latest: total 42".to_owned(), false)
+        );
+        // Both — the reading the prototype has no case for.
+        assert_eq!(
+            peek_text(&bucket(4, 2, 3, Target::Match(0)), &marks, Some("total 42")),
+            ("2 lines, 3 commands · latest: total 42".to_owned(), false)
+        );
+        // A single match tick reads the line itself, ellipsis and all left to the
+        // card; and a line the transcript no longer holds says so in the muted ink
+        // rather than saying nothing.
+        let single = bucket(1, 1, 0, Target::Match(0));
+        assert_eq!(
+            peek_text(&single, &marks, Some("  fn main() {  ")),
+            ("fn main() {".to_owned(), false)
+        );
+        assert_eq!(peek_text(&single, &marks, None), ("line".to_owned(), true));
+    }
+
+    /// **The acceptance anchor.** Open a search, type into it, close it — and the
+    /// rail is the rail it was, geometry and picture alike.
+    ///
+    /// MUTATION: leave `searching` set on the way out, or leave the fisheye where
+    /// the search left it, and the ticks come back at `.22` grey or with a bucket
+    /// hanging open under a hand that never asked — the "zero residue" §7.1.5d
+    /// promises, broken in the one direction nobody photographs.
+    #[test]
+    fn closing_the_search_hands_the_rail_back_exactly_as_it_was() {
+        let palette = bt_render::chrome_palette();
+        let marks: Vec<_> = (1..=400).map(ok).collect();
+        let plain = commands(&marks);
+        let before_rail = lay_out(BODY, &plain, 1.0, None);
+        let before_layer = build(&before_rail, &palette);
+        let key = RailKey {
+            revision: 3,
+            body: BODY,
+            scale: 1.0,
+            expanded: None,
+            search: None,
+        };
+        let mut cache = RailCache::default();
+        cache.install(key, before_rail.clone(), &palette);
+
+        // Open, and type: the stack is the merge, the rail is a different picture,
+        // and the cache says so.
+        let lines: Vec<CommandLine> = (1..=400).map(|id| at(id, id * 10)).collect();
+        let searched = merge(&lines, &[hit(15, 0), hit(25, 1)]);
+        let searching = RailKey {
+            search: Some(RailSearch {
+                query: 4,
+                hits: 9,
+                current: Some(0),
+            }),
+            ..key
+        };
+        assert!(cache.needs_rebuild(searching));
+        cache.fold_for_mode(true);
+        cache.install(searching, lay_out(BODY, &searched, 1.0, None), &palette);
+        assert!(cache.rail().searching);
+        assert_eq!(
+            searched.entries.len(),
+            marks.len() + 2,
+            "two lines nobody ran a command on"
+        );
+        assert_ne!(cache.layer().quads, before_layer.quads);
+        // A bucket opened under the pointer while the search was up.
+        cache.pointer_mut().expand(Some(9));
+
+        // Close: the mode switch folds the fisheye, and the plain key rebuilds the
+        // rail the pane had before any of this.
+        cache.fold_for_mode(false);
+        assert_eq!(
+            cache.pointer().expanded(),
+            None,
+            "the fisheye resets with the mode switch"
+        );
+        assert!(cache.needs_rebuild(key));
+        cache.install(key, lay_out(BODY, &commands(&marks), 1.0, None), &palette);
+        assert_eq!(*cache.rail(), before_rail, "geometry, byte for byte");
+        assert_eq!(
+            cache.layer().quads,
+            before_layer.quads,
+            "picture, byte for byte"
+        );
+        assert!(!cache.needs_rebuild(key), "and the key it came back under");
+        // Including the click targets: the same verb on the same mark, tick by
+        // tick.
+        assert_eq!(
+            cache
+                .rail()
+                .ticks
+                .iter()
+                .map(|tick| tick.target)
+                .collect::<Vec<_>>(),
+            before_rail
+                .ticks
+                .iter()
+                .map(|tick| tick.target)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// An empty query is not a search: the stack, the geometry and the picture are
+    /// the plain rail's, whatever the capsule is doing.
+    ///
+    /// MUTATION: key `srch-mode` on the capsule alone — the prototype's own
+    /// reading — and `Ctrl+F` greys out the command history before a letter is
+    /// typed, which reads as the marks having gone rather than as a field waiting.
+    #[test]
+    fn an_empty_query_leaves_the_plain_rail_untouched() {
+        let palette = bt_render::chrome_palette();
+        let marks: Vec<_> = (1..=20).map(ok).collect();
+        let plain = commands(&marks);
+        assert!(!plain.searching);
+        // `merge` with nothing matched is *not* the same thing: it is a search that
+        // found nothing, and its commands recede. That difference is what makes the
+        // empty-query case a decision at the caller rather than a fall-out here.
+        let nothing_found = merge(&(1..=20).map(|id| at(id, id * 10)).collect::<Vec<_>>(), &[]);
+        assert!(nothing_found.searching);
+        assert_eq!(nothing_found.entries.len(), plain.entries.len());
+        let quiet = build(&lay_out(BODY, &plain, 1.0, None), &palette);
+        let answered = build(&lay_out(BODY, &nothing_found, 1.0, None), &palette);
+        assert_ne!(
+            quiet.quads, answered.quads,
+            "one of them has been asked a question"
+        );
+    }
+
+    /// **Ticket item 5.** The key gains the search generation, and it moves on
+    /// exactly the three things the merge is a function of.
+    ///
+    /// MUTATION: leave the current index out of the key and `Enter` walks the
+    /// matches while the rail's deep tick stays where it was — the count says `4/9`
+    /// and the picture says `1/9`.
+    #[test]
+    fn the_rail_rebuilds_exactly_when_the_merge_input_moves() {
+        let palette = bt_render::chrome_palette();
+        let marks: Vec<_> = (1..=5).map(ok).collect();
+        let search = RailSearch {
+            query: 11,
+            hits: 4,
+            current: Some(2),
+        };
+        let key = RailKey {
+            revision: 7,
+            body: BODY,
+            scale: 1.0,
+            expanded: None,
+            search: Some(search),
+        };
+        let mut cache = RailCache::default();
+        cache.install(
+            key,
+            lay_out(key.body, &commands(&marks), 1.0, None),
+            &palette,
+        );
+        assert!(!cache.needs_rebuild(key));
+        // Another letter typed, or a toggle flipped.
+        assert!(cache.needs_rebuild(RailKey {
+            search: Some(RailSearch {
+                query: 12,
+                ..search
+            }),
+            ..key
+        }));
+        // Output arrived and the hit set was replaced (R2, ticket item 6).
+        assert!(cache.needs_rebuild(RailKey {
+            search: Some(RailSearch { hits: 5, ..search }),
+            ..key
+        }));
+        // `Enter`.
+        assert!(cache.needs_rebuild(RailKey {
+            search: Some(RailSearch {
+                current: Some(3),
+                ..search
+            }),
+            ..key
+        }));
+        // And the capsule closing, which is the mode switch itself.
+        assert!(cache.needs_rebuild(RailKey {
+            search: None,
+            ..key
+        }));
+        // The ledger and the pane still count, and nothing else has been added:
+        // the same key twice is still free.
+        assert!(cache.needs_rebuild(RailKey { revision: 8, ..key }));
+        assert!(!cache.needs_rebuild(key));
+    }
+
+    /// The keyboard walks the ledger; the pointer walks the merged stack. **The
+    /// two indexings are not interchangeable**, and this is why `step_command_mark`
+    /// reads `session.command_marks()` rather than the rail it is standing beside.
+    ///
+    /// MUTATION: walk the rail's ticks with `Ctrl+Shift+↑/↓` and the chord starts
+    /// landing on search hits — a key that walks commands, quietly redefined by
+    /// whatever is typed in a box somewhere else on the pane.
+    #[test]
+    fn the_keyboard_walks_the_ledger_while_the_pointer_walks_the_merged_stack() {
+        let marks: Vec<_> = (1..=3).map(ok).collect();
+        let plain = commands(&marks);
+        let searched = merge(
+            &[at(1, 10), at(2, 30), at(3, 50)],
+            &[hit(20, 0), hit(40, 1)],
+        );
+        assert_eq!(plain.entries.len(), marks.len());
+        assert_eq!(searched.entries.len(), 5);
+        // Ordinal 1 is command 2 on one and a match on the other, so a walk over
+        // tick indices would answer differently depending on what is typed.
+        assert_eq!(plain.entries[1].target(), Target::Command(CommandMarkId(2)));
+        assert_eq!(searched.entries[1].target(), Target::Match(0));
+        // The ledger's own step is unchanged by any of it — `stepped_command_mark`
+        // is a function of the mark count and the position in it.
+        assert_eq!(
+            crate::stepped_command_mark(marks.len(), Some(0), crate::Step::Forward),
+            Some(1)
+        );
     }
 }

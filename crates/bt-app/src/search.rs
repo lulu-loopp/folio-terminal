@@ -340,6 +340,16 @@ pub struct SearchState {
     error: Option<String>,
     /// The hit set in the shape a projection paints from, rebuilt with the hits and shared.
     highlights: Arc<SearchHighlights>,
+    /// Bumped wherever [`Self::hits`] is replaced — [`Self::install`], and the two doors that empty
+    /// it — and by nothing else.
+    ///
+    /// **The rail's half of the cache key** (S4). The results rail is a picture of the hit set, so
+    /// it has to be rebuilt exactly when that set is replaced and never per frame — the same
+    /// bargain `command_marks_revision` strikes for the ledger, said in the same word so that
+    /// `RailKey` can hold the two side by side. A counter rather than a hash of the hits because
+    /// `install` is the one door they come through: anything that changed them went through it,
+    /// and anything that did not, did not.
+    revision: u64,
 }
 
 impl SearchState {
@@ -391,6 +401,22 @@ impl SearchState {
         self.hits.get(self.current?)
     }
 
+    /// Which hit is current, as an index — the number the results rail is keyed on.
+    ///
+    /// The hit itself is what the highlighter and the scroll want; the *index* is what a cache key
+    /// wants, because two hits can be equal by value at different places in the walk and the rail's
+    /// `.cur` tick has to move when the walk does.
+    #[must_use]
+    pub fn current_index(&self) -> Option<usize> {
+        self.current
+    }
+
+    /// How many times the hit set has been replaced. See [`Self::revision`]'s field.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     #[must_use]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
@@ -427,6 +453,7 @@ impl SearchState {
             self.current = None;
             self.error = None;
             self.highlights = Arc::default();
+            self.revision = self.revision.wrapping_add(1);
         }
         self.seat = Some(seat);
         self.focused = true;
@@ -449,6 +476,7 @@ impl SearchState {
         self.current = None;
         self.error = None;
         self.highlights = Arc::default();
+        self.revision = self.revision.wrapping_add(1);
         was_open
     }
 
@@ -485,6 +513,7 @@ impl SearchState {
         from: Option<&ContentAnchor>,
     ) {
         let standing = keep_current.then(|| self.current()).flatten().cloned();
+        self.revision = self.revision.wrapping_add(1);
         self.hits = hits;
         self.error = error;
         self.current = if self.hits.is_empty() {
@@ -549,7 +578,6 @@ impl SearchState {
     /// match tick means "this one", which is neither a step forwards nor a step back. It is here
     /// rather than in that slice because it is the *state's* verb and the state is finished — the
     /// rail will bring a tick index and nothing else.
-    #[allow(dead_code)]
     pub fn set_current(&mut self, index: usize) -> Option<&Hit> {
         if index >= self.hits.len() {
             return None;
