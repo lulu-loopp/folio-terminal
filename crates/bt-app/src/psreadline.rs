@@ -457,24 +457,46 @@ pub fn row_state(
 /// sentences are runtime values, so each state's sentence is built once into a
 /// `OnceLock` — which is sound because the probe is itself a one-shot: a state's
 /// text cannot change once that state has been reached.
+///
+/// **One slot per language, not one slot** (§7.1.6c-3c). The language can move
+/// while the window is up, and this is the only cache in the app that would have
+/// survived the move with the old words in it: a reader who switched to Chinese
+/// with the Terminal page open would have watched every line on it change except
+/// this one. The probe's one-shot argument still holds — what a *state* says
+/// cannot change — so nothing here is ever invalidated; a second language simply
+/// fills a second slot the first time it is asked.
 #[must_use]
 pub fn row_description(state: RowState) -> &'static str {
-    static OUTDATED: OnceLock<String> = OnceLock::new();
-    static INSTALLED: OnceLock<String> = OnceLock::new();
-    static CURRENT: OnceLock<String> = OnceLock::new();
+    row_description_in(state, i18n::current())
+}
+
+/// The same line in a named language — the entry point for the test that reads
+/// both columns out of the cache at once.
+///
+/// The array length is [`i18n::Lang::COUNT`] and the index is
+/// [`i18n::Lang::index`], so a third language is a compile error here rather
+/// than a third column quietly sharing the second's slot.
+#[must_use]
+pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
+    static OUTDATED: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
+    static INSTALLED: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
+    static CURRENT: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
+    let slot = lang.index();
     match state {
-        RowState::Probing => Text::PsReadLineProbing.text(),
-        RowState::RemovedElsewhere => Text::PsReadLineRowGone.text(),
-        RowState::Outdated => OUTDATED
+        RowState::Probing => Text::PsReadLineProbing.in_lang(lang),
+        RowState::RemovedElsewhere => Text::PsReadLineRowGone.in_lang(lang),
+        RowState::Outdated => OUTDATED[slot]
             .get_or_init(|| {
-                i18n::psreadline_row_outdated(&probe().unwrap_or_default().found_text())
+                i18n::psreadline_row_outdated_in(lang, &probe().unwrap_or_default().found_text())
             })
             .as_str(),
-        RowState::InstalledByFolio => INSTALLED
-            .get_or_init(|| i18n::psreadline_row_installed(PATCHED_VERSION))
+        RowState::InstalledByFolio => INSTALLED[slot]
+            .get_or_init(|| i18n::psreadline_row_installed_in(lang, PATCHED_VERSION))
             .as_str(),
-        RowState::AlreadyCurrent => CURRENT
-            .get_or_init(|| i18n::psreadline_row_current(&probe().unwrap_or_default().found_text()))
+        RowState::AlreadyCurrent => CURRENT[slot]
+            .get_or_init(|| {
+                i18n::psreadline_row_current_in(lang, &probe().unwrap_or_default().found_text())
+            })
             .as_str(),
     }
 }
@@ -1175,5 +1197,61 @@ mod tests {
                 policy: ExecutionPolicy::AllSigned
             }
         );
+    }
+
+    /// PIN (§7.1.6c-3c) — **the row's cached line is cached per language.**
+    ///
+    /// Red before this slice: `row_description` held one `OnceLock` per state,
+    /// filled from whichever language happened to ask first, and nothing could
+    /// ask it for the other column at all. It is the only process-lifetime
+    /// string cache in this app built out of `crate::i18n`'s table, so it is the
+    /// only one a hot language switch could have left standing with the wrong
+    /// words in it — on the very page the switch is made from.
+    ///
+    /// Every state is walked, including the two that are not cached, because
+    /// what is being pinned is the *answer* and not the storage: a state that
+    /// stopped being cached would still have to change language.
+    ///
+    /// MUTATION: index the slots with `0` instead of `lang.index()` and this
+    /// fails on the first state whose two columns then come back equal.
+    #[test]
+    fn no_line_this_row_has_cached_survives_a_language_switch() {
+        for state in [
+            RowState::Probing,
+            RowState::RemovedElsewhere,
+            RowState::Outdated,
+            RowState::InstalledByFolio,
+            RowState::AlreadyCurrent,
+        ] {
+            let english = row_description_in(state, i18n::Lang::English);
+            let chinese = row_description_in(state, i18n::Lang::Chinese);
+            assert_ne!(
+                english, chinese,
+                "{state:?} says the same thing in both languages"
+            );
+            assert!(
+                chinese
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "{state:?} reads {chinese:?} in Chinese, which has no Chinese in it"
+            );
+            // Asked a second time, which is the half that reads the cache rather
+            // than filling it: a slot shared between the two languages answers
+            // the first caller's words to the second.
+            assert_eq!(row_description_in(state, i18n::Lang::English), english);
+            assert_eq!(row_description_in(state, i18n::Lang::Chinese), chinese);
+        }
+    }
+
+    /// PIN — the ambient entry point is the named one asked for whatever is in
+    /// force, and nothing else.
+    #[test]
+    fn the_rows_line_is_the_named_line_in_the_language_in_force() {
+        for state in [RowState::Probing, RowState::AlreadyCurrent] {
+            assert_eq!(
+                row_description(state),
+                row_description_in(state, i18n::current())
+            );
+        }
     }
 }

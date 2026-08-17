@@ -12725,12 +12725,11 @@ fn create_leaf_session(
     // obey, which is exactly why this builder exists (see above).
     session.set_display_math_bands(formulas.display);
     session.set_inline_math_bands(formulas.inline);
-    session.set_layout_key(LayoutKey {
-        width_cells: columns,
-        dpi_milli: renderer.metrics().dpi_milli(),
-        font_rev: 1,
-        theme_rev: theme_revision(),
-    });
+    session.set_layout_key(window_layout_key(
+        columns,
+        renderer.metrics().dpi_milli(),
+        1,
+    ));
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
     // `FALLBACK_PROFILE` before the spawn, so the shell starts cleanly and
@@ -13857,18 +13856,11 @@ impl Runtime {
         // window is measured from the words that go in it, and the first of
         // those measurements happens as soon as a chrome frame is built — so the
         // language has to be decided here, between reading the file and building
-        // anything, rather than at the first draw. `i18n::install` is a one-shot
-        // for the same reason: a second call would be a hot switch through the
-        // back door, with every cached width still measured for the language
-        // before it.
-        i18n::install(i18n::resolve(
-            match settings_store.loaded().language {
-                bt_persist::LanguageV1::System => i18n::LanguageMode::System,
-                bt_persist::LanguageV1::English => i18n::LanguageMode::English,
-                bt_persist::LanguageV1::Chinese => i18n::LanguageMode::Chinese,
-            },
-            &bt_platform::os_ui_language(),
-        ));
+        // anything, rather than at the first draw. It can be decided again later
+        // (§7.1.6c-3c): [`Runtime::adopt_new_language`] is the same call with a
+        // repaint behind it, and it is the reason this one no longer has to be
+        // the only one.
+        i18n::install(resolved_language(settings_store.loaded().language));
         // Defaults, then the file, then whatever the file could not be honoured
         // for — reported rather than repaired, because the file is the user's
         // own words and a build that silently rewrote one it could not read
@@ -19349,35 +19341,75 @@ impl Runtime {
         Ok(self.settings_store.store(settings))
     }
 
-    /// **The one setting whose effect is not on screen when it is chosen.**
+    /// **The window's language, changed while the window is up** (§7.1.6c-3c).
     ///
-    /// The file is written like every other row's — a setting that waited for a
-    /// restart to be *recorded* would be a setting that lost itself in a crash —
-    /// and then a card says so, because the alternative is a picker that visibly
-    /// moves its tick while nothing else in the window changes, which reads as a
-    /// bug rather than as a rule. [`crate::i18n`]'s header argues why the rule
-    /// exists; the card is how the user finds out about it without reading a
-    /// description they may have already scrolled past.
+    /// It used to be the one setting whose effect was not on screen when it was
+    /// chosen, and it used to raise a card saying so. Both of those are gone:
+    /// [`crate::i18n`]'s header records what had to exist first — a revision, so
+    /// that a measurement made in one language cannot be handed back in another
+    /// — and what turned out not to need doing, which is most of it.
     ///
-    /// Anchored to the window rather than to the dialog, which is the only choice
-    /// available: `ToastAnchor` names surfaces that outlive a modal, and a card
-    /// pinned to a dialog the user is about to dismiss would leave with it.
+    /// **No card.** The row's tick moves and every word in the window moves with
+    /// it, so there is nothing left for a card to report that the reader is not
+    /// already looking at.
     ///
     /// Silent when the value did not change, for the reason every confirmation in
-    /// this window is: a card is a report that something happened, and pressing
-    /// the item that is already ticked is not something happening.
+    /// this window is: pressing the item that already wears the tick is not
+    /// something happening. Note that the *stored* value is what is compared —
+    /// `System` and `English` are two different answers on an English machine
+    /// even though they resolve to one language, and the file has to record which
+    /// question the user answered.
     fn apply_language(&mut self, language: bt_persist::LanguageV1) -> Result<bool> {
-        let Some(notice) = language_restart_notice(self.settings_store.loaded().language, language)
-        else {
+        if self.settings_store.loaded().language == language {
             return Ok(false);
-        };
+        }
         let mut settings = self.settings_store.loaded().clone();
         settings.language = language;
         if !self.settings_store.store(settings) {
             return Ok(false);
         }
-        self.toast(notice.kind, notice.anchor, None, notice.body)?;
+        self.adopt_new_language()?;
         Ok(true)
+    }
+
+    /// **Everything a new language costs this window.**
+    ///
+    /// Deliberately short, and the shortness is the finding rather than an
+    /// omission — see [`crate::i18n`]'s header, which lists what was audited to
+    /// arrive at it. A language change is not a font change: the face of the grid
+    /// has not moved, so every glyph in it is still the right size, and none of
+    /// the renderer's shaping, composed-row or texture caches describes anything
+    /// that has changed. What *has* changed is the window's own words, and those
+    /// are re-derived from the table on the frame that draws them.
+    ///
+    /// So there are three steps and each answers for one of the three things
+    /// that outlive a repaint:
+    ///
+    /// 1. `i18n::install` — the answer itself, and the revision behind it. A
+    ///    `false` here means the resolved language did not move (`System` chosen
+    ///    on a machine already resolving to the same language), and nothing below
+    ///    is owed.
+    /// 2. [`Self::sync_math_layout_key`] — carries the new `lang_rev` into every
+    ///    session's `LayoutKey`, which is the channel every artefact keyed on the
+    ///    layout is invalidated through.
+    /// 3. [`Self::refresh_chrome`] and a publish — the strip, the tooltip
+    ///    anchors, the files feet, `preview_button_width` and the whole overlay
+    ///    stack, all rebuilt from the words that are in force now.
+    ///
+    /// The PSReadLine row's cached line needs no step of its own: it keeps one
+    /// slot per language rather than one slot, so step 3 asks it in the new
+    /// language and gets the new language back.
+    fn adopt_new_language(&mut self) -> Result<()> {
+        if !i18n::install(resolved_language(self.settings_store.loaded().language)) {
+            return Ok(());
+        }
+        self.sync_math_layout_key();
+        self.refresh_chrome();
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
     }
 
     /// **Everything a new palette costs this window**, whichever door it came
@@ -40039,24 +40071,21 @@ impl Runtime {
     }
 
     fn sync_math_layout_key(&mut self) {
-        // Future runtime theme switching has one required hook: update renderer theme colors, then
-        // call this method. `LayoutKey` contains `theme_rev`, so a theme change must invalidate old
-        // textures; the revision enters both the worker gate and GPU texture identity. The session
-        // keeps same-source old pixels only while the replacement is pending.
+        // A theme switch, a scheme swap, a font change and a language switch all
+        // have one required hook: move whatever they move, then call this. See
+        // [`window_layout_key`] for which of the four revisions answers for
+        // which. The session keeps same-source old pixels only while the
+        // replacement is pending.
         let width_cells = nonzero_u32(self.grid.columns.get());
         let dpi_milli = self.renderer.metrics().dpi_milli();
+        // The window's own count, not a constant. It was `1` for as long as
+        // nothing could change the face; the Terminal font row can, and a frozen
+        // revision here would leave every typeset band rastered for the previous
+        // cell — correct glyphs at the wrong size, from a cache whose key did not
+        // include the thing that moved.
         let font_rev = self.renderer.font_revision();
-        self.session.set_layout_key(LayoutKey {
-            width_cells,
-            dpi_milli,
-            // The window's own count, not a constant. It was `1` for as long as
-            // nothing could change the face; the Terminal font row can, and a
-            // frozen revision here would leave every typeset band rastered for
-            // the previous cell — correct glyphs at the wrong size, from a cache
-            // whose key did not include the thing that moved.
-            font_rev,
-            theme_rev: theme_revision(),
-        });
+        self.session
+            .set_layout_key(window_layout_key(width_cells, dpi_milli, font_rev));
     }
 
     fn apply_scale_factor(&mut self, scale_factor: f64) -> Result<()> {
@@ -41816,39 +41845,49 @@ fn unknown_profile_banner(unknown: &str) -> String {
     banner_line(&i18n::unknown_profile_banner_text(unknown, started))
 }
 
-/// The card a language change owes the reader, or `None` when it owes none.
+/// The layout identity this window hands every session it owns.
 ///
-/// A function rather than three lines inside [`Runtime::apply_language`] because
-/// all three of its answers are rulings and a `Runtime` cannot be built without a
-/// window: pulled out here they are testable, and what they are is worth being
-/// able to test.
-#[must_use]
-fn language_restart_notice(
-    stored: bt_persist::LanguageV1,
-    chosen: bt_persist::LanguageV1,
-) -> Option<LanguageNotice> {
-    // Silent when nothing changed, for the reason every confirmation in this
-    // window is silent then: a card reports that something happened, and pressing
-    // the item that already wears the tick is not something happening.
-    (stored != chosen).then_some(LanguageNotice {
-        // `Info` and not `Ok`: nothing succeeded, and nothing failed. It is a
-        // fact about *when* — the one thing the reader cannot see for themselves,
-        // because the window they are looking at is still in the old language.
-        kind: toast::ToastKind::Info,
-        // The window and not the dialog, which is the only choice available:
-        // `ToastAnchor` names surfaces that outlive a modal, and a card pinned to
-        // a dialog the reader is about to dismiss would leave with it.
-        anchor: toast::ToastAnchor::Window,
-        body: i18n::Text::LanguageRestartToast.text(),
-    })
+/// **One function and not two struct literals**, because the two places that
+/// build a `LayoutKey` — the leaf builder, for a pane that has just been born,
+/// and [`Runtime::sync_math_layout_key`], for every pane already alive — have to
+/// name the same four fields or a freshly split pane starts life keyed
+/// differently from its neighbour. Two of the four are the caller's (a pane's
+/// width, and the window's DPI and font revision); the other two are the
+/// process's, and reading them here is what keeps a caller from having to know
+/// they exist.
+///
+/// * `theme_rev` — `bt_render::theme_revision`, advanced by a theme switch and
+///   by a colour scheme being replaced under a theme that did not move.
+/// * `lang_rev` — [`i18n::lang_revision`], advanced by the Language row
+///   (§7.1.6c-3c). It is the number `crates/bt-app/src/i18n.rs`'s header spent a
+///   slice explaining the absence of.
+fn window_layout_key(width_cells: NonZeroU32, dpi_milli: NonZeroU32, font_rev: u64) -> LayoutKey {
+    LayoutKey {
+        width_cells,
+        dpi_milli,
+        font_rev,
+        theme_rev: theme_revision(),
+        lang_rev: i18n::lang_revision(),
+    }
 }
 
-/// What that card is.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LanguageNotice {
-    kind: toast::ToastKind,
-    anchor: toast::ToastAnchor,
-    body: &'static str,
+/// Which [`i18n::Lang`] a stored preference comes out as on this machine.
+///
+/// The mapping from the file's vocabulary to the table's, in one place because
+/// there are two callers now: the startup that installs the language before the
+/// first measurement, and [`Runtime::adopt_new_language`], which installs it
+/// again on every press of the row. Two spellings of this `match` would be two
+/// chances for the Language row and the settings file to disagree about what
+/// `System` means.
+fn resolved_language(stored: bt_persist::LanguageV1) -> i18n::Lang {
+    i18n::resolve(
+        match stored {
+            bt_persist::LanguageV1::System => i18n::LanguageMode::System,
+            bt_persist::LanguageV1::English => i18n::LanguageMode::English,
+            bt_persist::LanguageV1::Chinese => i18n::LanguageMode::Chinese,
+        },
+        &bt_platform::os_ui_language(),
+    )
 }
 
 /// One dim, prefixed, self-terminating line — the register all of these speak
@@ -42901,39 +42940,59 @@ mod tests {
         assert_eq!(super::preedit_caret_byte(None), None);
     }
 
-    /// PIN (the Language row, 2026-08-17) — **choosing a language raises one
-    /// quiet card on the window, and choosing the language already in force
-    /// raises none.**
+    /// PIN (§7.1.6c-3c) — **the layout key this window hands its sessions
+    /// carries the language's revision as well as the palette's.**
     ///
-    /// Three rulings, and each of the three is a way this could have been wrong
-    /// in a way nobody would notice for months:
+    /// Red before this slice: `LayoutKey` had four fields and none of them was
+    /// the language, which is exactly what `crates/bt-app/src/i18n.rs`'s header
+    /// named as the reason the language could not be switched live.
     ///
-    /// * a card at all, because this is the one setting whose effect is not on
-    ///   screen when it is chosen — the tick moves and nothing else does, which
-    ///   reads as a bug rather than as a rule;
-    /// * `Info`, because nothing succeeded and nothing failed. It is a fact about
-    ///   *when*;
-    /// * `Window`, because a card anchored to the dialog would leave with the
-    ///   dialog the reader is about to dismiss.
+    /// It is pinned on this function rather than at either call site because
+    /// this function *is* the pin: the leaf builder and
+    /// `Runtime::sync_math_layout_key` both go through it, so a revision left
+    /// out here is left out of both, and a fifth field added without a line here
+    /// is a field neither of them fills in.
+    ///
+    /// MUTATION: hard-code `lang_rev: 0` and this fails as soon as any test in
+    /// this process has moved the language; hard-code either revision to a
+    /// constant and it fails immediately.
     #[test]
-    fn choosing_a_new_language_says_the_window_has_to_restart_and_says_it_once() {
-        use bt_persist::LanguageV1;
-        let notice = super::language_restart_notice(LanguageV1::System, LanguageV1::Chinese)
-            .expect("a change is worth a card");
-        assert_eq!(notice.kind, toast::ToastKind::Info);
-        assert_eq!(notice.anchor, toast::ToastAnchor::Window);
-        assert_eq!(notice.body, i18n::Text::LanguageRestartToast.text());
-        assert_eq!(
-            i18n::Text::LanguageRestartToast.in_lang(i18n::Lang::Chinese),
-            "重启 Folio 以切换语言"
+    fn the_windows_layout_key_reads_both_of_the_processs_revisions() {
+        let key = super::window_layout_key(
+            NonZeroU32::new(80).unwrap(),
+            NonZeroU32::new(1000).unwrap(),
+            7,
         );
-        for mode in [LanguageV1::System, LanguageV1::English, LanguageV1::Chinese] {
-            assert_eq!(
-                super::language_restart_notice(mode, mode),
-                None,
-                "{mode:?} was already chosen, so nothing happened to report"
-            );
-        }
+        assert_eq!(key.width_cells.get(), 80);
+        assert_eq!(key.dpi_milli.get(), 1000);
+        assert_eq!(key.font_rev, 7);
+        assert_eq!(key.theme_rev, bt_render::theme_revision());
+        assert_eq!(key.lang_rev, i18n::lang_revision());
+    }
+
+    /// PIN — **the file's three answers and the table's two languages line up,
+    /// and `System` is the only one that asks the machine.**
+    ///
+    /// The mapping used to be written out inside `Runtime::new`; it is a free
+    /// function now because the Language row calls it again on every press, and
+    /// a second spelling of it is how a row and a settings file come to disagree
+    /// about what `System` means.
+    #[test]
+    fn a_stored_language_resolves_to_the_column_it_names() {
+        use bt_persist::LanguageV1;
+        assert_eq!(
+            super::resolved_language(LanguageV1::English),
+            i18n::Lang::English
+        );
+        assert_eq!(
+            super::resolved_language(LanguageV1::Chinese),
+            i18n::Lang::Chinese
+        );
+        assert_eq!(
+            super::resolved_language(LanguageV1::System),
+            i18n::resolve(i18n::LanguageMode::System, &bt_platform::os_ui_language()),
+            "`System` is the machine's answer and nothing else"
+        );
     }
 
     use super::*;
@@ -48913,6 +48972,7 @@ mod tests {
             dpi_milli: NonZeroU32::new(800).unwrap(),
             font_rev: 1,
             theme_rev: harness.session.layout_key().theme_rev,
+            lang_rev: harness.session.layout_key().lang_rev,
         });
         let delayed_relayout = harness.session.take_live_worker_task().unwrap();
         assert!(harness.publish_pty_frame());

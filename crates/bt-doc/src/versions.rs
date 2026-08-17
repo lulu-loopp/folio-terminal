@@ -88,6 +88,17 @@ pub struct LayoutKey {
     pub dpi_milli: NonZeroU32,
     pub font_rev: u64,
     pub theme_rev: u64,
+    /// How many times the window's **language** has moved (§7.1.6c-3c).
+    ///
+    /// The last of the four to arrive, and the one whose absence was an
+    /// architectural fact rather than an oversight: `crates/bt-app/src/i18n.rs`
+    /// held the language in a `OnceLock` precisely because there was no number
+    /// here for a switch to advance, and named this field as the thing that had
+    /// to exist first. It exists now, so the language is a member of the layout's
+    /// identity in the same way the palette is — an artefact measured, typeset or
+    /// rastered while the window spoke one language can no longer be handed back
+    /// after it has started speaking another.
+    pub lang_rev: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -118,5 +129,39 @@ mod tests {
                 to: SourceLifecycle::Frozen,
             })
         );
+    }
+
+    /// PIN (§7.1.6c-3c) — **the language is part of the key**, by equality and
+    /// by hash alike.
+    ///
+    /// Both halves are load-bearing and they fail differently. Equality is what
+    /// `DualPlaneSession::set_layout_key` compares to decide that a re-layout is
+    /// owed; the hash is what the math texture cache looks entries up by. A
+    /// field that participated in one and not the other would give a window that
+    /// correctly decided to re-typeset and was then handed the old raster back.
+    #[test]
+    fn a_language_change_is_a_different_layout_key() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let base = LayoutKey {
+            width_cells: NonZeroU32::new(80).unwrap(),
+            dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_rev: 1,
+            theme_rev: 1,
+            lang_rev: 0,
+        };
+        let switched = LayoutKey {
+            lang_rev: 1,
+            ..base
+        };
+        assert_ne!(base, switched);
+
+        let hash_of = |key: LayoutKey| {
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(hash_of(base), hash_of(switched));
     }
 }
