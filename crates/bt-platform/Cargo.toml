@@ -13,9 +13,18 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    # `CreateFileW` and `CreateEventW` both take a `SECURITY_ATTRIBUTES`, which
+    # is what pulls this one in; nothing here ever passes one.
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_DataExchange",
+    # `ReadDirectoryChangesW`'s three companions: the overlapped completion
+    # (`Win32_System_IO`), and the events the watcher thread waits on and the
+    # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
+    "Win32_System_IO",
     "Win32_System_Memory",
+    "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

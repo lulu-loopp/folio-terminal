@@ -19,6 +19,7 @@ mod float;
 mod git;
 mod git_graph;
 mod git_panel;
+mod git_watch;
 mod highlight;
 mod i18n;
 mod input;
@@ -196,6 +197,15 @@ enum AppEvent {
     /// lane where the answer is allowed to be seconds late without anything else
     /// noticing.
     PreviewReady,
+    /// **The kernel says something under a watched repository moved** (R31's
+    /// D, `git_watch`).
+    ///
+    /// Its own wake-up and not a share of [`Self::GitReady`], on that variant's
+    /// own reasoning turned round: this one carries no answer at all. It is the
+    /// loop being nudged to look at a clock, and the clock may well decide the
+    /// news is not ripe yet — so folding it into the answer lane would make a
+    /// notification that changes nothing look like a repository that replied.
+    GitChanged,
     /// Something a repository was asked has been answered.
     ///
     /// The fourth of the same family and separate for the same reason: a `git
@@ -2791,6 +2801,34 @@ enum GitOrigin {
     Graph(PathBuf),
 }
 
+/// **Whether a re-read may join one that is already out** (R31's third moment).
+///
+/// The two automatic triggers and the two buttons want the same three questions
+/// and disagree about exactly one thing, so that one thing is a parameter rather
+/// than a second function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Ask {
+    /// A person pressed a button. It is answered every time it is made — that is
+    /// what "now" means, and a reader who presses refresh twice is entitled to
+    /// two readings.
+    Always,
+    /// Something happened. A burst of them is still one piece of news: while any
+    /// answer is owed, this asks nothing at all. Ten commands pasted into a shell
+    /// end ten times, and thirty subprocesses to learn what the first three were
+    /// already on their way to say is the polling R31 forbids, arriving by
+    /// another door.
+    Settled,
+}
+
+impl Ask {
+    fn begin(self, cache: &mut git::GitCache) -> Vec<git::GitQuestion> {
+        match self {
+            Self::Always => cache.begin_reread(),
+            Self::Settled => cache.begin_reread_unless_owed(),
+        }
+    }
+}
+
 /// The prompt a `…` row turned the menu into (v2 ④).
 #[derive(Clone, Debug)]
 struct GitPromptState {
@@ -3405,6 +3443,28 @@ struct LeafSession {
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
     pending_psreadline_resize_reanchor: bool,
+    /// **The last command this shell was seen to finish** — the newest of its
+    /// marks carrying an `OSC 133;D` (R31's third invalidation moment).
+    ///
+    /// An identity and not a count, and the difference is a real bug avoided:
+    /// the ledger *retires* marks whose lines are deleted
+    /// (`CommandMarkLedger::retire`), so the number of finished marks can fall
+    /// as well as rise, and a counter would then sit above the ledger and go
+    /// deaf for as many commands as had been retired. Ids are monotonic and
+    /// never reused, so "is the newest finished mark newer than the one I last
+    /// saw" survives any amount of retirement — a retired newest simply makes
+    /// the answer *no* until a genuinely new command ends.
+    ///
+    /// Kept beside `output_revision` and for the same reason: every leaf is
+    /// drained on every turn, so this is the one place a shell nobody is watching
+    /// is heard, and the frame path could never answer for it.
+    ///
+    /// A shell with no integration installed — Command Prompt, a PowerShell whose
+    /// profile never loaded ours — emits no markers and leaves this `None`
+    /// forever. That is the honest answer and not a gap to be filled by guessing
+    /// at prompt-shaped lines; what covers those panes is the window-focus
+    /// trigger, the kernel's own change notifications and the masthead's button.
+    last_finished_command: Option<bt_term::CommandMarkId>,
     /// How much this shell has said, counted by [`output_revision`].
     ///
     /// Kept here rather than read off the session because the question is
@@ -3704,6 +3764,14 @@ struct Runtime {
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
+    /// **The repositories the kernel has been asked to report changes in**
+    /// (R31's D).
+    ///
+    /// Not a worker: there is no queue and no answer, only a set of
+    /// subscriptions that follows the set of Git pages on screen and a clock per
+    /// repository. It is on the window rather than on a tab because the set it
+    /// follows is "what is on the glass", which only the window knows.
+    git_watch: git_watch::GitWatch,
     /// The thread that reads directories, and whether it is still there.
     ///
     /// One for the window rather than one per column, exactly as `math_worker`
@@ -12697,6 +12765,7 @@ fn create_leaf_session(
         conpty_grid: grid,
         pending_pty_resize: None,
         pending_psreadline_resize_reanchor: false,
+        last_finished_command: None,
         output_revision: 0,
         last_seen_revision: 0,
         last_presented_frame: None,
@@ -13382,11 +13451,12 @@ fn absorb_tab_into_layout(
 
 /// What one drain turned up, beyond the bytes.
 ///
-/// Three answers rather than a `bool` triple because they drive three different
-/// machines and two of them are easy to confuse: `arrived` is about painting
+/// Separate answers rather than a `bool` tuple because they drive different
+/// machines and some of them are easy to confuse: `arrived` is about painting
 /// cells, `renamed` about relabelling chrome, `moved` about what goes in the
-/// session file. A title moving renames without moving; a `cd` does both.
-#[derive(Clone, Copy, Debug, Default)]
+/// session file, `command_ends` about reading a repository. A title moving
+/// renames without moving; a `cd` does both.
+#[derive(Clone, Debug, Default)]
 struct DrainOutcome {
     /// Bytes reached the screen.
     arrived: bool,
@@ -13404,6 +13474,17 @@ struct DrainOutcome {
     /// The shell reported a different working directory, which is **durable**
     /// state: it is the `cwd` of this leaf in `session.json`.
     moved: bool,
+    /// **Where the shells that just finished a command are standing** (R31's
+    /// third invalidation moment, A).
+    ///
+    /// The folders and not the seats, because the only question asked of them is
+    /// whether any is inside a repository some surface is showing
+    /// ([`git::should_reread`]) — and a shell that has never reported over OSC 7
+    /// has no folder, so it contributes nothing rather than a guess.
+    ///
+    /// A list because a tab is drained leaf by leaf and two shells can finish
+    /// inside one turn of the loop.
+    command_ends: Vec<PathBuf>,
 }
 
 impl DrainOutcome {
@@ -13412,6 +13493,7 @@ impl DrainOutcome {
         self.arrived_off_focus |= other.arrived_off_focus;
         self.renamed |= other.renamed;
         self.moved |= other.moved;
+        self.command_ends.extend(other.command_ends);
     }
 }
 
@@ -13468,8 +13550,30 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
         changed,
         leaf.session.resize_finish_deadline().is_some(),
     );
+    // **A command ending is heard here or nowhere.** The ledger is the shell's
+    // own account of itself (`OSC 133;D`), and this is the one place every leaf's
+    // bytes pass through — so a `git commit` finished in a pane behind a Git page
+    // is noticed whether or not that pane is the focused one.
+    let finished = leaf
+        .session
+        .command_marks()
+        .iter()
+        .rev()
+        .find(|mark| mark.finished.is_some())
+        .map(|mark| mark.id);
+    let ended = finished > leaf.last_finished_command;
+    if ended {
+        leaf.last_finished_command = finished;
+    }
     let name_after = leaf.name_evidence();
     Ok(DrainOutcome {
+        command_ends: leaf
+            .session
+            .working_directory()
+            .filter(|_| ended)
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect(),
         arrived: changed,
         // A leaf cannot know whether it is the one the frame path will compose;
         // that is a fact about the tab, and [`drain_tab_pty`] is where it is
@@ -13505,6 +13609,47 @@ fn columns_wanting_git(
         .iter()
         .filter(|(_, view, root)| *view == seats::FilesView::Git && !root.trim().is_empty())
         .map(|(seat, _, root)| (*seat, root.clone()))
+        .collect()
+}
+
+/// **R31's third invalidation moment, as a list**: which of the git surfaces on
+/// screen are to be read again, and why they are the only candidates.
+///
+/// The master switch and the "is it showing" gate are asked here for
+/// [`columns_wanting_git`]'s reason — they are promises about what is *not* read,
+/// and a promise that can only be checked by starting a window is a promise
+/// nothing checks. What is new is the third fact:
+///
+/// - `standing_in: Some(cwds)` — **a shell finished a command** (OSC 133;D). The
+///   surface is re-read only if one of those shells is standing inside the
+///   repository it is showing ([`git::should_reread`]). A `cargo build` in an
+///   unrelated tree is not news about this one.
+/// - `standing_in: None` — **the window came back**. Every showing surface is
+///   re-read, because what happened while the window was away happened *outside*
+///   this process and left no cwd to compare against. That is exactly the case
+///   the command-end trigger cannot see, and the reason there are two triggers
+///   rather than one.
+///
+/// A surface that is not showing is never in the answer under either reading. A
+/// page nobody has switched to costs what it always cost: no process at all.
+#[must_use]
+fn git_surfaces_wanting_reread(
+    panel_on: bool,
+    surfaces: &[(GitOrigin, PathBuf, bool)],
+    standing_in: Option<&[PathBuf]>,
+) -> Vec<GitOrigin> {
+    if !panel_on {
+        return Vec::new();
+    }
+    surfaces
+        .iter()
+        .filter(|(_, root, showing)| match standing_in {
+            None => *showing,
+            Some(cwds) => cwds
+                .iter()
+                .any(|cwd| git::should_reread(root, Some(cwd), *showing)),
+        })
+        .map(|(origin, _, _)| origin.clone())
         .collect()
 }
 
@@ -14017,6 +14162,7 @@ impl Runtime {
             active_tab,
             next_tab_id: conpty_sources.len() as u64 + 1,
             event_proxy: proxy.clone(),
+            git_watch: git_watch::GitWatch::default(),
             math_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
@@ -15532,20 +15678,6 @@ impl Runtime {
                     if box_[3] <= body[1] || box_[1] >= body[3] {
                         continue;
                     }
-                    if let git_panel::GitRow::Masthead(head) = row {
-                        for (pill, pill_box) in head
-                            .pills
-                            .iter()
-                            .zip(git_panel::pill_boxes(head, box_, git_scale))
-                        {
-                            anchors.push(
-                                tooltip::TooltipAnchorId::GitPill(seat, index),
-                                pill_box,
-                                &pill.tooltip,
-                            );
-                        }
-                        continue;
-                    }
                     // The buttons first, so they win the pixels they are on:
                     // first-match-wins is this list's ordering rule, and a row
                     // registered ahead of the verb inside it would swallow it.
@@ -15561,6 +15693,29 @@ impl Runtime {
                             act_box,
                             act.tooltip(untracked),
                         );
+                    }
+                    // **The masthead's buttons register here too**, which they
+                    // did not until R31's third moment put a second one beside
+                    // the first: this loop used to reach the pills and then
+                    // `continue`, so the door to the graph had been drawn, lit
+                    // and pressable with nothing to say for itself since G24.
+                    // The pills follow the buttons, on the ordering rule above —
+                    // `pill_boxes` already stops where the buttons begin, so the
+                    // two do not overlap and the order is a discipline rather
+                    // than a fix.
+                    if let git_panel::GitRow::Masthead(head) = row {
+                        for (pill, pill_box) in head
+                            .pills
+                            .iter()
+                            .zip(git_panel::pill_boxes(head, box_, git_scale))
+                        {
+                            anchors.push(
+                                tooltip::TooltipAnchorId::GitPill(seat, index),
+                                pill_box,
+                                &pill.tooltip,
+                            );
+                        }
+                        continue;
                     }
                     if let Some(text) = git_panel::row_tooltip(row) {
                         anchors.push(tooltip::TooltipAnchorId::GitRow(seat, index), box_, &text);
@@ -24766,15 +24921,16 @@ impl Runtime {
         let Some(row) = page.rows.get(index) else {
             return Ok(());
         };
-        // **Two of the verbs are about no file at all** and are answered before
-        // a pathspec is gathered, because there is none to gather: one asks the
-        // repository for another page of history, the other puts a document on
-        // the preview seat. Both still go through `press_outcome`, so the
-        // judgement stays in one place even for the two verbs that need nothing
-        // from the row they were pressed on.
+        // **Three of the verbs are about no file at all** and are answered
+        // before a pathspec is gathered, because there is none to gather: one
+        // asks the repository for another page of history, one puts a document on
+        // the preview seat, one re-reads the whole repository. All three still go
+        // through `press_outcome`, so the judgement stays in one place even for
+        // the verbs that need nothing from the row they were pressed on.
         match git_panel::press_outcome(act, false) {
             git_panel::GitPress::MoreCommits => return self.load_more_commits(seat),
             git_panel::GitPress::Graph => return self.open_git_graph(seat),
+            git_panel::GitPress::Reread => return self.refresh_git_column(seat),
             git_panel::GitPress::Write(_) | git_panel::GitPress::Gate => {}
         }
         // Which files this verb is about: one row's, or a whole group's. The
@@ -24825,6 +24981,7 @@ impl Runtime {
             git_panel::GitPress::Write(verb) => self.write_to_repository(seat, verb, paths),
             git_panel::GitPress::MoreCommits => self.load_more_commits(seat),
             git_panel::GitPress::Graph => self.open_git_graph(seat),
+            git_panel::GitPress::Reread => self.refresh_git_column(seat),
         }
     }
 
@@ -29990,39 +30147,190 @@ impl Runtime {
     /// under the lane walker is not a history it can resume, and a refresh is
     /// exactly the moment that may have happened.
     fn refresh_graph(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.active_tab;
-        let Some(root) = self.tabs[active]
+        let Some(root) = self.tabs[self.active_tab]
             .git_graph_view
             .get(&seat)
             .map(|view| view.root.clone())
         else {
             return Ok(());
         };
-        let tab_id = self.tabs[active].id;
-        let Some(state) = self.tabs[active].git_graphs.get_mut(&root) else {
-            return Ok(());
+        self.reread_git_origin(&GitOrigin::Graph(root), Ask::Always);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The docked Git page's own refresh (R31's third moment, the pressed one).
+    ///
+    /// [`Self::refresh_graph`]'s twin down to the line, which is why both are
+    /// four lines around [`Self::reread_git_origin`]: the two surfaces differ in
+    /// how they are addressed and in nothing else that matters here.
+    fn refresh_git_column(&mut self, seat: SeatId) -> Result<()> {
+        self.reread_git_origin(&GitOrigin::Column(seat), Ask::Always);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Ask one surface's three questions again, without taking its page down.**
+    ///
+    /// The one place a re-read is issued, whichever of the four moments asked for
+    /// it. See `GitCache::begin_reread` for why this is not `refresh`: what is on
+    /// screen when a reader presses "check" — or when a command they ran ends — is
+    /// still perfectly true, it may simply have got older, and blanking a history
+    /// to `Reading the repository…` in answer to that is the page punishing them
+    /// for asking.
+    ///
+    /// Answers whether anything was actually asked, which is what [`Ask::Settled`]
+    /// makes a real question: a burst of command-ends finds the first re-read
+    /// still owed and issues nothing.
+    ///
+    /// A graph's lanes go with the answers it is waiting for: a history rewritten
+    /// under the lane walker is not a history it can resume, and any of these
+    /// moments is exactly when that may have happened. They are rebuilt from the
+    /// answer, in `sync`, before anything is drawn from them.
+    fn reread_git_origin(&mut self, origin: &GitOrigin, ask: Ask) -> bool {
+        let host = self.git_host_at(origin);
+        let active = self.active_tab;
+        let questions = match origin {
+            GitOrigin::Column(seat) => match self.tabs[active].git_trees.get_mut(seat) {
+                Some(cache) => ask.begin(cache),
+                None => Vec::new(),
+            },
+            GitOrigin::Graph(root) => match self.tabs[active].git_graphs.get_mut(root) {
+                Some(state) => {
+                    let questions = ask.begin(&mut state.cache);
+                    if !questions.is_empty() {
+                        state.invalidate();
+                    }
+                    questions
+                }
+                None => Vec::new(),
+            },
         };
-        // **The page stays up while it is re-read** (T5) — see
-        // `GitCache::begin_reread` for why this is not `refresh`. What *is*
-        // thrown away is the lane state: a history rewritten under it is not a
-        // history it can resume, and a re-read is exactly the moment that may
-        // have happened. It is rebuilt from the answer, in `sync`, before
-        // anything is drawn from it.
-        let questions = state.cache.begin_reread();
-        state.invalidate();
+        if questions.is_empty() {
+            return false;
+        }
         for question in questions {
             if !self.git_worker.request(git::GitRequest {
-                host: git::GitHost::Graph {
-                    tab: tab_id,
-                    root: root.clone(),
-                },
+                host: host.clone(),
                 question,
             }) {
                 self.disable_git_worker();
                 break;
             }
         }
-        if self.refresh_chrome() {
+        true
+    }
+
+    /// **Every git surface on screen, and whether it is on screen** (R31).
+    ///
+    /// The `showing` flag is carried rather than filtered out here so that
+    /// [`git_surfaces_wanting_reread`] — the free function that can be tested
+    /// without a window — is the thing that drops the ones nobody is looking at.
+    /// A column that is on its Files page is in this list, with `false`, and that
+    /// is the fact the pin is about.
+    fn git_surfaces_on_screen(&self) -> Vec<(GitOrigin, PathBuf, bool)> {
+        let active = self.active_tab;
+        let mut surfaces: Vec<(GitOrigin, PathBuf, bool)> = self.tabs[active]
+            .files
+            .iter()
+            .filter_map(|(seat, state)| {
+                let root = self.tabs[active].git_trees.get(seat)?.root()?.to_path_buf();
+                Some((
+                    GitOrigin::Column(*seat),
+                    root,
+                    // **Drawn, not merely turned to.** `git_pages_shown` is the
+                    // frame's own record of which columns put a Git page on the
+                    // glass; a seat that is collapsed or not laid out is not a
+                    // surface looking at a repository, however its `view` is set.
+                    state.view == seats::FilesView::Git && self.git_pages_shown.contains_key(seat),
+                ))
+            })
+            .collect();
+        // A graph is addressed by its root, so two seats showing one repository
+        // are one surface — and the second would find the first's re-read already
+        // owed in any case.
+        let mut graphs: Vec<PathBuf> = Vec::new();
+        for (seat, view) in &self.tabs[active].git_graph_view {
+            if !self.git_graphs_shown.contains_key(seat)
+                || !self.tabs[active].git_graphs.contains_key(&view.root)
+                || graphs.contains(&view.root)
+            {
+                continue;
+            }
+            graphs.push(view.root.clone());
+            surfaces.push((GitOrigin::Graph(view.root.clone()), view.root.clone(), true));
+        }
+        surfaces
+    }
+
+    /// **Keep the kernel's subscriptions level with what is on screen, and act
+    /// on anything it has said** (R31's D).
+    ///
+    /// Both halves in one step because they are one question asked at one
+    /// moment: which repositories is this window looking at, and which of those
+    /// have news that has ripened. The set is derived from
+    /// [`Self::git_surfaces_on_screen`] and the master switch — the same two
+    /// conditions the first reading is gated on — so a page that is left, a tab
+    /// that is switched away from and a switch that is turned off all drop their
+    /// handles here, by the set no longer containing them.
+    ///
+    /// **A subscription costs nothing while nothing happens.** No timer is armed
+    /// unless a notification has already arrived, which is why this can be called
+    /// on every turn of the loop beside every other clock in this window without
+    /// being the polling R31 forbids.
+    fn advance_git_watch(&mut self, now: Instant) -> Result<()> {
+        // Asked on every turn of the loop, so the switch is read before the list
+        // is built rather than used to filter one: with the panel off there is
+        // nothing to enumerate and `sync` is handed an empty set, which drops
+        // every handle and then costs nothing on every turn after that.
+        let on_screen = if self.git_panel_on() {
+            self.git_surfaces_on_screen()
+        } else {
+            Vec::new()
+        };
+        let wanted: std::collections::BTreeSet<PathBuf> = on_screen
+            .iter()
+            .filter(|(_, _, showing)| *showing)
+            .map(|(_, root, _)| root.clone())
+            .collect();
+        self.git_watch.sync(&wanted, &self.event_proxy);
+        let due = self.git_watch.due(now);
+        if due.is_empty() {
+            return Ok(());
+        }
+        // Every surface showing one of those repositories, which is not the same
+        // list as the roots: two columns and a graph can be looking at one
+        // repository, and all three are about to be out of date together.
+        let mut asked = false;
+        for (origin, root, showing) in &on_screen {
+            if *showing && due.contains(root) {
+                asked |= self.reread_git_origin(origin, Ask::Settled);
+            }
+        }
+        if asked && self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **R31's third invalidation moment, carried out**: read every surface that
+    /// this thing the user did could have changed.
+    ///
+    /// `standing_in` is the whole of the difference between the two automatic
+    /// triggers — see [`git_surfaces_wanting_reread`]. Both go through
+    /// [`Ask::Settled`]: neither is a gesture at this page, so neither may stack.
+    fn reread_git_surfaces(&mut self, standing_in: Option<&[PathBuf]>) -> Result<()> {
+        let surfaces = self.git_surfaces_on_screen();
+        let wanted = git_surfaces_wanting_reread(self.git_panel_on(), &surfaces, standing_in);
+        let mut asked = false;
+        for origin in wanted {
+            asked |= self.reread_git_origin(&origin, Ask::Settled);
+        }
+        if asked && self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -32760,11 +33068,17 @@ impl Runtime {
         let mut active_changed_off_focus = false;
         let mut chrome_changed = false;
         let mut moved = false;
+        let mut command_ends: Vec<PathBuf> = Vec::new();
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let outcome = drain_tab_pty(tab)?;
             if index == self.active_tab {
                 active_changed = outcome.arrived;
                 active_changed_off_focus = outcome.arrived_off_focus;
+                // **Only the tab on screen** (R31): a Git page in a tab nobody is
+                // looking at is not a surface looking at a repository, and the
+                // first frame after that tab is switched to asks its own
+                // questions anyway.
+                command_ends = outcome.command_ends;
             }
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
@@ -32790,6 +33104,14 @@ impl Runtime {
         // window is one to two seconds, so a burst of `cd`s still writes once.
         if moved {
             self.mark_session_dirty(Instant::now());
+        }
+        // **R31's third invalidation moment, A: a command finished.** A shell
+        // standing inside a repository this tab is showing has just done
+        // something, and asking git is the only way to find out what — no
+        // watcher, no timer, and nothing at all for a command that ended
+        // somewhere else. See [`git_surfaces_wanting_reread`].
+        if !command_ends.is_empty() {
+            self.reread_git_surfaces(Some(&command_ends))?;
         }
         if chrome_changed {
             self.window.set_title(&self.display_title());
@@ -40250,6 +40572,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     self.fail(event_loop, error);
                 }
             }
+            // Nothing is done here. The news has already been stamped into the
+            // watcher's own mailbox by the thread that heard it; this only
+            // brings the loop round to `about_to_wait`, where every clock in
+            // this window is read and where the debounce can either fire or ask
+            // for a later wake-up.
+            AppEvent::GitChanged => {}
         }
     }
 
@@ -40340,10 +40668,33 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 })
             }
             WindowEvent::Focused(true) => {
+                // **R31's third invalidation moment, B: the window came back.**
+                // Whatever happened while it was away happened in another process
+                // — an editor saving, a `git` run in another terminal, a
+                // checkout by a build script — and left no cwd and no marker for
+                // this window to have noticed. Coming back is the moment a reader
+                // looks at the page again, so it is the moment the page is
+                // entitled to be true; it is a gesture at the window and not a
+                // timer, which is the whole of what R31 forbids.
+                //
+                // On the transition and not on the event: this is asked before
+                // `set_cursor_focus`, which is where `window_focused` is written,
+                // so a platform that re-announced a focus this window already had
+                // would not spend a `git status` on it. No debounce beyond that —
+                // there is no observed flap to debounce, and a timer put in
+                // against one would be exactly the machine this rule is about.
+                let regained = !runtime.window_focused;
                 runtime.set_cursor_focus(true, Instant::now());
-                runtime.publish_frame(FrameTrigger {
-                    occurred_at: Instant::now(),
-                    source: FrameSource::Expose,
+                let reread = if regained {
+                    runtime.reread_git_surfaces(None)
+                } else {
+                    Ok(())
+                };
+                reread.and_then(|()| {
+                    runtime.publish_frame(FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    })
                 })
             }
             WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
@@ -40412,6 +40763,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             return;
         }
         if let Err(error) = runtime.finish_synchronized_update_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        // The watcher's own clock (R31's D), beside the rest of this window's:
+        // it asks for a wake-up only while it is holding news, and the
+        // subscriptions it keeps level with the screen are dropped here the turn
+        // after the page they were for went away.
+        if let Err(error) = runtime.advance_git_watch(now) {
             self.fail(event_loop, error);
             return;
         }
@@ -40633,6 +40992,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 .preview_raster_image()
                 .and_then(|preview| preview.resize_scale_deadline),
             runtime.session_store.deadline(),
+            // The debounce a change notification started (R31's D). Absent —
+            // and therefore costing nothing — for every window that is not
+            // currently holding unanswered news about a repository, which is
+            // every window most of the time.
+            runtime.git_watch.deadline(),
         ]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
@@ -59768,6 +60132,7 @@ mod tests {
             projection,
             grid,
             conpty_grid: grid,
+            last_finished_command: None,
             pending_pty_resize: None,
             pending_psreadline_resize_reanchor: false,
             output_revision: 0,
@@ -61975,6 +62340,74 @@ mod tests {
         assert_eq!(
             columns_wanting_git(true, &[(column, seats::FilesView::Git, "   ".to_owned())]),
             Vec::new()
+        );
+    }
+
+    /// PIN (R31's third invalidation moment) — **the two automatic triggers read
+    /// only what somebody is looking at, and the command one reads only the
+    /// repository the command was run in.**
+    ///
+    /// The showing gate is the same one the first reading keeps
+    /// ([`columns_wanting_git`]) and it is kept a second time here on purpose: a
+    /// file changing is not on its own a reason to spend a subprocess. What is
+    /// new is the asymmetry between the two triggers, and it is the whole reason
+    /// there are two — a command end carries a folder to compare against, and a
+    /// window coming back does not, because what happened while it was away
+    /// happened in another process.
+    #[test]
+    fn a_command_and_a_focus_re_read_only_the_repositories_on_screen() {
+        let page = SeatId(1);
+        let tree = SeatId(2);
+        let repo = PathBuf::from(r"D:\repo");
+        let other = PathBuf::from(r"D:\other");
+        let graph = PathBuf::from(r"D:\repo");
+        let surfaces = vec![
+            (GitOrigin::Column(page), repo.clone(), true),
+            // Same tab, same window, on its Files page: available, not showing.
+            (GitOrigin::Column(tree), other.clone(), false),
+            (GitOrigin::Graph(graph.clone()), graph.clone(), true),
+        ];
+
+        assert_eq!(
+            git_surfaces_wanting_reread(false, &surfaces, None),
+            Vec::new(),
+            "with the master switch off nothing is read, however many pages are up"
+        );
+
+        // B: the window came back. Every showing surface, and nothing else.
+        assert_eq!(
+            git_surfaces_wanting_reread(true, &surfaces, None),
+            vec![GitOrigin::Column(page), GitOrigin::Graph(graph.clone())],
+            "a column on its tree is not a surface looking at a repository"
+        );
+
+        // A: a command ended in a pane standing in the repository the page shows.
+        assert_eq!(
+            git_surfaces_wanting_reread(
+                true,
+                &surfaces,
+                Some(&[PathBuf::from(r"D:\repo\crates\bt-app")])
+            ),
+            vec![GitOrigin::Column(page), GitOrigin::Graph(graph)],
+            "a subdirectory of the root is inside the root"
+        );
+        assert_eq!(
+            git_surfaces_wanting_reread(true, &surfaces, Some(std::slice::from_ref(&other))),
+            Vec::new(),
+            "a command that ended in the folder the *hidden* page is rooted at \
+             reads nothing: that page is not showing, and the one that is shows \
+             another repository"
+        );
+        assert_eq!(
+            git_surfaces_wanting_reread(true, &surfaces, Some(&[PathBuf::from(r"D:\repository")])),
+            Vec::new(),
+            "and the folder next door whose name merely starts the same way is \
+             not inside it"
+        );
+        assert_eq!(
+            git_surfaces_wanting_reread(true, &surfaces, Some(&[])),
+            Vec::new(),
+            "no shell finished anywhere: nothing to re-read"
         );
     }
 
