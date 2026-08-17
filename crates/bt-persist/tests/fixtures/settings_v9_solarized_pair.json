@@ -1,0 +1,15 @@
+{
+  "theme_mode": "System",
+  "display_formulas": true,
+  "inline_formulas": false,
+  "default_profile": "wsl",
+  "git_panel": false,
+  "split_direction": "Right",
+  "language": "English",
+  "terminal_font_family": "MS Gothic",
+  "terminal_font_size": 14,
+  "psreadline_invite": "Declined",
+  "light_scheme": "Solarized Light",
+  "dark_scheme": "Solarized Dark",
+  "schema_version": 9
+}

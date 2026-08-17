@@ -43,6 +43,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (5, migrate_settings_v5_to_v6),
     (6, migrate_settings_v6_to_v7),
     (7, migrate_settings_v7_to_v8),
+    (8, migrate_settings_v8_to_v9),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -171,6 +172,38 @@ fn migrate_settings_v7_to_v8(mut value: Value) -> Value {
         object.insert("terminal_font_family".to_owned(), Value::from(""));
         object.insert("terminal_font_size".to_owned(), Value::from(16));
         object.insert("psreadline_invite".to_owned(), Value::from("NotAsked"));
+    }
+    value
+}
+
+/// v8 -> v9: which colour scheme is painted on each side of the theme, both
+/// left **unnamed**.
+///
+/// `v3_to_v4`'s answer for the third time, and the third table it applies to:
+/// a shell, then a face, now a palette. A v8 build painted one light palette
+/// and one dark one because those were the only two it had, not because anyone
+/// chose them, and writing this build's two default names here would look
+/// identical on the machine the migration runs on while pinning a decision its
+/// owner never made — indistinguishable, ever after, from a user who opened the
+/// list and picked those two out of it. The day the built-in palette is renamed
+/// or improved, a migrated file would still be asking for the old name and the
+/// user would never see the new one.
+///
+/// Two keys in one step for [`crate::SETTINGS_SCHEMA_VERSION`]'s reason: the
+/// two are one decision's two halves. Filling in one side and leaving the other
+/// absent would leave a hole for the reader to guess at — and it is a hole the
+/// user would fall into on the first day their Windows flipped the other way.
+fn migrate_settings_v8_to_v9(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(9));
+        object.insert(
+            "light_scheme".to_owned(),
+            Value::from(crate::settings::DEFAULT_LIGHT_SCHEME),
+        );
+        object.insert(
+            "dark_scheme".to_owned(),
+            Value::from(crate::settings::DEFAULT_DARK_SCHEME),
+        );
     }
     value
 }
@@ -742,6 +775,56 @@ mod tests {
         assert_eq!(migrated["git_panel"], json!(false));
         assert_eq!(migrated["split_direction"], json!("Down"));
         assert_eq!(migrated["language"], json!("Chinese"));
+    }
+
+    /// PIN — v8 -> v9 writes two empty strings and leaves every sibling exactly
+    /// as it found it (rule 3, "迁移函数只做结构升级").
+    ///
+    /// The fixture is non-default in all ten older fields, the three v8 keys
+    /// deliberately among them: they are the siblings added one version ago and
+    /// therefore the ones a copy-paste of the step above would most plausibly
+    /// reset while inserting its own pair.
+    ///
+    /// `""` twice, and not this build's two default palette names, is the
+    /// assertion with teeth — `v7_to_v8`'s `""` for the family, reappearing. A
+    /// step that wrote the names it happens to ship with would pass on the
+    /// machine it ran on and pin a choice its owner never made into every file
+    /// on disk. That *both* are empty is the second half: filling in one side
+    /// only would leave the other for the reader to guess.
+    #[test]
+    fn real_settings_v8_to_v9_migration_adds_two_unnamed_schemes() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 8,
+                "theme_mode": "Light",
+                "display_formulas": false,
+                "inline_formulas": true,
+                "default_profile": "gitbash",
+                "git_panel": false,
+                "split_direction": "Down",
+                "language": "Chinese",
+                "terminal_font_family": "Cascadia Mono",
+                "terminal_font_size": 20,
+                "psreadline_invite": "Installed"
+            }),
+            8,
+            9,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(9));
+        assert_eq!(migrated["light_scheme"], json!(""));
+        assert_eq!(migrated["dark_scheme"], json!(""));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(migrated["inline_formulas"], json!(true));
+        assert_eq!(migrated["default_profile"], json!("gitbash"));
+        assert_eq!(migrated["git_panel"], json!(false));
+        assert_eq!(migrated["split_direction"], json!("Down"));
+        assert_eq!(migrated["language"], json!("Chinese"));
+        assert_eq!(migrated["terminal_font_family"], json!("Cascadia Mono"));
+        assert_eq!(migrated["terminal_font_size"], json!(20));
+        assert_eq!(migrated["psreadline_invite"], json!("Installed"));
     }
 
     #[test]

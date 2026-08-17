@@ -2,6 +2,7 @@
 
 mod procedural;
 mod rounded_rect;
+mod scheme;
 mod theme;
 
 use std::{
@@ -37,6 +38,7 @@ use wgpu::util::DeviceExt;
 use rounded_rect::{
     rounded_rect_coverage, rounded_rect_halo_coverage, rounded_rect_shadow_coverage,
 };
+pub use scheme::{ColourScheme, FOLIO_DARK, FOLIO_LIGHT, selection_from_accent};
 pub use theme::{
     CURSOR_BAR_WIDTH_LOGICAL_PX, ChromePalette, CursorStyle, DARK_CHROME, DEFAULT_BACKGROUND_RGB,
     DOCK_DASH_RATIO, DOCK_PREVIEW_BORDER_LOGICAL_PX, DOCK_PREVIEW_FILL_ALPHA,
@@ -106,6 +108,7 @@ use theme::{
     DEFAULT_STATUS_BACKGROUND_RGB, search_current_ink_rgb, search_current_rgb, search_match_rgb,
     selection_background_rgb,
 };
+pub use theme::{background_is_light, ink_over_bp, set_schemes};
 
 /// `mark.srch { border-radius: 3px }` (mock-up 1530) — the corner a found word
 /// wears, and the one thing that tells it apart from a dragged selection at a

@@ -447,6 +447,42 @@ pub fn family_index(name: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// The names one scheme picker draws, in its own order, as `&'static str`.
+///
+/// Two `OnceLock`s and not one list filtered per call, for
+/// [`monospace_families`]'s reason taken one step further: `option_label`
+/// returns `&'static str`, and the *order* has to be stable across the measure
+/// pass, the hit test and the draw within one frame. The catalogue behind them
+/// is itself read once per process — see `crate::schemes::catalogue` — so these
+/// are two views of one enumeration rather than two enumerations.
+#[must_use]
+pub fn scheme_labels(light: bool) -> &'static [&'static str] {
+    static LIGHT: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    static DARK: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let slot = if light { &LIGHT } else { &DARK };
+    slot.get_or_init(|| crate::schemes::catalogue().names_for(light).collect())
+}
+
+/// Which row of a scheme picker a stored name is.
+///
+/// A name this build does not hold — a file deleted, or one a newer build
+/// bundled — resolves to the default's row, which is
+/// `crate::schemes::Catalogue::resolve`'s answer asked as an index: the tick and
+/// the colours on screen are one resolution, not two that agree most of the
+/// time.
+#[must_use]
+pub fn scheme_index(name: &str, light: bool) -> usize {
+    let labels = scheme_labels(light);
+    labels
+        .iter()
+        .position(|label| *label == name)
+        .or_else(|| {
+            let fallback = crate::schemes::catalogue().default_name(light);
+            labels.iter().position(|label| *label == fallback)
+        })
+        .unwrap_or(0)
+}
+
 /// Which row of the size picker a stored size is, or the default's row for a
 /// size this build's list does not offer.
 ///
@@ -685,6 +721,25 @@ impl SettingsCategory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsRow {
     Theme,
+    /// **The palette a Light window wears** (§7.1.6c-4a), and its dark twin
+    /// below.
+    ///
+    /// Directly under `Theme` because the three are one decision read in
+    /// sequence: `Theme` says *which* canvas, and these two say what that canvas
+    /// looks like. A scheme never overrules the mode — a window on `Dark` stays
+    /// dark whatever is chosen here — which is exactly why the two rows exist
+    /// instead of one: the pair a user is not currently looking at has to be
+    /// settable too, or switching the theme would mean coming back here.
+    ///
+    /// **Each row lists only the schemes whose canvas is its own.** That is not
+    /// tidiness: the chrome picks its palette from the luma of the background
+    /// actually painted, so a dark scheme in this row would paint a dark canvas
+    /// and then be dressed in the *other* row's chrome. See
+    /// `crate::schemes::Catalogue::names_for`.
+    LightScheme,
+    /// The palette a Dark window wears. Its description is where the pair says
+    /// once where a user's own scheme files go.
+    DarkScheme,
     Cursor,
     TabLayout,
     Sidebar,
@@ -803,6 +858,8 @@ impl SettingsRow {
     pub fn category(self) -> SettingsCategory {
         match self {
             Self::Theme
+            | Self::LightScheme
+            | Self::DarkScheme
             | Self::Cursor
             | Self::TabLayout
             | Self::Sidebar
@@ -847,6 +904,8 @@ impl SettingsRow {
             Self::Language => Text::RowLanguage.text(),
             Self::TerminalFont => Text::RowTerminalFont.text(),
             Self::FontSize => Text::RowFontSize.text(),
+            Self::LightScheme => Text::RowLightScheme.text(),
+            Self::DarkScheme => Text::RowDarkScheme.text(),
             Self::PsReadLine => Text::RowPsReadLine.text(),
         }
     }
@@ -919,6 +978,9 @@ impl SettingsRow {
             // own face.
             Self::TerminalFont => Text::DescTerminalFont.text(),
             Self::FontSize => Text::DescFontSize.text(),
+            // The folder is named on the dark half alone — see the two strings.
+            Self::LightScheme => Text::DescLightScheme.text(),
+            Self::DarkScheme => Text::DescDarkScheme.text(),
             // The one description in the dialog that reports a fact about the
             // machine rather than about the setting: which PSReadLine is
             // installed, and what that costs today. It is also where the reason
@@ -938,6 +1000,8 @@ impl SettingsRow {
             }
             Self::TerminalFont => monospace_families().len(),
             Self::FontSize => FONT_SIZE_OPTIONS.len(),
+            Self::LightScheme => scheme_labels(true).len(),
+            Self::DarkScheme => scheme_labels(false).len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
@@ -972,6 +1036,11 @@ impl SettingsRow {
                 .get(index)
                 .map(|family| family.name.as_str()),
             Self::FontSize => FONT_SIZE_LABELS.get(index).copied(),
+            // The same `OnceLock` answer the family picker gives, for the same
+            // reason: a scheme's name is a runtime string and this signature is
+            // `&'static str`. See [`scheme_labels`].
+            Self::LightScheme => scheme_labels(true).get(index).copied(),
+            Self::DarkScheme => scheme_labels(false).get(index).copied(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
@@ -1063,6 +1132,8 @@ impl SettingsRow {
                 .position(|it| *it == values.language),
             Self::TerminalFont => Some(values.terminal_font),
             Self::FontSize => Some(values.font_size),
+            Self::LightScheme => Some(values.light_scheme),
+            Self::DarkScheme => Some(values.dark_scheme),
             // The *state of the machine*, not a stored preference: what the row
             // shows ticked is whether the module is on disk, which is what a
             // reader is actually asking. `settings.json`'s own field records
@@ -1099,6 +1170,8 @@ impl SettingsRow {
 pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     let mut rows = vec![
         SettingsRow::Theme,
+        SettingsRow::LightScheme,
+        SettingsRow::DarkScheme,
         SettingsRow::Cursor,
         SettingsRow::TabLayout,
     ];
@@ -1231,6 +1304,17 @@ pub struct SettingsValues {
     /// reason — a size this build's list does not offer resolves to the default
     /// rather than leaving the combo blank.
     pub font_size: usize,
+    /// Which row of the light scheme picker is ticked — an index into
+    /// [`scheme_labels(true)`](scheme_labels), never the stored name.
+    ///
+    /// [`SettingsValues::terminal_font`]'s ruling a third time: a scheme whose
+    /// file has been deleted since it was chosen ticks the scheme the window is
+    /// actually drawn in, which is Folio's own. The stored name is left alone by
+    /// that resolution, so moving a file out of the folder and back does not
+    /// consume the choice.
+    pub light_scheme: usize,
+    /// The same for the dark picker.
+    pub dark_scheme: usize,
     /// What the PSReadLine row is describing, reconciled from the out-of-band
     /// probe and the module actually on disk.
     pub psreadline: crate::psreadline::RowState,
@@ -1270,6 +1354,8 @@ impl SettingsValues {
             default_profile: profiles::FALLBACK_PROFILE,
             terminal_font: 0,
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
+            light_scheme: scheme_index(bt_persist::DEFAULT_LIGHT_SCHEME, true),
+            dark_scheme: scheme_index(bt_persist::DEFAULT_DARK_SCHEME, false),
             psreadline: crate::psreadline::RowState::Outdated,
             psreadline_install_available: true,
             psreadline_remove_available: false,
@@ -2494,6 +2580,29 @@ pub fn font_size_requested(target: SettingsTarget) -> Option<u8> {
     match target {
         SettingsTarget::Choice(SettingsRow::FontSize, index) => {
             FONT_SIZE_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The light canvas's palette, as a press on its picker — the scheme's **name**,
+/// which is what `settings.json` stores and what the catalogue resolves.
+#[must_use]
+pub fn light_scheme_requested(target: SettingsTarget) -> Option<&'static str> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::LightScheme, index) => {
+            scheme_labels(true).get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The dark canvas's, on the same terms.
+#[must_use]
+pub fn dark_scheme_requested(target: SettingsTarget) -> Option<&'static str> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::DarkScheme, index) => {
+            scheme_labels(false).get(index).copied()
         }
         _ => None,
     }
@@ -4403,8 +4512,8 @@ mod tests {
         assert_eq!(height(cursor.combo), height(theme.combo));
         assert_eq!(
             cursor.combo[1] - theme.combo[1],
-            ROW_HEIGHT,
-            "Cursor is the next identical row under Theme"
+            3.0 * ROW_HEIGHT,
+            "Cursor is three identical rows under Theme — the two scheme rows sit between them"
         );
     }
 
@@ -4641,8 +4750,12 @@ mod tests {
         let cursor = combo_of(&placed, SettingsRow::Cursor);
         assert_eq!(width(cursor), width(theme));
         assert_eq!(height(cursor), height(theme));
+        // Measured against the row immediately above it rather than against
+        // Theme: the two scheme rows moved in between (§7.1.6c-4a), and what
+        // this pins is the stacking step, not which row happens to be second.
+        let above = combo_of(&placed, SettingsRow::DarkScheme);
         assert_eq!(
-            cursor[1] - theme[1],
+            cursor[1] - above[1],
             ROW_HEIGHT,
             "the rows stack exactly one row height apart"
         );
@@ -5547,8 +5660,8 @@ mod tests {
     fn a_press_inside_an_open_picker_never_reaches_the_row_beneath_it() {
         let placed = open(1.0, true);
         let menu = placed.menu.expect("the picker is open");
-        let covered = clipped(combo_of(&placed, SettingsRow::Cursor), menu)
-            .expect("the Theme picker hangs over the Cursor row's control");
+        let covered = clipped(combo_of(&placed, SettingsRow::LightScheme), menu)
+            .expect("the Theme picker hangs over the Light scheme row's control");
         let mut swept = 0;
         let mut y = covered[1] + 0.5;
         while y < covered[3] {
@@ -6510,6 +6623,85 @@ mod tests {
         }
     }
 
+    /// PIN (§7.1.6c-4a) — the two scheme rows are on Appearance, directly under
+    /// Theme, and each offers only the schemes its own canvas can wear.
+    ///
+    /// The filtering is the load-bearing half: a dark scheme reachable from the
+    /// Light row would paint a dark canvas and then be dressed in the *other*
+    /// row's chrome, because the chrome picks its palette from the luma of the
+    /// background actually painted. See `crate::schemes::Catalogue::names_for`.
+    #[test]
+    fn the_two_scheme_rows_sit_under_theme_and_each_offers_only_its_own_canvas() {
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let theme = rows
+            .iter()
+            .position(|row| *row == SettingsRow::Theme)
+            .expect("Theme is in the dialog");
+        assert_eq!(rows[theme + 1], SettingsRow::LightScheme);
+        assert_eq!(rows[theme + 2], SettingsRow::DarkScheme);
+        for row in [SettingsRow::LightScheme, SettingsRow::DarkScheme] {
+            assert_eq!(row.category(), SettingsCategory::Appearance);
+            assert!(row.option_count() > 0, "{row:?} offers something");
+            assert_eq!(
+                row.option_labels().count(),
+                row.option_count(),
+                "{row:?}: every item the picker counts is an item it can draw"
+            );
+        }
+        let light: Vec<&str> = SettingsRow::LightScheme.option_labels().collect();
+        let dark: Vec<&str> = SettingsRow::DarkScheme.option_labels().collect();
+        assert!(light.contains(&"Folio Light"));
+        assert!(dark.contains(&"Folio Dark"));
+        assert!(dark.contains(&"Solarized Dark"));
+        for name in &light {
+            assert!(
+                !dark.contains(name),
+                "{name} cannot be offered by both rows"
+            );
+        }
+    }
+
+    /// PIN — a stored name this build does not hold ticks the scheme the window
+    /// is actually drawn in, and the two rows never answer each other's press.
+    #[test]
+    fn a_missing_scheme_ticks_the_default_and_a_press_answers_one_row_only() {
+        let default_light = scheme_index(bt_persist::DEFAULT_LIGHT_SCHEME, true);
+        assert_eq!(scheme_index("A Scheme Nobody Wrote", true), default_light);
+        assert_eq!(
+            scheme_labels(true)[default_light],
+            crate::schemes::FOLIO_LIGHT_NAME
+        );
+        let default_dark = scheme_index("Solarized Light", false);
+        assert_eq!(
+            scheme_labels(false)[default_dark],
+            crate::schemes::FOLIO_DARK_NAME,
+            "a light name asked for by the dark row is as gone as one nobody wrote"
+        );
+
+        let light = SettingsTarget::Choice(SettingsRow::LightScheme, 0);
+        let dark = SettingsTarget::Choice(SettingsRow::DarkScheme, 0);
+        assert_eq!(light_scheme_requested(light), Some("Folio Light"));
+        assert_eq!(light_scheme_requested(dark), None);
+        assert_eq!(dark_scheme_requested(dark), Some("Folio Dark"));
+        assert_eq!(dark_scheme_requested(light), None);
+        for target in [
+            SettingsTarget::Combo(SettingsRow::LightScheme),
+            SettingsTarget::Menu(SettingsRow::DarkScheme),
+            SettingsTarget::Choice(SettingsRow::Theme, 0),
+        ] {
+            assert_eq!(light_scheme_requested(target), None);
+            assert_eq!(dark_scheme_requested(target), None);
+        }
+        assert_eq!(
+            light_scheme_requested(SettingsTarget::Choice(
+                SettingsRow::LightScheme,
+                SettingsRow::LightScheme.option_count()
+            )),
+            None,
+            "past the end of the list is not a scheme"
+        );
+    }
+
     /// PIN (Q191, mock-up 5644): `$("row-railmode").style.display =
     /// state.layoutMode === "vertical" ? "" : "none"` — Sidebar is a dependent
     /// of Tab layout and is not in the dialog at all while the tabs run across
@@ -6520,6 +6712,8 @@ mod tests {
             visible_rows(TabLayoutMode::Horizontal),
             [
                 SettingsRow::Theme,
+                SettingsRow::LightScheme,
+                SettingsRow::DarkScheme,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::SplitDirection,
@@ -6537,6 +6731,8 @@ mod tests {
             visible_rows(TabLayoutMode::Vertical),
             [
                 SettingsRow::Theme,
+                SettingsRow::LightScheme,
+                SettingsRow::DarkScheme,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::Sidebar,
@@ -7145,7 +7341,7 @@ mod tests {
         assert_eq!(tabbed.menu(), None);
         assert_eq!(
             tabbed.focus(),
-            Some(SettingsTarget::Combo(SettingsRow::Cursor))
+            Some(SettingsTarget::Combo(SettingsRow::LightScheme))
         );
     }
 

@@ -1,0 +1,13 @@
+{
+  "theme_mode": "Light",
+  "display_formulas": false,
+  "inline_formulas": true,
+  "default_profile": "gitbash",
+  "git_panel": false,
+  "split_direction": "Down",
+  "language": "Chinese",
+  "terminal_font_family": "Cascadia Mono",
+  "terminal_font_size": 20,
+  "psreadline_invite": "Installed",
+  "schema_version": 8
+}

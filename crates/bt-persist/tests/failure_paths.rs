@@ -56,10 +56,17 @@ fn settings_from_a_future_schema_version_refuses_and_does_not_partially_parse() 
     let dir = unique_dir("settings-future");
     let path = dir.join("settings.json");
     // A hypothetical future settings.json with a field this build has never
-    // heard of, at a schema_version this build cannot understand.
+    // heard of, at a schema_version this build cannot understand. The version is
+    // written from `SETTINGS_SCHEMA_VERSION + 1` rather than as a literal,
+    // because a literal stops being a future version the day the schema reaches
+    // it — and it then fails as a *parse* error over a missing field, which is
+    // the one outcome this test exists to prove does not happen.
     std::fs::write(
         &path,
-        r##"{"schema_version": 9, "theme_mode": "Dark", "accent_color": "#ff00ff"}"##,
+        format!(
+            r##"{{"schema_version": {}, "theme_mode": "Dark", "accent_color": "#ff00ff"}}"##,
+            SETTINGS_SCHEMA_VERSION + 1
+        ),
     )
     .unwrap();
 

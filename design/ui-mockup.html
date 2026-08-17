@@ -2733,6 +2733,77 @@
             </div>
           </div>
         </div>
+
+        <!-- COLOUR SCHEMES (§7.1.6c-4a, 2026-08-17).
+
+             Two rows directly under Theme, because the three are one decision
+             read in sequence: Theme says WHICH canvas, and these two say what
+             that canvas looks like. A scheme never overrules the mode — a window
+             on Dark stays dark whatever is chosen here — which is exactly why
+             there are two rows and not one: the half you are not currently
+             looking at has to be settable too, or switching the theme means
+             coming back here.
+
+             A scheme is twenty-one colours: the ANSI sixteen, plus background,
+             foreground, cursor, selection and accent. The window's own ~139
+             chrome colours are DERIVED from those, never stored — which is the
+             difference between a colour scheme and a skin. Nobody has to name a
+             divider, and no scheme can produce a window whose tab strip
+             disagrees with its terminal. The proof is a test: deriving from
+             Folio Dark reproduces the struck dark palette byte for byte, and
+             the same for light.
+
+             The file format is Windows Terminal's scheme JSON unchanged, so a
+             scheme copied off windowsterminalthemes.dev pastes in as it stands;
+             Folio adds one optional key, `accent`, defaulting to the scheme's
+             `blue`. Ten travel inside the executable and every *.json in
+             %APPDATA%\Folio\schemes joins them at startup, through the very same
+             parser. A file that will not parse is skipped and says which file
+             and why, once, in an error toast — never a crash, and never silence.
+
+             EACH ROW LISTS ONLY THE SCHEMES WHOSE CANVAS IS ITS OWN, and that is
+             correctness rather than tidiness: the chrome picks its palette from
+             the luma of the background actually painted, so a dark scheme in the
+             Light row would paint a dark canvas and then be dressed in the other
+             row's chrome. Filtering makes that state unreachable.
+
+             The folder is named once, on the dark row, because the pair is read
+             together and a path printed twice reads as two paths — and it is
+             named in a sentence short enough to fit the row, because a
+             description that ellipsises away the path names nothing. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Light scheme</div>
+            <div class="desc">The colours a Light window is drawn in, terminal and chrome alike</div>
+          </div>
+          <div class="combo" data-combo="lightscheme">
+            <button aria-haspopup="listbox"><span class="value">Folio Light</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="folio-light" role="option"><span class="tick">✓</span>Folio Light</div>
+              <div class="combo-item" data-v="gruvbox-light" role="option"><span class="tick">✓</span>Gruvbox Light</div>
+              <div class="combo-item" data-v="one-half-light" role="option"><span class="tick">✓</span>One Half Light</div>
+              <div class="combo-item" data-v="solarized-light" role="option"><span class="tick">✓</span>Solarized Light</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Dark scheme</div>
+            <div class="desc">The same for a Dark window. Files: %APPDATA%\Folio\schemes</div>
+          </div>
+          <div class="combo" data-combo="darkscheme">
+            <button aria-haspopup="listbox"><span class="value">Folio Dark</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="folio-dark" role="option"><span class="tick">✓</span>Folio Dark</div>
+              <div class="combo-item" data-v="dracula" role="option"><span class="tick">✓</span>Dracula</div>
+              <div class="combo-item" data-v="gruvbox-dark" role="option"><span class="tick">✓</span>Gruvbox Dark</div>
+              <div class="combo-item" data-v="nord" role="option"><span class="tick">✓</span>Nord</div>
+              <div class="combo-item" data-v="one-half-dark" role="option"><span class="tick">✓</span>One Half Dark</div>
+              <div class="combo-item" data-v="solarized-dark" role="option"><span class="tick">✓</span>Solarized Dark</div>
+            </div>
+          </div>
+        </div>
+
         <div class="row">
           <div class="text">
             <div class="title">Tab layout</div>

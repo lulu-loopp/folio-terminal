@@ -41,6 +41,8 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         terminal_font_family: "Cascadia Mono".to_owned(),
         terminal_font_size: 20,
         psreadline_invite: PsReadLineInviteV1::Installed,
+        light_scheme: "Solarized Light".to_owned(),
+        dark_scheme: "Nord".to_owned(),
     };
     write_settings_atomic(&path, &settings).unwrap();
 
@@ -83,6 +85,14 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     );
     assert!(
         on_disk.contains("\"psreadline_invite\": \"Installed\""),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"light_scheme\": \"Solarized Light\""),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"dark_scheme\": \"Nord\""),
         "written file must be human-readable JSON: {on_disk}"
     );
 }
