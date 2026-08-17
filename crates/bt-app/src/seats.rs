@@ -14332,12 +14332,17 @@ mod tests {
         // stopped the moment the Git panel's switch arrived under it.
         let (width, height) = (1_280u32, 1_400u32);
         let layout = solved(&seats, viewport_of(width, height, 1_000), &metrics);
+        let rows = crate::settings::visible_rows(TabLayoutMode::Horizontal);
         let overlay = crate::settings::layout_for_menu(
             width as f32,
             height as f32,
             1.0,
             None,
-            &crate::settings::visible_rows(TabLayoutMode::Horizontal),
+            crate::settings::SettingsContent {
+                rows: &rows,
+                shortcuts: &[],
+            },
+            crate::settings::SettingsCategory::Appearance,
             0.0,
             0.0,
         )

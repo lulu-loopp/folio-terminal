@@ -2121,7 +2121,14 @@
   }
   .overlay.show { display: block; }
   .settings {
-    width: min(480px, 92%);
+    /* 480 until the category rail arrived (user ruling Q2 = A, 2026-08-17).
+       The widening is arithmetic and not taste: 168 of rail plus the 22px
+       gutters plus a 118px picker leaves 150 for a title and the sentence under
+       it, and that sentence is the longest string in this dialog. 720 keeps the
+       PAGE (720 - 168 = 552) close to the 480 every row in here was measured
+       against, and it stays a centred dialog rather than becoming a whole-window
+       surface - this is still a modal you dismiss, not a place you go. */
+    width: min(720px, 92%);
     margin: 54px auto 0;
     max-height: calc(100% - 72px);     /* never taller than the window it sits in */
     display: flex; flex-direction: column;
@@ -2202,6 +2209,103 @@
   .combo-item .tick { width: 14px; font-size: 11px; color: var(--accent); visibility: hidden; }
   .combo-item.selected .tick { visibility: visible; }
   .combo-item.selected { color: var(--ink); }
+  /* ── THE CATEGORY RAIL, born 2026-08-17 (Settings extension block, slice 2) ──
+     The comment that used to stand in the settings DOM said the rail was
+     "deliberately NOT built yet: it waits for the Settings extension block, and
+     it will be born the same day as the shortcut-editing panel (P2-7) rather
+     than before there is enough here to navigate". This is that day: an editor
+     for the shortcut table is a page, not a run of rows, and a single scroll
+     that ran a thirty-line table on under the last picker would have been a
+     dialog nobody could find the top of.
+
+     The dialog widened from 480 to 720 for arithmetic and not for taste — 168 of
+     rail plus the 22px gutters plus a 118px picker leaves 150 for a title and
+     the sentence under it, and that sentence is the longest string in here.
+
+     THE RAIL IS DERIVED FROM THE ROWS, exactly as the group headings were: a
+     category with nothing on its page draws no word here, costs no width and
+     cannot be navigated to. That is the whole of the placeholder ruling —
+     `Profiles` and `Language` are NOT listed with a page saying "coming next",
+     they arrive on the day their rows do. A door onto an empty room is a worse
+     promise than no door.
+
+     ONE PAGE PER CATEGORY, and therefore ONE HEADING PER PAGE: the inline
+     `margin-top:16px` every later `.group-label` used to carry retired with the
+     flat list, because there is no next group on a page for it to stand off.
+
+     SCOPED TO #settings-overlay, deliberately: the `.settings` shell is shared
+     with the Automation dialog (#auto-overlay), and a rail declared on the shell
+     would have grown an empty one over there. */
+  .settings-body { flex: 1; min-height: 0; display: flex; }
+  .settings-nav {
+    flex: none; width: 168px;
+    padding: 10px 10px 18px;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 2px;
+    overflow-y: auto;
+  }
+  .nav-item {
+    position: relative;
+    flex: none;
+    display: flex; align-items: center;
+    height: 30px; padding: 0 0 0 12px;
+    border: none; background: none; border-radius: 6px;
+    color: var(--ink3);
+    font-family: inherit; font-size: 12.5px;
+    text-align: left; cursor: pointer;
+  }
+  .nav-item:hover { background: var(--hover); color: var(--ink); }
+  .nav-item.selected { background: var(--hover); color: var(--ink); }
+  /* The bar names the page that is up, never the word under the pointer: a
+     hover is a question and a selection is an answer, and the accent is the ink
+     an answer is written in. 2px is the focus ring's own width — the only other
+     accent stroke in this dialog. */
+  .nav-item.selected::before {
+    content: ""; position: absolute;
+    left: 0; top: 7px; bottom: 7px; width: 2px;
+    border-radius: 1px; background: var(--accent);
+  }
+  .settings-body .content { flex: 1; min-width: 0; }
+  .settings-page { display: none; }
+  .settings-page.shown { display: block; }
+
+  /* ── the shortcut editor, born the same day ────────────────────────────────
+     A shortcut line IS a `.row` — a title with a muted line under it on the
+     left, controls on the right — so it keeps `.row`'s padding, gap and two type
+     sizes exactly. Only the things `.row` has never held get rules of their own.
+
+     A key cap borrows `.combo > button`'s recipe at a smaller round: a hairline
+     and a face. It is a control-shaped thing that is not a control, and
+     borrowing the shape is what makes it read as a key rather than as a badge. */
+  .caps { flex: none; display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
+  .cap {
+    min-width: 20px; height: 20px; padding: 0 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--hover);
+    font-size: 11.5px; color: var(--ink);
+  }
+  /* A row the audit listed and declined wears the ink an unavailable picker item
+     wears, for the same reason: this is a thing you are being shown and cannot
+     have. */
+  .sc-row.reserved .title, .sc-row.reserved .desc, .sc-row.reserved .cap { color: var(--ink3); }
+  .sc-row.reserved .cap { background: var(--win); }
+  .sc-unset { font-size: 12px; color: var(--ink3); }
+  .btn.record { min-width: 84px; padding: 5px 10px; font-size: 13px; }
+  /* Only drawn when there is something to undo, so "absent" already does the
+     work "invisible until hovered" does elsewhere in this file. */
+  .sc-restore {
+    flex: none; width: 24px; height: 24px; padding: 0;
+    border: none; background: none; border-radius: 6px;
+    color: var(--ink2); font-size: 13px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .sc-restore:hover { background: var(--hover); color: var(--ink); }
+  /* The page's own verb stands off the last row the way a heading used to stand
+     off the group above it. No confirmation: this dialog has no dirty gate to
+     route one through — every choice in it is written the instant it is made —
+     and a question here would be the first modal over a modal in the product. */
+  .sc-foot { display: flex; justify-content: flex-end; margin-top: 14px; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
 </style>
 </head>
@@ -2476,19 +2580,47 @@
         <h1>Settings</h1>
         <button class="dlg-close" id="btn-close-settings" title="Close" aria-label="Close settings"><svg><use href="#i-close"/></svg></button>
       </header>
-      <!-- GROUPS, not a flat list (user ruling 2026-08-10). The native dialog
-           now reads this literally: `.content` is a stack of `.group-label`s with
-           their rows beneath, the first at the base `margin-top:10px` and every
-           later one at the inline `margin-top:16px` below. The native build has
-           the two groups it has rows for — Appearance (Theme, Cursor, Tab layout,
-           Sidebar) and Rendered blocks (Display formulas) — and derives the
-           headings by walking its row list and noticing where the group changes,
-           so a group with no rows draws no heading and costs no height.
-           The left-hand category rail is deliberately NOT built yet: it waits for
-           the Settings extension block, and it will be born the same day as the
-           shortcut-editing panel (P2-7) rather than before there is enough here
-           to navigate. -->
-      <div class="content">
+      <!-- GROUPS BECAME PAGES (user rulings 2026-08-10, then Q2/Q3 = A on
+           2026-08-17). The 2026-08-10 ruling read `.content` literally as a
+           stack of `.group-label`s with their rows beneath, and left the
+           left-hand category rail for "the day it is born, the same day as the
+           shortcut-editing panel (P2-7)". That day is this one — see the rail's
+           own CSS block for why an editor cannot be a run of rows in a shared
+           scroll.
+
+           What changed and what did not: a group became a CATEGORY, a category
+           owns a PAGE, and the heading a group used to draw is now that page's
+           title, at the base `margin-top:10px` (the inline `16px` every later
+           heading carried has nothing left to stand off). The native build still
+           derives all of it — the rail's words, the page's rows and its one
+           heading — by walking its row list and noticing where the category
+           changes, so a category with no rows draws no word, no heading and no
+           height. That derivation is the placeholder ruling: `Profiles` and
+           `Language` are absent rather than present-and-empty. -->
+      <div class="settings-body">
+        <nav class="settings-nav" id="settings-nav" aria-label="Settings categories">
+          <button class="nav-item selected" data-page="general">General</button>
+          <button class="nav-item" data-page="appearance">Appearance</button>
+          <button class="nav-item" data-page="terminal">Terminal</button>
+          <button class="nav-item" data-page="blocks">Rendered blocks</button>
+          <button class="nav-item" data-page="shortcuts">Shortcuts</button>
+        </nav>
+        <div class="content">
+        <section class="settings-page shown" data-page="general">
+        <div class="group-label">General</div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Default profile</div>
+            <div class="desc">What opens on a new tab, and when Folio starts</div>
+          </div>
+          <div class="combo" data-combo="profile">
+            <button aria-haspopup="listbox"><span class="value">PowerShell</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox" id="profile-options"></div>
+          </div>
+        </div>
+        </section>
+
+        <section class="settings-page" data-page="appearance">
         <div class="group-label">Appearance</div>
         <div class="row">
           <div class="text">
@@ -2551,8 +2683,10 @@
             </div>
           </div>
         </div>
+        </section>
 
-        <div class="group-label" style="margin-top:16px">Terminal</div>
+        <section class="settings-page" data-page="terminal">
+        <div class="group-label">Terminal</div>
         <div class="row">
           <div class="text">
             <div class="title">Line wrapping</div>
@@ -2566,8 +2700,10 @@
             </div>
           </div>
         </div>
+        </section>
 
-        <div class="group-label" style="margin-top:16px">Rendered blocks</div>
+        <section class="settings-page" data-page="blocks">
+        <div class="group-label">Rendered blocks</div>
         <div class="row">
           <div class="text">
             <div class="title">Maximum height</div>
@@ -2583,6 +2719,77 @@
             </div>
           </div>
         </div>
+        </section>
+
+        <!-- THE SHORTCUT EDITOR (P2-7's own page, born 2026-08-17).
+             The audit block further down says it in one sentence: the native
+             build carries the bindings as a DATA TABLE, "and the shortcut-editing
+             panel that Settings will grow is an editor for exactly that table. A
+             binding that cannot be written as a row there is a binding the panel
+             could never offer, which is the whole reason for the shape."
+
+             So this page is not a hand-written list — the native build derives
+             every line from `crates/bt-app/src/shortcuts.rs`, folds the families
+             (nine tab ordinals, four picture-in-picture slots) into one line
+             apiece, and appends the rows the audit LISTED AND DECLINED. Six of
+             the lines are drawn here as the specimen for each shape the page can
+             take: an ordinary row, a scoped row, a stub row whose verb has not
+             arrived, a folded family, a family with nothing assigned, and a
+             declined row.
+
+             Storage is `keybindings.json` beside `settings.json` (user ruling
+             Q7 = B), holding ONLY the departures — a row equal to the default is
+             absent, and `"chord": null` is a user saying "give this key back to
+             my shell". -->
+        <section class="settings-page" data-page="shortcuts">
+        <div class="group-label">Shortcuts</div>
+        <div class="row sc-row">
+          <div class="text">
+            <div class="title">New tab</div>
+          </div>
+          <div class="caps"><span class="cap">Ctrl</span><span class="cap">Shift</span><span class="cap">N</span></div>
+          <button class="btn record">Record</button>
+        </div>
+        <div class="row sc-row">
+          <div class="text">
+            <div class="title">Go to tab 1–9</div>
+            <div class="desc">One chord for each</div>
+          </div>
+          <div class="caps"><span class="cap">Ctrl</span><span class="cap">Shift</span><span class="cap">1 – 9</span></div>
+        </div>
+        <div class="row sc-row">
+          <div class="text">
+            <div class="title">Save the open document</div>
+            <div class="desc">In a preview</div>
+          </div>
+          <div class="caps"><span class="cap">Ctrl</span><span class="cap">S</span></div>
+          <button class="btn record">Record</button>
+        </div>
+        <div class="row sc-row">
+          <div class="text">
+            <div class="title">Command palette</div>
+            <div class="desc">Bound; the verb behind it is still to come</div>
+          </div>
+          <div class="caps"><span class="cap">Ctrl</span><span class="cap">Shift</span><span class="cap">Y</span></div>
+          <button class="btn record">Record</button>
+          <button class="sc-restore" title="Restore the default">↺</button>
+        </div>
+        <div class="row sc-row">
+          <div class="text">
+            <div class="title">Summon PiP slot 1–4</div>
+            <div class="desc">One chord for each; none is set yet</div>
+          </div>
+          <div class="caps"><span class="sc-unset">Not set</span></div>
+        </div>
+        <div class="row sc-row reserved">
+          <div class="text">
+            <div class="title">Move the focus between panes</div>
+            <div class="desc">Reserved — readline reads Alt+arrow as word movement</div>
+          </div>
+          <div class="caps"><span class="cap">Alt</span><span class="cap">← ↑ → ↓</span></div>
+        </div>
+        <div class="sc-foot"><button class="btn">Restore all defaults</button></div>
+        </section>
 
         <!-- "Clicking a tab: Switch view / Swap focused pane" was here and is
              gone. Removed 2026-07-16 — see UI-UX §10 principle 20. It made "tab"
@@ -2597,17 +2804,6 @@
              one behaviour the whole ecosystem independently calls jarring. A files
              pane now always roots-on-open and stays put; the quick-peek need that
              follow was chasing goes to the flyout (step 2), not to a pane mode. -->
-
-        <div class="group-label" style="margin-top:16px">Startup</div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Default profile</div>
-            <div class="desc">What opens on a new tab, and when Folio starts</div>
-          </div>
-          <div class="combo" data-combo="profile">
-            <button aria-haspopup="listbox"><span class="value">PowerShell</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox" id="profile-options"></div>
-          </div>
         </div>
       </div>
     </div>
@@ -7836,6 +8032,21 @@
   $("desk-icon").addEventListener("click", () => setShut(false));
 
   /* ── settings ── */
+  /* THE RAIL (2026-08-17). Selecting a category switches the page and puts the
+     reader at the top of it: the distance belonged to the page they left, and
+     carrying it across would open the next one somewhere in its middle. The
+     native build resets its own `settings_scroll` for exactly this reason. */
+  $("settings-nav").addEventListener("click", (e) => {
+    const item = e.target.closest(".nav-item");
+    if (!item) return;
+    const page = item.dataset.page;
+    document.querySelectorAll("#settings-nav .nav-item")
+      .forEach((el) => el.classList.toggle("selected", el === item));
+    document.querySelectorAll("#settings-overlay .settings-page")
+      .forEach((el) => el.classList.toggle("shown", el.dataset.page === page));
+    const content = $("settings-overlay").querySelector(".content");
+    if (content) content.scrollTop = 0;
+  });
   $("btn-settings").addEventListener("click", () => $("settings-overlay").classList.add("show"));
   $("btn-close-settings").addEventListener("click", () => $("settings-overlay").classList.remove("show"));
   $("settings-overlay").addEventListener("click", (e) => {

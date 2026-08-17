@@ -13,8 +13,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    Debouncer, ExitState, ReadReport, SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker,
-    create_sentinel, probe_sentinel, read_session, read_settings, remove_sentinel,
+    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1, ReadReport,
+    SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel,
+    read_keybindings, read_session, read_settings, remove_sentinel, write_keybindings_atomic,
     write_session_atomic, write_settings_atomic,
 };
 
@@ -195,6 +196,91 @@ impl SettingsStore {
         {
             // §5.3: one alert per failure streak, not one per attempt.
             eprintln!("BT_PERSIST could not write settings.json: {error}");
+        }
+        true
+    }
+}
+
+/// The name the shortcut file wears on disk, which is also what a notice about
+/// it has to say out loud.
+pub const KEYBINDINGS_FILE_NAME: &str = "keybindings.json";
+
+/// `keybindings.json` — the shortcut table's departures, and when they reach the
+/// disk.
+///
+/// No debouncer, for [`SettingsStore`]'s reason and rather more sharply: a chord
+/// arrives when a human has just pressed a key and watched a dialog change, and
+/// a quiet window would be a window in which exactly that can be lost.
+///
+/// **A damaged file is reported, never repaired.** `fault` carries the sentence
+/// a notice will say, and the read path leaves the file itself untouched — a
+/// build that silently rewrote a shortcut file it could not parse would destroy
+/// the one copy of a customisation the user could have fixed by hand. It is only
+/// replaced when the user changes something, which is them choosing.
+pub struct KeybindingsStore {
+    path: PathBuf,
+    overrides: Vec<BindingOverrideV1>,
+    /// Why the file on disk was not usable, if it was not.
+    fault: Option<String>,
+    failures: WriteFailureTracker,
+}
+
+impl KeybindingsStore {
+    /// Read `keybindings.json`, falling back to *no overrides* on every failure.
+    pub fn open() -> Self {
+        let dir = storage_dir();
+        let path = dir.join(KEYBINDINGS_FILE_NAME);
+        let _ = std::fs::create_dir_all(&dir);
+        let (file, report) = read_keybindings(&path);
+        // §5.4 case 1 — no file — is the ordinary state of nearly every machine
+        // and must not alert. Everything else must, naming the file (§5.3).
+        let fault = match &report {
+            ReadReport::FellBackToDefaults { reason } => {
+                eprintln!("BT_PERSIST {KEYBINDINGS_FILE_NAME} fell back to defaults: {reason:?}");
+                Some(format!(
+                    "{KEYBINDINGS_FILE_NAME} could not be read; the default shortcuts are in force"
+                ))
+            }
+            ReadReport::NotFound | ReadReport::Loaded => None,
+        };
+        Self {
+            path,
+            overrides: file.bindings,
+            fault,
+            failures: WriteFailureTracker::new(),
+        }
+    }
+
+    /// The overrides as they were read.
+    pub fn loaded(&self) -> &[BindingOverrideV1] {
+        &self.overrides
+    }
+
+    /// Take the read fault, so a notice about it is raised once and not once a
+    /// frame.
+    pub fn take_fault(&mut self) -> Option<String> {
+        self.fault.take()
+    }
+
+    /// Record the new set of departures and put them on disk now.
+    ///
+    /// Returns whether anything changed, so a caller can skip the write when a
+    /// user records the chord a row already had.
+    pub fn store(&mut self, overrides: Vec<BindingOverrideV1>) -> bool {
+        if self.overrides == overrides {
+            return false;
+        }
+        self.overrides = overrides;
+        let file = KeybindingsV1 {
+            schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            bindings: self.overrides.clone(),
+        };
+        let result = write_keybindings_atomic(&self.path, &file);
+        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
+            && let Err(error) = &result
+        {
+            // §5.3: one alert per failure streak, not one per attempt.
+            eprintln!("BT_PERSIST could not write {KEYBINDINGS_FILE_NAME}: {error}");
         }
         true
     }

@@ -45,8 +45,20 @@ use crate::profiles;
 use crate::seats::{RailMode, TabLayoutMode};
 
 // ── `.settings`, `.overlay` ────────────────────────────────────────────────
-/// `.settings { width: min(480px, 92%) }` — the cap and the share.
-const DIALOG_MAX_WIDTH_LOGICAL_PX: f32 = 480.0;
+/// `.settings { width: min(720px, 92%) }` — the cap and the share.
+///
+/// **480 until the category rail arrived** (user ruling Q2 = A, 2026-08-17). The
+/// mock-up's own note beside the groups said the rail waits "rather than before
+/// there is enough here to navigate", and the day it arrives 480 stops working
+/// arithmetically rather than aesthetically: a 168px column plus the 22px
+/// gutters plus a 118px picker leaves 150px for a title and the line that
+/// explains it, and the line that explains it is the longest string in the
+/// dialog. 720 is the width the industry's settings dialogs sit at, it keeps
+/// the *page* (720 − 168 = 552) close to the 480 every row in here was measured
+/// against, and it stays a centred dialog rather than becoming a whole-window
+/// surface — which is the other half of the ruling: this is still a modal you
+/// dismiss, not a place you go.
+const DIALOG_MAX_WIDTH_LOGICAL_PX: f32 = 720.0;
 const DIALOG_WIDTH_RATIO: f32 = 0.92;
 /// `.settings { margin: 54px auto 0 }` — the drop from the window's top, and
 /// `auto` on both sides, which is what centres it.
@@ -84,14 +96,17 @@ const CONTENT_PADDING_BOTTOM_LOGICAL_PX: f32 = 18.0;
 const GROUP_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
 /// The 11px line box, measured in the mock-up.
 const GROUP_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
-const GROUP_LABEL_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
-/// What every heading after the first stands off the group above it.
+/// `margin: 10px 0 2px` — and now the *only* top margin a heading takes.
 ///
-/// The mock-up writes the base `margin: 10px 0 2px` once and then overrides the
-/// top on each later heading with an inline `style="margin-top:16px"`
-/// (`design/ui-mockup.html:2406, 2421, 2452`) — the extra six pixels are what
-/// separate one group from the next rather than one row from the next.
-const GROUP_LABEL_MARGIN_TOP_LATER_LOGICAL_PX: f32 = 16.0;
+/// **`margin-top: 16px` retired with the rail** (2026-08-17). The mock-up used
+/// to override the top of every heading after the first with an inline
+/// `style="margin-top:16px"`, and the extra six pixels were what separated one
+/// group from the next rather than one row from the next. With one category per
+/// page there is no next group to separate: a page draws exactly one heading, at
+/// the base margin, and the six pixels have nothing left to say. The mock-up is
+/// written back with the same retirement, so the constant is not being dropped
+/// ahead of its authority.
+const GROUP_LABEL_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
 const GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX: f32 = 2.0;
 /// `letter-spacing: .05em` at 11px.
 const GROUP_LABEL_TRACKING_EM: f32 = 0.05;
@@ -166,6 +181,122 @@ const FOCUS_RING_OFFSET_LOGICAL_PX: f32 = 1.0;
 /// what keeps the ring concentric with the thing it names rather than a
 /// rectangle around a rounded box.
 const FOCUS_RING_RADIUS_LOGICAL_PX: f32 = 6.0;
+
+// ── the category rail (`.settings-nav`, born 2026-08-17) ───────────────────
+//
+// **There is no mock-up CSS for this.** The mock-up carried the rail as a
+// commented promise and nothing else — "deliberately NOT built yet: it waits for
+// the Settings extension block, and it will be born the same day as the
+// shortcut-editing panel" — so every number below is derived from tokens the
+// dialog already uses rather than transcribed, and the mock-up is written back
+// to in the same change so it goes on being the authority.
+//
+// The derivations, each named where it comes from:
+//   * the column's width is the one free number, chosen so the longest category
+//     word (`Rendered blocks`) sits on one line at 12.5px with the gutters the
+//     rest of the dialog uses;
+//   * an item's height is the `.row` rhythm at a smaller type size, its round is
+//     the 6px every control in here wears, and its left padding is the picker
+//     button's own 12;
+//   * the selected ground is `--hover` (`dialog_hover`), which is the one lit
+//     state this dialog has;
+//   * the accent bar is 2px because that is the width of the focus ring, the one
+//     other 2px accent stroke in the file.
+
+/// The rail's own column, header excluded.
+const NAV_WIDTH_LOGICAL_PX: f32 = 168.0;
+/// Above the first item — the `.group-label`'s own first `margin-top`, so the
+/// rail's first word sits on the same line as the page's first heading.
+const NAV_PADDING_TOP_LOGICAL_PX: f32 = 10.0;
+/// Below the last, matching `.content`'s own bottom padding.
+const NAV_PADDING_BOTTOM_LOGICAL_PX: f32 = 18.0;
+/// The rail's own gutters, inside which the item pills sit.
+const NAV_PADDING_X_LOGICAL_PX: f32 = 10.0;
+const NAV_ITEM_HEIGHT_LOGICAL_PX: f32 = 30.0;
+const NAV_ITEM_GAP_LOGICAL_PX: f32 = 2.0;
+/// The round every control in this dialog wears.
+const NAV_ITEM_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `.combo > button`'s own left padding, so the rail's words and the page's
+/// pickers start their text the same distance inside their boxes.
+const NAV_ITEM_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
+/// Between `.group-label`'s 11 and `.row .title`'s 13.5: a rail is read at a
+/// glance like a heading and chosen from like a row.
+const NAV_ITEM_FONT_LOGICAL_PX: f32 = 12.5;
+/// The bar on the selected item's left edge — the focus ring's own width, which
+/// is the only other 2px accent stroke this dialog draws.
+const NAV_ACCENT_BAR_WIDTH_LOGICAL_PX: f32 = 2.0;
+/// How far the bar is held off the item's top and bottom, so it reads as a mark
+/// on the pill rather than as the pill's own left border.
+const NAV_ACCENT_BAR_INSET_Y_LOGICAL_PX: f32 = 7.0;
+
+// ── the shortcut page (born 2026-08-17) ────────────────────────────────────
+//
+// Also without mock-up CSS, and derived the same way: a shortcut line *is* a
+// `.row` — a title with a muted line under it on the left, controls on the
+// right — so it keeps `.row`'s padding, gap and two type sizes exactly, and only
+// the things `.row` has never held get numbers of their own.
+
+/// What a chord's caps are given, right of the title column.
+///
+/// A reserved width rather than a measured one, because the geometry here is a
+/// pure function of numbers and only the renderer knows how wide a glyph is
+/// (the same division `widest_option` already runs on). 168 holds the widest
+/// chord this table can produce — three caps and a range — with room to spare;
+/// the caps are laid out right to left inside it, beside the button that
+/// changes them.
+const SHORTCUT_CAPS_WIDTH_LOGICAL_PX: f32 = 168.0;
+/// One key cap: `.combo`'s hairline-and-face recipe at a smaller round.
+const CAP_HEIGHT_LOGICAL_PX: f32 = 20.0;
+const CAP_RADIUS_LOGICAL_PX: f32 = 4.0;
+const CAP_PADDING_X_LOGICAL_PX: f32 = 6.0;
+const CAP_GAP_LOGICAL_PX: f32 = 4.0;
+const CAP_FONT_LOGICAL_PX: f32 = 11.5;
+/// A cap is never narrower than it is tall: a single letter in a box a third of
+/// its height wide reads as a sliver, not as a key.
+const CAP_MIN_WIDTH_LOGICAL_PX: f32 = CAP_HEIGHT_LOGICAL_PX;
+
+/// The `Record` button — `.btn`'s grammar (mock-up 2000-2008) at the picker's
+/// own height, so a row's right-hand control is the same object it is on every
+/// other page.
+const SHORTCUT_RECORD_WIDTH_LOGICAL_PX: f32 = 84.0;
+/// The `↺` beside it: a 24px square, the smallest hover verb this house draws.
+const SHORTCUT_RESTORE_SIDE_LOGICAL_PX: f32 = 24.0;
+/// Between the two right-hand controls.
+const SHORTCUT_CONTROL_GAP_LOGICAL_PX: f32 = 8.0;
+/// The glyph the restore verb wears. `↺` and not a word, because it stands
+/// beside a button that is already a word and a second one would read as a
+/// choice between two verbs rather than as an undo of one.
+const RESTORE_GLYPH: &str = "\u{21ba}";
+/// Above the page's own `Restore all defaults`, which stands off the last row
+/// the way a later heading stands off the group above it.
+const SHORTCUT_FOOT_MARGIN_TOP_LOGICAL_PX: f32 = 14.0;
+const RESTORE_ALL_WIDTH_LOGICAL_PX: f32 = 152.0;
+const BUTTON_HEIGHT_LOGICAL_PX: f32 = 27.5;
+const BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
+const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
+
+// ── every word this dialog puts in front of a person ───────────────────────
+//
+// Constants for `shortcuts.rs`' own reason: the i18n sweep lands next slice and
+// collects a table by *finding* these, and a literal buried at a call site is a
+// string that never gets translated.
+
+/// The header, and the gear's own tooltip.
+const DIALOG_TITLE: &str = "Settings";
+const RECORD_BUTTON_LABEL: &str = "Record";
+/// What the button says while it is listening.
+const RECORD_LISTENING_LABEL: &str = "Press…";
+/// What the muted line says while a row is listening.
+///
+/// **Three verbs and no preamble**, because the button beside it already says
+/// `Press…` and this column is the narrowest in the dialog — it gives up 168px
+/// to the caps that a settings row keeps. A sentence that started by repeating
+/// the button would have spent the room it had on the half a reader already
+/// knew, and arrived at the three things they do not cut off.
+const RECORD_PROMPT: &str = "Enter keeps it · Esc cancels · Del clears";
+/// What it says when a key arrives that no file could hold.
+const RECORD_UNUSABLE_HINT: &str = "That key cannot be written down";
+const RESTORE_ALL_LABEL: &str = "Restore all defaults";
 
 // ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
 /// `.profile-item .ticon { width: 14px }` (mock-up 1023) — the same column the
@@ -300,55 +431,103 @@ fn split_direction_mark(direction: SplitDirectionV1) -> ChromeMark {
     }
 }
 
-/// A headed run of rows in the dialog's `.content`.
+/// **One page of the dialog, and one word in the rail beside it** (user ruling
+/// Q2/Q3 = A, 2026-08-17).
 ///
-/// The mock-up's settings panel is not a flat list — it is group labels with
-/// their rows beneath them (`design/ui-mockup.html:2343, 2406, 2421, 2452`), and
-/// the user's 2026-08-10 ruling took that literally: groups laid out one after
-/// another, with a category rail down the side left for when the panel has grown
-/// enough to need one.
+/// This is what the mock-up's group labels grew into. Until today they were
+/// headings inside one scroll — "GROUPS, not a flat list", with the rail
+/// deliberately postponed "rather than before there is enough here to navigate"
+/// — and the day the shortcut editor arrives there is more than enough: an
+/// editor is a page, not a run of rows, and a scroll that ran a thirty-line
+/// table on under the last picker would have been a dialog nobody could find
+/// the top of. So a group became a category, a category owns a page, and the
+/// heading it used to draw is now that page's title.
 ///
-/// Only the two groups this build has rows for are named. A group with nothing in
-/// it draws no heading and costs no height, which falls out of deriving the
-/// headings from the row list rather than declaring them beside it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettingsGroup {
+/// **The rail is derived from the rows, exactly as the headings were.** A
+/// category with nothing to show draws no rail item, costs no width and cannot
+/// be navigated to — which is the same sentence as "a group with no rows draws
+/// no heading and costs no height", one level up, and it is what settles the
+/// placeholder question: `Profiles` and `Language` are not listed with a page
+/// saying "coming next", they simply arrive on the day their rows do. A door
+/// onto an empty room is a worse promise than no door.
+///
+/// The order here is the rail's order and it is declared rather than derived,
+/// because it is a reading order and not a fact about the rows: `General` first
+/// because it is where a dialog opens, `Shortcuts` last because a table is a
+/// place you go on purpose. Within a page, the rows keep the order
+/// [`visible_rows`] gives them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettingsCategory {
+    /// The catch-all, and the page the dialog opens on.
+    ///
+    /// It is where the mock-up's `Startup` group and this build's own `Files`
+    /// group have gone. Both held exactly one row, and two headings over two
+    /// rows is a table of contents for a paragraph; a reader looking for "what
+    /// opens on a new tab" or "does this thing read my repository" is looking
+    /// for the page that is not about a *look*, and that page is this one.
+    #[default]
+    General,
     Appearance,
+    /// Mock-up 2555. **No rows yet, and therefore no rail item yet** — line
+    /// wrapping is the row that will bring it, and this build has no
+    /// line-wrapping setting to put here. The variant exists so the day it
+    /// arrives is a match arm rather than a category being invented under
+    /// pressure.
+    Terminal,
     RenderedBlocks,
-    /// The Files column's own switches — today, the one that decides whether the
-    /// column has a second page at all.
+    /// The one category whose page is not a list of rows.
     ///
-    /// **A group the mock-up does not have**, and the first of those. Its four
-    /// headings are `Appearance`, `Terminal`, `Rendered blocks`, `Startup`, and
-    /// none of them is where "does this product read the repository you are
-    /// standing in" belongs: it is not a look, not a shell, not a block. A row
-    /// filed under a heading that does not describe it is a row nobody finds, and
-    /// the whole reason this switch exists is that a user must be able to find it
-    /// and say no.
-    ///
-    /// It sits above `Startup` because `Startup` is documented as last and means
-    /// it.
-    Files,
-    /// Last, which is the mock-up's own order: `Appearance` (2355), `Terminal`
-    /// (2418), `Rendered blocks` (2433), `Startup` (2464). This build has no
-    /// Terminal group, and a group with no rows draws no heading — so the two it
-    /// does have keep their places and this one arrives under them.
-    Startup,
+    /// It is never empty — the shortcut table is a constant of this build — so
+    /// it is always in the rail, and it is last because it is the page a reader
+    /// goes to deliberately rather than one they scroll past.
+    Shortcuts,
 }
 
-impl SettingsGroup {
-    /// The heading as it is drawn.
+impl SettingsCategory {
+    /// Every category this build knows, in the rail's own order.
+    pub const ALL: [Self; 5] = [
+        Self::General,
+        Self::Appearance,
+        Self::Terminal,
+        Self::RenderedBlocks,
+        Self::Shortcuts,
+    ];
+
+    /// The page's own heading, drawn in the `.group-label` grammar the groups
+    /// this replaced were drawn in.
     ///
     /// Upper-cased at the source, as `"APPEARANCE"` always was: the chrome text
     /// path has no `text-transform`, and the mock-up's own words are
-    /// "Appearance" (2355), "Rendered blocks" (2433) and "Startup" (2464).
+    /// "Appearance" (2492), "Terminal" (2555), "Rendered blocks" (2570) and
+    /// "Startup" (2601).
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::General => "GENERAL",
             Self::Appearance => "APPEARANCE",
+            Self::Terminal => "TERMINAL",
             Self::RenderedBlocks => "RENDERED BLOCKS",
-            Self::Files => "FILES",
-            Self::Startup => "STARTUP",
+            Self::Shortcuts => "SHORTCUTS",
+        }
+    }
+
+    /// The word in the rail.
+    ///
+    /// **A second string and not the heading lower-cased**, and the reason is
+    /// the i18n ruling rather than typography: this file upper-cases at the
+    /// source precisely because "大写是内容不是样式" — a `to_uppercase` here
+    /// would be a rule that has to be *unlearned* the day the same word arrives
+    /// in Chinese, where there is no case to raise. Two literals side by side in
+    /// one match is a reader seeing both at once; a transformation is a rule
+    /// somebody has to remember does not apply.
+    #[must_use]
+    pub fn nav_label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Appearance => "Appearance",
+            Self::Terminal => "Terminal",
+            Self::RenderedBlocks => "Rendered blocks",
+            Self::Shortcuts => "Shortcuts",
         }
     }
 }
@@ -423,23 +602,29 @@ pub enum SettingsRow {
 }
 
 impl SettingsRow {
-    /// Which heading this row is filed under.
+    /// Which page this row is on, and therefore which word in the rail leads to
+    /// it.
     ///
-    /// Stated once, per row, and read by the layout — the headings the dialog
-    /// draws are derived by walking [`visible_rows`] and noticing where this
-    /// answer changes, so there is no second list of groups to keep in step and
-    /// no way to show a heading over rows that do not belong to it.
+    /// Stated once, per row, and read by everything — the rail's items, the
+    /// page's rows, its height, its hit test, its draw and its heading are all
+    /// derived by walking [`visible_rows`] and reading this answer, so there is
+    /// no second list of categories to keep in step and no way to show a page
+    /// under a name that does not describe it. **Six readings of one
+    /// derivation** now, which is R4's lesson taken as far as it goes: the first
+    /// reading nobody teaches is a control the user can reach and cannot see.
     #[must_use]
-    pub fn group(self) -> SettingsGroup {
+    pub fn category(self) -> SettingsCategory {
         match self {
             Self::Theme | Self::Cursor | Self::TabLayout | Self::Sidebar | Self::SplitDirection => {
-                SettingsGroup::Appearance
+                SettingsCategory::Appearance
             }
             // The mock-up files what typesetting does to a block under "Rendered
-            // blocks" (2433), beside that group's own Maximum height row.
-            Self::Formulas | Self::InlineFormulas => SettingsGroup::RenderedBlocks,
-            Self::GitPanel => SettingsGroup::Files,
-            Self::DefaultProfile => SettingsGroup::Startup,
+            // blocks" (2570), beside that page's own Maximum height row.
+            Self::Formulas | Self::InlineFormulas => SettingsCategory::RenderedBlocks,
+            // Both were headings over one row apiece — `FILES` and `STARTUP` —
+            // and both are the same kind of question: not a look, not a block, no
+            // page of their own to fill. See [`SettingsCategory::General`].
+            Self::GitPanel | Self::DefaultProfile => SettingsCategory::General,
         }
     }
 
@@ -657,9 +842,9 @@ impl SettingsRow {
 /// all read the list this returns, so none of them carries a copy of the rule and
 /// none of them can be forgotten when it changes.
 ///
-/// Rows of one group must stay contiguous here: the headings are derived from
-/// where [`SettingsRow::group`] changes as this list is walked, so a row filed
-/// out of order would head its group twice.
+/// Rows of one category must stay contiguous here: the heading is derived from
+/// where [`SettingsRow::category`] changes as a page's list is walked, so a row
+/// filed out of order would head its page twice.
 #[must_use]
 pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     let mut rows = vec![
@@ -676,6 +861,72 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
     rows
+}
+
+/// **Everything the dialog is holding this frame**: the rows it could show, and
+/// the shortcut table's own lines.
+///
+/// One parameter instead of two everywhere, and a borrow instead of a copy,
+/// because the shortcut lines are strings derived from a table that changes as
+/// the user edits it. It is handed to the layout, the focus walk and the draw
+/// alike so that all three read one description of the dialog's contents — the
+/// same reason [`SettingsValues`] is passed in rather than fetched.
+#[derive(Clone, Copy, Debug)]
+pub struct SettingsContent<'a> {
+    /// Every row the dialog would show across all its pages, in order.
+    pub rows: &'a [SettingsRow],
+    /// The shortcut page's own lines, folded and tagged by `shortcuts.rs`.
+    pub shortcuts: &'a [crate::shortcuts::ShortcutRow],
+}
+
+impl SettingsContent<'_> {
+    /// The rows of one page, in the order [`visible_rows`] put them.
+    #[must_use]
+    pub fn page_rows(&self, category: SettingsCategory) -> Vec<SettingsRow> {
+        self.rows
+            .iter()
+            .copied()
+            .filter(|row| row.category() == category)
+            .collect()
+    }
+
+    /// **The rail**, derived: every category with something on its page, in
+    /// [`SettingsCategory::ALL`]'s order.
+    ///
+    /// This is where the placeholder ruling actually lives. `Terminal` has a
+    /// variant, a heading and a page and still does not appear, because it has
+    /// no rows — and neither will `Profiles` or `Language` until the day they
+    /// do. `Shortcuts` is always here because its page is a table this build
+    /// ships, never empty.
+    #[must_use]
+    pub fn nav_items(&self) -> Vec<SettingsCategory> {
+        SettingsCategory::ALL
+            .into_iter()
+            .filter(|category| self.has_content(*category))
+            .collect()
+    }
+
+    /// Whether a category has anything to show.
+    #[must_use]
+    pub fn has_content(&self, category: SettingsCategory) -> bool {
+        match category {
+            SettingsCategory::Shortcuts => !self.shortcuts.is_empty(),
+            other => self.rows.iter().any(|row| row.category() == other),
+        }
+    }
+
+    /// The category a dialog opened now would land on: the first the rail holds.
+    ///
+    /// Asked rather than assumed, because `General` is only the answer while
+    /// `General` has rows — and the whole point of deriving the rail is that a
+    /// build which took the last one away must not open onto a blank page.
+    #[must_use]
+    pub fn first_category(&self) -> SettingsCategory {
+        self.nav_items()
+            .first()
+            .copied()
+            .unwrap_or(SettingsCategory::Shortcuts)
+    }
 }
 
 /// What every row in the dialog currently reads.
@@ -746,9 +997,26 @@ impl SettingsValues {
 /// App state and nothing else: it is not a seat, so the solver never sees it;
 /// it is not an intent, so the session file never sees it. A dialog that
 /// survived a restart would be a window that opens with a question on it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// **Not `Copy` since the recorder arrived**, which is worth a line because
+/// every caller used to take it by value. A capture in progress carries the caps
+/// it is showing and the sentence it is refusing with, and both are text; a
+/// `Copy` state would have meant keeping the recorder's words somewhere else,
+/// which is two places holding one moment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SettingsPanel {
     open: bool,
+    /// **Which page is up** (user ruling Q3 = A, 2026-08-17). One page per
+    /// category, so this is the whole of "where am I" — and it is state on the
+    /// panel rather than on the runtime because the panel is what a key press
+    /// moves, and a key press that changed a page recorded somewhere else would
+    /// be a walk with two owners.
+    ///
+    /// It is not persisted, for the reason nothing else here is: a dialog does
+    /// not survive a restart, and a dialog that reopened on the page you left is
+    /// a dialog that opens somewhere you have to read before you can act.
+    category: SettingsCategory,
+    /// The row the recorder is listening for, and what it has heard.
+    recording: Option<Recording>,
     /// Which row's picker is open. Nested state, because Esc unwinds one layer
     /// per press (§7.1.5) and "the menu is open" is the top layer.
     menu: Option<SettingsRow>,
@@ -778,13 +1046,92 @@ pub struct SettingsPanel {
     focus_visible: bool,
 }
 
+/// A capture in progress: which line is listening, what it is showing, and what
+/// it is refusing.
+///
+/// **The chord is held pending rather than taken on the spot** (S64's shape,
+/// worked through). A recorder that bound the first complete chord it saw would
+/// have no state left in which to *refuse* one — and refusing is the point: the
+/// AltGr zone and the shell's control alphabet are both cases where the user
+/// pressed something real and must be told why it cannot be theirs, without
+/// their old chord having been thrown away in the meantime. So a press produces
+/// a candidate, a refusal replaces the candidate with a reason, and `Enter`
+/// commits whatever is standing.
+///
+/// The cost is written down where it is paid, in `shortcuts::RecordedKey`: bare
+/// `Esc`, `Backspace`, `Delete` and `Enter` are this state's own verbs and
+/// cannot be recorded bare.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Recording {
+    /// Which line of the shortcut page is listening, by its index in
+    /// [`SettingsContent::shortcuts`].
+    row: usize,
+    /// The caps the box is showing — modifiers alone while the keys are going
+    /// down, the whole chord once one has arrived.
+    caps: Vec<String>,
+    /// The chord `Enter` would take, if there is one.
+    candidate: Option<crate::shortcuts::Chord>,
+    /// Why the last press was refused, if it was.
+    hint: Option<String>,
+}
+
 impl SettingsPanel {
-    pub fn is_open(self) -> bool {
+    pub fn is_open(&self) -> bool {
         self.open
     }
 
-    pub fn menu(self) -> Option<SettingsRow> {
+    pub fn menu(&self) -> Option<SettingsRow> {
         self.menu
+    }
+
+    /// Which page is up.
+    #[must_use]
+    pub fn category(&self) -> SettingsCategory {
+        self.category
+    }
+
+    /// Which line of the shortcut page is listening for a chord, if one is.
+    #[must_use]
+    pub fn recording_row(&self) -> Option<usize> {
+        self.recording.as_ref().map(|capture| capture.row)
+    }
+
+    /// **Which** row is listening, what it is showing, and the reason the last
+    /// press was refused.
+    ///
+    /// The row is carried here rather than read off the focus, and that is not
+    /// redundancy — it is a bug found on the real window: a capture started by a
+    /// *pointer* has no ring at all (`:focus-visible` puts it away), so a draw
+    /// that asked the ring which row was listening left a box swallowing every
+    /// key while looking exactly like one that was not.
+    #[must_use]
+    pub fn recording_state(&self) -> Option<(usize, &[String], Option<&str>)> {
+        self.recording.as_ref().map(|capture| {
+            (
+                capture.row,
+                capture.caps.as_slice(),
+                capture.hint.as_deref(),
+            )
+        })
+    }
+
+    /// Turn to a page, answering whether that changed anything.
+    ///
+    /// The focus lands on the page's first control rather than staying on the
+    /// rail, and that is deliberate: choosing a category is choosing to look at
+    /// what is on it — no. It stays on the rail item, because the rail is where
+    /// the arrows just were and a focus that jumped out of the list a user is
+    /// walking would make the second `↓` land somewhere they were not looking.
+    /// `→`, `Tab` and `Enter` are the three ways to say "now take me in".
+    pub fn select_category(&mut self, category: SettingsCategory) -> bool {
+        if self.category == category {
+            return false;
+        }
+        self.category = category;
+        self.menu = None;
+        self.recording = None;
+        self.focus = Some(SettingsTarget::Nav(category));
+        true
     }
 
     /// The gear: open when shut, shut when open. Closing takes the menu with it.
@@ -796,14 +1143,21 @@ impl SettingsPanel {
     /// "leave" has spent its one free position on the verb nobody opened it to
     /// reach. The ring is off, because a gear pressed with the mouse is not a
     /// keyboard interaction; the first key turns it on.
-    pub fn toggle(&mut self, rows: &[SettingsRow]) {
+    ///
+    /// **And it opens on the first page**, which is `General` while `General`
+    /// has rows — not on the page it was left on. A dialog that reopened where
+    /// you left it is one you have to read before you can act, and the point of
+    /// a rail is that the way back is one word away.
+    pub fn toggle(&mut self, content: SettingsContent<'_>) {
         self.open = !self.open;
         self.menu = None;
         self.hover = None;
+        self.recording = None;
         self.focus_visible = false;
+        self.category = content.first_category();
         self.focus = self
             .open
-            .then(|| rows.first().map(|row| SettingsTarget::Combo(*row)))
+            .then(|| page_order(content, self.category).first().copied())
             .flatten();
     }
 
@@ -814,7 +1168,18 @@ impl SettingsPanel {
     /// ladder (6184-6187: `.combo.open`, then the dialog), and closing it hands
     /// the keyboard back to the button it hangs under rather than dropping the
     /// focus on the floor.
+    ///
+    /// **A capture is the newest rung and it is above the picker**, because it
+    /// is the innermost thing that can be open: while the recorder is listening
+    /// the whole keyboard is its, so the one key a user has left to say "not
+    /// that" must undo the listening and nothing else. §7.1.5's ladder gains a
+    /// step rather than growing a second ladder.
     pub fn close_one_layer(&mut self) -> bool {
+        if let Some(capture) = self.recording.take() {
+            self.hover = None;
+            self.focus = Some(SettingsTarget::Record(capture.row));
+            return true;
+        }
         if let Some(row) = self.menu {
             self.menu = None;
             self.hover = None;
@@ -833,6 +1198,7 @@ impl SettingsPanel {
         self.open = false;
         self.menu = None;
         self.hover = None;
+        self.recording = None;
         self.focus = None;
         self.focus_visible = false;
     }
@@ -856,20 +1222,20 @@ impl SettingsPanel {
         changed
     }
 
-    pub fn hover(self) -> Option<SettingsTarget> {
+    pub fn hover(&self) -> Option<SettingsTarget> {
         self.hover
     }
 
     /// Where the keyboard is, whether or not the ring is showing.
     #[must_use]
-    pub fn focus(self) -> Option<SettingsTarget> {
+    pub fn focus(&self) -> Option<SettingsTarget> {
         self.focus
     }
 
     /// Where the **ring** is drawn, which is the focus only while it was reached
     /// by keyboard. The one reader is the draw, so the heuristic is stated once.
     #[must_use]
-    pub fn focus_ring(self) -> Option<SettingsTarget> {
+    pub fn focus_ring(&self) -> Option<SettingsTarget> {
         self.focus_visible.then_some(self.focus).flatten()
     }
 
@@ -881,8 +1247,26 @@ impl SettingsPanel {
     /// half of `:focus-visible` a naive "set focus on click" would miss.
     pub fn press(&mut self, target: SettingsTarget) {
         self.focus_visible = false;
+        // **A capture ends where the finger goes**, unless the finger is on the
+        // very button that is listening. The recorder takes every key while it
+        // is open, so a capture the pointer had walked away from would be a
+        // dialog silently eating the keyboard on behalf of a row that has
+        // stopped saying it is listening — the state and what is drawn come
+        // apart, and only one of them is visible.
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(|capture| target != SettingsTarget::Record(capture.row))
+        {
+            self.recording = None;
+        }
         match target {
-            SettingsTarget::Close | SettingsTarget::Combo(_) => self.focus = Some(target),
+            SettingsTarget::Close
+            | SettingsTarget::Combo(_)
+            | SettingsTarget::Nav(_)
+            | SettingsTarget::Record(_)
+            | SettingsTarget::RestoreRow(_)
+            | SettingsTarget::RestoreAll => self.focus = Some(target),
             // An item's own row is what the keyboard lands on: the menu is about
             // to close, and a focus naming an item of a shut picker names
             // nothing.
@@ -901,10 +1285,20 @@ impl SettingsPanel {
     /// the list, and again at the top of [`Self::key`], because a focus naming a
     /// row that is gone draws no ring and answers no key: the dialog would look
     /// like it had swallowed the keyboard.
-    pub fn keep_focus_reachable(&mut self, rows: &[SettingsRow]) {
+    pub fn keep_focus_reachable(&mut self, content: SettingsContent<'_>) {
         if !self.open {
             return;
         }
+        // A page that has lost every row goes with them: the rail derives itself
+        // from the rows, so a category the dialog is standing on can stop
+        // existing under it.
+        if !content.has_content(self.category) {
+            self.category = content.first_category();
+            self.menu = None;
+            self.recording = None;
+            self.focus = None;
+        }
+        let rows = content.page_rows(self.category);
         // **An open picker's own item is a legal place for the focus and is not
         // in the Tab order**, which is a list of the dialog's controls: while a
         // picker is up the keyboard is *inside* one of them. Checked against the
@@ -917,13 +1311,21 @@ impl SettingsPanel {
         {
             return;
         }
-        let order = focus_order(rows);
+        let order = focus_order(content, self.category);
         if self.focus.is_some_and(|focus| order.contains(&focus)) {
             return;
         }
-        // A picker open on a row that just vanished goes with it.
+        // A picker open on a row that just vanished goes with it, and so does a
+        // capture on a line that has.
         if self.menu.is_some_and(|row| !rows.contains(&row)) {
             self.menu = None;
+        }
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(|capture| capture.row >= content.shortcuts.len())
+        {
+            self.recording = None;
         }
         self.focus = order.first().copied();
     }
@@ -943,6 +1345,15 @@ pub enum SettingsKey {
     },
     Down,
     Up,
+    /// The two that cross between the rail and the page.
+    ///
+    /// A rail is a list you walk with `↑`/`↓` and step *out of* sideways — the
+    /// tablist shape every settings dialog on this platform uses, and the reason
+    /// the rail is one Tab stop rather than five. `←` and `→` are what make that
+    /// true of the keyboard: without them the only way back to the rail from the
+    /// middle of a page would be to Tab through everything under it.
+    Left,
+    Right,
     Home,
     End,
     /// Enter or Space — "press the thing the ring is on".
@@ -971,6 +1382,13 @@ pub enum SettingsKeyVerdict {
     Closed,
 }
 
+impl SettingsKeyVerdict {
+    /// `Moved` or `Inert`, from whether anything actually moved.
+    const fn from_moved(moved: bool) -> Self {
+        if moved { Self::Moved } else { Self::Inert }
+    }
+}
+
 impl SettingsPanel {
     /// Drive the dialog from one key.
     ///
@@ -987,13 +1405,13 @@ impl SettingsPanel {
     pub fn key(
         &mut self,
         key: SettingsKey,
-        rows: &[SettingsRow],
+        content: SettingsContent<'_>,
         values: SettingsValues,
     ) -> SettingsKeyVerdict {
         if !self.open {
             return SettingsKeyVerdict::Inert;
         }
-        self.keep_focus_reachable(rows);
+        self.keep_focus_reachable(content);
         // Every key press is keyboard interaction, including the ones with no
         // verb here: `:focus-visible`'s heuristic is about the *input device*,
         // not about whether the key happened to be bound.
@@ -1011,18 +1429,20 @@ impl SettingsPanel {
                     SettingsKeyVerdict::Inert
                 };
             }
-            SettingsKey::Activate => return self.activate(values),
+            SettingsKey::Activate => return self.activate(content, values),
             SettingsKey::Tab { backwards } => {
                 // Tab leaves an open picker rather than walking inside it — a
                 // `<select>`'s own behaviour, and the only reading that keeps
                 // "one popup at a time" (mock-up 5102) true of the keyboard.
                 self.close_menu();
-                self.step_focus(rows, if backwards { -1 } else { 1 })
+                self.step_focus(content, if backwards { -1 } else { 1 })
             }
-            SettingsKey::Down => self.step(rows, values, 1),
-            SettingsKey::Up => self.step(rows, values, -1),
-            SettingsKey::Home => self.jump(rows, values, false),
-            SettingsKey::End => self.jump(rows, values, true),
+            SettingsKey::Down => self.step(content, values, 1),
+            SettingsKey::Up => self.step(content, values, -1),
+            SettingsKey::Left => self.step_out_of_page(content),
+            SettingsKey::Right => self.step_into_page(content),
+            SettingsKey::Home => self.jump(content, values, false),
+            SettingsKey::End => self.jump(content, values, true),
             SettingsKey::Other => false,
         };
         if moved || ring_appeared {
@@ -1032,12 +1452,62 @@ impl SettingsPanel {
         }
     }
 
+    /// Whether the ring is standing on a rail item.
+    fn on_nav(&self) -> bool {
+        matches!(self.focus, Some(SettingsTarget::Nav(_)))
+    }
+
+    /// `→` from the rail: into the page, onto its first control.
+    ///
+    /// It answers nothing anywhere else. `→` on a picker button is not "open it"
+    /// — that is Enter's, and a second spelling would make `←` ambiguous between
+    /// "close the picker" and "go back to the rail".
+    fn step_into_page(&mut self, content: SettingsContent<'_>) -> bool {
+        if !self.on_nav() || self.menu.is_some() {
+            return false;
+        }
+        let Some(landing) = page_order(content, self.category).first().copied() else {
+            return false;
+        };
+        self.focus = Some(landing);
+        true
+    }
+
+    /// `←` from anywhere on the page: back to the rail item that opened it.
+    ///
+    /// Back to *this page's* item and not to wherever the rail was last, because
+    /// the rail's selection and the page on screen are one fact — the rail is
+    /// what says which page this is.
+    fn step_out_of_page(&mut self, content: SettingsContent<'_>) -> bool {
+        if self.on_nav() || self.menu.is_some() {
+            return false;
+        }
+        if !content.has_content(self.category) {
+            return false;
+        }
+        let landing = SettingsTarget::Nav(self.category);
+        let changed = self.focus != Some(landing);
+        self.focus = Some(landing);
+        changed
+    }
+
     /// Enter or Space on whatever the ring is on.
-    fn activate(&mut self, values: SettingsValues) -> SettingsKeyVerdict {
+    fn activate(
+        &mut self,
+        content: SettingsContent<'_>,
+        values: SettingsValues,
+    ) -> SettingsKeyVerdict {
         match self.focus {
             Some(SettingsTarget::Close) => {
                 self.close();
                 SettingsKeyVerdict::Closed
+            }
+            // Enter on a rail item is the third spelling of "take me in", beside
+            // `→` and Tab. The page it names is already the page on screen — the
+            // arrows switch as they walk — so there is nothing to select, only
+            // somewhere to go.
+            Some(SettingsTarget::Nav(_)) => {
+                SettingsKeyVerdict::from_moved(self.step_into_page(content))
             }
             Some(SettingsTarget::Combo(row)) => {
                 // "Opens its menu with the current value focused": the picker
@@ -1058,24 +1528,68 @@ impl SettingsPanel {
                 self.close_menu();
                 SettingsKeyVerdict::Chose(target)
             }
+            // The recorder opens here rather than through a verdict, because
+            // starting to listen changes nothing outside this dialog: no file is
+            // written until a chord is confirmed.
+            Some(SettingsTarget::Record(row)) => {
+                if content
+                    .shortcuts
+                    .get(row)
+                    .is_none_or(|line| !line.recordable)
+                {
+                    return SettingsKeyVerdict::Inert;
+                }
+                self.begin_recording(row);
+                SettingsKeyVerdict::Moved
+            }
+            Some(target @ (SettingsTarget::RestoreRow(_) | SettingsTarget::RestoreAll)) => {
+                SettingsKeyVerdict::Chose(target)
+            }
             _ => SettingsKeyVerdict::Inert,
         }
     }
 
     /// One step of the arrows: through the open picker's options if there is
-    /// one, otherwise through the dialog's own controls.
-    fn step(&mut self, rows: &[SettingsRow], values: SettingsValues, delta: isize) -> bool {
+    /// one, along the rail if the ring is on it, otherwise through the page's
+    /// own controls.
+    ///
+    /// **Three regions, one spelling.** `↑`/`↓` never cross between the rail and
+    /// the page — a list you are walking should not tip you out of its bottom
+    /// into the first control of whatever it was pointing at — and that is what
+    /// makes `←`/`→` and Tab the ways across rather than one of five behaviours
+    /// of the same key.
+    fn step(&mut self, content: SettingsContent<'_>, values: SettingsValues, delta: isize) -> bool {
         match (self.menu, self.focus) {
             (Some(menu), Some(SettingsTarget::Choice(row, index))) if menu == row => {
                 self.step_option(row, values, index, delta)
             }
-            _ => self.step_focus(rows, delta),
+            (_, Some(SettingsTarget::Nav(_))) => self.step_nav(content, delta),
+            _ => self.step_in(&page_order(content, self.category), delta),
         }
     }
 
-    /// Home/End: the first or last option of an open picker, else the first or
-    /// last control of the dialog.
-    fn jump(&mut self, rows: &[SettingsRow], values: SettingsValues, last: bool) -> bool {
+    /// One step along the rail — **and the page turns with it**.
+    ///
+    /// Automatic activation, which is what a rail whose items are pages wants:
+    /// the tab pattern's own rule for a list where showing a section costs
+    /// nothing. A rail that needed Enter after every arrow would make the
+    /// keyboard walk twice as long as the pointer's one click.
+    fn step_nav(&mut self, content: SettingsContent<'_>, delta: isize) -> bool {
+        let items = content.nav_items();
+        if items.is_empty() {
+            return false;
+        }
+        let at = items
+            .iter()
+            .position(|item| *item == self.category)
+            .unwrap_or(0) as isize;
+        let landing = items[(at + delta).rem_euclid(items.len() as isize) as usize];
+        self.select_category(landing)
+    }
+
+    /// Home/End: the first or last option of an open picker, else the two ends
+    /// of whichever region the ring is in.
+    fn jump(&mut self, content: SettingsContent<'_>, values: SettingsValues, last: bool) -> bool {
         if let (Some(menu), Some(SettingsTarget::Choice(row, _))) = (self.menu, self.focus)
             && menu == row
         {
@@ -1088,7 +1602,14 @@ impl SettingsPanel {
                 self.step_option_from(row, values, -1, 1)
             };
         }
-        let order = focus_order(rows);
+        if self.on_nav() {
+            let items = content.nav_items();
+            let landing = if last { items.last() } else { items.first() };
+            return landing
+                .copied()
+                .is_some_and(|item| self.select_category(item));
+        }
+        let order = page_order(content, self.category);
         let landing = if last { order.last() } else { order.first() };
         let Some(landing) = landing.copied() else {
             return false;
@@ -1135,8 +1656,12 @@ impl SettingsPanel {
     }
 
     /// One step along the dialog's Tab order, wrapping at both ends.
-    fn step_focus(&mut self, rows: &[SettingsRow], delta: isize) -> bool {
-        let order = focus_order(rows);
+    fn step_focus(&mut self, content: SettingsContent<'_>, delta: isize) -> bool {
+        self.step_in(&focus_order(content, self.category), delta)
+    }
+
+    /// One step along any list of stops, wrapping at both ends.
+    fn step_in(&mut self, order: &[SettingsTarget], delta: isize) -> bool {
         if order.is_empty() {
             return false;
         }
@@ -1151,21 +1676,188 @@ impl SettingsPanel {
     }
 }
 
-/// **The dialog's Tab order**: the close, then every visible row's control, top
-/// to bottom.
+// ── the recorder ───────────────────────────────────────────────────────────
+
+/// One press, already judged, on its way to a listening row.
 ///
-/// Derived from the row list for [`visible_rows`]' own reason — the conditional
+/// **The judging happens in `shortcuts.rs` and the state machine happens here**,
+/// and the split is the point: this dialog draws boxes and walks a focus, and
+/// what counts as a chord — which keys can be written into a file, which
+/// modifier pairs a German keyboard produces by accident, which row already has
+/// this one — is the shortcut table's own knowledge. A recorder that decided any
+/// of it would be a second answer to a question `apply_overrides` also asks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordInput {
+    /// Only modifiers are down. The box shows them and goes on waiting.
+    Modifier { caps: Vec<String> },
+    /// A complete chord, with the reason it cannot be taken if there is one.
+    Candidate {
+        caps: Vec<String>,
+        chord: crate::shortcuts::Chord,
+        refusal: Option<String>,
+    },
+    /// Bare `Esc`.
+    Cancel,
+    /// Bare `Backspace` or `Delete`.
+    Unbind,
+    /// Bare `Enter`.
+    Confirm,
+    /// A key no file could hold.
+    Unusable,
+}
+
+/// What a press did to a capture, for a runtime that has to repaint or write a
+/// file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordVerdict {
+    /// The box changed and nothing else did.
+    Moved,
+    /// Capture ended with nothing to persist.
+    Ended,
+    /// Give the line at this index this chord — or, with `None`, take its chord
+    /// away — and write the file.
+    Commit(usize, Option<crate::shortcuts::Chord>),
+}
+
+impl SettingsPanel {
+    /// Start listening on one line of the shortcut page.
+    pub fn begin_recording(&mut self, row: usize) {
+        self.menu = None;
+        self.recording = Some(Recording {
+            row,
+            ..Recording::default()
+        });
+        self.focus = Some(SettingsTarget::Record(row));
+    }
+
+    /// Drive a capture from one judged press.
+    ///
+    /// A refusal **leaves the capture open**, which is S64's real requirement:
+    /// the point of refusing at record time rather than after is that the user
+    /// is still holding the keyboard and can simply press something else. A
+    /// refusal that shut the box would make the second attempt cost another
+    /// click on the button they are already looking at.
+    pub fn record(&mut self, input: RecordInput) -> RecordVerdict {
+        let Some(capture) = self.recording.as_mut() else {
+            return RecordVerdict::Ended;
+        };
+        match input {
+            RecordInput::Modifier { caps } => {
+                capture.caps = caps;
+                capture.candidate = None;
+                capture.hint = None;
+                RecordVerdict::Moved
+            }
+            RecordInput::Candidate {
+                caps,
+                chord,
+                refusal,
+            } => {
+                capture.caps = caps;
+                match refusal {
+                    Some(reason) => {
+                        capture.candidate = None;
+                        capture.hint = Some(reason);
+                    }
+                    None => {
+                        capture.candidate = Some(chord);
+                        capture.hint = None;
+                    }
+                }
+                RecordVerdict::Moved
+            }
+            RecordInput::Unusable => {
+                capture.candidate = None;
+                capture.hint = Some(RECORD_UNUSABLE_HINT.to_owned());
+                RecordVerdict::Moved
+            }
+            RecordInput::Cancel => {
+                let row = capture.row;
+                self.recording = None;
+                self.focus = Some(SettingsTarget::Record(row));
+                RecordVerdict::Ended
+            }
+            RecordInput::Unbind => {
+                let row = capture.row;
+                self.recording = None;
+                self.focus = Some(SettingsTarget::Record(row));
+                RecordVerdict::Commit(row, None)
+            }
+            RecordInput::Confirm => match capture.candidate.take() {
+                // Nothing standing: `Enter` with no candidate is not "bind
+                // Enter" and it is not "give up" either — the box is still
+                // waiting, and saying so costs nothing.
+                None => RecordVerdict::Moved,
+                Some(chord) => {
+                    let row = capture.row;
+                    self.recording = None;
+                    self.focus = Some(SettingsTarget::Record(row));
+                    RecordVerdict::Commit(row, Some(chord))
+                }
+            },
+        }
+    }
+}
+
+/// **The dialog's Tab order**: the close, the rail (one stop, the selected item),
+/// then the page's own controls.
+///
+/// **The rail is one Tab stop and not five**, which is the tablist pattern every
+/// settings dialog on this platform uses and the reason `↑`/`↓` and `←`/`→`
+/// exist above: Tab crosses *between* the parts of a dialog, and a list you walk
+/// with the arrows is one part. A rail that put five stops in the Tab order
+/// would make reaching the first row of a page cost six presses.
+///
+/// Derived from the content for [`visible_rows`]' own reason — the conditional
 /// Sidebar row must not be a stop the keyboard can reach while it is not drawn,
 /// and a second list stating the order beside the one stating the rows is a
 /// second place to forget that. The close is first because it is first on the
 /// page; where the focus *starts* is a different question, and
 /// [`SettingsPanel::toggle`] answers it.
 #[must_use]
-pub fn focus_order(rows: &[SettingsRow]) -> Vec<SettingsTarget> {
-    let mut order = Vec::with_capacity(rows.len() + 1);
+pub fn focus_order(
+    content: SettingsContent<'_>,
+    category: SettingsCategory,
+) -> Vec<SettingsTarget> {
+    let page = page_order(content, category);
+    let mut order = Vec::with_capacity(page.len() + 2);
     order.push(SettingsTarget::Close);
-    order.extend(rows.iter().map(|row| SettingsTarget::Combo(*row)));
+    if content.has_content(category) {
+        order.push(SettingsTarget::Nav(category));
+    }
+    order.extend(page);
     order
+}
+
+/// Every control on one page, top to bottom.
+///
+/// The rows page is one picker per row. The shortcut page is, per line, the
+/// `Record` button when the line offers one and the `↺` when there is something
+/// to undo — **and a `↺` that is not drawn is not a stop**, which is the same
+/// rule the conditional Sidebar row taught: a ring on a control nobody can see
+/// is a dialog that looks like it has swallowed the keyboard.
+#[must_use]
+pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<SettingsTarget> {
+    if category == SettingsCategory::Shortcuts {
+        let mut order = Vec::new();
+        for (index, line) in content.shortcuts.iter().enumerate() {
+            if line.recordable {
+                order.push(SettingsTarget::Record(index));
+            }
+            if line.overridden {
+                order.push(SettingsTarget::RestoreRow(index));
+            }
+        }
+        if !content.shortcuts.is_empty() {
+            order.push(SettingsTarget::RestoreAll);
+        }
+        return order;
+    }
+    content
+        .page_rows(category)
+        .into_iter()
+        .map(SettingsTarget::Combo)
+        .collect()
 }
 
 /// Something in the overlay the pointer can be over — **and the same enumeration
@@ -1191,12 +1883,32 @@ pub enum SettingsTarget {
     /// in particular does not close — the mock-up closes only on the scrim.
     Panel,
     Close,
+    /// One word of the category rail.
+    ///
+    /// It carries the category rather than an index for [`SettingsRow`]'s own
+    /// reason one level up: the rail is derived from the rows and a category can
+    /// stop being in it, so an ordinal would come to name a different page the
+    /// first time one appeared above it.
+    Nav(SettingsCategory),
     /// A row's picker button.
     Combo(SettingsRow),
     /// The open menu's own body, between or around its items.
     Menu(SettingsRow),
     /// One item of a row's open picker, by its index in that row's options.
     Choice(SettingsRow, usize),
+    /// The `Record` button on one line of the shortcut page, by that line's
+    /// index in [`SettingsContent::shortcuts`].
+    ///
+    /// **An index here and a string on disk**, and the difference is the whole
+    /// division: this is a fact about the list drawn *this frame*, resolved
+    /// before the frame ends, exactly as `Choice(row, index)` is a fact about
+    /// the options drawn this frame. The id is what crosses into a file, and it
+    /// is looked up through the line the index names.
+    Record(usize),
+    /// The `↺` on one line of the shortcut page.
+    RestoreRow(usize),
+    /// The shortcut page's own `Restore all defaults`.
+    RestoreAll,
 }
 
 /// One row's three boxes, and which row they belong to.
@@ -1215,11 +1927,44 @@ pub struct RowLayout {
     pub combo: [f32; 4],
 }
 
-/// One heading's line box, and which group it names.
+/// The page's own heading, and which category it names.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupLayout {
-    pub group: SettingsGroup,
+    pub group: SettingsCategory,
     pub label: [f32; 4],
+}
+
+/// One word of the rail, and the band it answers in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NavLayout {
+    pub category: SettingsCategory,
+    /// The pill: the ground a selected item wears and the box a press lands in.
+    pub band: [f32; 4],
+    /// The 2px accent stroke on its left edge, drawn only for the selected item.
+    pub bar: [f32; 4],
+    /// Where the word sits, one picker's-worth of padding inside the pill.
+    pub label: [f32; 4],
+}
+
+/// One line of the shortcut page, given boxes.
+///
+/// It is a `.row` and wears `.row`'s boxes — `band`, `title`, `desc` mean
+/// exactly what they mean on a settings row — with the right-hand controls that
+/// only this page has. `record` and `restore` are `Option` for the same reason
+/// [`SettingsLayout::row`] returns one: a line that offers neither is a real
+/// state (a reserved row offers nothing at all), and `None` is how the hit test
+/// and the draw are told once instead of each working it out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShortcutLineLayout {
+    /// Which line of [`SettingsContent::shortcuts`] this is.
+    pub index: usize,
+    pub band: [f32; 4],
+    pub title: [f32; 4],
+    pub desc: [f32; 4],
+    /// Where the caps are laid out, right to left from this box's right edge.
+    pub caps: [f32; 4],
+    pub record: Option<[f32; 4]>,
+    pub restore: Option<[f32; 4]>,
 }
 
 /// Every rectangle the overlay draws and hit-tests, in physical pixels of the
@@ -1242,12 +1987,26 @@ pub struct SettingsLayout {
     /// the caller owns the offset, the geometry owns what the offset may legally
     /// be, and neither has to remember the other's arithmetic.
     max_scroll: f32,
-    /// The headings the dialog is drawing, top to bottom. Derived from `rows`,
-    /// never declared beside it.
+    /// The rail's own column, header excluded — the box its words are clipped
+    /// to, and the box a hairline is drawn down the right edge of.
+    nav: [f32; 4],
+    /// The rail's words, top to bottom.
+    nav_items: Vec<NavLayout>,
+    /// Which page is laid out here.
+    category: SettingsCategory,
+    /// The page's heading. A `Vec` of one, kept as a list because it is still
+    /// derived by walking the rows and noticing where the category changes —
+    /// and on a page that holds one category that walk produces exactly one
+    /// heading, which is the derivation proving itself rather than a special
+    /// case replacing it.
     groups: Vec<GroupLayout>,
-    /// The rows the dialog is holding, top to bottom — the list
-    /// [`visible_rows`] handed in, given boxes.
+    /// The rows this page is holding, top to bottom — the ones
+    /// [`SettingsContent::page_rows`] selected, given boxes.
     rows: Vec<RowLayout>,
+    /// The shortcut page's own lines. Empty on every other page.
+    shortcuts: Vec<ShortcutLineLayout>,
+    /// The shortcut page's `Restore all defaults`.
+    restore_all: Option<[f32; 4]>,
     /// The open menu's border box and its items, top to bottom in its row's own
     /// option order. Empty when the menu is shut.
     menu: Option<[f32; 4]>,
@@ -1299,18 +2058,32 @@ impl SettingsLayout {
     /// that clips it. `Close` never moves anything — the header does not scroll.
     #[must_use]
     pub fn scroll_to_show(&self, target: SettingsTarget, scroll: f32) -> f32 {
-        let row = match target {
-            SettingsTarget::Combo(row) | SettingsTarget::Menu(row) => row,
-            SettingsTarget::Choice(row, _) => row,
-            SettingsTarget::Close | SettingsTarget::Scrim | SettingsTarget::Panel => {
+        // The rail does not scroll and neither does the header, so neither moves
+        // anything: `Nav` is the second target in this dialog whose answer is
+        // "nowhere", and it is the first one that is a control.
+        let band = match target {
+            SettingsTarget::Combo(row) | SettingsTarget::Menu(row) => {
+                self.row(row).map(|placed| placed.band)
+            }
+            SettingsTarget::Choice(row, _) => self.row(row).map(|placed| placed.band),
+            SettingsTarget::Record(index) | SettingsTarget::RestoreRow(index) => self
+                .shortcuts
+                .iter()
+                .find(|line| line.index == index)
+                .map(|line| line.band),
+            SettingsTarget::RestoreAll => self.restore_all,
+            SettingsTarget::Nav(_)
+            | SettingsTarget::Close
+            | SettingsTarget::Scrim
+            | SettingsTarget::Panel => {
                 return scroll;
             }
         };
-        let Some(placed) = self.row(row) else {
+        let Some(band) = band else {
             return scroll;
         };
-        let above = self.content[1] - placed.band[1];
-        let below = placed.band[3] - self.content[3];
+        let above = self.content[1] - band[1];
+        let below = band[3] - self.content[3];
         // A band taller than the viewport cannot satisfy both ends; its top wins,
         // because that is where a row's title is and reading starts there.
         let travel = if above > 0.0 {
@@ -1621,26 +2394,47 @@ pub(crate) fn ellipsized_left(
 /// `None` is a real answer, not a failure: `max-height: calc(100% - 72px)` can
 /// go to nothing, and a scrim over a dialog that is not there would be a window
 /// nobody can use. The runtime treats it as "not open", so no input is trapped
-/// behind an invisible modal.
+/// behind an invisible modal. Since the rail arrived it is also the answer to a
+/// window too *narrow*: below a width that can hold the rail, the gutters and a
+/// picker, what is left is not a narrower version of this design, it is a
+/// different one — and refusing is more honest than drawing a page with no room
+/// for the control every row of it ends in.
 ///
-/// `scroll` is how far the content stack has been pushed up, in physical pixels,
+/// `scroll` is how far the page's stack has been pushed up, in physical pixels,
 /// and it is clamped here rather than trusted: `max-height` plus `overflow-y`
 /// is a pair, and the half that says how far the overflow reaches belongs to
 /// whoever measured the stack. The caller keeps the number and reads
 /// [`SettingsLayout::max_scroll`] back to clamp its own copy — the same division
-/// the tab strip and the rail already run on.
+/// the tab strip and the rail already run on. **It is the page's scroll and not
+/// the dialog's**: one page per category, so a distance measured on one page is
+/// nonsense on the next, which is why turning a page resets it (`Q3 = A`).
 #[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the page's identity is the eighth, and every one of the eight is a \
+              fact only the caller has: the surface, the scale, which picker is \
+              open, what the dialog is holding, which page is up, how wide the \
+              open picker measures, and how far it has been scrolled"
+)]
 pub fn layout_for_menu(
     surface_width: f32,
     surface_height: f32,
     scale: f32,
     menu_kind: Option<SettingsRow>,
-    rows: &[SettingsRow],
+    content_of: SettingsContent<'_>,
+    category: SettingsCategory,
     widest_option: f32,
     scroll: f32,
 ) -> Option<SettingsLayout> {
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let rows = content_of.page_rows(category);
+    let shortcut_lines: &[crate::shortcuts::ShortcutRow] =
+        if category == SettingsCategory::Shortcuts {
+            content_of.shortcuts
+        } else {
+            &[]
+        };
     let width = px(DIALOG_MAX_WIDTH_LOGICAL_PX)
         .min(surface_width * DIALOG_WIDTH_RATIO)
         .round();
@@ -1648,43 +2442,54 @@ pub fn layout_for_menu(
     let available = (surface_height - top - px(DIALOG_BOTTOM_LOGICAL_PX)).round();
     // `.row .text` is two stacked line boxes; the row is as tall as the taller
     // of that column and the control beside it, which is what `align-items:
-    // center` on a flex row resolves to.
+    // center` on a flex row resolves to. A shortcut line is the same `.row` with
+    // a different control, so it is the same height by construction.
     let text_height =
         px(ROW_TITLE_LINE_LOGICAL_PX + ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX);
-    let row_height =
-        2.0 * px(ROW_PADDING_Y_LOGICAL_PX) + text_height.max(px(COMBO_HEIGHT_LOGICAL_PX));
-    // The content is a stack of headings and rows in one order, so its height is
-    // that same stack measured — not a row count plus a remembered number of
-    // headings. `heading_advance` answers for both the height here and the
+    let row_content_height = text_height.max(px(COMBO_HEIGHT_LOGICAL_PX));
+    let row_height = 2.0 * px(ROW_PADDING_Y_LOGICAL_PX) + row_content_height;
+    // The page is a stack of one heading and its rows in one order, so its
+    // height is that same stack measured — not a row count plus a remembered
+    // heading. `heading_advance` answers for both the height here and the
     // placement below, which is what keeps a row from being drawn one heading's
     // worth away from where the dialog made room for it.
-    let heading_advance = |first: bool| {
-        px(if first {
-            GROUP_LABEL_MARGIN_TOP_LOGICAL_PX
-        } else {
-            GROUP_LABEL_MARGIN_TOP_LATER_LOGICAL_PX
-        }) + px(GROUP_LABEL_LINE_LOGICAL_PX)
-            + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX)
-    };
+    let heading_advance = px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
+        + px(GROUP_LABEL_LINE_LOGICAL_PX)
+        + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
     let mut stack_height = 0.0_f32;
-    let mut previous_group: Option<SettingsGroup> = None;
-    for row in rows {
-        let group = row.group();
+    let mut previous_group: Option<SettingsCategory> = None;
+    for row in &rows {
+        let group = row.category();
         if previous_group != Some(group) {
-            stack_height += heading_advance(previous_group.is_none());
+            stack_height += heading_advance;
             previous_group = Some(group);
         }
         stack_height += row_height;
     }
-    let content_height =
+    if !shortcut_lines.is_empty() {
+        stack_height += heading_advance;
+        stack_height += shortcut_lines.len() as f32 * row_height;
+        stack_height += px(SHORTCUT_FOOT_MARGIN_TOP_LOGICAL_PX) + px(BUTTON_HEIGHT_LOGICAL_PX);
+    }
+    let page_height =
         px(CONTENT_PADDING_TOP_LOGICAL_PX) + stack_height + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX);
+    // The rail does not scroll — five words never overflow a dialog that is
+    // already as tall as its window — but it is still part of what the body has
+    // to be tall enough for, or a rail with more items than the shortest page
+    // has rows would be cut off by a dialog that fitted the page exactly.
+    let nav_items = content_of.nav_items();
+    let nav_height = px(NAV_PADDING_TOP_LOGICAL_PX)
+        + nav_stack_height(nav_items.len(), scale)
+        + px(NAV_PADDING_BOTTOM_LOGICAL_PX);
+    let body_height = page_height.max(nav_height);
     let header = px(HEADER_HEIGHT_LOGICAL_PX);
-    let height = (2.0 * border + header + content_height)
-        .min(available)
-        .round();
+    let height = (2.0 * border + header + body_height).min(available).round();
     // Below the header plus its own two borders there is no dialog left to draw,
-    // only a lid — and a lid with no body is not the design's dialog.
-    if width < px(COMBO_MIN_WIDTH_LOGICAL_PX) || height <= 2.0 * border + header {
+    // only a lid — and a lid with no body is not the design's dialog. Narrower
+    // than the rail plus the gutters plus a picker is the same sentence sideways.
+    let narrowest =
+        px(NAV_WIDTH_LOGICAL_PX + 2.0 * CONTENT_PADDING_X_LOGICAL_PX + COMBO_MIN_WIDTH_LOGICAL_PX);
+    if width < narrowest || height <= 2.0 * border + header {
         return None;
     }
     let left = ((surface_width - width) / 2.0).round();
@@ -1712,41 +2517,49 @@ pub fn layout_for_menu(
         header_content[2],
         header_content[1] + close_side,
     ];
-    let content = [
+    let body = [
         inner[0],
         inner[1] + header,
         inner[2],
         inner[3].max(inner[1] + header),
     ];
-    // What the stack wanted minus what the box gives it. The dialog already
-    // stopped growing at `available`; this is the height that capping refused,
-    // and refusing it silently is what cut the last row off before.
-    let max_scroll = (content_height - (content[3] - content[1])).max(0.0);
+    // **The rail is a column of the body and the page is what is left of it.**
+    // Stated in that order because that is the dependency: the rail's width is
+    // the design's, and the page takes the remainder — a page that claimed its
+    // width first would push the rail off a narrow window rather than the
+    // dialog refusing to open, which is the answer the guard above already gave.
+    let nav = [
+        body[0],
+        body[1],
+        body[0] + px(NAV_WIDTH_LOGICAL_PX),
+        body[3],
+    ];
+    let content = [nav[2], body[1], body[2], body[3]];
+    let placed_nav = place_nav(&nav_items, nav, scale);
+    // What the page's stack wanted minus what the box gives it. The dialog
+    // already stopped growing at `available`; this is the height that capping
+    // refused, and refusing it silently is what cut the last row off before.
+    let max_scroll = (page_height - (content[3] - content[1])).max(0.0);
     let scroll = scroll.clamp(0.0, max_scroll);
     let text_left = content[0] + px(CONTENT_PADDING_X_LOGICAL_PX);
     let text_right = content[2] - px(CONTENT_PADDING_X_LOGICAL_PX);
-    let row_content_height = text_height.max(px(COMBO_HEIGHT_LOGICAL_PX));
     let row_left = text_left + px(ROW_PADDING_X_LOGICAL_PX);
     let row_right = text_right - px(ROW_PADDING_X_LOGICAL_PX);
     let combo_width = px(COMBO_MIN_WIDTH_LOGICAL_PX);
     let combo_height = px(COMBO_HEIGHT_LOGICAL_PX);
     // One walk down the same stack the height was measured from. A heading is
-    // emitted wherever the group changes and everything after it moves down by
-    // exactly what the heading took, so the boxes drawn, the boxes hit-tested and
-    // the height reserved are three readings of one derivation rather than three
-    // rules that have to be kept in agreement.
+    // emitted wherever the category changes and everything after it moves down
+    // by exactly what the heading took, so the boxes drawn, the boxes
+    // hit-tested and the height reserved are three readings of one derivation
+    // rather than three rules that have to be kept in agreement.
     let mut cursor = content[1] + px(CONTENT_PADDING_TOP_LOGICAL_PX) - scroll;
     let mut placed_groups: Vec<GroupLayout> = Vec::new();
     let mut placed_rows: Vec<RowLayout> = Vec::with_capacity(rows.len());
-    let mut previous_group: Option<SettingsGroup> = None;
-    for row in rows {
-        let group = row.group();
+    let mut previous_group: Option<SettingsCategory> = None;
+    for row in &rows {
+        let group = row.category();
         if previous_group != Some(group) {
-            cursor += px(if previous_group.is_none() {
-                GROUP_LABEL_MARGIN_TOP_LOGICAL_PX
-            } else {
-                GROUP_LABEL_MARGIN_TOP_LATER_LOGICAL_PX
-            });
+            cursor += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
             let label = [
                 text_left,
                 cursor,
@@ -1792,10 +2605,93 @@ pub fn layout_for_menu(
             }
         });
     }
-    // A picker hangs off a row's button, so a picker named for a row the dialog
+    let mut placed_lines: Vec<ShortcutLineLayout> = Vec::with_capacity(shortcut_lines.len());
+    let mut restore_all = None;
+    if !shortcut_lines.is_empty() {
+        cursor += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
+        let label = [
+            text_left,
+            cursor,
+            text_right,
+            cursor + px(GROUP_LABEL_LINE_LOGICAL_PX),
+        ];
+        cursor = label[3] + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
+        placed_groups.push(GroupLayout {
+            group: SettingsCategory::Shortcuts,
+            label,
+        });
+        for (index, line) in shortcut_lines.iter().enumerate() {
+            let band = [row_left, cursor, row_right, cursor + row_height];
+            let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
+            cursor += row_height;
+            let middle = (band[1] + band[3]) / 2.0;
+            // Right to left, which is how the row is actually built: the verbs
+            // sit against the edge and the chord sits against the verb that
+            // changes it. Laid out the other way the caps would move whenever a
+            // row gained or lost a `↺`, and a chord that shifts sideways when
+            // you edit a different row is a chord that looks like it changed.
+            let restore = line.overridden.then(|| {
+                let side = px(SHORTCUT_RESTORE_SIDE_LOGICAL_PX);
+                [
+                    row_right - side,
+                    middle - side / 2.0,
+                    row_right,
+                    middle + side / 2.0,
+                ]
+            });
+            let record_right = restore.map_or(row_right, |box_| {
+                box_[0] - px(SHORTCUT_CONTROL_GAP_LOGICAL_PX)
+            });
+            let record = line.recordable.then(|| {
+                let width = px(SHORTCUT_RECORD_WIDTH_LOGICAL_PX);
+                let height = px(BUTTON_HEIGHT_LOGICAL_PX);
+                [
+                    record_right - width,
+                    middle - height / 2.0,
+                    record_right,
+                    middle + height / 2.0,
+                ]
+            });
+            let caps_right = record.map_or(record_right, |box_| box_[0] - px(ROW_GAP_LOGICAL_PX));
+            let caps_left = caps_right - px(SHORTCUT_CAPS_WIDTH_LOGICAL_PX);
+            let caps = [caps_left, band[1], caps_right, band[3]];
+            let text_column_right = caps_left - px(ROW_GAP_LOGICAL_PX);
+            let title = [
+                row_left,
+                top,
+                text_column_right,
+                top + px(ROW_TITLE_LINE_LOGICAL_PX),
+            ];
+            let desc = [
+                row_left,
+                title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
+                text_column_right,
+                title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
+            ];
+            placed_lines.push(ShortcutLineLayout {
+                index,
+                band,
+                title,
+                desc,
+                caps,
+                record,
+                restore,
+            });
+        }
+        cursor += px(SHORTCUT_FOOT_MARGIN_TOP_LOGICAL_PX);
+        let width = px(RESTORE_ALL_WIDTH_LOGICAL_PX);
+        restore_all = Some([
+            row_right - width,
+            cursor,
+            row_right,
+            cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
+        ]);
+    }
+    // A picker hangs off a row's button, so a picker named for a row this page
     // is not holding has nothing to hang from and is not open. That is not a
     // guard against the impossible: switching Tab layout to Horizontal takes the
-    // Sidebar row out from under its own open menu.
+    // Sidebar row out from under its own open menu, and turning to another page
+    // takes every row of this one.
     //
     // A row scrolled out from under its own picker is the same sentence with the
     // same answer. The button is the anchor, and an anchor clipped away by the
@@ -1828,12 +2724,60 @@ pub fn layout_for_menu(
         close,
         content,
         max_scroll,
+        nav,
+        nav_items: placed_nav,
+        category,
         groups: placed_groups,
         rows: placed_rows,
+        shortcuts: placed_lines,
+        restore_all,
         menu,
         items,
         menu_kind: active.map(|(row, _)| row),
     })
+}
+
+/// What a rail of this many words costs, pills and the gaps between them.
+fn nav_stack_height(items: usize, scale: f32) -> f32 {
+    if items == 0 {
+        return 0.0;
+    }
+    let px = |value: f32| value * scale;
+    items as f32 * px(NAV_ITEM_HEIGHT_LOGICAL_PX) + (items - 1) as f32 * px(NAV_ITEM_GAP_LOGICAL_PX)
+}
+
+/// Give the rail's words their boxes, top to bottom.
+fn place_nav(items: &[SettingsCategory], nav: [f32; 4], scale: f32) -> Vec<NavLayout> {
+    let px = |value: f32| value * scale;
+    let left = nav[0] + px(NAV_PADDING_X_LOGICAL_PX);
+    let right = nav[2] - px(NAV_PADDING_X_LOGICAL_PX);
+    let mut cursor = nav[1] + px(NAV_PADDING_TOP_LOGICAL_PX);
+    items
+        .iter()
+        .map(|category| {
+            let band = [left, cursor, right, cursor + px(NAV_ITEM_HEIGHT_LOGICAL_PX)];
+            cursor = band[3] + px(NAV_ITEM_GAP_LOGICAL_PX);
+            let inset = px(NAV_ACCENT_BAR_INSET_Y_LOGICAL_PX);
+            let bar = [
+                band[0],
+                band[1] + inset,
+                band[0] + px(NAV_ACCENT_BAR_WIDTH_LOGICAL_PX),
+                band[3] - inset,
+            ];
+            let label = [
+                band[0] + px(NAV_ITEM_PADDING_LEFT_LOGICAL_PX),
+                band[1],
+                band[2],
+                band[3],
+            ];
+            NavLayout {
+                category: *category,
+                band,
+                bar,
+                label,
+            }
+        })
+        .collect()
 }
 
 /// The theme picker's popup: `min-width: 100%` and `right: 0` off the button,
@@ -1934,10 +2878,40 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
     if contains(layout.close, x, y) {
         return SettingsTarget::Close;
     }
+    // The rail before the page, which is the same smallest-target-first ruling
+    // read at this scale: a word of the rail sits *on* the dialog, and the
+    // dialog sits on the scrim. The rail is not clipped by the page's scroll box
+    // and does not ask `shows` — it does not scroll, so there is nothing for a
+    // scroll to have cut off.
+    for item in &layout.nav_items {
+        if contains(item.band, x, y) {
+            return SettingsTarget::Nav(item.category);
+        }
+    }
     for placed in &layout.rows {
         if layout.shows(placed.combo) && contains(placed.combo, x, y) {
             return SettingsTarget::Combo(placed.row);
         }
+    }
+    for line in &layout.shortcuts {
+        if let Some(record) = line.record
+            && layout.shows(record)
+            && contains(record, x, y)
+        {
+            return SettingsTarget::Record(line.index);
+        }
+        if let Some(restore) = line.restore
+            && layout.shows(restore)
+            && contains(restore, x, y)
+        {
+            return SettingsTarget::RestoreRow(line.index);
+        }
+    }
+    if let Some(restore_all) = layout.restore_all
+        && layout.shows(restore_all)
+        && contains(restore_all, x, y)
+    {
+        return SettingsTarget::RestoreAll;
     }
     if contains(layout.frame, x, y) {
         return SettingsTarget::Panel;
@@ -1965,6 +2939,8 @@ pub fn build(
     hover: Option<SettingsTarget>,
     focus: Option<SettingsTarget>,
     values: SettingsValues,
+    shortcuts: &[crate::shortcuts::ShortcutRow],
+    recording: Option<(usize, &[String], Option<&str>)>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -2002,7 +2978,7 @@ pub fn build(
     );
 
     labels.push(ChromeLabel {
-        text: "Settings".to_owned(),
+        text: DIALOG_TITLE.to_owned(),
         rect: [
             layout.header_content[0],
             layout.header_content[1],
@@ -2043,6 +3019,63 @@ pub fn build(
             palette.dialog_secondary_text
         },
     ));
+
+    // **The rail, before the page and outside its clip.** It sits in the
+    // dialog's own layer rather than in the scrolling stack because it does not
+    // scroll: a rail that moved with the page would be a table of contents that
+    // walks off the top of the book.
+    let seam = [
+        layout.nav[2] - border,
+        layout.nav[1],
+        layout.nav[2],
+        layout.nav[3],
+    ];
+    quads.push(OverlayQuad {
+        rect: seam,
+        color: palette.menu_border,
+        alpha: alpha(palette.menu_border_alpha),
+    });
+    for item in &layout.nav_items {
+        let selected = item.category == layout.category;
+        let hovered = hover == Some(SettingsTarget::Nav(item.category));
+        if selected || hovered {
+            quads.extend(rounded_overlay_fill(
+                item.band,
+                px(NAV_ITEM_RADIUS_LOGICAL_PX),
+                palette.dialog_hover,
+                1.0,
+            ));
+        }
+        // The bar names the page that is up, never the word under the pointer:
+        // a hover is a question and a selection is an answer, and the accent in
+        // this house is the ink an answer is written in.
+        if selected {
+            quads.push(OverlayQuad {
+                rect: item.bar,
+                color: palette.accent,
+                alpha: 1.0,
+            });
+        }
+        if focus == Some(SettingsTarget::Nav(item.category)) {
+            quads.extend(focus_ring(item.band, scale, palette.accent));
+        }
+        labels.push(ChromeLabel {
+            text: item.category.nav_label().to_owned(),
+            rect: item.label,
+            font_size_px: px(NAV_ITEM_FONT_LOGICAL_PX),
+            color: if selected || hovered {
+                palette.dialog_title_text
+            } else {
+                palette.dialog_muted_text
+            },
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
 
     // Everything below the header is clipped to the content box, which is what
     // `max-height` plus `overflow-y` leaves when the window is too short.
@@ -2125,6 +3158,18 @@ pub fn build(
                 .extend(focus_ring(placed.combo, scale, palette.accent));
         }
     }
+    push_shortcut_page(
+        &mut content_stack,
+        layout,
+        shortcuts,
+        hover,
+        focus,
+        recording,
+        scale,
+        border,
+        palette,
+        measure,
+    );
     clip_content(clip, content_stack, &mut quads, &mut labels, &mut sprites);
 
     // The open picker, on a layer of its own above everything the dialog drew.
@@ -2249,6 +3294,353 @@ pub fn build(
     } else {
         vec![content, popup]
     }
+}
+
+/// The shortcut page's own lines, into the scrolling stack.
+///
+/// It draws nothing at all on any other page, and that falls out of the layout
+/// rather than being asked here: `layout.shortcuts` is empty unless the page is
+/// the shortcut page, which is the same shape "a category with no rows draws no
+/// heading" already has.
+#[allow(clippy::too_many_arguments)]
+fn push_shortcut_page(
+    stack: &mut OverlayLayer,
+    layout: &SettingsLayout,
+    shortcuts: &[crate::shortcuts::ShortcutRow],
+    hover: Option<SettingsTarget>,
+    focus: Option<SettingsTarget>,
+    recording: Option<(usize, &[String], Option<&str>)>,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |value: f32| value * scale;
+    for placed in &layout.shortcuts {
+        let Some(line) = shortcuts.get(placed.index) else {
+            continue;
+        };
+        let listening = recording.map(|(row, _, _)| row) == Some(placed.index);
+        // A reserved row is greyed whole — name, note and caps — because the
+        // audit did not take the chord and the line exists to say so. It is the
+        // same ink an unavailable picker item wears, for the same reason: this
+        // is a thing you are being shown and cannot have.
+        let title_ink = if line.reserved {
+            palette.menu_item_hint_text
+        } else {
+            palette.dialog_title_text
+        };
+        stack.labels.push(ChromeLabel {
+            text: line.title.to_owned(),
+            rect: placed.title,
+            font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
+            color: title_ink,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+        // **While a row is listening, its own muted line is the recorder's.**
+        // A hint printed anywhere else would be a second place to look for the
+        // answer to a question asked here; a refusal shown in red where the
+        // scope tag was is a sentence in the place the eye is already on.
+        let (note, note_ink) = match (listening, recording) {
+            (true, Some((_, _, Some(hint)))) => (Some(hint.to_owned()), palette.status_err),
+            (true, Some((_, _, None))) => {
+                (Some(RECORD_PROMPT.to_owned()), palette.dialog_muted_text)
+            }
+            _ => (
+                line.note.as_ref().map(|note| note.to_string()),
+                palette.dialog_muted_text,
+            ),
+        };
+        if let Some(note) = note {
+            // **Ellipsised, unlike a settings row's own description.** The rule
+            // is the combo value's (`a_value_too_wide_for_its_button_is_
+            // ellipsised_not_cropped`): a crop mid-glyph reads as a rendering
+            // fault, an ellipsis reads as a line too long. It is applied here
+            // and not to every row because this column is the one that is
+            // narrow by construction — a shortcut line hands 168px to its caps,
+            // and the recorder writes a whole sentence into what is left.
+            let width = placed.desc[2] - placed.desc[0];
+            stack.labels.push(ChromeLabel {
+                text: ellipsized(&note, width, px(ROW_DESC_FONT_LOGICAL_PX), measure),
+                rect: placed.desc,
+                font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
+                color: note_ink,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
+        let live: Vec<String> = match (listening, recording) {
+            (true, Some((_, caps, _))) => caps.to_vec(),
+            _ => line.caps.clone(),
+        };
+        push_caps(
+            stack,
+            placed.caps,
+            &live,
+            line.reserved,
+            listening,
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if let Some(record) = placed.record {
+            push_button(
+                &mut stack.quads,
+                &mut stack.labels,
+                record,
+                if listening {
+                    RECORD_LISTENING_LABEL
+                } else {
+                    RECORD_BUTTON_LABEL
+                },
+                hover == Some(SettingsTarget::Record(placed.index)) || listening,
+                scale,
+                border,
+                palette,
+                measure,
+            );
+            if focus == Some(SettingsTarget::Record(placed.index)) {
+                stack
+                    .quads
+                    .extend(focus_ring(record, scale, palette.accent));
+            }
+        }
+        if let Some(restore) = placed.restore {
+            push_restore_verb(
+                stack,
+                restore,
+                hover == Some(SettingsTarget::RestoreRow(placed.index)),
+                scale,
+                palette,
+            );
+            if focus == Some(SettingsTarget::RestoreRow(placed.index)) {
+                stack
+                    .quads
+                    .extend(focus_ring(restore, scale, palette.accent));
+            }
+        }
+    }
+    if let Some(restore_all) = layout.restore_all {
+        push_button(
+            &mut stack.quads,
+            &mut stack.labels,
+            restore_all,
+            RESTORE_ALL_LABEL,
+            hover == Some(SettingsTarget::RestoreAll),
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if focus == Some(SettingsTarget::RestoreAll) {
+            stack
+                .quads
+                .extend(focus_ring(restore_all, scale, palette.accent));
+        }
+    }
+}
+
+/// A chord as key caps, laid out **right to left** from the box's right edge.
+///
+/// Right to left because the caps belong to the button beside them: a chord that
+/// started at a fixed left edge would drift away from its own `Record` as rows
+/// gained and lost their `↺`, and a chord that moves when you edit a different
+/// row is a chord that looks like it changed.
+///
+/// An empty chord draws the word for it instead, in the muted ink — never an
+/// empty space, because a blank where a chord goes is indistinguishable from a
+/// row that failed to draw.
+#[allow(clippy::too_many_arguments)]
+fn push_caps(
+    stack: &mut OverlayLayer,
+    box_: [f32; 4],
+    caps: &[String],
+    reserved: bool,
+    listening: bool,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |value: f32| value * scale;
+    let font_size_px = px(CAP_FONT_LOGICAL_PX);
+    let middle = (box_[1] + box_[3]) / 2.0;
+    let height = px(CAP_HEIGHT_LOGICAL_PX);
+    if caps.is_empty() {
+        // **`Not set` is a fact about the row, not about the moment.** A box
+        // that is listening and has nothing down yet is showing an empty hand,
+        // and printing the word for "this row has no chord" there would be the
+        // panel answering a question nobody asked while the user is mid-press.
+        if listening {
+            return;
+        }
+        stack.labels.push(ChromeLabel {
+            text: crate::shortcuts::UNBOUND_CAP.to_owned(),
+            rect: [box_[0], box_[1], box_[2], box_[3]],
+            font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
+            color: palette.menu_item_hint_text,
+            align_right: true,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+        return;
+    }
+    let mut right = box_[2];
+    for cap in caps.iter().rev() {
+        let width = (measure(cap, font_size_px) + 2.0 * px(CAP_PADDING_X_LOGICAL_PX))
+            .max(px(CAP_MIN_WIDTH_LOGICAL_PX));
+        let rect = [
+            right - width,
+            middle - height / 2.0,
+            right,
+            middle + height / 2.0,
+        ];
+        right = rect[0] - px(CAP_GAP_LOGICAL_PX);
+        // The combo button's own recipe at a smaller round: a hairline, then a
+        // face one border in. A key cap is a control-shaped thing that is not a
+        // control, and borrowing the shape is what makes it read as a key rather
+        // than as a badge.
+        stack.quads.extend(rounded_overlay_fill(
+            rect,
+            px(CAP_RADIUS_LOGICAL_PX),
+            palette.menu_border,
+            f32::from(palette.menu_border_alpha) / 255.0,
+        ));
+        stack.quads.extend(rounded_overlay_fill(
+            [
+                rect[0] + border,
+                rect[1] + border,
+                rect[2] - border,
+                rect[3] - border,
+            ],
+            px(CAP_RADIUS_LOGICAL_PX) - border,
+            if reserved {
+                palette.dialog_surface
+            } else {
+                palette.dialog_hover
+            },
+            1.0,
+        ));
+        stack.labels.push(ChromeLabel {
+            text: cap.clone(),
+            rect,
+            font_size_px,
+            color: if reserved {
+                palette.menu_item_hint_text
+            } else {
+                palette.dialog_title_text
+            },
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+}
+
+/// `.btn` (mock-up 2000-2008): a bordered, rounded box with a word centred in
+/// it, at the picker's own height so a row's right-hand control is one object
+/// wherever it appears.
+#[allow(clippy::too_many_arguments)]
+fn push_button(
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+    rect: [f32; 4],
+    text: &str,
+    hovered: bool,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |value: f32| value * scale;
+    let radius = px(BUTTON_RADIUS_LOGICAL_PX);
+    quads.extend(rounded_overlay_fill(
+        rect,
+        radius,
+        palette.menu_border,
+        f32::from(palette.menu_border_alpha) / 255.0,
+    ));
+    quads.extend(rounded_overlay_fill(
+        [
+            rect[0] + border,
+            rect[1] + border,
+            rect[2] - border,
+            rect[3] - border,
+        ],
+        radius - border,
+        if hovered {
+            palette.dialog_hover
+        } else {
+            palette.dialog_surface
+        },
+        1.0,
+    ));
+    let font_size_px = px(BUTTON_FONT_LOGICAL_PX);
+    labels.push(ChromeLabel {
+        text: ellipsized(text, rect[2] - rect[0], font_size_px, measure),
+        rect,
+        font_size_px,
+        color: palette.dialog_title_text,
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+}
+
+/// The `↺` beside an overridden row — the house's own three-step reveal, one
+/// step short: it is only drawn at all when there is something to undo, so
+/// "absent" is already doing the work "invisible until hovered" does elsewhere.
+fn push_restore_verb(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    hovered: bool,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+) {
+    let px = |value: f32| value * scale;
+    if hovered {
+        stack.quads.extend(rounded_overlay_fill(
+            rect,
+            px(BUTTON_RADIUS_LOGICAL_PX),
+            palette.dialog_hover,
+            1.0,
+        ));
+    }
+    stack.labels.push(ChromeLabel {
+        text: RESTORE_GLYPH.to_owned(),
+        rect,
+        font_size_px: px(BUTTON_FONT_LOGICAL_PX),
+        color: if hovered {
+            palette.dialog_title_text
+        } else {
+            palette.dialog_secondary_text
+        },
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
 }
 
 /// **`button:focus-visible`** (mock-up 2205) — the ring round a control the
@@ -2424,28 +3816,15 @@ mod tests {
     /// the two-line text column (16.5 + 1 + 14.5) and the 27.5 control.
     const ROW_HEIGHT: f32 = 54.0;
 
-    /// A heading past the first costs `16 + 13 + 2`; the first costs `10 + 13 + 2`
-    /// and is already inside the 103 below.
-    const LATER_HEADING_HEIGHT: f32 = 31.0;
-
-    /// The dialog's height at scale 1 for a content box holding `rows` rows under
-    /// `groups` headings: two hairlines, the header's `16 + 30 + 10`, and
-    /// `2 + 10 + 13 + 2 + rows * 54 + 18` of content, plus 31 for every heading
-    /// after the first.
-    fn dialog_height(rows: usize, groups: usize) -> f32 {
-        103.0 + ROW_HEIGHT * rows as f32 + LATER_HEADING_HEIGHT * (groups.saturating_sub(1)) as f32
-    }
-
-    /// How many headings a list of rows draws — the same derivation the layout
-    /// makes, so a pin cannot count groups a different way than the dialog does.
-    fn group_count(rows: &[SettingsRow]) -> usize {
-        let mut groups: Vec<SettingsGroup> = Vec::new();
-        for row in rows {
-            if groups.last() != Some(&row.group()) {
-                groups.push(row.group());
-            }
-        }
-        groups.len()
+    /// The dialog's height at scale 1 for a page holding `rows` rows under its
+    /// one heading: two hairlines, the header's `16 + 30 + 10`, and
+    /// `2 + 10 + 13 + 2 + rows * 54 + 18` of content.
+    ///
+    /// **One heading, never more** since the rail arrived: a page holds one
+    /// category, so the `margin-top: 16px` a later heading used to take has
+    /// nothing left to stand off. The `groups` argument went with it.
+    fn dialog_height(rows: usize) -> f32 {
+        103.0 + ROW_HEIGHT * rows as f32
     }
 
     /// The rows a dialog holds with the tabs across the top — the state the app
@@ -2455,6 +3834,24 @@ mod tests {
         visible_rows(TabLayoutMode::Horizontal)
     }
 
+    /// The shortcut table as the panel would show it, for the claims that are
+    /// about it.
+    fn shortcut_lines() -> Vec<crate::shortcuts::ShortcutRow> {
+        crate::shortcuts::Shortcuts::defaults().editor_rows()
+    }
+
+    /// A dialog holding these rows and these shortcut lines.
+    fn content<'a>(
+        rows: &'a [SettingsRow],
+        shortcuts: &'a [crate::shortcuts::ShortcutRow],
+    ) -> SettingsContent<'a> {
+        SettingsContent { rows, shortcuts }
+    }
+
+    /// The page every geometry claim that is not about the rail or the shortcut
+    /// table is stated against: the one the mock-up's own rows live on.
+    const PAGE: SettingsCategory = SettingsCategory::Appearance;
+
     /// A representative reading for every row, for the tests that are about
     /// geometry rather than about which value is shown.
     fn values() -> SettingsValues {
@@ -2462,12 +3859,14 @@ mod tests {
     }
 
     fn open(scale: f32, menu_open: bool) -> SettingsLayout {
+        let rows = flat_rows();
         layout_for_menu(
             (SURFACE.0 * scale).round(),
             (SURFACE.1 * scale).round(),
             scale,
             menu_open.then_some(SettingsRow::Theme),
-            &flat_rows(),
+            content(&rows, &[]),
+            PAGE,
             0.0,
             UNSCROLLED,
         )
@@ -2497,18 +3896,42 @@ mod tests {
         tab_layout: TabLayoutMode,
         widest_option: f32,
     ) -> SettingsLayout {
+        open_page(
+            scale,
+            menu,
+            tab_layout,
+            menu.map_or(PAGE, SettingsRow::category),
+            widest_option,
+        )
+    }
+
+    /// One named page of the dialog.
+    fn open_page(
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+        category: SettingsCategory,
+        widest_option: f32,
+    ) -> SettingsLayout {
+        let rows = visible_rows(tab_layout);
+        let shortcuts = shortcut_lines();
         layout_for_menu(
             SURFACE.0 * scale,
             SURFACE.1 * scale,
             scale,
             menu,
-            &visible_rows(tab_layout),
+            content(&rows, &shortcuts),
+            category,
             widest_option,
             UNSCROLLED,
         )
         .expect("the settings dialog fits")
     }
 
+    /// The page a row lives on, opened.
+    fn open_showing(row: SettingsRow) -> SettingsLayout {
+        open_page(1.0, None, TabLayoutMode::Vertical, row.category(), 0.0)
+    }
     /// A dialog nobody has turned a wheel over — what every claim that is not
     /// about scrolling is stated against.
     const UNSCROLLED: f32 = 0.0;
@@ -2556,36 +3979,48 @@ mod tests {
     #[test]
     fn the_dialog_lands_where_the_mock_up_puts_it() {
         assert_eq!(
-            dialog_height(2, 1),
+            dialog_height(2),
             211.0,
             "the mock-up's own measurement: two rows under one heading, which is \
              what this dialog first shipped with"
         );
         let placed = open(1.0, false);
-        assert_eq!(width(placed.frame), 480.0, "min(480px, 92%) at 1280 wide");
+        assert_eq!(width(placed.frame), 720.0, "min(720px, 92%) at 1280 wide");
         assert_eq!(placed.frame[1], 54.0, "margin-top: 54px");
         assert_eq!(
             placed.frame[0],
-            (SURFACE.0 - 480.0) / 2.0,
+            (SURFACE.0 - 720.0) / 2.0,
             "margin-left/right: auto"
         );
+        let page = SettingsCategory::Appearance;
+        let rows = flat_rows();
+        let on_page = rows.iter().filter(|row| row.category() == page).count();
         assert_eq!(
             height(placed.frame),
-            dialog_height(flat_rows().len(), group_count(&flat_rows())),
-            "content decides the height, headings included"
+            dialog_height(on_page),
+            "the page decides the height, its one heading included"
         );
 
-        // The 92% share takes over below 480/0.92 ~= 521.7 logical pixels.
-        let narrow = layout_for_menu(480.0, 800.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED)
-            .expect("480 wide still hosts the dialog");
+        // The 92% share takes over below 720/0.92 ~= 782.6 logical pixels.
+        let narrow = layout_for_menu(
+            720.0,
+            800.0,
+            1.0,
+            None,
+            content(&rows, &[]),
+            page,
+            0.0,
+            UNSCROLLED,
+        )
+        .expect("720 wide still hosts the dialog");
         assert_eq!(
             width(narrow.frame),
-            (480.0_f32 * DIALOG_WIDTH_RATIO).round(),
+            (720.0_f32 * DIALOG_WIDTH_RATIO).round(),
             "under the cap the dialog takes 92% of the window"
         );
         assert_eq!(
             narrow.frame[0],
-            ((480.0 - width(narrow.frame)) / 2.0).round()
+            ((720.0 - width(narrow.frame)) / 2.0).round()
         );
     }
 
@@ -2665,9 +4100,14 @@ mod tests {
                 );
             };
             let combo = combo_of(&placed, SettingsRow::Theme);
-            near(480.0 * scale, width(placed.frame), "the dialog's width");
+            near(720.0 * scale, width(placed.frame), "the dialog's width");
             near(
-                dialog_height(flat_rows().len(), group_count(&flat_rows())) * scale,
+                dialog_height(
+                    flat_rows()
+                        .iter()
+                        .filter(|row| row.category() == PAGE)
+                        .count(),
+                ) * scale,
                 height(placed.frame),
                 "the dialog's height",
             );
@@ -2914,12 +4354,14 @@ mod tests {
         );
 
         // A window whose bottom is right under the combo leaves no room below.
+        let rows = flat_rows();
         let short = layout_for_menu(
             1280.0,
             200.0,
             1.0,
             Some(SettingsRow::Theme),
-            &flat_rows(),
+            content(&rows, &[]),
+            PAGE,
             0.0,
             UNSCROLLED,
         )
@@ -2943,21 +4385,36 @@ mod tests {
 
     /// A settings list of `count` rows, cycling the real ones.
     ///
-    /// Real rows and not invented ones: a row carries its own group, and it is
-    /// the group changes that put headings into the stack, so a synthetic row
-    /// would be measuring an easier shape than the dialog actually holds. Twenty
-    /// of these is the row count this module's growth is pinned against — six
-    /// today, seven with the rail's own row, and the Default profile row was
-    /// already being cut off the bottom at seven.
+    /// Real rows and not invented ones: a row carries its own category, and it
+    /// is the category changes that put a heading into the stack, so a synthetic
+    /// row would be measuring an easier shape than the dialog actually holds.
+    /// Twenty of these is the row count this module's growth is pinned against.
+    ///
+    /// **All from one page**, since a page is what a layout lays out: cycling
+    /// rows across two categories would also break the contiguity the heading
+    /// derivation depends on, which is a different bug wearing this test's
+    /// clothes.
     fn many_rows(count: usize) -> Vec<SettingsRow> {
-        let cycle = visible_rows(TabLayoutMode::Vertical);
+        let cycle: Vec<SettingsRow> = visible_rows(TabLayoutMode::Vertical)
+            .into_iter()
+            .filter(|row| row.category() == PAGE)
+            .collect();
         (0..count).map(|index| cycle[index % cycle.len()]).collect()
     }
 
     /// The dialog holding `rows`, scrolled this far, in a normal window.
     fn scrolled(rows: &[SettingsRow], scroll: f32) -> SettingsLayout {
-        layout_for_menu(SURFACE.0, SURFACE.1, 1.0, None, rows, 0.0, scroll)
-            .expect("this window hosts the dialog")
+        layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            content(rows, &[]),
+            PAGE,
+            0.0,
+            scroll,
+        )
+        .expect("this window hosts the dialog")
     }
 
     /// PIN (Bug 2): the dialog never grows out of the window it is in.
@@ -3094,7 +4551,8 @@ mod tests {
             SURFACE.1,
             1.0,
             Some(SettingsRow::Theme),
-            &rows,
+            content(&rows, &[]),
+            PAGE,
             0.0,
             UNSCROLLED,
         )
@@ -3108,7 +4566,8 @@ mod tests {
             SURFACE.1,
             1.0,
             Some(SettingsRow::Theme),
-            &rows,
+            content(&rows, &[]),
+            PAGE,
             0.0,
             anchored.max_scroll(),
         )
@@ -3322,10 +4781,14 @@ mod tests {
     /// the width claim with the whole title in a box that cannot hold it.
     #[test]
     fn a_value_too_wide_for_its_button_is_ellipsised_not_cropped() {
-        let placed = open_rows(1.0, None, TabLayoutMode::Vertical);
-        let labels = labels_of(&placed, None, values());
         let mut ellipsised = Vec::new();
-        for row in &placed.rows {
+        let mut placed_rows = Vec::new();
+        for category in SettingsCategory::ALL {
+            let page = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
+            placed_rows.extend(page.rows.iter().map(|row| (page.clone(), *row)));
+        }
+        for (placed, row) in &placed_rows {
+            let labels = labels_of(placed, None, values());
             let whole = shown_value(row.row);
             let box_of = combo_value_box(row.combo);
             let drawn = labels
@@ -3342,6 +4805,7 @@ mod tests {
             if drawn.text == whole {
                 continue;
             }
+            let drawn = drawn.clone();
             let kept = drawn
                 .text
                 .strip_suffix(ELLIPSIS)
@@ -3353,9 +4817,10 @@ mod tests {
             );
             ellipsised.push(row.row);
         }
+        ellipsised.sort_by_key(|row| format!("{row:?}"));
         assert_eq!(
             ellipsised,
-            vec![SettingsRow::SplitDirection, SettingsRow::DefaultProfile],
+            vec![SettingsRow::DefaultProfile, SettingsRow::SplitDirection],
             "the long profile title and `Auto (longer edge)` are the two \
              values that cannot fit the 118px button, and every other row's \
              option is one short word that must be left alone"
@@ -3475,18 +4940,36 @@ mod tests {
     /// trapped behind a modal with nothing on it.
     #[test]
     fn a_window_too_small_to_host_the_dialog_says_so() {
+        let rows = flat_rows();
+        let sized = |width: f32, height: f32| {
+            layout_for_menu(
+                width,
+                height,
+                1.0,
+                None,
+                content(&rows, &[]),
+                PAGE,
+                0.0,
+                UNSCROLLED,
+            )
+        };
+        assert!(sized(1280.0, 100.0).is_none(), "too short");
+        // **The floor moved with the rail** (2026-08-17). It used to be the
+        // 118px picker alone; it is now the rail, the two gutters and that
+        // picker, because a page with no room for the control every row of it
+        // ends in is not a narrower version of this design.
+        let floor =
+            NAV_WIDTH_LOGICAL_PX + 2.0 * CONTENT_PADDING_X_LOGICAL_PX + COMBO_MIN_WIDTH_LOGICAL_PX;
+        assert!(sized(100.0, 800.0).is_none(), "too narrow");
         assert!(
-            layout_for_menu(1280.0, 100.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED).is_none(),
-            "too short"
+            sized(floor / DIALOG_WIDTH_RATIO - 4.0, 800.0).is_none(),
+            "one pixel under the floor is still under it"
         );
         assert!(
-            layout_for_menu(100.0, 800.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED).is_none(),
-            "too narrow"
+            sized(floor / DIALOG_WIDTH_RATIO + 4.0, 800.0).is_some(),
+            "and just over it the dialog opens"
         );
-        assert!(
-            layout_for_menu(1280.0, 800.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED).is_some(),
-            "a real window"
-        );
+        assert!(sized(1280.0, 800.0).is_some(), "a real window");
     }
 
     /// PIN (Esc): one layer per press — the open menu first, then the dialog,
@@ -3495,8 +4978,10 @@ mod tests {
     #[test]
     fn escape_unwinds_one_layer_per_press() {
         let mut panel = SettingsPanel::default();
+        let rows = flat_rows();
+        let lines = shortcut_lines();
         assert!(!panel.close_one_layer(), "nothing is open yet");
-        panel.toggle(&flat_rows());
+        panel.toggle(content(&rows, &lines));
         panel.toggle_menu(SettingsRow::Theme);
         assert!(panel.close_one_layer());
         assert!(
@@ -3513,12 +4998,14 @@ mod tests {
     #[test]
     fn the_gear_toggles_and_shutting_takes_the_menu_with_it() {
         let mut panel = SettingsPanel::default();
-        panel.toggle(&flat_rows());
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        panel.toggle(content(&rows, &lines));
         assert!(panel.is_open());
         panel.toggle_menu(SettingsRow::Theme);
-        panel.toggle(&flat_rows());
+        panel.toggle(content(&rows, &lines));
         assert!(!panel.is_open() && panel.menu().is_none());
-        panel.toggle(&flat_rows());
+        panel.toggle(content(&rows, &lines));
         assert!(panel.is_open() && panel.menu().is_none());
         panel.close();
         assert!(!panel.is_open());
@@ -3543,7 +5030,27 @@ mod tests {
         hover: Option<SettingsTarget>,
         values: SettingsValues,
     ) -> Vec<OverlayLayer> {
-        build(placed, hover, None, values, &mut measure)
+        built_with(placed, hover, None, values, None)
+    }
+
+    /// The same, with a ring and a capture the caller names.
+    fn built_with(
+        placed: &SettingsLayout,
+        hover: Option<SettingsTarget>,
+        focus: Option<SettingsTarget>,
+        values: SettingsValues,
+        recording: Option<(usize, &[String], Option<&str>)>,
+    ) -> Vec<OverlayLayer> {
+        let lines = shortcut_lines();
+        build(
+            placed,
+            hover,
+            focus,
+            values,
+            &lines,
+            recording,
+            &mut measure,
+        )
     }
 
     /// Every fill the overlay draws, whatever layer it is on — the question
@@ -3841,10 +5348,17 @@ mod tests {
     fn hover_paints_the_control_under_the_pointer_and_nothing_else() {
         let placed = open(1.0, true);
         let palette = chrome_palette();
+        // **Everything the rail draws is excluded**, and deliberately: the
+        // selected word wears `--hover` as its standing ground, which is a
+        // *selection* and not a hover. Counting it here would make this test
+        // read "one thing is lit when nothing is hovered", which is true and is
+        // a different sentence from the one this pins.
+        let nav = placed.nav;
         let count = |hover, color| {
             quads_of(&placed, hover, values())
                 .iter()
                 .filter(|quad| quad.color == color)
+                .filter(|quad| quad.rect[0] >= nav[2] || quad.rect[2] <= nav[0])
                 .count()
         };
         assert_eq!(
@@ -3915,102 +5429,126 @@ mod tests {
         }
     }
 
-    /// The dialog is a stack of headed groups, and every row sits under the
-    /// heading that names it.
+    /// Every page is headed by its own category's word, and every row on it is
+    /// drawn under that heading.
     ///
-    /// The mock-up's `.content` is four `.group-label`s with their rows beneath
-    /// (`design/ui-mockup.html:2343, 2406, 2421, 2452`); this build has the two
-    /// the audit assigned. A row drawn under the wrong heading is a row filed
-    /// under a word that does not describe it, which is the only thing a group is
-    /// for.
+    /// The heading is derived by walking the page's rows and noticing where the
+    /// category changes, so on a page that holds one category it is exactly one
+    /// heading — and a row drawn above it, or under a word that does not name
+    /// it, is the derivation having come apart.
     #[test]
-    fn every_row_is_drawn_under_the_heading_that_names_it() {
-        let placed = open_rows(1.0, None, TabLayoutMode::Vertical);
-        let labels = labels_of(&placed, None, values());
-        let heading_top = |text: &str| {
-            labels
+    fn every_page_is_headed_by_its_own_word_and_every_row_sits_under_it() {
+        for category in SettingsCategory::ALL {
+            if category == SettingsCategory::Shortcuts {
+                continue;
+            }
+            let placed = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
+            let labels = labels_of(&placed, None, values());
+            let headings: Vec<&ChromeLabel> = labels
                 .iter()
-                .find(|label| label.text == text)
-                .unwrap_or_else(|| panic!("{text} is headed"))
-                .rect[1]
-        };
-        let appearance = heading_top("APPEARANCE");
-        let rendered = heading_top("RENDERED BLOCKS");
-        assert!(
-            appearance < rendered,
-            "Appearance is the first group in the mock-up's own order"
-        );
+                .filter(|label| label.text == category.label())
+                .collect();
+            if placed.rows.is_empty() {
+                assert!(
+                    headings.is_empty(),
+                    "{category:?} has no rows and must draw no heading"
+                );
+                continue;
+            }
+            assert_eq!(headings.len(), 1, "{category:?} is headed exactly once");
+            let heading = headings[0].rect[1];
+            for placed_row in &placed.rows {
+                assert!(
+                    placed_row.title[1] > heading,
+                    "{:?} is drawn above its own page's heading",
+                    placed_row.row
+                );
+            }
+            for other in SettingsCategory::ALL {
+                if other == category {
+                    continue;
+                }
+                assert!(
+                    !labels.iter().any(|label| label.text == other.label()),
+                    "{category:?}'s page draws {other:?}'s heading"
+                );
+            }
+        }
+    }
 
+    /// Two rows of the Appearance page, named, so the sweep above cannot go
+    /// green on a page that happens to hold nothing.
+    #[test]
+    fn the_appearance_page_holds_the_mock_ups_own_rows() {
+        let placed = open_page(
+            1.0,
+            None,
+            TabLayoutMode::Vertical,
+            SettingsCategory::Appearance,
+            0.0,
+        );
         for row in [
             SettingsRow::Theme,
             SettingsRow::Cursor,
             SettingsRow::TabLayout,
             SettingsRow::Sidebar,
         ] {
-            let top = placed.row(row).expect("row is shown").title[1];
             assert!(
-                top > appearance && top < rendered,
-                "{row:?} belongs to Appearance and must be drawn between the two \
-                 headings"
+                placed.row(row).is_some(),
+                "{row:?} belongs to the Appearance page"
             );
         }
-        let formulas = placed
-            .row(SettingsRow::Formulas)
-            .expect("row is shown")
-            .title[1];
         assert!(
-            formulas > rendered,
-            "Display formulas is what Rendered blocks names"
+            placed.row(SettingsRow::Formulas).is_none(),
+            "Display formulas belongs to Rendered blocks and is not on this page"
         );
     }
 
-    /// A heading past the first stands further off what precedes it than a row
-    /// does, which is the whole of what makes the stack read as groups.
+    /// PIN — **a page's heading takes the stylesheet's base `margin-top: 10px`,
+    /// and there is no other margin left to take.**
     ///
-    /// The mock-up says it twice: `.group-label { margin: 10px 0 2px }` for the
-    /// first (`design/ui-mockup.html:2042`) and an inline `margin-top:16px` on
-    /// every later one (2406, 2421, 2452).
+    /// The mock-up used to say it twice: `.group-label { margin: 10px 0 2px }`
+    /// for the first heading and an inline `margin-top:16px` on every later one,
+    /// the extra six pixels separating one group from the next. With one
+    /// category per page there is no next group on the page, the 16 was retired
+    /// with the rail, and what this pins is the half that survived — plus the
+    /// fact that it is now the *only* half, which is what stops the six pixels
+    /// coming back as a rule nothing reads.
     #[test]
-    fn a_later_heading_stands_off_the_group_above_it() {
+    fn a_pages_heading_takes_the_stylesheets_base_margin_and_stands_alone() {
         for scale in [1.0_f32, 1.5, 2.0] {
-            let placed = open_rows(scale, None, TabLayoutMode::Vertical);
+            let placed = open_page(
+                scale,
+                None,
+                TabLayoutMode::Vertical,
+                SettingsCategory::Appearance,
+                0.0,
+            );
             let labels = labels_of(&placed, None, values());
-            let heading = |text: &str| {
-                labels
-                    .iter()
-                    .find(|label| label.text == text)
-                    .unwrap_or_else(|| panic!("{text} is headed"))
-                    .rect
-            };
-            let first = heading("APPEARANCE");
-            let later = heading("RENDERED BLOCKS");
+            let heading = labels
+                .iter()
+                .find(|label| label.text == SettingsCategory::Appearance.label())
+                .expect("the page is headed")
+                .rect;
 
-            // The first heading takes the base 10px off the content padding.
             let content_top = placed.content[1];
             assert!(
-                (first[1]
+                (heading[1]
                     - (content_top
                         + (CONTENT_PADDING_TOP_LOGICAL_PX + GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
                             * scale))
                     .abs()
                     < 0.5,
-                "scale {scale}: the first heading keeps the stylesheet's 10px"
-            );
-
-            // The later heading takes 16px off the bottom of the group above it.
-            let last_of_first_group = placed
-                .row(SettingsRow::Sidebar)
-                .expect("vertical tabs show the sidebar row")
-                .desc[3];
-            let gap = later[1] - last_of_first_group;
-            assert!(
-                gap > (GROUP_LABEL_MARGIN_TOP_LOGICAL_PX * scale),
-                "scale {scale}: a later heading is pushed further than the base \
-                 margin, saw {gap}"
+                "scale {scale}: the heading keeps the stylesheet's 10px"
             );
             assert!(
-                (later[3] - later[1] - GROUP_LABEL_LINE_LOGICAL_PX * scale).abs() < 0.5,
+                (heading[3] - heading[1] - GROUP_LABEL_LINE_LOGICAL_PX * scale).abs() < 0.5,
                 "scale {scale}: every heading is one line box tall"
+            );
+            assert_eq!(
+                placed.groups.len(),
+                1,
+                "scale {scale}: a page draws one heading, so there is no later one"
             );
         }
     }
@@ -4023,11 +5561,11 @@ mod tests {
     /// taught in one place and forgotten in another gives a control the user can
     /// press but cannot see.
     #[test]
-    fn every_row_answers_the_pointer_where_its_own_group_put_it() {
+    fn every_row_answers_the_pointer_where_its_own_page_put_it() {
         for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             for scale in [1.0_f32, 1.25, 2.0] {
-                let placed = open_rows(scale, None, tab_layout);
                 for row in visible_rows(tab_layout) {
+                    let placed = open_page(scale, None, tab_layout, row.category(), 0.0);
                     let combo = placed.row(row).expect("a visible row is placed").combo;
                     let centre = (
                         f64::from((combo[0] + combo[2]) / 2.0),
@@ -4044,39 +5582,45 @@ mod tests {
         }
     }
 
-    /// The dialog is as tall as everything it is holding — both headings included.
+    /// The dialog is as tall as everything the page it is showing is holding —
+    /// its heading included.
     ///
-    /// A height that counted one heading while the stack drew two would push the
-    /// last group past the bottom of the content box and clip it away.
+    /// A height that forgot the heading would push the last row past the bottom
+    /// of the content box and clip it away, which is the bug that shipped once.
     #[test]
     fn the_dialog_makes_room_for_every_heading_it_draws() {
-        let placed = open_rows(1.0, None, TabLayoutMode::Vertical);
-        let content = placed.content;
-        let last = placed
-            .row(SettingsRow::Formulas)
-            .expect("row is shown")
-            .desc[3];
-        assert!(
-            last + CONTENT_PADDING_BOTTOM_LOGICAL_PX <= content[3] + 0.5,
-            "the last row and the content's bottom padding both fit inside the \
-             content box"
-        );
+        for category in SettingsCategory::ALL {
+            if category == SettingsCategory::Shortcuts {
+                continue;
+            }
+            let placed = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
+            let content = placed.content;
+            let Some(last) = placed.rows.last() else {
+                continue;
+            };
+            assert!(
+                last.desc[3] + CONTENT_PADDING_BOTTOM_LOGICAL_PX <= content[3] + 0.5,
+                "{category:?}: the last row and the content's bottom padding both \
+                 fit inside the content box"
+            );
+        }
     }
 
-    /// Every group the dialog can show holds at least one row, and a group's rows
-    /// are contiguous — the order in [`visible_rows`] is what the headings are
-    /// derived from, so a row filed out of order would split its own group in two.
+    /// Every category the dialog can show holds at least one row, and a
+    /// category's rows are contiguous — the order in [`visible_rows`] is what
+    /// the page heading is derived from, so a row filed out of order would head
+    /// its own page twice.
     #[test]
-    fn each_groups_rows_stand_together_in_the_visible_order() {
+    fn each_categorys_rows_stand_together_in_the_visible_order() {
         for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let rows = visible_rows(tab_layout);
-            let mut seen: Vec<SettingsGroup> = Vec::new();
+            let mut seen: Vec<SettingsCategory> = Vec::new();
             for row in rows {
-                let group = row.group();
+                let group = row.category();
                 if seen.last() != Some(&group) {
                     assert!(
                         !seen.contains(&group),
-                        "{tab_layout:?}: {group:?} is interrupted by another group"
+                        "{tab_layout:?}: {group:?} is interrupted by another category"
                     );
                     seen.push(group);
                 }
@@ -4084,15 +5628,74 @@ mod tests {
             assert_eq!(
                 seen,
                 vec![
-                    SettingsGroup::Appearance,
-                    SettingsGroup::RenderedBlocks,
-                    SettingsGroup::Files,
-                    SettingsGroup::Startup,
+                    SettingsCategory::Appearance,
+                    SettingsCategory::RenderedBlocks,
+                    SettingsCategory::General,
                 ],
-                "{tab_layout:?}: every group is shown, in the mock-up's own order \
-                 (2355, 2433, 2464 — its Terminal group at 2418 has no rows here), \
-                 with the Files group the mock-up has no heading for standing \
-                 between the last two"
+                "{tab_layout:?}: every category with rows is shown once, its rows \
+                 together"
+            );
+        }
+    }
+
+    /// PIN (S4, 2026-08-17) — **every row is on exactly one page, and every page
+    /// the rail offers has something on it.**
+    ///
+    /// The first half is what makes the rail a partition rather than a filter:
+    /// a row filed nowhere is a control nobody can reach, and a row filed twice
+    /// is a switch that disagrees with itself two words apart.
+    ///
+    /// The second is the placeholder ruling, stated as a property: `Terminal`
+    /// exists as a category, has a heading and a page, and is **not** in the
+    /// rail — because it has no rows, exactly as `Profiles` and `Language` will
+    /// not be in it until theirs arrive. A door onto an empty room is a worse
+    /// promise than no door.
+    ///
+    /// MUTATIONS:
+    /// (1) file a row under `Terminal` — it appears in the rail, which is the
+    ///     derivation working;
+    /// (2) list the categories in the rail from `ALL` without the filter —
+    ///     `Terminal` appears with nothing on it and this goes red.
+    #[test]
+    fn every_row_is_on_exactly_one_page_and_every_page_in_the_rail_has_something_on_it() {
+        for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let rows = visible_rows(tab_layout);
+            let lines = shortcut_lines();
+            let content = content(&rows, &lines);
+            for row in &rows {
+                let homes: Vec<SettingsCategory> = SettingsCategory::ALL
+                    .into_iter()
+                    .filter(|category| content.page_rows(*category).contains(row))
+                    .collect();
+                assert_eq!(homes.len(), 1, "{row:?} is filed on {homes:?}");
+                assert_eq!(homes[0], row.category());
+            }
+            let rail = content.nav_items();
+            for category in &rail {
+                assert!(
+                    content.has_content(*category),
+                    "{category:?} is in the rail with nothing on it"
+                );
+            }
+            assert_eq!(
+                rail,
+                vec![
+                    SettingsCategory::General,
+                    SettingsCategory::Appearance,
+                    SettingsCategory::RenderedBlocks,
+                    SettingsCategory::Shortcuts,
+                ],
+                "{tab_layout:?}: the rail is the categories with content, in \
+                 declaration order - Terminal has none and is not offered"
+            );
+            assert!(
+                !rail.contains(&SettingsCategory::Terminal),
+                "a page with no rows is not a door"
+            );
+            assert_eq!(
+                content.first_category(),
+                SettingsCategory::General,
+                "the dialog opens on the first word of the rail"
             );
         }
     }
@@ -4205,7 +5808,7 @@ mod tests {
                 SettingsRow::DefaultProfile.selected_index(values),
                 Some(chosen)
             );
-            let placed = open_rows(1.0, None, TabLayoutMode::Horizontal);
+            let placed = open_showing(SettingsRow::DefaultProfile);
             let combo = placed
                 .row(SettingsRow::DefaultProfile)
                 .expect("the Startup row is in the dialog")
@@ -4444,12 +6047,14 @@ mod tests {
     /// floating boxes.
     #[test]
     fn a_picker_too_wide_for_the_window_is_clamped_into_it() {
+        let rows = flat_rows();
         let placed = layout_for_menu(
-            520.0,
+            780.0,
             800.0,
             1.0,
             Some(SettingsRow::Theme),
-            &flat_rows(),
+            content(&rows, &[]),
+            PAGE,
             4_000.0,
             UNSCROLLED,
         )
@@ -4642,32 +6247,42 @@ mod tests {
     /// heading and not a pixel more.
     ///
     /// Two claims in one, because the pair is what a group *is*: rows that are
-    /// evenly spaced say "these belong together", and the one larger step says
-    /// "and these do not". Every row keeps the identical control either way — a
-    /// heading separates rows, it does not restyle them.
+    /// evenly spaced say "these belong together" — and since the rail arrived
+    /// that is the *only* step a page has, because a page holds one category and
+    /// therefore one heading. The larger step this test used to also pin went
+    /// with `margin-top: 16px`.
     #[test]
-    fn rows_stack_one_row_height_apart_within_a_group_and_one_heading_across_one() {
+    fn rows_of_a_page_stack_one_row_height_apart() {
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
-            let placed = open_rows(1.0, None, layout);
-            assert_eq!(placed.rows.len(), visible_rows(layout).len());
-            for pair in placed.rows.windows(2) {
-                let (above, below) = (&pair[0], &pair[1]);
-                let expected = if above.row.group() == below.row.group() {
-                    ROW_HEIGHT
-                } else {
-                    ROW_HEIGHT + LATER_HEADING_HEIGHT
-                };
+            for category in SettingsCategory::ALL {
+                if category == SettingsCategory::Shortcuts {
+                    continue;
+                }
+                let placed = open_page(1.0, None, layout, category, 0.0);
+                let expected: Vec<SettingsRow> = visible_rows(layout)
+                    .into_iter()
+                    .filter(|row| row.category() == category)
+                    .collect();
+                assert_eq!(placed.rows.len(), expected.len());
                 assert_eq!(
-                    below.combo[1] - above.combo[1],
-                    expected,
-                    "{:?} follows {:?}",
-                    below.row,
-                    above.row
+                    placed.groups.len(),
+                    usize::from(!expected.is_empty()),
+                    "{category:?}: a page draws one heading, or none at all"
                 );
-                assert_eq!(width(below.combo), width(above.combo));
-                assert_eq!(height(below.combo), height(above.combo));
-                assert_eq!(below.title[1] - above.title[1], expected);
-                assert_eq!(below.desc[1] - above.desc[1], expected);
+                for pair in placed.rows.windows(2) {
+                    let (above, below) = (&pair[0], &pair[1]);
+                    assert_eq!(
+                        below.combo[1] - above.combo[1],
+                        ROW_HEIGHT,
+                        "{:?} follows {:?}",
+                        below.row,
+                        above.row
+                    );
+                    assert_eq!(width(below.combo), width(above.combo));
+                    assert_eq!(height(below.combo), height(above.combo));
+                    assert_eq!(below.title[1] - above.title[1], ROW_HEIGHT);
+                    assert_eq!(below.desc[1] - above.desc[1], ROW_HEIGHT);
+                }
             }
         }
     }
@@ -4757,24 +6372,69 @@ mod tests {
 
     /// The dialog in a window too short to hold its whole stack, at this scroll.
     fn cramped(scroll: f32) -> SettingsLayout {
-        layout_for_menu(SURFACE.0, 320.0, 1.0, None, &flat_rows(), 0.0, scroll)
-            .expect("a short window still hosts the dialog")
+        let rows = flat_rows();
+        layout_for_menu(
+            SURFACE.0,
+            320.0,
+            1.0,
+            None,
+            content(&rows, &[]),
+            PAGE,
+            0.0,
+            scroll,
+        )
+        .expect("a short window still hosts the dialog")
     }
 
-    /// An open dialog with the keyboard already on it, ready to be driven.
+    /// An open dialog with the keyboard already inside a page, ready to be
+    /// driven — on the page the mock-up's own rows live on.
+    ///
+    /// Opening lands on `General` and on the rail's own word for it; every claim
+    /// below that is about a *row* wants the page those rows are on and the
+    /// keyboard already in it, which is the rail's two steps: choose, then walk
+    /// in.
     fn keyboarded() -> SettingsPanel {
+        keyboarded_on(PAGE)
+    }
+
+    fn keyboarded_on(category: SettingsCategory) -> SettingsPanel {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
         let mut panel = SettingsPanel::default();
-        panel.toggle(&flat_rows());
+        panel.toggle(content(&rows, &lines));
+        panel.select_category(category);
+        // Entered with the pointer rather than with `Right`, so the ring starts
+        // off exactly as it does on a freshly opened dialog: every claim below
+        // about "the first key lights it" would otherwise be starting from a
+        // dialog somebody had already pressed a key on.
+        if let Some(first) = page_order(content(&rows, &lines), category).first() {
+            panel.press(*first);
+        }
         panel
     }
 
-    /// Where the focus is after this run of keys, from a freshly opened dialog.
+    /// The dialog's whole contents, for the claims that drive it.
+    fn keyed(panel: &mut SettingsPanel, key: SettingsKey) -> SettingsKeyVerdict {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        panel.key(key, content(&rows, &lines), values())
+    }
+
+    /// Where the focus is after this run of keys, from a dialog already inside
+    /// its page.
     fn after(keys: &[SettingsKey]) -> Option<SettingsTarget> {
         let mut panel = keyboarded();
         for key in keys {
-            panel.key(*key, &flat_rows(), values());
+            keyed(&mut panel, *key);
         }
         panel.focus()
+    }
+
+    /// The Tab order of the page every keyboard claim below is stated against.
+    fn page_focus_order() -> Vec<SettingsTarget> {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        focus_order(content(&rows, &lines), PAGE)
     }
 
     /// PIN: **the Tab order is the page's order** — the close first, because it
@@ -4786,21 +6446,130 @@ mod tests {
     /// second half goes red — Sidebar is reachable by keyboard in a dialog that
     /// is not drawing it, which is `visible_rows`' own bug one surface along.
     #[test]
-    fn the_tab_order_is_the_close_then_every_visible_row_in_the_order_it_is_drawn() {
+    fn the_tab_order_is_the_close_the_rail_then_every_visible_row_in_the_order_it_is_drawn() {
         let flat = flat_rows();
-        let expected: Vec<SettingsTarget> = std::iter::once(SettingsTarget::Close)
-            .chain(flat.iter().map(|row| SettingsTarget::Combo(*row)))
+        let lines = shortcut_lines();
+        let expected: Vec<SettingsTarget> = [SettingsTarget::Close, SettingsTarget::Nav(PAGE)]
+            .into_iter()
+            .chain(
+                flat.iter()
+                    .filter(|row| row.category() == PAGE)
+                    .map(|row| SettingsTarget::Combo(*row)),
+            )
             .collect();
-        assert_eq!(focus_order(&flat), expected);
+        assert_eq!(focus_order(content(&flat, &lines), PAGE), expected);
+        // **The rail is one stop and not five.** Tab crosses between the parts
+        // of a dialog; a list you walk with the arrows is one part, and putting
+        // every word of it in the Tab order would make reaching a page's first
+        // row cost as many presses as the rail is long.
+        assert_eq!(
+            focus_order(content(&flat, &lines), PAGE)
+                .iter()
+                .filter(|stop| matches!(stop, SettingsTarget::Nav(_)))
+                .count(),
+            1,
+            "the rail contributes the selected word and no other"
+        );
 
         let down = visible_rows(TabLayoutMode::Vertical);
         assert!(
-            focus_order(&down).contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
+            focus_order(content(&down, &lines), PAGE)
+                .contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
             "the sidebar row is a keyboard stop while the tabs run down the side"
         );
         assert!(
-            !focus_order(&flat).contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
+            !focus_order(content(&flat, &lines), PAGE)
+                .contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
             "and is not one while the dialog is not drawing it"
+        );
+    }
+
+    /// PIN (S4/Q3, 2026-08-17) — **the rail and the page are two regions, and
+    /// the arrows never carry you between them.**
+    ///
+    /// Four promises: `↑`/`↓` inside the rail move the rail *and turn the page
+    /// with it* (the tab pattern's automatic activation, which is what makes a
+    /// keyboard walk cost what a click costs); `→`, Tab and Enter are the three
+    /// ways in; `←` and Shift+Tab are the ways back; and a page turned resets
+    /// nothing but itself — the focus stays on the rail word the user is
+    /// walking, because a focus that jumped into the page would make the second
+    /// `↓` land somewhere they were not looking.
+    ///
+    /// MUTATIONS:
+    /// (1) let `↓` fall out of the rail into the page — the "still on the rail"
+    ///     assertion goes red, and a user walking the rail is tipped into a
+    ///     picker;
+    /// (2) drop the automatic activation — the page never changes and the first
+    ///     assertion goes red;
+    /// (3) make `←` unwind the picker as well as leave the page — the last
+    ///     assertion goes red, and Esc has a rival.
+    #[test]
+    fn the_arrows_walk_the_rail_and_the_page_without_ever_crossing_between_them() {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let rail = content(&rows, &lines).nav_items();
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content(&rows, &lines));
+        assert_eq!(panel.category(), rail[0]);
+
+        // Tab from the page's first control goes back to the rail, which is
+        // where a user who overshot expects to land.
+        assert_eq!(
+            panel.focus(),
+            page_order(content(&rows, &lines), rail[0]).first().copied(),
+            "opening seats the keyboard on the page, as it always has"
+        );
+        keyed(&mut panel, SettingsKey::Left);
+        assert_eq!(panel.focus(), Some(SettingsTarget::Nav(rail[0])));
+
+        // Down the rail: the page turns and the focus stays on the rail.
+        for expected in &rail[1..] {
+            keyed(&mut panel, SettingsKey::Down);
+            assert_eq!(panel.category(), *expected, "the page turned with the walk");
+            assert_eq!(
+                panel.focus(),
+                Some(SettingsTarget::Nav(*expected)),
+                "and the keyboard is still on the rail"
+            );
+        }
+        // And it wraps, like every other walk in this dialog.
+        keyed(&mut panel, SettingsKey::Down);
+        assert_eq!(panel.category(), rail[0]);
+
+        // Three ways in, one way back.
+        for way_in in [
+            SettingsKey::Right,
+            SettingsKey::Tab { backwards: false },
+            SettingsKey::Activate,
+        ] {
+            let mut panel = SettingsPanel::default();
+            panel.toggle(content(&rows, &lines));
+            keyed(&mut panel, SettingsKey::Left);
+            assert_eq!(panel.focus(), Some(SettingsTarget::Nav(rail[0])));
+            keyed(&mut panel, way_in);
+            assert_eq!(
+                panel.focus(),
+                page_order(content(&rows, &lines), rail[0]).first().copied(),
+                "{way_in:?} takes the keyboard into the page"
+            );
+        }
+        let mut back = keyboarded();
+        keyed(&mut back, SettingsKey::Tab { backwards: true });
+        assert_eq!(
+            back.focus(),
+            Some(SettingsTarget::Nav(PAGE)),
+            "Shift+Tab from the first control returns to the rail"
+        );
+
+        // `←` inside an open picker does nothing: Esc is the one verb that
+        // unwinds a layer, and a second one would be a second ladder.
+        let mut open_picker = keyboarded();
+        keyed(&mut open_picker, SettingsKey::Activate);
+        assert!(open_picker.menu().is_some());
+        keyed(&mut open_picker, SettingsKey::Left);
+        assert!(
+            open_picker.menu().is_some(),
+            "the picker is Esc's to close, not the left arrow's"
         );
     }
 
@@ -4814,23 +6583,28 @@ mod tests {
     fn tab_walks_the_order_and_wraps_at_both_ends() {
         let forwards = SettingsKey::Tab { backwards: false };
         let backwards = SettingsKey::Tab { backwards: true };
-        let flat = flat_rows();
-        let order = focus_order(&flat);
+        let order = page_focus_order();
 
-        // Opening seats the focus on the first row, which is one past the close.
-        assert_eq!(after(&[]), Some(order[1]));
-        assert_eq!(after(&[forwards]), Some(order[2]));
-        assert_eq!(after(&[backwards]), Some(order[0]), "back onto the close");
+        // The keyboard is on the page's first control, which is two past the
+        // close: the close, the rail's one word, then the rows.
+        assert_eq!(after(&[]), Some(order[2]));
+        assert_eq!(after(&[forwards]), Some(order[3]));
+        assert_eq!(after(&[backwards]), Some(order[1]), "back onto the rail");
         assert_eq!(
             after(&[backwards, backwards]),
+            Some(order[0]),
+            "and past it onto the close"
+        );
+        assert_eq!(
+            after(&[backwards, backwards, backwards]),
             order.last().copied(),
-            "and past it, round to the last row"
+            "and past that, round to the last row"
         );
 
         let all_forwards: Vec<SettingsKey> = vec![forwards; order.len()];
         assert_eq!(
             after(&all_forwards),
-            Some(order[1]),
+            Some(order[2]),
             "a full lap comes back to where it started"
         );
     }
@@ -4839,17 +6613,22 @@ mod tests {
     /// its two ends. One order and one lap, not a second navigation model that
     /// has to be kept in step with Tab's.
     #[test]
-    fn the_arrows_home_and_end_reach_the_same_places_tab_does() {
-        let flat = flat_rows();
-        let order = focus_order(&flat);
-        assert_eq!(after(&[SettingsKey::Down]), Some(order[2]));
-        assert_eq!(after(&[SettingsKey::Up]), Some(order[0]));
-        assert_eq!(after(&[SettingsKey::Home]), Some(order[0]));
-        assert_eq!(after(&[SettingsKey::End]), order.last().copied());
+    fn the_arrows_home_and_end_walk_the_page_and_wrap_inside_it() {
+        let order = page_focus_order();
+        let first = order[2];
+        let last = *order.last().expect("the page has controls");
+        assert_eq!(after(&[SettingsKey::Down]), Some(order[3]));
+        assert_eq!(
+            after(&[SettingsKey::Up]),
+            Some(last),
+            "up from the first control wraps inside the page, never onto the rail"
+        );
+        assert_eq!(after(&[SettingsKey::Home]), Some(first));
+        assert_eq!(after(&[SettingsKey::End]), Some(last));
         assert_eq!(
             after(&[SettingsKey::End, SettingsKey::Down]),
-            Some(order[0]),
-            "the arrows wrap where Tab wraps"
+            Some(first),
+            "the arrows wrap at the page's own two ends"
         );
     }
 
@@ -4864,15 +6643,30 @@ mod tests {
     /// interaction — that is `:focus-visible`, not `:focus`.
     #[test]
     fn opening_the_dialog_puts_the_keyboard_on_the_first_row_with_no_ring() {
-        let panel = keyboarded();
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content(&rows, &lines));
+        assert_eq!(
+            panel.category(),
+            SettingsCategory::General,
+            "and it opens on the first page, not on the one it was left on"
+        );
         assert_eq!(
             panel.focus(),
-            Some(SettingsTarget::Combo(SettingsRow::Theme))
+            Some(SettingsTarget::Combo(SettingsRow::GitPanel)),
+            "the first row of the page it opened on - not the rail, and not the close"
         );
         assert_eq!(panel.focus_ring(), None, "opened by pointer, so no ring");
 
+        // Left on another page, it still comes back to the first one.
+        panel.select_category(SettingsCategory::Shortcuts);
+        panel.toggle(content(&rows, &lines));
+        panel.toggle(content(&rows, &lines));
+        assert_eq!(panel.category(), SettingsCategory::General);
+
         let mut shut = keyboarded();
-        shut.toggle(&flat_rows());
+        shut.toggle(content(&rows, &lines));
         assert_eq!(
             shut.focus(),
             None,
@@ -4893,19 +6687,27 @@ mod tests {
     #[test]
     fn a_pointer_press_moves_the_focus_and_puts_the_ring_away() {
         let mut panel = keyboarded();
-        panel.key(SettingsKey::Down, &flat_rows(), values());
+        keyed(&mut panel, SettingsKey::Down);
         assert!(panel.focus_ring().is_some(), "a key lights the ring");
 
-        panel.press(SettingsTarget::Combo(SettingsRow::GitPanel));
+        panel.press(SettingsTarget::Combo(SettingsRow::Cursor));
         assert_eq!(
             panel.focus(),
-            Some(SettingsTarget::Combo(SettingsRow::GitPanel)),
+            Some(SettingsTarget::Combo(SettingsRow::Cursor)),
             "the focus follows the finger"
         );
         assert_eq!(panel.focus_ring(), None, "and the ring goes away");
 
+        // The rail is pointer-reachable too, and moves the ring the same way.
+        panel.press(SettingsTarget::Nav(SettingsCategory::Shortcuts));
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Nav(SettingsCategory::Shortcuts))
+        );
+        assert_eq!(panel.focus_ring(), None);
+
         // Even a press that lands on nothing is pointer interaction.
-        panel.key(SettingsKey::Down, &flat_rows(), values());
+        keyed(&mut panel, SettingsKey::Down);
         assert!(panel.focus_ring().is_some());
         panel.press(SettingsTarget::Panel);
         assert_eq!(panel.focus_ring(), None);
@@ -4919,10 +6721,9 @@ mod tests {
     /// Space is the same verb: a button on the web answers both.
     #[test]
     fn enter_opens_a_picker_on_its_current_value_and_the_arrows_choose_from_there() {
-        let flat = flat_rows();
         let mut panel = keyboarded();
         assert_eq!(
-            panel.key(SettingsKey::Activate, &flat, values()),
+            keyed(&mut panel, SettingsKey::Activate),
             SettingsKeyVerdict::Moved
         );
         assert_eq!(panel.menu(), Some(SettingsRow::Theme));
@@ -4935,14 +6736,14 @@ mod tests {
             "the picker opens where the user already is"
         );
 
-        panel.key(SettingsKey::Down, &flat, values());
+        keyed(&mut panel, SettingsKey::Down);
         let next = (selected + 1) % SettingsRow::Theme.option_count();
         assert_eq!(
             panel.focus(),
             Some(SettingsTarget::Choice(SettingsRow::Theme, next))
         );
         assert_eq!(
-            panel.key(SettingsKey::Activate, &flat, values()),
+            keyed(&mut panel, SettingsKey::Activate),
             SettingsKeyVerdict::Chose(SettingsTarget::Choice(SettingsRow::Theme, next)),
             "the same target a click on that item would have carried"
         );
@@ -4955,8 +6756,8 @@ mod tests {
 
         // Home and End are the picker's own two ends while it is open.
         let mut ended = keyboarded();
-        ended.key(SettingsKey::Activate, &flat, values());
-        ended.key(SettingsKey::End, &flat, values());
+        keyed(&mut ended, SettingsKey::Activate);
+        keyed(&mut ended, SettingsKey::End);
         assert_eq!(
             ended.focus(),
             Some(SettingsTarget::Choice(
@@ -4964,7 +6765,7 @@ mod tests {
                 SettingsRow::Theme.option_count() - 1
             ))
         );
-        ended.key(SettingsKey::Home, &flat, values());
+        keyed(&mut ended, SettingsKey::Home);
         assert_eq!(
             ended.focus(),
             Some(SettingsTarget::Choice(SettingsRow::Theme, 0))
@@ -4973,8 +6774,8 @@ mod tests {
         // And Tab leaves an open picker rather than walking inside it, which is
         // what keeps "one popup at a time" true of the keyboard.
         let mut tabbed = keyboarded();
-        tabbed.key(SettingsKey::Activate, &flat, values());
-        tabbed.key(SettingsKey::Tab { backwards: false }, &flat, values());
+        keyed(&mut tabbed, SettingsKey::Activate);
+        keyed(&mut tabbed, SettingsKey::Tab { backwards: false });
         assert_eq!(tabbed.menu(), None);
         assert_eq!(
             tabbed.focus(),
@@ -4990,13 +6791,12 @@ mod tests {
     /// dialog that is already gone.
     #[test]
     fn escape_closes_the_picker_first_and_the_dialog_second() {
-        let flat = flat_rows();
         let mut panel = keyboarded();
-        panel.key(SettingsKey::Activate, &flat, values());
+        keyed(&mut panel, SettingsKey::Activate);
         assert_eq!(panel.menu(), Some(SettingsRow::Theme));
 
         assert_eq!(
-            panel.key(SettingsKey::Escape, &flat, values()),
+            keyed(&mut panel, SettingsKey::Escape),
             SettingsKeyVerdict::Moved
         );
         assert!(panel.is_open(), "the picker went first");
@@ -5006,12 +6806,12 @@ mod tests {
         );
 
         assert_eq!(
-            panel.key(SettingsKey::Escape, &flat, values()),
+            keyed(&mut panel, SettingsKey::Escape),
             SettingsKeyVerdict::Closed
         );
         assert!(!panel.is_open());
         assert_eq!(
-            panel.key(SettingsKey::Escape, &flat, values()),
+            keyed(&mut panel, SettingsKey::Escape),
             SettingsKeyVerdict::Inert,
             "a shut dialog answers no key, so the press falls to whoever owns it next"
         );
@@ -5024,24 +6824,25 @@ mod tests {
     #[test]
     fn the_keyboard_skips_an_option_this_machine_cannot_start() {
         let flat = flat_rows();
+        let lines = shortcut_lines();
         let mut lacking = values();
         // Only the fallback shell is installed.
         lacking.profile_available =
             std::array::from_fn(|index| index == profiles::FALLBACK_PROFILE);
         lacking.default_profile = profiles::FALLBACK_PROFILE;
 
-        let mut panel = keyboarded();
-        panel.key(SettingsKey::End, &flat, lacking);
+        let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
+        panel.key(SettingsKey::End, content(&flat, &lines), lacking);
         assert_eq!(
             panel.focus(),
             Some(SettingsTarget::Combo(SettingsRow::DefaultProfile))
         );
-        panel.key(SettingsKey::Activate, &flat, lacking);
+        panel.key(SettingsKey::Activate, content(&flat, &lines), lacking);
         assert_eq!(panel.menu(), Some(SettingsRow::DefaultProfile));
 
         // Every arrow press from here lands on the one profile that can start.
         for _ in 0..profiles::PROFILES.len() + 1 {
-            panel.key(SettingsKey::Down, &flat, lacking);
+            panel.key(SettingsKey::Down, content(&flat, &lines), lacking);
             assert_eq!(
                 panel.focus(),
                 Some(SettingsTarget::Choice(
@@ -5051,7 +6852,7 @@ mod tests {
                 "the arrows have nowhere else this machine can go"
             );
         }
-        panel.key(SettingsKey::Home, &flat, lacking);
+        panel.key(SettingsKey::Home, content(&flat, &lines), lacking);
         assert_eq!(
             panel.focus(),
             Some(SettingsTarget::Choice(
@@ -5068,18 +6869,17 @@ mod tests {
     /// keyboard.
     #[test]
     fn a_key_the_dialog_has_no_verb_for_is_swallowed_and_still_lights_the_ring() {
-        let flat = flat_rows();
         let mut panel = keyboarded();
         let before = panel.focus();
         assert_eq!(
-            panel.key(SettingsKey::Other, &flat, values()),
+            keyed(&mut panel, SettingsKey::Other),
             SettingsKeyVerdict::Moved,
             "the ring appearing is a change worth repainting"
         );
         assert_eq!(panel.focus(), before, "and nothing moved");
         assert_eq!(panel.focus_ring(), before);
         assert_eq!(
-            panel.key(SettingsKey::Other, &flat, values()),
+            keyed(&mut panel, SettingsKey::Other),
             SettingsKeyVerdict::Inert,
             "the second one changes nothing at all"
         );
@@ -5098,19 +6898,25 @@ mod tests {
         let focus = Some(SettingsTarget::Combo(SettingsRow::Theme));
         let accent = chrome_palette().accent;
 
+        // **Off the rail**, because the rail's selected word wears a 2px accent
+        // bar as its standing mark and that is a selection, not a ring. This
+        // test is about `:focus-visible`; the bar has its own pin.
+        let nav = placed.nav;
         let unfocused: Vec<OverlayQuad> = quads_of(&placed, None, values())
             .into_iter()
             .filter(|quad| quad.color == accent)
+            .filter(|quad| quad.rect[0] >= nav[2])
             .collect();
         assert!(
             unfocused.is_empty(),
             "a dialog nobody is driving by keyboard draws no ring"
         );
 
-        let ring: Vec<OverlayQuad> = build(&placed, None, focus, values(), &mut measure)
+        let ring: Vec<OverlayQuad> = built_with(&placed, None, focus, values(), None)
             .into_iter()
             .flat_map(|layer| layer.quads)
             .filter(|quad| quad.color == accent)
+            .filter(|quad| quad.rect[0] >= nav[2])
             .collect();
         assert!(!ring.is_empty(), "the focused control wears one");
 
@@ -5182,11 +6988,15 @@ mod tests {
             "the header does not scroll"
         );
 
-        let last = SettingsTarget::Combo(SettingsRow::DefaultProfile);
+        let bottom_row = *flat_rows()
+            .iter()
+            .rfind(|row| row.category() == PAGE)
+            .expect("the page has rows");
+        let last = SettingsTarget::Combo(bottom_row);
         let scrolled_to = top.scroll_to_show(last, 0.0);
         assert!(scrolled_to > 0.0, "the last row is below the fold");
         let landed = cramped(scrolled_to);
-        let band = landed.row(SettingsRow::DefaultProfile).expect("held").band;
+        let band = landed.row(bottom_row).expect("held").band;
         let content = landed.content_box();
         assert!(
             band[1] >= content[1] && band[3] <= content[3],
@@ -5218,8 +7028,10 @@ mod tests {
     #[test]
     fn a_row_that_disappears_under_the_focus_hands_it_back_to_a_row_that_is_there() {
         let down = visible_rows(TabLayoutMode::Vertical);
+        let lines = shortcut_lines();
         let mut panel = SettingsPanel::default();
-        panel.toggle(&down);
+        panel.toggle(content(&down, &lines));
+        panel.select_category(PAGE);
         panel.press(SettingsTarget::Combo(SettingsRow::Sidebar));
         panel.toggle_menu(SettingsRow::Sidebar);
         assert_eq!(
@@ -5228,9 +7040,10 @@ mod tests {
         );
 
         let flat = flat_rows();
-        panel.keep_focus_reachable(&flat);
+        panel.keep_focus_reachable(content(&flat, &lines));
         assert!(
-            focus_order(&flat).contains(&panel.focus().expect("an open dialog holds a focus")),
+            focus_order(content(&flat, &lines), PAGE)
+                .contains(&panel.focus().expect("an open dialog holds a focus")),
             "the focus landed somewhere the dialog is actually drawing"
         );
         assert_eq!(
@@ -5342,6 +7155,744 @@ mod tests {
                 row.description(dark),
                 "{row:?} has no line that follows a value yet, and does not pretend to"
             );
+        }
+    }
+
+    // ── the category rail and the shortcut page (slice 2, 2026-08-17) ──────
+
+    /// PIN (Q2 = A) — **the rail's own geometry, stated from the tokens it was
+    /// derived from.**
+    ///
+    /// There is no mock-up CSS to quote here, because the rail was a commented
+    /// promise until today; what there is instead is a derivation, and this is
+    /// the derivation written down: the dialog widened to 720, the rail is a
+    /// 168px column of the body, the page is what is left of it, and the two are
+    /// separated by the hairline every surface in this file is separated by.
+    ///
+    /// The last claim is the one that would rot silently: the *page* must still
+    /// be able to hold a 118px picker between the mock-up's own 22px gutters,
+    /// which is the whole reason 480 stopped working.
+    ///
+    /// MUTATIONS:
+    /// (1) take the rail's width off the page instead of off the dialog — the
+    ///     page's own width assertion goes red;
+    /// (2) let the rail scroll with the page — `nav` stops spanning the body and
+    ///     the "top to bottom" assertion goes red.
+    #[test]
+    fn the_rail_is_a_column_of_the_dialog_and_the_page_is_what_is_left_of_it() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let placed = open(scale, false);
+            let border = (bt_render::FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+            assert!(
+                (width(placed.frame) - 720.0 * scale).abs() <= 1.0,
+                "scale {scale}: the dialog is the ruling's own 720 wide"
+            );
+            assert!(
+                (width(placed.nav) - 168.0 * scale).abs() < 0.5,
+                "scale {scale}: the rail keeps its column"
+            );
+            assert_eq!(
+                placed.nav[0],
+                placed.frame[0] + border,
+                "scale {scale}: the rail starts at the dialog's own inside edge"
+            );
+            assert_eq!(
+                placed.content_box()[0],
+                placed.nav[2],
+                "scale {scale}: the page begins where the rail ends"
+            );
+            assert!(
+                (placed.nav[1] - (placed.frame[1] + border + HEADER_HEIGHT_LOGICAL_PX * scale))
+                    .abs()
+                    < 0.5,
+                "scale {scale}: the rail starts under the header, not beside it"
+            );
+            assert_eq!(
+                placed.nav[3],
+                placed.content_box()[3],
+                "scale {scale}: and runs to the bottom with the page"
+            );
+            let gutters = 2.0 * CONTENT_PADDING_X_LOGICAL_PX * scale;
+            assert!(
+                width(placed.content_box()) - gutters >= COMBO_MIN_WIDTH_LOGICAL_PX * scale,
+                "scale {scale}: the page still holds a picker between the gutters"
+            );
+        }
+    }
+
+    /// PIN — **every word of the rail answers the pointer where it is drawn**,
+    /// top to bottom in the declared order, and the page's own controls still
+    /// answer beside it.
+    ///
+    /// The rail is a sixth reading of the row list (`SettingsRow::category`'s own
+    /// doc counts them), and R4's lesson is that the first reading nobody
+    /// teaches is a control the user can reach and cannot see.
+    #[test]
+    fn every_word_of_the_rail_answers_the_pointer_where_it_is_drawn() {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let expected = content(&rows, &lines).nav_items();
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let placed = open_page(scale, None, TabLayoutMode::Horizontal, PAGE, 0.0);
+            assert_eq!(
+                placed
+                    .nav_items
+                    .iter()
+                    .map(|item| item.category)
+                    .collect::<Vec<_>>(),
+                expected,
+                "scale {scale}: the rail draws the categories with content, in order"
+            );
+            for pair in placed.nav_items.windows(2) {
+                assert!(
+                    pair[1].band[1] > pair[0].band[1],
+                    "scale {scale}: the rail runs top to bottom"
+                );
+                assert!(
+                    (pair[1].band[1] - pair[0].band[3] - 2.0 * scale).abs() < 0.5,
+                    "scale {scale}: one gap between two words"
+                );
+            }
+            for item in &placed.nav_items {
+                let (x, y) = centre(item.band);
+                assert_eq!(
+                    hit(&placed, values(), x, y),
+                    SettingsTarget::Nav(item.category),
+                    "scale {scale}: {:?} must answer where it is drawn",
+                    item.category
+                );
+                assert!((height(item.band) - 30.0 * scale).abs() < 0.5);
+                assert!(
+                    item.label[0] > item.band[0],
+                    "the word sits inside its own pill"
+                );
+                assert!(
+                    (width(item.bar) - FOCUS_RING_WIDTH_LOGICAL_PX * scale).abs() < 0.5,
+                    "the accent bar is the focus ring's own 2px, and is stated                      against that constant rather than against its own - the                      derivation is the claim"
+                );
+                assert!(
+                    item.bar[1] > item.band[1] && item.bar[3] < item.band[3],
+                    "and is held off both ends, so it reads as a mark and not a border"
+                );
+            }
+        }
+    }
+
+    /// Visual PIN — **the bar names the page that is up, and only that.**
+    ///
+    /// A selected word wears `--hover` and the accent stroke; a hovered one
+    /// wears the ground alone. Two lit states with one meaning between them would
+    /// be a rail where "where am I" and "what is under my finger" are the same
+    /// sentence.
+    #[test]
+    fn the_rail_marks_the_page_that_is_up_and_lights_the_word_under_the_pointer() {
+        let placed = open(1.0, false);
+        let palette = chrome_palette();
+        let bar_of = |hover| {
+            quads_of(&placed, hover, values())
+                .into_iter()
+                .filter(|quad| quad.color == palette.accent)
+                .filter(|quad| quad.rect[2] <= placed.nav[2])
+                .collect::<Vec<_>>()
+        };
+        let selected = placed
+            .nav_items
+            .iter()
+            .find(|item| item.category == PAGE)
+            .expect("the page that is up is in the rail");
+        let bars = bar_of(None);
+        assert_eq!(bars.len(), 1, "exactly one word is marked");
+        assert_eq!(bars[0].rect, selected.bar);
+
+        let other = SettingsCategory::Shortcuts;
+        let hovered = bar_of(Some(SettingsTarget::Nav(other)));
+        assert_eq!(
+            hovered.len(),
+            1,
+            "hovering another word does not move the mark"
+        );
+        assert_eq!(hovered[0].rect, selected.bar);
+
+        let grounds = quads_of(&placed, Some(SettingsTarget::Nav(other)), values())
+            .into_iter()
+            .filter(|quad| quad.color == palette.dialog_hover)
+            .filter(|quad| quad.rect[2] <= placed.nav[2])
+            .count();
+        assert!(
+            grounds > 1,
+            "the hovered word takes the ground the selected one already has"
+        );
+
+        let labels = labels_of(&placed, None, values());
+        for item in &placed.nav_items {
+            let word = labels
+                .iter()
+                .find(|label| label.text == item.category.nav_label())
+                .unwrap_or_else(|| panic!("{:?} is drawn", item.category));
+            let expected = if item.category == PAGE {
+                palette.dialog_title_text
+            } else {
+                palette.dialog_muted_text
+            };
+            assert_eq!(word.color, expected, "{:?}", item.category);
+        }
+    }
+
+    /// PIN (Q3 = A) — **one page at a time, and each page measures itself.**
+    ///
+    /// A page holds one category's rows and nothing else, so the dialog's height
+    /// and the distance it can scroll are facts about *that* page — which is why
+    /// turning a page resets the scroll rather than carrying it across.
+    #[test]
+    fn a_page_holds_its_own_rows_and_measures_its_own_scroll() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let lines = shortcut_lines();
+        for category in content(&rows, &lines).nav_items() {
+            let placed = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
+            let expected: Vec<SettingsRow> = rows
+                .iter()
+                .copied()
+                .filter(|row| row.category() == category)
+                .collect();
+            assert_eq!(
+                placed.rows.iter().map(|row| row.row).collect::<Vec<_>>(),
+                expected,
+                "{category:?} draws its own rows and no others"
+            );
+            let shortcut_lines_drawn = placed.shortcuts.len();
+            if category == SettingsCategory::Shortcuts {
+                assert_eq!(shortcut_lines_drawn, lines.len());
+                assert!(placed.restore_all.is_some(), "the page's own verb is there");
+            } else {
+                assert_eq!(
+                    shortcut_lines_drawn, 0,
+                    "{category:?} is not the shortcut page"
+                );
+                assert!(placed.restore_all.is_none());
+            }
+        }
+
+        // The shortcut table is long and the row pages are short, so the two
+        // pages disagree about how far there is to scroll — which is the whole
+        // reason a distance cannot be carried between them.
+        let short = open_page(1.0, None, TabLayoutMode::Vertical, PAGE, 0.0);
+        let long = open_page(
+            1.0,
+            None,
+            TabLayoutMode::Vertical,
+            SettingsCategory::Shortcuts,
+            0.0,
+        );
+        assert!(
+            long.max_scroll() > short.max_scroll(),
+            "the shortcut table overflows a window the Appearance page fits in"
+        );
+
+        // And the panel reports the turn, which is the signal the runtime resets
+        // its own offset on.
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content(&rows, &lines));
+        assert!(
+            panel.select_category(SettingsCategory::Shortcuts),
+            "turning a page is a change worth reporting"
+        );
+        assert!(
+            !panel.select_category(SettingsCategory::Shortcuts),
+            "and turning to the page already up is not"
+        );
+    }
+
+    /// PIN (S1/S3/S67) — **the shortcut page draws every line the table gives
+    /// it, and each line's controls answer where they are drawn.**
+    ///
+    /// A `Record` on a line that offers one, a `↺` only where there is something
+    /// to undo, and neither on a row the audit declined — the same three answers
+    /// the focus order reads, because a control the pointer can press and the
+    /// keyboard cannot reach is half a control.
+    #[test]
+    fn every_shortcut_line_answers_the_pointer_where_its_own_controls_are_drawn() {
+        let mut table = crate::shortcuts::Shortcuts::defaults();
+        table.set("new-tab", crate::shortcuts::parse_chord("Ctrl+Shift+Y"));
+        let lines = table.editor_rows();
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let placed = layout_for_menu(
+            SURFACE.0,
+            2_400.0,
+            1.0,
+            None,
+            content(&rows, &lines),
+            SettingsCategory::Shortcuts,
+            0.0,
+            UNSCROLLED,
+        )
+        .expect("a tall window hosts the whole table");
+        assert_eq!(placed.max_scroll(), 0.0, "and hosts it without scrolling");
+        assert_eq!(placed.shortcuts.len(), lines.len());
+
+        for (line, drawn) in lines.iter().zip(&placed.shortcuts) {
+            assert_eq!(drawn.record.is_some(), line.recordable, "{}", line.title);
+            assert_eq!(drawn.restore.is_some(), line.overridden, "{}", line.title);
+            if let Some(record) = drawn.record {
+                let (x, y) = centre(record);
+                assert_eq!(
+                    hit(&placed, values(), x, y),
+                    SettingsTarget::Record(drawn.index)
+                );
+            }
+            if let Some(restore) = drawn.restore {
+                let (x, y) = centre(restore);
+                assert_eq!(
+                    hit(&placed, values(), x, y),
+                    SettingsTarget::RestoreRow(drawn.index)
+                );
+            }
+            assert!(
+                drawn.caps[2] <= drawn.record.map_or(drawn.band[2], |box_| box_[0]),
+                "{}: the caps sit left of the button that changes them",
+                line.title
+            );
+            assert!(
+                drawn.title[2] <= drawn.caps[0],
+                "{}: and the name sits left of the caps",
+                line.title
+            );
+        }
+        let (x, y) = centre(placed.restore_all.expect("the page's own verb"));
+        assert_eq!(hit(&placed, values(), x, y), SettingsTarget::RestoreAll);
+
+        // Exactly one line has a `↺`, which is the one row that departs.
+        assert_eq!(
+            placed
+                .shortcuts
+                .iter()
+                .filter(|line| line.restore.is_some())
+                .count(),
+            1
+        );
+    }
+
+    /// Visual PIN — **a chord is drawn as key caps, right to left from the
+    /// button that changes it, and an unbound row says so in words.**
+    ///
+    /// The caps stay inside the room the layout reserved for them, which is what
+    /// keeps the longest chord this table can produce from running into its own
+    /// row's name.
+    #[test]
+    fn a_chord_is_drawn_as_caps_that_stay_in_the_room_reserved_for_them() {
+        let lines = shortcut_lines();
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let placed = layout_for_menu(
+            SURFACE.0,
+            2_400.0,
+            1.0,
+            None,
+            content(&rows, &lines),
+            SettingsCategory::Shortcuts,
+            0.0,
+            UNSCROLLED,
+        )
+        .expect("a tall window hosts the whole table");
+        let drawn = build(&placed, None, None, values(), &lines, None, &mut measure);
+        let labels: Vec<ChromeLabel> = drawn
+            .iter()
+            .flat_map(|layer| layer.labels.clone())
+            .collect();
+
+        for (line, box_) in lines.iter().zip(&placed.shortcuts) {
+            for cap in &line.caps {
+                let label = labels
+                    .iter()
+                    .find(|label| {
+                        &label.text == cap
+                            && label.rect[1] >= box_.band[1] - 0.5
+                            && label.rect[3] <= box_.band[3] + 0.5
+                    })
+                    .unwrap_or_else(|| panic!("{}: the cap {cap:?} is drawn", line.title));
+                assert!(
+                    label.rect[0] >= box_.caps[0] - 0.5 && label.rect[2] <= box_.caps[2] + 0.5,
+                    "{}: the cap {cap:?} left the room reserved for it: {:?} in {:?}",
+                    line.title,
+                    label.rect,
+                    box_.caps
+                );
+            }
+            if line.caps.is_empty() {
+                assert!(
+                    labels
+                        .iter()
+                        .any(|label| label.text == crate::shortcuts::UNBOUND_CAP
+                            && label.rect[1] >= box_.band[1] - 0.5
+                            && label.rect[3] <= box_.band[3] + 0.5),
+                    "{}: a row with no chord says so rather than drawing nothing",
+                    line.title
+                );
+            }
+        }
+        assert!(
+            labels.iter().any(|label| label.text == RESTORE_ALL_LABEL),
+            "the page's own verb is drawn"
+        );
+    }
+
+    /// PIN (S64) — **the recorder's whole state machine: accept, refuse, cancel,
+    /// clear, confirm.**
+    ///
+    /// A refusal leaves the capture open, which is S64's real requirement: the
+    /// point of refusing *at record time* rather than afterwards is that the user
+    /// is still holding the keyboard and can simply press something else. A
+    /// refusal that shut the box would make the second attempt cost another
+    /// click on the button they are already looking at.
+    ///
+    /// MUTATIONS:
+    /// (1) commit the candidate on arrival instead of on `Enter` — the refusal
+    ///     assertions have nowhere left to stand and the "still listening" ones
+    ///     go red;
+    /// (2) let `Escape` fall through to `close_one_layer`'s dialog rung — the
+    ///     cancel assertion closes the dialog and goes red.
+    #[test]
+    fn the_recorder_takes_a_chord_refuses_one_and_lets_go_of_both() {
+        let chord = |text: &str| crate::shortcuts::parse_chord(text).expect("a chord");
+        let caps = |text: &str| crate::shortcuts::chord_caps(&chord(text));
+
+        // Accept, then confirm.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        assert_eq!(panel.recording_row(), Some(0));
+        assert_eq!(
+            panel.record(RecordInput::Modifier {
+                caps: vec!["Ctrl".to_owned()]
+            }),
+            RecordVerdict::Moved
+        );
+        assert_eq!(
+            panel
+                .recording_state()
+                .map(|(_, caps, hint)| (caps.to_vec(), hint.is_some())),
+            Some((vec!["Ctrl".to_owned()], false)),
+            "a modifier on its own is shown and waited on"
+        );
+        assert_eq!(
+            panel.record(RecordInput::Candidate {
+                caps: caps("Ctrl+Shift+Y"),
+                chord: chord("Ctrl+Shift+Y"),
+                refusal: None,
+            }),
+            RecordVerdict::Moved,
+            "a chord is held pending, never taken on arrival"
+        );
+        assert_eq!(panel.recording_row(), Some(0), "and the box is still open");
+        assert_eq!(
+            panel.record(RecordInput::Confirm),
+            RecordVerdict::Commit(0, Some(chord("Ctrl+Shift+Y")))
+        );
+        assert_eq!(panel.recording_row(), None, "confirming closes the box");
+        assert_eq!(panel.focus(), Some(SettingsTarget::Record(0)));
+
+        // Refuse, and stay.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(1);
+        assert_eq!(
+            panel.record(RecordInput::Candidate {
+                caps: caps("Ctrl+Alt+P"),
+                chord: chord("Ctrl+Alt+P"),
+                refusal: Some(crate::shortcuts::HINT_ALTGR_ZONE.to_owned()),
+            }),
+            RecordVerdict::Moved
+        );
+        assert_eq!(
+            panel.recording_state().and_then(|(_, _, hint)| hint),
+            Some(crate::shortcuts::HINT_ALTGR_ZONE),
+            "the refusal is shown"
+        );
+        assert_eq!(panel.recording_row(), Some(1), "and the box stays open");
+        assert_eq!(
+            panel.record(RecordInput::Confirm),
+            RecordVerdict::Moved,
+            "there is nothing standing for Enter to take"
+        );
+        assert_eq!(panel.recording_row(), Some(1));
+
+        // Escape cancels the capture and nothing else — the dialog stays up.
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(2);
+        assert_eq!(
+            panel.key(SettingsKey::Escape, content(&rows, &lines), values()),
+            SettingsKeyVerdict::Moved
+        );
+        assert_eq!(panel.recording_row(), None, "the capture went first");
+        assert!(panel.is_open(), "and the dialog is still up");
+        assert_eq!(panel.focus(), Some(SettingsTarget::Record(2)));
+
+        // Backspace clears the row outright, which is a write and not a cancel.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(3);
+        assert_eq!(
+            panel.record(RecordInput::Unbind),
+            RecordVerdict::Commit(3, None)
+        );
+        assert_eq!(panel.recording_row(), None);
+
+        // A key no file could hold says so and goes on waiting.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        assert_eq!(panel.record(RecordInput::Unusable), RecordVerdict::Moved);
+        assert_eq!(
+            panel.recording_state().and_then(|(_, _, hint)| hint),
+            Some(RECORD_UNUSABLE_HINT)
+        );
+        assert_eq!(panel.recording_row(), Some(0));
+
+        // Cancel leaves the row exactly as it was.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        panel.record(RecordInput::Candidate {
+            caps: caps("Ctrl+Shift+Y"),
+            chord: chord("Ctrl+Shift+Y"),
+            refusal: None,
+        });
+        assert_eq!(panel.record(RecordInput::Cancel), RecordVerdict::Ended);
+        assert_eq!(panel.recording_row(), None);
+
+        // And a finger that goes anywhere else ends the capture too: a box that
+        // swallows every key while nothing on screen says it is listening is the
+        // dialog eating the keyboard.
+        let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
+        panel.begin_recording(0);
+        panel.press(SettingsTarget::Record(0));
+        assert_eq!(
+            panel.recording_row(),
+            Some(0),
+            "pressing the very button that is listening changes nothing"
+        );
+        panel.press(SettingsTarget::Panel);
+        assert_eq!(panel.recording_row(), None);
+    }
+
+    /// Visual PIN — **a listening row says what it is waiting for, and says why
+    /// in red when it refuses.**
+    ///
+    /// The recorder's words land on the row's own muted line, which is where the
+    /// scope tag was: a hint printed anywhere else would be a second place to
+    /// look for the answer to a question asked here.
+    #[test]
+    fn a_listening_row_borrows_its_own_muted_line_for_the_recorders_words() {
+        let lines = shortcut_lines();
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let placed = layout_for_menu(
+            SURFACE.0,
+            2_400.0,
+            1.0,
+            None,
+            content(&rows, &lines),
+            SettingsCategory::Shortcuts,
+            0.0,
+            UNSCROLLED,
+        )
+        .expect("a tall window hosts the whole table");
+        let palette = chrome_palette();
+        let focus = Some(SettingsTarget::Record(0));
+
+        let waiting = vec!["Ctrl".to_owned(), "Shift".to_owned()];
+        let drawn = build(
+            &placed,
+            None,
+            focus,
+            values(),
+            &lines,
+            Some((0, &waiting, None)),
+            &mut measure,
+        );
+        let labels: Vec<ChromeLabel> = drawn
+            .iter()
+            .flat_map(|layer| layer.labels.clone())
+            .collect();
+        // Said through [`ellipsized`], because this column is the narrowest in
+        // the dialog and the test's stand-in metric is wider than the real face:
+        // what is pinned is that the *prompt* is what the row draws, not that a
+        // particular number of its characters survive a fictional font.
+        let room = placed.shortcuts[0].desc[2] - placed.shortcuts[0].desc[0];
+        let fitted = |text: &str| ellipsized(text, room, ROW_DESC_FONT_LOGICAL_PX, &mut measure);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == fitted(RECORD_PROMPT)),
+            "the box says what it is waiting for"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == RECORD_LISTENING_LABEL),
+            "and the button says it is listening"
+        );
+        for cap in &waiting {
+            assert!(
+                labels.iter().any(|label| &label.text == cap),
+                "the modifiers already down are shown live"
+            );
+        }
+
+        let refused = build(
+            &placed,
+            None,
+            focus,
+            values(),
+            &lines,
+            Some((0, &waiting, Some(crate::shortcuts::HINT_ALTGR_ZONE))),
+            &mut measure,
+        );
+        let hint = refused
+            .iter()
+            .flat_map(|layer| layer.labels.clone())
+            .find(|label| label.text == fitted(crate::shortcuts::HINT_ALTGR_ZONE))
+            .expect("the refusal is drawn");
+
+        // **A capture started with the pointer has no ring**, and must still
+        // draw as listening. Found on the real window: the draw used to ask the
+        // *ring* which row was capturing, and `:focus-visible` had just put the
+        // ring away — so a box swallowing every key looked exactly like one that
+        // was not, and the button under the finger still said `Record`.
+        let by_pointer = build(
+            &placed,
+            None,
+            None,
+            values(),
+            &lines,
+            Some((0, &waiting, None)),
+            &mut measure,
+        );
+        assert!(
+            by_pointer
+                .iter()
+                .flat_map(|layer| layer.labels.clone())
+                .any(|label| label.text == fitted(RECORD_PROMPT)),
+            "a capture with no ring is still a capture"
+        );
+        assert_eq!(
+            hint.color, palette.status_err,
+            "a refusal is written in the ink this house says no in"
+        );
+        assert_eq!(
+            hint.rect, placed.shortcuts[0].desc,
+            "and it stands where the row's own muted line does"
+        );
+    }
+
+    /// PIN — **the shortcut page's focus order is its own controls, and a `↺`
+    /// that is not drawn is not a stop.**
+    ///
+    /// The same rule the conditional Sidebar row taught, met again: a ring on a
+    /// control nobody can see is a dialog that looks like it has swallowed the
+    /// keyboard.
+    #[test]
+    fn the_shortcut_pages_focus_order_holds_only_the_controls_it_draws() {
+        let table = crate::shortcuts::Shortcuts::defaults();
+        let lines = table.editor_rows();
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts);
+        assert_eq!(
+            order.last(),
+            Some(&SettingsTarget::RestoreAll),
+            "the page's own verb is last"
+        );
+        assert!(
+            !order
+                .iter()
+                .any(|stop| matches!(stop, SettingsTarget::RestoreRow(_))),
+            "a table nobody has edited offers nothing to restore"
+        );
+        for (index, line) in lines.iter().enumerate() {
+            assert_eq!(
+                order.contains(&SettingsTarget::Record(index)),
+                line.recordable,
+                "{}",
+                line.title
+            );
+        }
+
+        let mut edited = crate::shortcuts::Shortcuts::defaults();
+        edited.set("new-tab", crate::shortcuts::parse_chord("Ctrl+Shift+Y"));
+        let lines = edited.editor_rows();
+        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts);
+        assert!(
+            order.contains(&SettingsTarget::RestoreRow(0)),
+            "and an edited row grows the stop that undoes it"
+        );
+    }
+
+    /// PIN (S4/S73, 2026-08-17) — **the rail was written back to the mock-up on
+    /// the day it was born**, and this reads it out of the file rather than
+    /// trusting a memory of having done so.
+    ///
+    /// `design/ui-mockup.html` is the only visual authority this dialog has. A
+    /// surface built in the native tree and never written back is a surface with
+    /// no authority at all — the next slice would have nothing to check itself
+    /// against — so the rail's own words, its ids and the width that made room
+    /// for it are asserted here against the file.
+    ///
+    /// Red gate: revert the mock-up and every assertion below names what is
+    /// missing.
+    #[test]
+    fn the_mock_up_carries_the_rail_this_slice_gave_it() {
+        let at = MOCKUP
+            .find("id=\"settings-nav\"")
+            .expect("the mock-up has the rail");
+        let tail = &MOCKUP[at..];
+        let rail = &tail[..tail.find("</nav>").expect("the rail closes")];
+        let words: Vec<&str> = rail
+            .match_indices("class=\"nav-item")
+            .map(|(start, _)| {
+                let item = &rail[start..];
+                let text = &item[item.find('>').expect("the tag closes") + 1..];
+                &text[..text.find("</button>").expect("the word closes")]
+            })
+            .collect();
+        assert_eq!(
+            words,
+            [
+                SettingsCategory::General.nav_label(),
+                SettingsCategory::Appearance.nav_label(),
+                SettingsCategory::Terminal.nav_label(),
+                SettingsCategory::RenderedBlocks.nav_label(),
+                SettingsCategory::Shortcuts.nav_label(),
+            ],
+            "every category this build knows is a word in the mock-up's rail, in \
+             the enum's own order"
+        );
+        // The mock-up draws `Terminal` because *it* has a Line wrapping row; the
+        // native build has no such setting and therefore no such word. The rail
+        // is derived from the rows on both sides, which is the whole ruling —
+        // and this is where the two readings are checked against each other.
+        assert!(
+            MOCKUP.contains("<div class=\"title\">Line wrapping</div>"),
+            "the mock-up's Terminal page has the row that earns it"
+        );
+
+        assert!(
+            MOCKUP.contains("width: min(720px, 92%);"),
+            "the dialog widened in the mock-up too, or the rail has no room"
+        );
+        for id in [
+            "class=\"settings-body\"",
+            "class=\"settings-nav\"",
+            "class=\"settings-page shown\"",
+            "class=\"nav-item selected\"",
+        ] {
+            assert!(MOCKUP.contains(id), "the mock-up is missing {id}");
+        }
+        assert!(
+            !MOCKUP.contains("style=\"margin-top:16px\""),
+            "the later-heading margin retired with the flat list"
+        );
+        // And the shortcut editor, which is the other half of the same day.
+        for text in [
+            "class=\"cap\"",
+            "class=\"sc-restore\"",
+            RESTORE_ALL_LABEL,
+            "keybindings.json",
+        ] {
+            assert!(MOCKUP.contains(text), "the mock-up is missing {text:?}");
         }
     }
 

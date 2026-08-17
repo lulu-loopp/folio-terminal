@@ -29,6 +29,7 @@
 mod atomic;
 mod debounce;
 mod error;
+mod keybindings;
 mod layout;
 mod migrate;
 mod sentinel;
@@ -39,12 +40,14 @@ mod write_tracker;
 pub use atomic::atomic_write;
 pub use debounce::Debouncer;
 pub use error::WriteError;
+pub use keybindings::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
 pub use layout::{
     FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, RATIO_PPM_MAX, SplitDirV1,
     SplitNodeV1, TermLeafV1,
 };
 pub use migrate::{
-    FallbackReason, MigrationStep, ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
+    FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, ReadReport, SESSION_MIGRATIONS,
+    SETTINGS_MIGRATIONS,
 };
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
@@ -88,6 +91,30 @@ pub fn read_session(path: &Path) -> (SessionV1, ReadReport, DegradationReport) {
 pub fn write_settings_atomic(path: &Path, settings: &SettingsV1) -> Result<(), WriteError> {
     let bytes = serde_json::to_vec_pretty(settings).map_err(|source| WriteError::Serialize {
         what: "SettingsV1",
+        source,
+    })?;
+    atomic_write(path, &bytes)
+}
+
+/// Reads `keybindings.json` from `path`, applying the same §5.4 fallback chain
+/// the other two files get. A missing file is [`ReadReport::NotFound`] and is
+/// the ordinary case — most machines never customise a chord — while a damaged
+/// one falls back to *no overrides at all*, which leaves the caller's table at
+/// this build's defaults. Never returns an `Err`: a shortcut file that cannot be
+/// read must not be a terminal that will not start.
+pub fn read_keybindings(path: &Path) -> (KeybindingsV1, ReadReport) {
+    migrate::read_with_fallback(path, KEYBINDINGS_SCHEMA_VERSION, KEYBINDINGS_MIGRATIONS)
+}
+
+/// Serializes `keybindings` and writes it to `path` via [`atomic_write`].
+/// Pretty-printed for [`write_settings_atomic`]'s reason, and rather more so:
+/// this is the one file of the three a user is actively invited to hand-edit.
+pub fn write_keybindings_atomic(
+    path: &Path,
+    keybindings: &KeybindingsV1,
+) -> Result<(), WriteError> {
+    let bytes = serde_json::to_vec_pretty(keybindings).map_err(|source| WriteError::Serialize {
+        what: "KeybindingsV1",
         source,
     })?;
     atomic_write(path, &bytes)

@@ -4503,6 +4503,19 @@ struct Runtime {
     work_area: WorkAreaHint,
     session_store: persist::SessionStore,
     settings_store: persist::SettingsStore,
+    /// The shortcut table dispatch reads: this build's defaults with the user's
+    /// `keybindings.json` laid over them.
+    ///
+    /// One table and not two, because the settings page edits the same object
+    /// the key handler consults — a chord recorded in the dialog answers on the
+    /// very next press, with no reload between them.
+    shortcuts: shortcuts::Shortcuts,
+    keybindings_store: persist::KeybindingsStore,
+    /// The sentence a damaged `keybindings.json` owes the user, until it has
+    /// been said. Raised on the first frame rather than during construction:
+    /// there is no window to hang a notice on until then, and a notice printed
+    /// into a window that does not exist is a notice nobody reads.
+    keybindings_fault: Option<String>,
     /// The one store that pin, Recent and undo-close all draw from — kept beside
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
@@ -6613,6 +6626,9 @@ fn settings_key_of(key: &Key, modifiers: ModifiersState, repeat: bool) -> settin
         },
         Key::Named(NamedKey::ArrowDown) => settings::SettingsKey::Down,
         Key::Named(NamedKey::ArrowUp) => settings::SettingsKey::Up,
+        // The two that cross between the rail and the page (2026-08-17).
+        Key::Named(NamedKey::ArrowLeft) => settings::SettingsKey::Left,
+        Key::Named(NamedKey::ArrowRight) => settings::SettingsKey::Right,
         Key::Named(NamedKey::Home) => settings::SettingsKey::Home,
         Key::Named(NamedKey::End) => settings::SettingsKey::End,
         Key::Named(NamedKey::Enter | NamedKey::Space) if !repeat => settings::SettingsKey::Activate,
@@ -13543,6 +13559,37 @@ impl Runtime {
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
         let settings_store = persist::SettingsStore::open();
+        // Defaults, then the file, then whatever the file could not be honoured
+        // for — reported rather than repaired, because the file is the user's
+        // own words and a build that silently rewrote one it could not read
+        // would destroy the copy they could have fixed by hand.
+        let mut keybindings_store = persist::KeybindingsStore::open();
+        let mut shortcuts = shortcuts::Shortcuts::defaults();
+        let overrides: Vec<shortcuts::Override> = keybindings_store
+            .loaded()
+            .iter()
+            .map(|entry| shortcuts::Override {
+                id: entry.action.clone(),
+                chord: entry.chord.clone(),
+            })
+            .collect();
+        let mut keybindings_fault = keybindings_store.take_fault();
+        for fault in shortcuts.apply_overrides(&overrides) {
+            eprintln!(
+                "BT_PERSIST {} refused {}: {}",
+                persist::KEYBINDINGS_FILE_NAME,
+                fault.id,
+                fault.reason
+            );
+            keybindings_fault.get_or_insert_with(|| {
+                format!(
+                    "{}: {} - {}",
+                    persist::KEYBINDINGS_FILE_NAME,
+                    fault.id,
+                    fault.reason
+                )
+            });
+        }
         let theme_mode = render_theme_mode(session_store.loaded().theme);
         set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
         // Through the same constructor the two live routes take, so a restored
@@ -13939,6 +13986,9 @@ impl Runtime {
             work_area: WorkAreaHint::NeverKnown,
             session_store,
             settings_store,
+            shortcuts,
+            keybindings_store,
+            keybindings_fault,
             recent,
             pending_restore,
             // "It opens BEFORE it asks — like a browser, which lands you on
@@ -17416,18 +17466,39 @@ impl Runtime {
                 .map(|label| self.renderer.measure_chrome_text(label, font_px))
                 .fold(0.0_f32, f32::max)
         });
+        // Read fresh every time rather than cached: the Sidebar row appears and
+        // disappears with the Tab layout combo, the shortcut lines change as the
+        // user records, and the height, the hit test and the draw all come off
+        // this one call, so all three follow it in the same frame.
+        let rows = settings::visible_rows(self.rail.layout);
+        let shortcuts = self.shortcuts.editor_rows();
         settings::layout_for_menu(
             width as f32,
             height as f32,
             scale,
             self.settings.menu(),
-            // Read fresh every time rather than cached: the Sidebar row appears
-            // and disappears with the Tab layout combo, and the height, the hit
-            // test and the draw all come off this one call, so all three follow
-            // it in the same frame.
-            &settings::visible_rows(self.rail.layout),
+            settings::SettingsContent {
+                rows: &rows,
+                shortcuts: &shortcuts,
+            },
+            self.settings.category(),
             widest_option,
             self.settings_scroll,
+        )
+    }
+
+    /// The dialog's contents this frame, for the callers that need them beside a
+    /// layout — the focus walk and the draw.
+    ///
+    /// It hands back the two owned lists as well, because a `SettingsContent`
+    /// borrows them and a borrow of a temporary does not outlive the call that
+    /// made it. Every caller therefore reads the *same* two lists it hands to
+    /// the panel, which is what keeps the focus order and the boxes from being
+    /// derived one frame apart.
+    fn settings_content(&self) -> (Vec<settings::SettingsRow>, Vec<shortcuts::ShortcutRow>) {
+        (
+            settings::visible_rows(self.rail.layout),
+            self.shortcuts.editor_rows(),
         )
     }
 
@@ -17528,9 +17599,24 @@ impl Runtime {
             // arrived at this control by way of somebody's finger.
             let focus = self.settings.focus_ring();
             let values = self.settings_values();
+            let shortcuts = self.shortcuts.editor_rows();
+            let recording = self.settings.recording_state();
+            let recording =
+                recording.map(|(row, caps, hint)| (row, caps.to_vec(), hint.map(str::to_owned)));
+            let recording = recording
+                .as_ref()
+                .map(|(row, caps, hint)| (*row, caps.as_slice(), hint.as_deref()));
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
-            settings::build(&layout, hover, focus, values, &mut measure)
+            settings::build(
+                &layout,
+                hover,
+                focus,
+                values,
+                &shortcuts,
+                recording,
+                &mut measure,
+            )
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the prompt floats over a
             // window that already works, which is the whole reason it is
@@ -18255,8 +18341,11 @@ impl Runtime {
     /// between the pointer and the gear it is over — the highlight would be a
     /// button claiming to be reachable through a modal.
     fn toggle_settings_panel(&mut self) -> Result<()> {
-        self.settings
-            .toggle(&settings::visible_rows(self.rail.layout));
+        let (rows, shortcuts) = self.settings_content();
+        self.settings.toggle(settings::SettingsContent {
+            rows: &rows,
+            shortcuts: &shortcuts,
+        });
         // A dialog opens at its top. The distance belongs to the sitting the
         // wheel moved, not to the preference the dialog edits, so it does not
         // outlive the dialog being shut.
@@ -18314,8 +18403,156 @@ impl Runtime {
         }
         // Tab layout is the one choice that changes which rows exist, and the
         // focus may be standing on the row it just deleted.
+        let (rows, shortcuts) = self.settings_content();
         self.settings
-            .keep_focus_reachable(&settings::visible_rows(self.rail.layout));
+            .keep_focus_reachable(settings::SettingsContent {
+                rows: &rows,
+                shortcuts: &shortcuts,
+            });
+        Ok(())
+    }
+
+    /// **Everything a shortcut verb does to the process**, whichever door it
+    /// came through.
+    ///
+    /// One function for the pointer and the keyboard alike, for
+    /// `apply_settings_choice`'s reason: a verb reachable two ways whose body
+    /// lives on one of them is a verb that half works. The file is written here
+    /// and nowhere else, so "the table changed" and "the disk knows" cannot come
+    /// apart.
+    fn apply_shortcut_edit(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        let lines = self.shortcuts.editor_rows();
+        match target {
+            settings::SettingsTarget::RestoreRow(index) => {
+                let Some(line) = lines.get(index) else {
+                    return Ok(());
+                };
+                for id in &line.ids {
+                    self.shortcuts.restore(id);
+                }
+            }
+            // **No confirmation, and that is the ruling** (2026-08-17). This
+            // dialog has no dirty gate to route one through — every choice in it
+            // is written the instant it is made — so a question here would be
+            // the product's first modal over a modal and would owe §7.1.5's Esc
+            // ladder a rung of its own. What it discards is exactly the table
+            // the user is looking at while they press it, and the file it
+            // rewrites is the one file this product invites them to keep open in
+            // an editor.
+            settings::SettingsTarget::RestoreAll => self.shortcuts.restore_all(),
+            _ => return Ok(()),
+        }
+        self.store_keybindings();
+        let (rows, shortcuts) = self.settings_content();
+        self.settings
+            .keep_focus_reachable(settings::SettingsContent {
+                rows: &rows,
+                shortcuts: &shortcuts,
+            });
+        Ok(())
+    }
+
+    /// Write the table's departures to `keybindings.json`.
+    ///
+    /// The departures and not the table: [`shortcuts::Shortcuts::overrides`]
+    /// derives them by walking the effective table beside the defaults, so a row
+    /// a user has put back leaves no line behind and a later build is free to
+    /// retune a chord nobody touched.
+    fn store_keybindings(&mut self) {
+        let overrides = self
+            .shortcuts
+            .overrides()
+            .into_iter()
+            .map(|entry| bt_persist::BindingOverrideV1 {
+                action: entry.id,
+                chord: entry.chord,
+            })
+            .collect();
+        self.keybindings_store.store(overrides);
+    }
+
+    /// Say once, on the window, that `keybindings.json` could not be used.
+    ///
+    /// **A notice and not a silent fallback**, because the fallback is invisible
+    /// by construction: the shortcuts simply work the way they always did, and a
+    /// user whose customisations have quietly stopped applying has no way at all
+    /// to find out. `Error` rather than `Info` for the same reason §7.1.6d gives
+    /// the kind to Git's refusals — something the user asked for did not happen.
+    fn announce_keybindings_fault(&mut self) -> Result<()> {
+        let Some(fault) = self.keybindings_fault.take() else {
+            return Ok(());
+        };
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            fault,
+        )
+    }
+
+    /// One press, while a shortcut row is listening.
+    ///
+    /// **The judging happens in `shortcuts.rs`, the state machine in
+    /// `settings.rs`, and the two are joined here** — which is what keeps the
+    /// recorder and a hand-edited `keybindings.json` answering to one rule:
+    /// [`shortcuts::Shortcuts::verdict_for`] is the same call
+    /// `apply_overrides` makes at the file's door.
+    ///
+    /// The chord is built from `key_without_modifiers` and not from the produced
+    /// logical key (Q6), so what comes back is the glyph printed on the key that
+    /// was pressed rather than the one Shift made of it — which is what makes
+    /// the caps the panel draws afterwards the caps on the user's own board.
+    fn record_settings_key(&mut self, event: &KeyEvent) -> Result<()> {
+        let Some(row) = self.settings.recording_row() else {
+            return Ok(());
+        };
+        let base = event.key_without_modifiers();
+        let input = match shortcuts::classify_recording(&base, self.modifiers) {
+            shortcuts::RecordedKey::Modifier => settings::RecordInput::Modifier {
+                caps: shortcuts::live_caps(self.modifiers),
+            },
+            shortcuts::RecordedKey::Cancel => settings::RecordInput::Cancel,
+            shortcuts::RecordedKey::Unbind => settings::RecordInput::Unbind,
+            shortcuts::RecordedKey::Confirm => settings::RecordInput::Confirm,
+            shortcuts::RecordedKey::Unusable => settings::RecordInput::Unusable,
+            shortcuts::RecordedKey::Chord(chord) => {
+                let lines = self.shortcuts.editor_rows();
+                let id = lines
+                    .get(row)
+                    .and_then(|line| line.ids.first().copied())
+                    .unwrap_or_default();
+                let refusal = match self.shortcuts.verdict_for(id, &chord) {
+                    shortcuts::ChordVerdict::Free => None,
+                    refused => Some(refused.hint().into_owned()),
+                };
+                settings::RecordInput::Candidate {
+                    caps: shortcuts::chord_caps(&chord),
+                    chord,
+                    refusal,
+                }
+            }
+        };
+        match self.settings.record(input) {
+            settings::RecordVerdict::Moved | settings::RecordVerdict::Ended => {}
+            settings::RecordVerdict::Commit(index, chord) => {
+                let lines = self.shortcuts.editor_rows();
+                if let Some(line) = lines.get(index)
+                    && let Some(id) = line.ids.first()
+                {
+                    self.shortcuts.set(id, chord);
+                    self.store_keybindings();
+                }
+                let (rows, shortcuts) = self.settings_content();
+                self.settings
+                    .keep_focus_reachable(settings::SettingsContent {
+                        rows: &rows,
+                        shortcuts: &shortcuts,
+                    });
+            }
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
         Ok(())
     }
 
@@ -18345,6 +18582,17 @@ impl Runtime {
                 self.settings.close_menu();
                 self.apply_settings_choice(target)?;
             }
+            // Turning a page puts the reader at the top of it. The distance
+            // belonged to the page they were on, and carrying it across would
+            // open the next one somewhere in its middle.
+            settings::SettingsTarget::Nav(category) => {
+                if self.settings.select_category(category) {
+                    self.settings_scroll = 0.0;
+                }
+            }
+            settings::SettingsTarget::Record(index) => self.settings.begin_recording(index),
+            target @ (settings::SettingsTarget::RestoreRow(_)
+            | settings::SettingsTarget::RestoreAll) => self.apply_shortcut_edit(target)?,
             // A press on the dialog's own body, or inside the open menu but on
             // none of its items, lands nowhere. It notably does *not* close: the
             // mock-up closes on the scrim and on the `×`, and nothing else.
@@ -18965,7 +19213,16 @@ impl Runtime {
             // the row is real so that nothing else takes the chord and no byte
             // leaks to the shell in the meantime. Same latitude as the formulas
             // switch: the seat exists before the machine that sits in it.
-            shortcuts::Action::JumpAttention | shortcuts::Action::CommandPalette => Ok(()),
+            //
+            // The picture-in-picture slots join them (2026-08-17), one rung
+            // further out: they are claimed *and* unassigned, so nothing arrives
+            // here until a user gives one of them a chord. That is the shape the
+            // ruling asked for — "a summon key is per-slot configurable, and the
+            // prototype's default is only a default" — and it is why this arm
+            // exists before the window it summons does.
+            shortcuts::Action::JumpAttention
+            | shortcuts::Action::CommandPalette
+            | shortcuts::Action::SummonPip(_) => Ok(()),
             // The glyph names the divider it draws, as in Windows Terminal: the
             // minus lays a horizontal rule across the pane and the new shell
             // opens below it; the equals stands a vertical one and the new shell
@@ -37704,11 +37961,44 @@ impl Runtime {
         // here that does (a shortcut recorder, a theme name) opts in through
         // `ImeOwner`, which is where that decision belongs.
         if self.settings_layout().is_some() {
+            // **The recorder is above the focus walk, and it takes everything.**
+            // A box that is listening for a chord cannot also be a dialog whose
+            // Tab walks a focus order: `Ctrl+Shift+Tab` is a chord somebody may
+            // well want, and a dialog that walked its own focus on the second
+            // half of it would be a recorder that cannot record the one binding
+            // it exists to change. Every key press reaches
+            // `record_settings_key` while a capture is open, and Esc gets out.
+            if self.settings.recording_row().is_some() {
+                if event.repeat {
+                    return Ok(());
+                }
+                return self.record_settings_key(event);
+            }
             let key = settings_key_of(&event.logical_key, self.modifiers, event.repeat);
-            let rows = settings::visible_rows(self.rail.layout);
-            match self.settings.key(key, &rows, self.settings_values()) {
+            let before = self.settings.category();
+            let (rows, shortcuts) = self.settings_content();
+            let content = settings::SettingsContent {
+                rows: &rows,
+                shortcuts: &shortcuts,
+            };
+            let verdict = self.settings.key(key, content, self.settings_values());
+            // Turning a page puts the reader at its top — the wheel's distance
+            // belonged to the page they left. Read off the panel rather than
+            // reported by the verdict, because the arrows turn pages as they
+            // walk and a verdict that had to say so would be a second place the
+            // rule is written.
+            if self.settings.category() != before {
+                self.settings_scroll = 0.0;
+            }
+            match verdict {
                 settings::SettingsKeyVerdict::Inert => return Ok(()),
                 settings::SettingsKeyVerdict::Moved => {}
+                settings::SettingsKeyVerdict::Chose(
+                    target @ (settings::SettingsTarget::RestoreRow(_)
+                    | settings::SettingsTarget::RestoreAll),
+                ) => {
+                    self.apply_shortcut_edit(target)?;
+                }
                 settings::SettingsKeyVerdict::Chose(target) => {
                     self.apply_settings_choice(target)?;
                 }
@@ -38018,10 +38308,15 @@ impl Runtime {
         // The shortcut registry (P2-7), above the PTY encoder because that is what
         // "we claim this chord" means: the table is consulted before any key is
         // encoded, and a chord that is in it never reaches the child. Only chords
-        // in the table are taken — `lookup_action` matches modifiers exactly, so
-        // ordinary typing, bare `Ctrl+letter` control codes and the AltGr family
-        // all fall straight through to the encoder below.
-        if let Some(action) = shortcuts::lookup_action(
+        // in the table are taken — `Shortcuts::lookup` matches modifiers exactly,
+        // so ordinary typing, bare `Ctrl+letter` control codes and the AltGr
+        // family all fall straight through to the encoder below.
+        //
+        // **The table asked is the effective one** (2026-08-17): defaults with
+        // `keybindings.json` laid over them. Dispatch reads one table and the
+        // settings page edits that same table, which is what keeps a chord a
+        // user just recorded from taking a restart to arrive.
+        if let Some(action) = self.shortcuts.lookup(
             &event.logical_key,
             &event.key_without_modifiers(),
             self.modifiers,
@@ -39035,6 +39330,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         match Runtime::create(event_loop, self.proxy.clone(), self.startup_started) {
             Ok(runtime) => {
                 self.runtime = Some(runtime);
+                // A shortcut file that could not be read owes the user a sentence
+                // naming it (§5.3), and this is the first moment there is a window
+                // to say it on — the store was opened before one existed. Anchored
+                // at the window because a preferences file belongs to no surface
+                // inside it.
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.announce_keybindings_fault()
+                {
+                    self.fail(event_loop, error);
+                    return;
+                }
                 // Output can already be buffered after the long GPU initialization path. Drain
                 // once after installing Runtime instead of waiting for another event-loop turn.
                 if let Some(runtime) = self.runtime.as_mut()
@@ -41310,9 +41616,12 @@ mod tests {
         // the other. What the graph's keys may not survive is a row claiming the
         // *same* press, which is what this asserts.
         for binding in shortcuts::BINDINGS {
+            let Some(chord) = &binding.chord else {
+                continue;
+            };
             assert!(
                 !matches!(
-                    binding.chord.key,
+                    chord.key,
                     shortcuts::ChordKey::Named(
                         NamedKey::ArrowUp
                             | NamedKey::ArrowDown
@@ -41321,7 +41630,7 @@ mod tests {
                             | NamedKey::Enter
                             | NamedKey::Escape
                     )
-                ) || binding.chord.modifiers != ModifiersState::empty(),
+                ) || chord.modifiers != ModifiersState::empty(),
                 "{:?} claims a key the graph answers bare",
                 binding.action
             );
@@ -45826,7 +46135,11 @@ mod tests {
     #[test]
     fn the_gear_opens_the_settings_surface_rather_than_deciding_a_theme() {
         let mut panel = settings::SettingsPanel::default();
-        panel.toggle(&settings::visible_rows(seats::TabLayoutMode::Horizontal));
+        let rows = settings::visible_rows(seats::TabLayoutMode::Horizontal);
+        panel.toggle(settings::SettingsContent {
+            rows: &rows,
+            shortcuts: &[],
+        });
         assert!(panel.is_open(), "the gear's verb is 'open the dialog'");
         assert_eq!(
             settings::theme_requested(settings::SettingsTarget::Close),
@@ -49051,8 +49364,9 @@ mod tests {
     #[test]
     fn the_retired_preview_chord_reaches_the_shell_like_any_other_key() {
         let key = Key::Character("p".into());
+        let table = shortcuts::Shortcuts::defaults();
         let claimed = |modifiers| {
-            shortcuts::lookup_action(
+            table.lookup(
                 &key,
                 &key,
                 modifiers,
@@ -49064,7 +49378,7 @@ mod tests {
             )
         };
         let in_preview = |modifiers| {
-            shortcuts::lookup_action(
+            table.lookup(
                 &key,
                 &key,
                 modifiers,

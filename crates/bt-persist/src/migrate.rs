@@ -126,6 +126,14 @@ fn migrate_settings_v5_to_v6(mut value: Value) -> Value {
     value
 }
 
+/// Migration table for `keybindings.json`. Empty, and it will stay empty for as
+/// long as the file's *shape* holds: a schema step is owed when the document
+/// changes, and adding, renaming or retiring a shortcut row does not change this
+/// document at all — an id this build cannot resolve is one row degrading to its
+/// default (§5.4 逐叶降级), which the reader already does, per line, without a
+/// version bump.
+pub const KEYBINDINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
 pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
