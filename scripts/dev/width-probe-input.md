@@ -19,7 +19,7 @@ The left half is legacy mode; the fixture then sends `CSI ? 2027 h` and draws th
 | `e` + combining acute | 1 | 1 |
 | `A☆中│Ｂ` mixed text | 7 | 7 |
 | umbrella + VS15 | 1 | 1 |
-| umbrella + VS16 | 1 | 2 |
+| umbrella + VS16 | 2 | 2 |
 
 Unset the variable after the check to return to the normal ConPTY-backed shell:
 

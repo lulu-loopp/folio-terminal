@@ -130,6 +130,9 @@ const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = TITLE_STACK_MAX_DEPTH;
 /// Default tab interval, corresponding to terminfo `it` value.
 const INITIAL_TABSTOPS: usize = 8;
 
+/// VARIATION SELECTOR-16: the request for a character's emoji presentation.
+const VARIATION_SELECTOR_EMOJI: char = '\u{fe0f}';
+
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct TermMode: u32 {
@@ -1617,7 +1620,9 @@ impl<T> Term<T> {
         Some((lead, wrap_placeholder))
     }
 
-    fn attach_to_previous_cell(&mut self, character: char) {
+    /// The cell a zero-width mark belongs to: the one the cursor last wrote, stepping back over a
+    /// wide char's spacer so the mark lands on the lead half.
+    fn previous_cell_point(&self) -> Point {
         let mut column = self.grid.cursor.point.column;
         if !self.grid.cursor.input_needs_wrap {
             column.0 = column.saturating_sub(1);
@@ -1629,7 +1634,69 @@ impl<T> Term<T> {
         {
             column.0 = column.saturating_sub(1);
         }
-        self.grid[line][column].push_zerowidth(character);
+        Point::new(line, column)
+    }
+
+    fn attach_to_previous_cell(&mut self, character: char) {
+        let point = self.previous_cell_point();
+        self.grid[point].push_zerowidth(character);
+    }
+
+    /// Widen the cell U+FE0F just landed on when the emoji-presentation sequence it completes is
+    /// two cells wide.
+    ///
+    /// Returns the lead point when the cell was promoted, `None` when U+FE0F is an ordinary
+    /// zero-width mark there and the caller should file it as one.
+    ///
+    /// Upstream alacritty — and this crate before the change — treats every variation selector as
+    /// a zero-width mark, so `↔\u{fe0f}` occupies the single cell U+2194 asks for on its own.
+    /// Every program that measures with `wcwidth`-plus-emoji or `string-width`, and every terminal
+    /// those programs are written for, counts an emoji-presentation sequence as two, so the
+    /// program lays the rest of its line out two columns further along than the grid does and the
+    /// emoji's square ink lands on top of its neighbours. The width comes from the same
+    /// [`cluster_width`] oracle the clustering mode uses, applied to the cell's complete text, so
+    /// there is no second emoji table here: a base whose default presentation is already emoji is
+    /// already wide and falls out below, and a base with no emoji property (`a\u{fe0f}`) measures
+    /// one and stays narrow.
+    ///
+    /// The reverse — U+FE0E narrowing an already-wide default-emoji cell — is deliberately not
+    /// done in this compatibility mode. ConPTY's own bookkeeping and the string-width
+    /// implementations shipped in applications both keep an East Asian Wide base at two cells when
+    /// a text selector follows it, so shrinking would move the grid away from both. Clustering
+    /// mode (`DECSET 2027`) still narrows, because there the oracle owns the whole cluster.
+    fn widen_emoji_presentation_at_previous_cell(&mut self) -> Option<Point>
+    where
+        T: EventListener,
+    {
+        let lead = self.previous_cell_point();
+        let cell = &self.grid[lead];
+        if cell.flags.intersects(
+            Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
+        ) {
+            return None;
+        }
+
+        let mut cluster = String::with_capacity(8);
+        cluster.push(cell.c);
+        cluster.extend(cell.zerowidth().into_iter().flatten().copied());
+        cluster.push(VARIATION_SELECTOR_EMOJI);
+        if cluster_width(&cluster) != 2 {
+            return None;
+        }
+
+        let mut state = GraphemeState {
+            cluster,
+            lead,
+            width: 1,
+            expected_cursor: self.grid.cursor.point,
+            expected_wrap: self.grid.cursor.input_needs_wrap,
+            wrap_placeholder: None,
+            alternate_screen: self.mode.contains(TermMode::ALT_SCREEN),
+        };
+        // Either outcome files U+FE0F: a refused promotion — the right margin with DECAWM off —
+        // leaves the cell narrow but has already attached the selector to it.
+        self.rewrite_grapheme_width(&mut state, 2);
+        Some(state.lead)
     }
 
     fn start_grapheme(&mut self, character: char)
@@ -1856,11 +1923,17 @@ impl<T: EventListener> Handler for Term<T> {
         self.reported_pending_wrap = None;
         let written_line = if !self.mode.contains(TermMode::GRAPHEME_CLUSTERING) {
             self.grapheme = GraphemeState::default();
-            let mut encoded = [0; 4];
-            let scalar = c.encode_utf8(&mut encoded);
-            self.write_grapheme_at_cursor(scalar, cluster_width(scalar))
-                .map(|(lead, _)| lead.line)
-                .or(Some(self.grid.cursor.point.line))
+            if c == VARIATION_SELECTOR_EMOJI
+                && let Some(lead) = self.widen_emoji_presentation_at_previous_cell()
+            {
+                Some(lead.line)
+            } else {
+                let mut encoded = [0; 4];
+                let scalar = c.encode_utf8(&mut encoded);
+                self.write_grapheme_at_cursor(scalar, cluster_width(scalar))
+                    .map(|(lead, _)| lead.line)
+                    .or(Some(self.grid.cursor.point.line))
+            }
         } else if self.can_extend_grapheme(c) {
             self.extend_grapheme(c);
             Some(self.grapheme.lead.line)
@@ -3515,6 +3588,117 @@ mod tests {
         assert_eq!(term.grapheme.width, 1);
         assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(3)));
         assert!(!term.grid.cursor.input_needs_wrap);
+    }
+
+    #[test]
+    fn legacy_emoji_presentation_sequences_own_two_cells() {
+        for base in ['↔', '⏱', '☺', '❤', '⚠'] {
+            let size = TermSize::new(8, 2);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut processor: ansi::Processor = ansi::Processor::new();
+
+            processor.advance(&mut term, format!("a{base}\u{fe0f}b").as_bytes());
+
+            let lead = &term.grid[Line(0)][Column(1)];
+            assert_eq!(lead.c, base, "{base} must stay the lead");
+            assert_eq!(lead.zerowidth(), Some(&['\u{fe0f}'][..]));
+            assert!(
+                lead.flags.contains(Flags::WIDE_CHAR),
+                "{base}\u{fe0f} must own two cells"
+            );
+            assert!(
+                term.grid[Line(0)][Column(2)]
+                    .flags
+                    .contains(Flags::WIDE_CHAR_SPACER)
+            );
+            assert_eq!(
+                term.grid[Line(0)][Column(3)].c,
+                'b',
+                "the next character must land past the widened cell"
+            );
+            assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(4)));
+        }
+    }
+
+    #[test]
+    fn legacy_emoji_presentation_at_the_right_margin_wraps_the_widened_lead() {
+        let size = TermSize::new(4, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+
+        processor.advance(&mut term, "abc↔".as_bytes());
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(3)));
+        assert!(term.grid.cursor.input_needs_wrap);
+
+        processor.advance(&mut term, "\u{fe0f}".as_bytes());
+
+        assert!(
+            term.grid[Line(0)][Column(3)]
+                .flags
+                .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+        );
+        let lead = &term.grid[Line(1)][Column(0)];
+        assert_eq!(lead.c, '↔');
+        assert_eq!(lead.zerowidth(), Some(&['\u{fe0f}'][..]));
+        assert!(lead.flags.contains(Flags::WIDE_CHAR));
+        assert!(
+            term.grid[Line(1)][Column(1)]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER)
+        );
+        assert_eq!(term.grid.cursor.point, Point::new(Line(1), Column(2)));
+    }
+
+    #[test]
+    fn legacy_emoji_presentation_at_the_right_margin_stays_narrow_without_decawm() {
+        let size = TermSize::new(4, 2);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+
+        processor.advance(&mut term, b"\x1b[?7l");
+        processor.advance(&mut term, "abc↔".as_bytes());
+        processor.advance(&mut term, "\u{fe0f}".as_bytes());
+
+        let lead = &term.grid[Line(0)][Column(3)];
+        assert_eq!(lead.c, '↔');
+        assert_eq!(lead.zerowidth(), Some(&['\u{fe0f}'][..]));
+        assert!(
+            !lead
+                .flags
+                .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+        );
+        assert_eq!(term.grid[Line(1)][Column(0)], Cell::default());
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(3)));
+        assert!(term.grid.cursor.input_needs_wrap);
+    }
+
+    #[test]
+    fn legacy_variation_selectors_that_change_no_width_stay_zero_width_marks() {
+        // An emoji-presentation base is already wide, a text selector never widens, and a
+        // character with no emoji property is not an emoji sequence at all.
+        for (text, base, wide) in [
+            ("⌚\u{fe0f}", '⌚', true),
+            ("⌚\u{fe0e}", '⌚', true),
+            ("↔\u{fe0e}", '↔', false),
+            ("a\u{fe0f}", 'a', false),
+        ] {
+            let size = TermSize::new(8, 2);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut processor: ansi::Processor = ansi::Processor::new();
+
+            processor.advance(&mut term, text.as_bytes());
+
+            let lead = &term.grid[Line(0)][Column(0)];
+            assert_eq!(lead.c, base, "{text:?}");
+            assert_eq!(lead.zerowidth().map(<[char]>::len), Some(1), "{text:?}");
+            assert_eq!(lead.flags.contains(Flags::WIDE_CHAR), wide, "{text:?}");
+            let expected_column = if wide { 2 } else { 1 };
+            assert_eq!(
+                term.grid.cursor.point,
+                Point::new(Line(0), Column(expected_column)),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]

@@ -52820,7 +52820,7 @@ mod tests {
                 .unwrap()
         };
         let rows = [2, 4, 6, 8, 10, 12, 14];
-        let legacy_widths = [8, 4, 2, 1, 7, 1, 1];
+        let legacy_widths = [8, 4, 2, 1, 7, 1, 2];
         let mode_2027_widths = [2, 2, 2, 1, 7, 1, 2];
         for ((row, legacy), clustered) in rows.into_iter().zip(legacy_widths).zip(mode_2027_widths)
         {

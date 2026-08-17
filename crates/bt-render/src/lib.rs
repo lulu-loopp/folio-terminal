@@ -1770,6 +1770,7 @@ struct TextPreparationStats {
 struct WideGlyph {
     column: usize,
     buffer: Arc<Buffer>,
+    left_offset_px: f32,
     top_offset_px: f32,
     color: Color,
 }
@@ -1918,7 +1919,7 @@ impl NarrowShapingCache {
                     metrics.primary_cap_center_y_px,
                 )
             }
-            NarrowSizePolicy::CellHeightEmoji => center_ink_offsets(
+            NarrowSizePolicy::ColorEmoji => center_ink_offsets(
                 &buffer,
                 font_system,
                 swash_cache,
@@ -1953,6 +1954,7 @@ impl NarrowShapingCache {
 
 struct CachedWideShape {
     buffer: Arc<Buffer>,
+    left_offset_px: f32,
     top_offset_px: f32,
 }
 
@@ -1995,16 +1997,20 @@ impl WideShapingCache {
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
-    ) -> (Arc<Buffer>, f32) {
+    ) -> (Arc<Buffer>, f32, f32) {
         if let Some(cached) = self.entries.get(&key) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
-            return (Arc::clone(&cached.buffer), cached.top_offset_px);
+            return (
+                Arc::clone(&cached.buffer),
+                cached.left_offset_px,
+                cached.top_offset_px,
+            );
         }
 
         let miss_started = self.track_perf.then(Instant::now);
-        let buffer = shape_wide_buffer_for_key(
+        let (buffer, size_policy) = shape_wide_buffer_for_key(
             &key,
             font_system,
             swash_cache,
@@ -2012,11 +2018,25 @@ impl WideShapingCache {
             #[cfg(test)]
             &mut self.color_emoji_trial_shapes,
         );
-        let glyph_baseline_px = buffer
-            .layout_runs()
-            .next()
-            .map_or(metrics.ascii_baseline_px, |run| run.line_y);
-        let top_offset_px = baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px);
+        let (left_offset_px, top_offset_px) = match size_policy {
+            WideSizePolicy::MonospaceSlot => {
+                let glyph_baseline_px = buffer
+                    .layout_runs()
+                    .next()
+                    .map_or(metrics.ascii_baseline_px, |run| run.line_y);
+                (
+                    0.0,
+                    baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px),
+                )
+            }
+            WideSizePolicy::ColorEmojiBox { .. } => center_ink_offsets(
+                &buffer,
+                font_system,
+                swash_cache,
+                2.0 * metrics.cell_width_px,
+                metrics.cell_height_px,
+            ),
+        };
         let buffer = Arc::new(buffer);
         let resident_bytes =
             shape_entry_resident_bytes(&key, &buffer, size_of::<CachedWideShape>());
@@ -2024,6 +2044,7 @@ impl WideShapingCache {
             key,
             CachedWideShape {
                 buffer: Arc::clone(&buffer),
+                left_offset_px,
                 top_offset_px,
             },
             resident_bytes,
@@ -2037,7 +2058,7 @@ impl WideShapingCache {
                 .miss_time
                 .saturating_add(miss_started.elapsed());
         }
-        (buffer, top_offset_px)
+        (buffer, left_offset_px, top_offset_px)
     }
 }
 
@@ -7170,7 +7191,7 @@ fn prepare_text_atlas(
             let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
             TextArea {
                 buffer: &wide.buffer,
-                left,
+                left: left + wide.left_offset_px,
                 top: top + wide.top_offset_px,
                 scale: 1.0,
                 bounds: TextBounds {
@@ -7241,7 +7262,7 @@ fn prepare_status_text_atlas(
             + wide.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
         TextArea {
             buffer: &wide.buffer,
-            left,
+            left: left + wide.left_offset_px,
             top: geometry.rect[1] + wide.top_offset_px,
             scale: 1.0,
             bounds: TextBounds {
@@ -7915,7 +7936,14 @@ fn shape_narrow_buffer_for_key(
             )
         }
         PresentationRoute::ColorEmoji => {
+            // Which face draws the cluster is a coverage-and-composition question, asked at a
+            // nominal em against that em's own square; how large the answer is drawn is
+            // [`color_emoji_box_px`], applied to the measured ink below. Keeping the two apart is
+            // what lets the size rule change without moving a single cluster between faces.
+            let trial_em_px = metrics.cell_height_px;
             let segoe_family = Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY);
+            let mut family = Family::Name(COLOR_EMOJI_FONT_FAMILY);
+            let mut trial = None;
             if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
                 #[cfg(test)]
                 {
@@ -7925,7 +7953,7 @@ fn shape_narrow_buffer_for_key(
                     key,
                     font_system,
                     metrics,
-                    narrow_emoji_em_scale(metrics),
+                    trial_em_px / metrics.font_size_px,
                     segoe_family,
                 );
                 if is_color_cluster_from_family_within_slot(
@@ -7933,24 +7961,40 @@ fn shape_narrow_buffer_for_key(
                     font_system,
                     swash_cache,
                     SEGOE_COLOR_EMOJI_FONT_FAMILY,
-                    metrics.cell_height_px,
-                    metrics.cell_height_px,
+                    trial_em_px,
+                    trial_em_px,
                 ) {
-                    return (segoe, segoe_family, NarrowSizePolicy::CellHeightEmoji);
+                    family = segoe_family;
+                    trial = Some(segoe);
                 }
             }
+            let trial = trial.unwrap_or_else(|| {
+                shape_narrow_buffer(
+                    key,
+                    font_system,
+                    metrics,
+                    trial_em_px / metrics.font_size_px,
+                    family,
+                )
+            });
 
-            let noto_family = Family::Name(COLOR_EMOJI_FONT_FAMILY);
+            let em_px = color_emoji_fitted_em_px(
+                &trial,
+                font_system,
+                swash_cache,
+                shaped_em_px(&trial, trial_em_px),
+                color_emoji_box_px(metrics, 1),
+            );
             (
                 shape_narrow_buffer(
                     key,
                     font_system,
                     metrics,
-                    narrow_emoji_em_scale(metrics),
-                    noto_family,
+                    em_px / metrics.font_size_px,
+                    family,
                 ),
-                noto_family,
-                NarrowSizePolicy::CellHeightEmoji,
+                family,
+                NarrowSizePolicy::ColorEmoji,
             )
         }
     }
@@ -7960,11 +8004,58 @@ fn shape_narrow_buffer_for_key(
 enum NarrowSizePolicy {
     StrictCell,
     TextCoordinated,
-    CellHeightEmoji,
+    ColorEmoji,
 }
 
-fn narrow_emoji_em_scale(metrics: CellMetrics) -> f32 {
-    metrics.cell_height_px / metrics.font_size_px
+/// The side of the square a colour emoji is drawn at, for a cluster that owns `cells` cells.
+///
+/// A colour emoji glyph is a square: one em across and one em tall, ink to the edges. So the only
+/// question is how long that em is, and the answer is the largest square the cells the cluster
+/// owns can contain — `min(cell_height, cells × cell_width)`. Sized by the row's height instead,
+/// as this did until 2026-08-17, a one-cell emoji at 16px Consolas is a 22px square standing in an
+/// 8.8px column: it covers the character on either side of it, which is exactly what the report
+/// that ended that rule showed. Two cells of the same grid hold 17.6px, still short of the row, so
+/// the same formula sizes the common wide emoji too and one rule serves both.
+fn color_emoji_box_px(metrics: CellMetrics, cells: usize) -> f32 {
+    metrics
+        .cell_height_px
+        .min(cells as f32 * metrics.cell_width_px)
+}
+
+/// The em that makes a colour emoji's raster ink exactly [`color_emoji_box_px`] on its long side.
+///
+/// Measured rather than assumed, because a colour face's ink is not its em: Segoe UI Emoji draws
+/// COLR outlines a little past the em box and the bundled Noto is a bitmap strike whose ink is a
+/// quarter again as large as the advance it declares. Sizing by either face's own em would put the
+/// two at different visual sizes and let both cross the cell boundary; fitting the ink puts one
+/// square on the glass whatever face drew it.
+fn color_emoji_fitted_em_px(
+    buffer: &Buffer,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    shaped_em_px: f32,
+    box_px: f32,
+) -> f32 {
+    let Some([left, top, right, bottom]) = glyph_ink_bounds(buffer, font_system, swash_cache)
+    else {
+        return shaped_em_px;
+    };
+    let longest_side_px = (right - left).max(bottom - top);
+    if longest_side_px <= 0.0 {
+        return shaped_em_px;
+    }
+    shaped_em_px * box_px / longest_side_px
+}
+
+/// The em a shaped buffer's first glyph actually carries, which is not the buffer's nominal size
+/// once cosmic-text has normalized a fallback face against a monospace advance.
+fn shaped_em_px(buffer: &Buffer, fallback_em_px: f32) -> f32 {
+    buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter())
+        .map(|glyph| glyph.font_size)
+        .next()
+        .unwrap_or(fallback_em_px)
 }
 
 fn narrow_fallback_em_scale(
@@ -8204,12 +8295,13 @@ fn shape_wide_glyphs(
                 bold: slot.style.flags.contains(CellFlags::BOLD),
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
-            let (buffer, top_offset_px) =
+            let (buffer, left_offset_px, top_offset_px) =
                 cache.get_or_shape(key, font_system, swash_cache, metrics);
             let (foreground, _) = resolve_colors(&slot.style);
             WideGlyph {
                 column: slot.column,
                 buffer,
+                left_offset_px,
                 top_offset_px,
                 color: Color::rgb(foreground[0], foreground[1], foreground[2]),
             }
@@ -8217,11 +8309,26 @@ fn shape_wide_glyphs(
         .collect()
 }
 
+/// How a two-cell slot sizes the face it shapes with, and therefore where the result is placed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WideSizePolicy {
+    /// A CJK full-width glyph owns a two-cell slot. Matching one cell would shrink the fallback
+    /// face to half width; leaving the em alone puts each fallback face at a different visual
+    /// size. cosmic-text normalizes the fallback em to the full slot, and the glyph keeps the
+    /// row's baseline.
+    MonospaceSlot,
+    /// A colour emoji is a square of a measured em, centred on the two cells it owns rather than
+    /// sat on the baseline — the same rule a one-cell colour emoji obeys, with two cells' worth of
+    /// room to obey it in.
+    ColorEmojiBox { em_px: f32 },
+}
+
 fn shape_wide_buffer(
     key: &ShapeKey,
     font_system: &mut FontSystem,
     metrics: CellMetrics,
     family: Family<'static>,
+    size_policy: WideSizePolicy,
 ) -> Buffer {
     let mut buffer = Buffer::new(
         font_system,
@@ -8232,11 +8339,16 @@ fn shape_wide_buffer(
         Some(2.0 * metrics.cell_width_px),
         Some(metrics.cell_height_px),
     );
-    // A CJK full-width glyph owns a two-cell slot. Matching one cell would shrink the fallback
-    // face to half width; omitting this entirely leaves each fallback face at a different visual
-    // size. Let cosmic-text normalize the fallback em to the full slot.
-    buffer.set_monospace_width(Some(metrics.font_size_px * wide_slot_em_scale(metrics)));
-    let attrs = shape_attrs(key, family);
+    let attrs = match size_policy {
+        WideSizePolicy::MonospaceSlot => {
+            buffer.set_monospace_width(Some(metrics.font_size_px * wide_slot_em_scale(metrics)));
+            shape_attrs(key, family)
+        }
+        WideSizePolicy::ColorEmojiBox { em_px } => {
+            buffer.set_monospace_width(None);
+            shape_attrs(key, family).metrics(Metrics::new(em_px, metrics.cell_height_px))
+        }
+    };
     buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
@@ -8248,28 +8360,45 @@ fn shape_wide_buffer_for_key(
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
-) -> Buffer {
+) -> (Buffer, WideSizePolicy) {
     match font_presentation_route(&key.text, font_system) {
-        PresentationRoute::TerminalText => {
-            shape_wide_buffer(key, font_system, metrics, Family::Monospace)
-        }
-        PresentationRoute::TextSymbol => shape_wide_buffer(
-            key,
-            font_system,
-            metrics,
-            Family::Name(TEXT_SYMBOL_FONT_FAMILY),
+        PresentationRoute::TerminalText => (
+            shape_wide_buffer(
+                key,
+                font_system,
+                metrics,
+                Family::Monospace,
+                WideSizePolicy::MonospaceSlot,
+            ),
+            WideSizePolicy::MonospaceSlot,
+        ),
+        PresentationRoute::TextSymbol => (
+            shape_wide_buffer(
+                key,
+                font_system,
+                metrics,
+                Family::Name(TEXT_SYMBOL_FONT_FAMILY),
+                WideSizePolicy::MonospaceSlot,
+            ),
+            WideSizePolicy::MonospaceSlot,
         ),
         PresentationRoute::ColorEmoji => {
+            // As in the narrow route: the trial answers which face, at the slot-normalized em it
+            // has always been asked at, and the fit below answers how large.
+            let mut family = Family::Name(COLOR_EMOJI_FONT_FAMILY);
+            let mut trial = None;
             if font_family_available(font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY) {
                 #[cfg(test)]
                 {
                     *color_emoji_trial_shapes = color_emoji_trial_shapes.saturating_add(1);
                 }
+                let segoe_family = Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY);
                 let segoe = shape_wide_buffer(
                     key,
                     font_system,
                     metrics,
-                    Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY),
+                    segoe_family,
+                    WideSizePolicy::MonospaceSlot,
                 );
                 if is_color_cluster_from_family_within_slot(
                     &segoe,
@@ -8279,15 +8408,31 @@ fn shape_wide_buffer_for_key(
                     2.0 * metrics.cell_width_px,
                     metrics.cell_height_px,
                 ) {
-                    return segoe;
+                    family = segoe_family;
+                    trial = Some(segoe);
                 }
             }
+            let trial = trial.unwrap_or_else(|| {
+                shape_wide_buffer(
+                    key,
+                    font_system,
+                    metrics,
+                    family,
+                    WideSizePolicy::MonospaceSlot,
+                )
+            });
 
-            shape_wide_buffer(
-                key,
+            let em_px = color_emoji_fitted_em_px(
+                &trial,
                 font_system,
-                metrics,
-                Family::Name(COLOR_EMOJI_FONT_FAMILY),
+                swash_cache,
+                shaped_em_px(&trial, metrics.font_size_px * wide_slot_em_scale(metrics)),
+                color_emoji_box_px(metrics, 2),
+            );
+            let size_policy = WideSizePolicy::ColorEmojiBox { em_px };
+            (
+                shape_wide_buffer(key, font_system, metrics, family, size_policy),
+                size_policy,
             )
         }
     }
@@ -9852,36 +9997,28 @@ mod tests {
                 }),
                 "{text} must use non-.notdef glyphs from the selected family"
             );
-            if expected_family == SEGOE_COLOR_EMOJI_FONT_FAMILY {
-                let mut swash_cache = SwashCache::new();
-                assert!(
-                    is_color_cluster_from_family_within_slot(
-                        &wide.buffer,
-                        &mut font_system,
-                        &mut swash_cache,
-                        expected_family,
-                        2.0 * metrics.cell_width_px,
-                        metrics.cell_height_px,
-                    ),
-                    "{text} Segoe composition must normalize into its double-cell slot"
-                );
-            } else {
-                assert_eq!(
-                    raster_content(&mut font_system, &wide.buffer),
-                    glyphon::SwashContent::Color,
-                    "{text} Noto fallback must remain on glyphon's color atlas"
-                );
-            }
             assert_eq!(
-                wide.buffer.monospace_width(),
-                Some(2.0 * metrics.cell_width_px)
+                raster_content(&mut font_system, &wide.buffer),
+                glyphon::SwashContent::Color,
+                "{text} must remain on glyphon's color atlas"
+            );
+            // A colour emoji's em is fitted to its measured ink, not negotiated through a
+            // monospace advance, so the square on the glass is the slot's and not the face's.
+            // Where that square sits is `no_color_emoji_glyph_box_leaves_the_cells_it_owns`.
+            assert_eq!(wide.buffer.monospace_width(), None);
+            let mut swash_cache = SwashCache::new();
+            let [left, top, right, bottom] =
+                glyph_ink_bounds(&wide.buffer, &mut font_system, &mut swash_cache).unwrap();
+            assert!(
+                ((right - left).max(bottom - top) - color_emoji_box_px(metrics, 2)).abs() <= 0.5,
+                "{text} must be drawn at the square its two cells hold"
             );
         }
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn default_text_emoji_uses_cell_height_size_centered_over_its_narrow_cell() {
+    fn default_text_emoji_fits_the_square_its_one_cell_can_hold() {
         let mut font_system = terminal_font_system();
         for scale_factor in [1.0, 1.25, 1.5, 2.0] {
             let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
@@ -9905,14 +10042,13 @@ mod tests {
                 glyphon::SwashContent::Color,
                 "⚠ must reach glyphon's color atlas"
             );
-            assert_eq!(glyphs[0].font_size, metrics.cell_height_px);
-            assert!(
-                occupied_width_px(&mut font_system, &shaped[0].buffer) > metrics.cell_width_px,
-                "scale {scale_factor}: ⚠ must retain square emoji size and may overhang one cell"
-            );
             let mut swash_cache = SwashCache::new();
             let [left, top, right, bottom] =
                 glyph_ink_bounds(&shaped[0].buffer, &mut font_system, &mut swash_cache).unwrap();
+            assert!(
+                (right - left).max(bottom - top) - color_emoji_box_px(metrics, 1) <= 0.5,
+                "scale {scale_factor}: ⚠ owns one cell and must stay inside it"
+            );
             let centered_left = left + shaped[0].left_offset_px;
             let centered_right = right + shaped[0].left_offset_px;
             let centered_top = top + shaped[0].top_offset_px;
@@ -9925,6 +10061,89 @@ mod tests {
                     <= 0.5
             );
             assert!(centered_top >= -0.5 && centered_bottom <= metrics.cell_height_px + 0.5);
+        }
+    }
+
+    /// One rule for one- and two-cell colour emoji: the square is `min(cell height, cells × cell
+    /// width)` and it is centred on the cells the cluster owns, so no colour emoji ink ever
+    /// crosses into a neighbour's column. `⚠` and `☂` are one-cell text-default emoji, the rest
+    /// own two.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn no_color_emoji_glyph_box_leaves_the_cells_it_owns() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        for scale_factor in [1.0, 1.25, 1.5, 2.0] {
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+            for (text, cells) in [
+                ("⚠", 1),
+                ("☂", 1),
+                ("↔\u{fe0f}", 2),
+                ("⏱\u{fe0f}", 2),
+                ("❤\u{fe0f}", 2),
+                ("😀", 2),
+                ("👍🏽", 2),
+                ("👨‍👩‍👧‍👦", 2),
+            ] {
+                let mut cell = CapturedCell::plain(text);
+                let (buffer, left_offset_px, top_offset_px) = if cells == 2 {
+                    cell.style.flags.insert(CellFlags::WIDE_CHAR);
+                    let shaped = shape_wide_for_test(&[cell], &mut font_system, metrics);
+                    let wide = &shaped[0];
+                    (
+                        Arc::clone(&wide.buffer),
+                        wide.left_offset_px,
+                        wide.top_offset_px,
+                    )
+                } else {
+                    let shaped = shape_narrow_for_test(&[cell], &mut font_system, metrics);
+                    let narrow = &shaped[0];
+                    (
+                        Arc::clone(&narrow.buffer),
+                        narrow.left_offset_px,
+                        narrow.top_offset_px,
+                    )
+                };
+                assert_eq!(
+                    raster_content(&mut font_system, &buffer),
+                    glyphon::SwashContent::Color,
+                    "scale {scale_factor}: {text} must be a colour emoji for this rule to bind"
+                );
+
+                let box_px = color_emoji_box_px(metrics, cells);
+                assert_eq!(
+                    box_px,
+                    metrics
+                        .cell_height_px
+                        .min(cells as f32 * metrics.cell_width_px)
+                );
+                let slot_width_px = cells as f32 * metrics.cell_width_px;
+                let [left, top, right, bottom] =
+                    glyph_ink_bounds(&buffer, &mut font_system, &mut swash_cache).unwrap();
+                let placed = [
+                    left + left_offset_px,
+                    top + top_offset_px,
+                    right + left_offset_px,
+                    bottom + top_offset_px,
+                ];
+                assert!(
+                    placed[2] - placed[0] <= box_px + 0.5 && placed[3] - placed[1] <= box_px + 0.5,
+                    "scale {scale_factor}: {text} must fit a {box_px}px square, got {placed:?}"
+                );
+                assert!(
+                    placed[0] >= -0.5
+                        && placed[2] <= slot_width_px + 0.5
+                        && placed[1] >= -0.5
+                        && placed[3] <= metrics.cell_height_px + 0.5,
+                    "scale {scale_factor}: {text} must stay inside its {cells} cell(s), got {placed:?}"
+                );
+                assert!(
+                    ((placed[0] + placed[2]) / 2.0 - slot_width_px / 2.0).abs() <= 0.5
+                        && ((placed[1] + placed[3]) / 2.0 - metrics.cell_height_px / 2.0).abs()
+                            <= 0.5,
+                    "scale {scale_factor}: {text} must be centred on its cells, got {placed:?}"
+                );
+            }
         }
     }
 
