@@ -2524,7 +2524,7 @@
 <!-- THE PSReadLine INVITATION (§7.1.6c-3b).
 
      `Windows PowerShell 5.1` ships PSReadLine 2.0.0, and on 2.0.0 the input
-     line stays where it was when the window is resized — the private
+     line lands in the wrong place when the window is resized — the private
      resize-anchor chord Folio sends is swallowed as a no-op there, because the
      only repair 2.0.0 offers clears the viewport. So the fix this product
      already ships does nothing on the shell most Windows users open first, and
@@ -2544,8 +2544,8 @@
      that, never again; Settings ▸ Terminal keeps the row. -->
 <div class="invite-scrim" id="invite-scrim"></div>
 <div class="restore invite" id="invite" role="dialog" aria-labelledby="invite-h" style="z-index:50">
-  <h1 id="invite-h">Keep the input line in place when the window resizes?</h1>
-  <p class="sub">Windows PowerShell ships with PSReadLine 2.0.0. On that version the input line stays where it was when the window is resized, and the repair Folio sends does nothing. Installing writes PSReadLine 2.4.6 to C:\Users\you\Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6. It takes effect in PowerShell sessions started after that, and Settings ▸ Terminal removes it.</p>
+  <h1 id="invite-h">Fix the input line after a resize?</h1>
+  <p class="sub">Windows PowerShell ships with PSReadLine 2.0.0. On that version the input line lands in the wrong place when the window is resized, and the repair Folio sends does nothing. Installing writes PSReadLine 2.4.6 to C:\Users\you\Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6. It takes effect in PowerShell sessions started after that, and Settings ▸ Terminal removes it.</p>
   <!-- Shown only under an execution policy that would refuse an unsigned script
        module — `AllSigned` or `Restricted`. PSReadLine is a `.psm1`, so writing
        the files there would report success and produce a module no shell would

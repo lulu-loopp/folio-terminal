@@ -583,8 +583,8 @@ impl Text {
             // rather than the module, which is the half that matters.
             Self::PsReadLineInviteTitle => pick(
                 lang,
-                "Keep the input line in place on resize?",
-                "让输入行在缩放后留在原位？",
+                "Fix the input line after a resize?",
+                "修复缩放后输入行错位？",
             ),
             Self::PsReadLineInstall => pick(lang, "Install", "安装"),
             Self::PsReadLineNotNow => pick(lang, "Not now", "以后再说"),
@@ -928,13 +928,13 @@ pub fn psreadline_invite_body(found: &str, patched: &str, path: &str) -> String 
     match current() {
         Lang::English => format!(
             "Windows PowerShell ships with PSReadLine {found}. On that version the input line \
-             stays where it was when the window is resized, and the repair Folio sends does \
-             nothing. Installing writes PSReadLine {patched} to {path}. It takes effect in \
+             lands in the wrong place when the window is resized, and the repair Folio sends \
+             does nothing. Installing writes PSReadLine {patched} to {path}. It takes effect in \
              PowerShell sessions started after that, and Settings ▸ Terminal removes it."
         ),
         Lang::Chinese => format!(
             "Windows PowerShell 自带的 PSReadLine 是 {found}。在这个版本上，缩放窗口后输入行会\
-             停在原处，Folio 发出的修复指令不起作用。安装会把 PSReadLine {patched} 写入 \
+             错位，Folio 发出的修复指令不起作用。安装会把 PSReadLine {patched} 写入 \
              {path}，对此后新开的 PowerShell 会话生效，并可在设置 ▸ 终端中移除。"
         ),
     }
