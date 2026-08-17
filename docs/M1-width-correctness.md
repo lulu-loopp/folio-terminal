@@ -1,6 +1,8 @@
 # M1：宽度正确性交付报告
 
 > M1.5 已补足彩色 emoji 与 fallback em 归一；当前字形验收和字体资产策略见 `M1.5-glyph-quality.md`。本文保留 M1 当时的宽度证据与历史边界。
+>
+> 2026-08-17 起 legacy 档对 emoji-presentation 序列（base + U+FE0F）也判 2 cells，理由与范围见 `DESIGN.md` §2.1；本文下表中「BetterTerminal legacy」的 umbrella+VS16 一行因此变为 2，其余各行不动。
 
 ## 结论与证据边界
 
@@ -83,7 +85,7 @@ PowerShell 的 Console API 先更新 ConPTY/console 自己的屏幕模型，ConP
 | thumbs + skin tone | 4 | 4 | 2 |
 | `e` + combining acute | 2 | 1 | 1 |
 | umbrella + VS15 | 2 | 1 | 1 |
-| umbrella + VS16 | 2 | 1 | 2 |
+| umbrella + VS16 | 2 | 1（2026-08-17 起 2） | 2 |
 | US flag | 4 | 2 | 2 |
 | ambiguous `☆` | 1 | 1 | 1 |
 
