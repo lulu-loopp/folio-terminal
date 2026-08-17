@@ -15,6 +15,7 @@ fn key(width_cells: u32) -> LayoutKey {
         dpi_milli: nz(1000),
         font_rev: 1,
         theme_rev: 1,
+        lang_rev: 0,
     }
 }
 

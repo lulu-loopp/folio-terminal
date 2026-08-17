@@ -1089,6 +1089,7 @@ impl DualPlaneSession {
                 dpi_milli: NonZeroU32::new(1000).unwrap(),
                 font_rev: 1,
                 theme_rev: 1,
+                lang_rev: 0,
             },
             view_generation: ViewGeneration(1),
             grid_generation: GridGeneration(1),
@@ -11860,6 +11861,7 @@ mod tests {
             dpi_milli: nz(1000),
             font_rev: 1,
             theme_rev: 1,
+            lang_rev: 0,
         };
         assert_ne!(
             shared_math_artifact_key(MathMode::Display, "x", layout, DetectionRevision(1)),
@@ -12083,6 +12085,7 @@ mod tests {
 
         session.set_layout_key(LayoutKey {
             theme_rev: 2,
+            lang_rev: 0,
             ..session.layout_key()
         });
         assert!(
@@ -12270,11 +12273,13 @@ mod tests {
         session.resize_at(columns, rows, at).unwrap();
         session.mark_pty_resize_requested_at(columns, rows, at);
         let theme_rev = session.layout_key().theme_rev;
+        let lang_rev = session.layout_key().lang_rev;
         session.set_layout_key(LayoutKey {
             width_cells: columns,
             dpi_milli,
             font_rev: 1,
             theme_rev,
+            lang_rev,
         });
     }
 
@@ -12708,6 +12713,7 @@ mod tests {
             dpi_milli: nz(800),
             font_rev: 1,
             theme_rev: session.layout_key().theme_rev,
+            lang_rev: session.layout_key().lang_rev,
         });
         session
             .feed_at(
@@ -12789,6 +12795,7 @@ mod tests {
                 dpi_milli: start_dpi,
                 font_rev: 1,
                 theme_rev: session.layout_key().theme_rev,
+                lang_rev: session.layout_key().lang_rev,
             });
             session
                 .feed_at(
@@ -12881,6 +12888,7 @@ mod tests {
                 dpi_milli: start_dpi,
                 font_rev: 1,
                 theme_rev: session.layout_key().theme_rev,
+                lang_rev: session.layout_key().lang_rev,
             });
             let mut lines = Vec::new();
             for i in 0..60 {

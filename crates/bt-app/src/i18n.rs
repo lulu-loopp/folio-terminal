@@ -20,24 +20,55 @@
 //! allocations** — where a resource lookup would have turned every one of those
 //! into a `String` on a dialog that redraws on hover.
 //!
-//! # Why the language is read once and applies at the next start
+//! # Why the language switches where you are standing
 //!
-//! Theme can be switched live because the theme has a *revision*:
+//! It did not, until 2026-08-17, and the reason it did not is worth keeping
+//! because it is the reason the fix has the shape it has. Theme could always be
+//! switched live because the theme had a *revision*:
 //! `bt_render::theme_revision()` feeds `LayoutKey.theme_rev`, so every cached
-//! measurement is invalidated the instant the palette changes. Language has no
-//! such number, and it needs one more than the theme does — a language changes
-//! the **widths**, and this window caches widths in more places than any one
-//! slice could hunt down: the `˅` menu's `min-width: 180`, the root menu's 190,
-//! the settings picker's 118, `preview_button_width`, the files foot's
-//! `ellipsized_left` result, the restore prompt's wrapped lines. A hot switch
-//! would leave every one of those measured for the previous language until
-//! something happened to re-measure it, which is a window that is subtly wrong in
-//! a way nothing on screen explains.
+//! measurement is invalidated the instant the palette changes. Language had no
+//! such number, and a language needs one more than a palette does — it changes
+//! the **widths**, and this window measures widths in a great many places: the
+//! `˅` menu's `min-width: 180`, the root menu's 190, the settings picker's 118,
+//! `preview_button_width`, the files foot's `ellipsized_left` result, the
+//! restore prompt's wrapped lines.
 //!
-//! So [`install`] is called once, before the first frame, and [`current`] answers
-//! the same thing for the life of the process. The Language row says so in its
-//! own description, and choosing a value raises a card that says it again. The
-//! day `LayoutKey` grows a `lang_rev`, this paragraph is the one to delete.
+//! What made the switch safe was reading those places instead of counting them.
+//! Every one of them is re-derived by `Runtime::refresh_chrome`, which builds
+//! the strip, the tooltip anchors, the feet and the whole overlay stack from
+//! scratch on the frame it is called — the settings dialog measures its widest
+//! option per call and says so in `settings_layout`'s own comment. So the
+//! language's invalidation list is **not** the terminal font's: a face change
+//! moves the cell every glyph in the grid is drawn in, and a language change
+//! moves nothing in the grid at all. It moves the window's own words, and the
+//! window's own words are rebuilt every frame that asks for them.
+//!
+//! Which leaves exactly three things that outlive a `refresh_chrome`, and they
+//! are the three this slice touches:
+//!
+//! 1. **[`current`] itself** — an atomic now, not a `OnceLock`, so [`install`]
+//!    can be called again. It is read from the layout code on the UI thread and
+//!    from the PSReadLine probe's thread, hence `Relaxed` loads of a plain word
+//!    rather than a lock.
+//! 2. **[`lang_revision`]** — the number that did not exist. It feeds
+//!    `bt_doc::LayoutKey::lang_rev`, which is what makes the language a member
+//!    of the layout's identity rather than an ambient fact about it.
+//! 3. **`crate::psreadline::row_description`'s three `OnceLock<String>`** — the
+//!    only process-lifetime string cache in this app that is built out of this
+//!    table. It is keyed by [`Lang`] now, which is why it has room for six.
+//!
+//! Everything else was audited and is language-neutral by construction:
+//! `profiles::title`'s cache holds names this file deliberately does not carry,
+//! `settings::monospace_families` and `settings::scheme_labels` hold names out
+//! of the machine and out of a folder, and `cmdrail::RailCache` contains no
+//! string from this table at all.
+//!
+//! **What is not retranslated is what has already been said.** A toast on
+//! screen, the files pane's 1300ms answer to a double-click, a preview's failure
+//! banner: those are reports of a moment, they were true in the language they
+//! were said in, and half of them carry an `io::Error`'s own sentence which has
+//! no second column anywhere. They are not state the window is describing; they
+//! are things the window told you.
 //!
 //! # What is deliberately **not** in this table
 //!
@@ -55,7 +86,7 @@
 //! * **Technical tokens** inside sentences: `git`, `LaTeX`, `$$…$$`, `Folio`,
 //!   `64 KB`, key caps. They stay in both languages because they are names.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// The language the window is drawn in — the *resolved* answer.
 ///
@@ -63,11 +94,52 @@ use std::sync::OnceLock;
 /// third language is a third variant and a third literal per arm, which is the
 /// shape this was chosen for; a `&str` key would be the shape that compiles with
 /// a typo in it.
+///
+/// `repr(u8)` because the live answer is an atomic word — see [`Current`]. The
+/// discriminants are also the indices of the per-language cache slots
+/// `crate::psreadline::row_description` keeps, which is what [`Self::COUNT`] and
+/// [`Self::from_index`] are for: a third variant then fails to compile in the
+/// one place that would otherwise have silently kept two.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
 pub enum Lang {
     #[default]
-    English,
-    Chinese,
+    English = 0,
+    Chinese = 1,
+}
+
+impl Lang {
+    /// How many languages this build speaks.
+    pub const COUNT: usize = 2;
+
+    /// Every one of them, for the tests that have to read both columns.
+    ///
+    /// Test-only, like [`Text::ALL`]: nothing the window does walks the
+    /// languages — it draws the one in force — and a constant the product
+    /// carried only so that a test could read it would be shipped weight.
+    #[cfg(test)]
+    pub const ALL: [Self; Self::COUNT] = [Self::English, Self::Chinese];
+
+    /// Which slot of a per-language array this language owns.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The inverse, for reading the answer back out of an atomic word.
+    ///
+    /// Anything that is not a discriminant is [`Self::English`] rather than a
+    /// panic, and the only writer is [`Current::set`], so the arm cannot be
+    /// reached — it is the same "English is the source language, not a
+    /// fallback" answer [`resolve`] gives, expressed where the compiler asks
+    /// for it.
+    #[must_use]
+    const fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Chinese,
+            _ => Self::English,
+        }
+    }
 }
 
 /// What the user asked for — the *stored* preference.
@@ -118,29 +190,92 @@ pub fn resolve(mode: LanguageMode, os_ui_language: &str) -> Lang {
     }
 }
 
-/// The one answer this process gives, set once before the first frame.
-static CURRENT: OnceLock<Lang> = OnceLock::new();
-
-/// Name the language this process draws in. **Called once, at startup.**
+/// The language in force, and how many times it has moved.
 ///
-/// A second call is ignored rather than being a panic or a swap, and the
-/// difference matters: a swap would be a hot switch through the back door, with
-/// every cached width still measured for the language before it (see this
-/// module's header). The `bool` is for the test that pins the once-ness; nothing
-/// in the app reads it.
+/// A type rather than two loose statics, and the reason is testability and not
+/// tidiness: the whole of the swap's contract — the answer changes, the revision
+/// advances, installing what is already in force advances nothing, and every
+/// thread sees it — is a property of *this*, and a test can build one of its own
+/// and pin all four without touching the process's. Flipping the real one under
+/// a test suite that runs its cases in parallel would leave every other test
+/// that reads a word off this table racing a language it did not ask for.
+///
+/// Two words and not one `RwLock<(Lang, u64)>`, because [`current`] is called
+/// from inside layout loops that measure one label at a time: it has to be an
+/// unlocked load. The pair is never read atomically together and never needs to
+/// be — a reader that saw the new language with the old revision would be a
+/// frame that redrew correctly and re-drew again, and there is no reader that
+/// takes the revision alone and does something with it.
+struct Current {
+    lang: AtomicU8,
+    revision: AtomicU64,
+}
+
+impl Current {
+    const fn new() -> Self {
+        Self {
+            lang: AtomicU8::new(Lang::English as u8),
+            revision: AtomicU64::new(0),
+        }
+    }
+
+    fn get(&self) -> Lang {
+        Lang::from_index(self.lang.load(Ordering::Relaxed))
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    /// Put a language in force, and say whether that was a change.
+    ///
+    /// The revision advances only on a real change, which is what lets
+    /// `Runtime::adopt_new_language` treat the answer as "is there anything to
+    /// repaint": a settings row re-pressed on the value it already wears must
+    /// not cost a re-layout of every typeset band in the window.
+    fn set(&self, lang: Lang) -> bool {
+        if self.get() == lang {
+            return false;
+        }
+        self.lang.store(lang as u8, Ordering::Relaxed);
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+}
+
+/// The one this process draws in.
+static CURRENT: Current = Current::new();
+
+/// Name the language this window draws in, and say whether that moved it.
+///
+/// **Called at startup and again on every press of the Language row.** It used
+/// to be a one-shot — see this module's header for what had to exist before it
+/// could stop being one — and the caller's obligation is now the obligation the
+/// theme's switch already had: a `true` answer means a repaint is owed, and
+/// `Runtime::adopt_new_language` is where that obligation is discharged.
 pub fn install(lang: Lang) -> bool {
-    CURRENT.set(lang).is_ok()
+    CURRENT.set(lang)
 }
 
 /// The language every [`Text`] is answered in.
 ///
-/// English before [`install`] has run, and deliberately **not** `get_or_init`:
-/// initialising on the first read would let any early reader — a unit test, a
-/// diagnostic — lock the process into English before the settings file had been
-/// opened. Reading a word early is harmless; deciding the language early is not.
+/// English before [`install`] has run: English is the source language rather
+/// than a fallback, so a word read before the settings file was opened is the
+/// word this product was written with, not a placeholder.
 #[must_use]
 pub fn current() -> Lang {
-    CURRENT.get().copied().unwrap_or(Lang::English)
+    CURRENT.get()
+}
+
+/// How many times the window's language has changed.
+///
+/// The number `bt_doc::LayoutKey::lang_rev` carries, and the whole reason a hot
+/// switch is possible: it is to the language what `bt_render::theme_revision` is
+/// to the palette. Starts at zero and advances only on a real change, so a
+/// window whose user never opens the Language row pays nothing for it.
+#[must_use]
+pub fn lang_revision() -> u64 {
+    CURRENT.revision()
 }
 
 /// One arm of the table: the English the product was written in, and the Chinese
@@ -270,8 +405,15 @@ pub enum Text {
     OptionSplitRight,
     OptionSplitDown,
 
-    /// The card raised when the Language row is answered.
-    LanguageRestartToast,
+    // A card telling the reader to relaunch stood here until §7.1.6c-3c. It was
+    // raised because the Language row was the one row whose tick moved while
+    // nothing else in the window did. The window changes language under the
+    // press now, so the card has nothing to report — and a card announcing a
+    // change the reader is looking at would be the window telling them what they
+    // can see. Removed rather than left unused: an unused arm in this table is a
+    // sentence somebody will one day find a place for.
+    // `no_string_in_this_table_asks_for_a_relaunch` is the pin, and it reads this
+    // file, so the words it forbids are not spelled out here.
 
     // ── the PSReadLine row and its invitation ──────────────────────
     /// The row's line while the out-of-band probe has not answered yet. It is a
@@ -534,13 +676,17 @@ impl Text {
                 "What opens on a new tab, and when Folio starts",
                 "新建标签时、以及 Folio 启动时打开什么",
             ),
-            // Says the rule out loud, because the rule is the surprise: this is
-            // the only row in the dialog that does not take effect where you can
-            // see it. See this module's header for why.
+            // **It used to say when it took effect** — "Applies the next time
+            // Folio starts" — because that was the one surprising thing about
+            // the row. It is not true any more (§7.1.6c-3c) and there is nothing
+            // surprising left to say, so the line does what every other picker's
+            // description in this dialog does: it names what is on offer. Theme's
+            // own line is its model, down to the third item, because the third
+            // item is the same item.
             Self::DescLanguage => pick(
                 lang,
-                "Applies the next time Folio starts",
-                "下次启动 Folio 时生效",
+                "English, 中文, or follow your system setting",
+                "English、中文，或跟随系统设置",
             ),
             // Names what it does *not* move, because that is the question a
             // reader has when a terminal offers one font row: the chrome keeps
@@ -589,12 +735,6 @@ impl Text {
             Self::OptionSplitAuto => pick(lang, "Auto (longer edge)", "自动（沿长边）"),
             Self::OptionSplitRight => pick(lang, "Right", "右侧"),
             Self::OptionSplitDown => pick(lang, "Down", "下方"),
-
-            Self::LanguageRestartToast => pick(
-                lang,
-                "Restart Folio to switch the language",
-                "重启 Folio 以切换语言",
-            ),
 
             Self::PsReadLineProbing => pick(
                 lang,
@@ -793,7 +933,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 134] = [
+    pub const ALL: [Self; 133] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -865,7 +1005,6 @@ impl Text {
         Self::OptionSplitAuto,
         Self::OptionSplitRight,
         Self::OptionSplitDown,
-        Self::LanguageRestartToast,
         Self::PsReadLineProbing,
         Self::PsReadLineRowGone,
         Self::PsReadLineInviteTitle,
@@ -1008,9 +1147,16 @@ pub fn psreadline_policy_reason(policy: &str) -> String {
 }
 
 /// The row's line when the machine's PSReadLine is older than the patched one.
+///
+/// **The three PSReadLine row lines take their language as an argument**, where
+/// every other value-carrying string in this file reads [`current`]. They are
+/// the only three the app caches for the life of the process — see
+/// `crate::psreadline::row_description`, which keeps one slot per [`Lang`] — and
+/// a cache filling itself from an ambient answer is a cache that cannot be asked
+/// for the other column.
 #[must_use]
-pub fn psreadline_row_outdated(found: &str) -> String {
-    match current() {
+pub fn psreadline_row_outdated_in(lang: Lang, found: &str) -> String {
+    match lang {
         Lang::English => format!("{found} on this machine · the resize repair does nothing"),
         Lang::Chinese => format!("本机为 {found} · 缩放修复不起作用"),
     }
@@ -1018,8 +1164,8 @@ pub fn psreadline_row_outdated(found: &str) -> String {
 
 /// The row's line after Folio has written the module.
 #[must_use]
-pub fn psreadline_row_installed(patched: &str) -> String {
-    match current() {
+pub fn psreadline_row_installed_in(lang: Lang, patched: &str) -> String {
+    match lang {
         Lang::English => format!("{patched} · installed by Folio"),
         Lang::Chinese => format!("{patched} · 由 Folio 安装"),
     }
@@ -1027,8 +1173,8 @@ pub fn psreadline_row_installed(patched: &str) -> String {
 
 /// The row's line when the machine already had a new enough module of its own.
 #[must_use]
-pub fn psreadline_row_current(found: &str) -> String {
-    match current() {
+pub fn psreadline_row_current_in(lang: Lang, found: &str) -> String {
+    match lang {
         Lang::English => format!("{found} on this machine · already anchors itself"),
         Lang::Chinese => format!("本机为 {found} · 已自带正确的锚点"),
     }
@@ -1419,5 +1565,147 @@ mod tests {
         assert_eq!(Text::Settings.text(), Text::Settings.in_lang(current()));
         assert_eq!(LanguageMode::default(), LanguageMode::System);
         assert_eq!(Lang::default(), Lang::English);
+    }
+
+    // ── the hot switch (§7.1.6c-3c) ────────────────────────────────────────
+    //
+    // These build their own [`Current`] rather than moving the process's, and
+    // that is a decision and not a shortcut. `cargo test` runs this crate's
+    // cases in parallel in one process; a case that put the window into Chinese
+    // for even a microsecond would race every other case in `seats.rs` that
+    // asserts a pane head reads `"Terminal"`. The global is three lines of
+    // delegation over this type, and this is the type with the contract in it.
+
+    /// PIN — **a switch changes the answer and advances the revision, and a
+    /// re-press of what is already in force does neither.**
+    ///
+    /// The second half is the one worth a test. `LayoutKey.lang_rev` is what a
+    /// re-layout of every typeset band in the window hangs off, so a revision
+    /// that ticked on every press would make pressing the ticked item cost a
+    /// full re-typeset — which nothing on screen would show, and a profiler
+    /// would find months later.
+    #[test]
+    fn installing_a_language_moves_the_answer_and_the_revision_together() {
+        let current = Current::new();
+        assert_eq!(current.get(), Lang::English);
+        assert_eq!(current.revision(), 0);
+
+        assert!(current.set(Lang::Chinese));
+        assert_eq!(current.get(), Lang::Chinese);
+        assert_eq!(current.revision(), 1);
+
+        assert!(
+            !current.set(Lang::Chinese),
+            "the language already in force did not change"
+        );
+        assert_eq!(current.revision(), 1, "and so nothing was invalidated");
+
+        assert!(current.set(Lang::English));
+        assert_eq!(current.get(), Lang::English);
+        assert_eq!(
+            current.revision(),
+            2,
+            "switching back is a switch — the caches measured in Chinese are \
+             just as stale as the ones measured in English were"
+        );
+    }
+
+    /// PIN — **every thread this app runs reads the language that is in force**,
+    /// including one that was already running when it moved.
+    ///
+    /// Not a hypothetical: `crate::psreadline`'s probe answers off its own
+    /// thread and its row description is built from this table, and the settings
+    /// dialog is the surface that both moves the language and draws that row. A
+    /// language behind a `thread_local` — or behind a `OnceLock` each thread
+    /// initialised for itself — would give that row the language of whichever
+    /// thread happened to build it.
+    #[test]
+    fn a_language_installed_on_one_thread_is_read_on_every_other() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let current = Arc::new(Current::new());
+        let switched = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let current = Arc::clone(&current);
+            let switched = Arc::clone(&switched);
+            std::thread::spawn(move || {
+                while !switched.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+                (current.get(), current.revision())
+            })
+        };
+        assert!(current.set(Lang::Chinese));
+        switched.store(true, Ordering::Release);
+        let (lang, revision) = reader.join().expect("the reading thread");
+        assert_eq!(lang, Lang::Chinese);
+        assert_eq!(revision, 1);
+    }
+
+    /// PIN — the process-wide functions are that type and nothing else.
+    ///
+    /// Read-only, so it can stand beside a suite that reads this table on other
+    /// threads. What it pins is that [`current`] answers off the same word
+    /// [`lang_revision`] counts, rather than the two having drifted onto
+    /// separate statics that could disagree.
+    #[test]
+    fn the_processs_language_and_its_revision_are_one_pair() {
+        assert_eq!(current(), CURRENT.get());
+        assert_eq!(lang_revision(), CURRENT.revision());
+    }
+
+    /// PIN — a discriminant survives the round trip through the atomic word.
+    #[test]
+    fn every_language_is_its_own_slot() {
+        for lang in Lang::ALL {
+            assert_eq!(Lang::from_index(lang as u8), lang);
+        }
+        let indices: Vec<usize> = Lang::ALL.iter().map(|lang| lang.index()).collect();
+        assert_eq!(indices, (0..Lang::COUNT).collect::<Vec<_>>());
+    }
+
+    /// PIN (§7.1.6c-3c) — **no string in this window asks to be relaunched, and
+    /// the Language row does not describe a moment.**
+    ///
+    /// Written against the source rather than against one entry, because the
+    /// failure it guards is a re-addition somewhere else in the table: the card
+    /// that used to stand here was reasonable while the switch needed a restart,
+    /// and the next person to want one will write it as a new variant rather
+    /// than by reviving the old name.
+    #[test]
+    fn no_string_in_this_table_asks_for_a_relaunch() {
+        let source = include_str!("i18n.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a split always yields a first piece");
+        for needle in ["Restart", "restart", "重启"] {
+            assert!(
+                !source.contains(needle),
+                "{needle:?} is still in this table — the language now switches \
+                 where the reader is standing"
+            );
+        }
+        // Not a source-wide needle: `TabTipPinned` says 下次启动会恢复 about a
+        // pinned tab, which is a true sentence about a *tab* and has nothing to
+        // do with this row.
+        for lang in Lang::ALL {
+            assert!(!Text::DescLanguage.in_lang(lang).contains("下次启动"));
+        }
+        for lang in Lang::ALL {
+            let description = Text::DescLanguage.in_lang(lang);
+            assert!(
+                description.contains("中文"),
+                "{lang:?}: the row names what is on offer — {description:?}"
+            );
+        }
+        assert_eq!(
+            Text::DescLanguage.in_lang(Lang::English),
+            "English, 中文, or follow your system setting"
+        );
+        assert_eq!(
+            Text::DescLanguage.in_lang(Lang::Chinese),
+            "English、中文，或跟随系统设置"
+        );
     }
 }

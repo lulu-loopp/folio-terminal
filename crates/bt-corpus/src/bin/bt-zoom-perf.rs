@@ -273,6 +273,7 @@ fn run_zoom_sample(
         dpi_milli: metrics.dpi_milli(),
         font_rev: 1,
         theme_rev: session.layout_key().theme_rev,
+        lang_rev: session.layout_key().lang_rev,
     });
     let layout_key = started.elapsed();
 

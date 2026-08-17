@@ -7783,27 +7783,41 @@ mod tests {
         assert_eq!(language_requested(SettingsTarget::Close), None);
     }
 
-    /// PIN — the row says *when* it takes effect, in whichever language it is
-    /// currently saying it.
+    /// PIN (§7.1.6c-3c) — **the row names what is on offer and promises no
+    /// moment**, in whichever language it is currently saying it.
     ///
-    /// The one line in this dialog that describes a moment rather than a value,
-    /// and it has to, because this is the one setting whose effect is not on
-    /// screen when it is chosen. See [`crate::i18n`]'s header for why there is no
-    /// hot switch to describe instead.
+    /// It used to be the one line in this dialog that described a moment rather
+    /// than a value, and it had to be, because this used to be the one setting
+    /// whose effect was not on screen when it was chosen. The language switches
+    /// under the press now, so the line went back to the shape every other
+    /// picker's description in this dialog has — Theme's, most of all, because
+    /// the third item in both pickers is the same item.
+    ///
+    /// MUTATION: put the old sentence back in either column and this fails
+    /// naming the column.
     #[test]
-    fn the_language_row_promises_the_next_start_in_both_languages() {
+    fn the_language_row_names_its_two_languages_and_promises_no_restart() {
         assert_eq!(
             SettingsRow::Language.description(values()),
             crate::i18n::Text::DescLanguage.text()
         );
         assert_eq!(
             crate::i18n::Text::DescLanguage.in_lang(crate::i18n::Lang::English),
-            "Applies the next time Folio starts"
+            "English, 中文, or follow your system setting"
         );
         assert_eq!(
             crate::i18n::Text::DescLanguage.in_lang(crate::i18n::Lang::Chinese),
-            "下次启动 Folio 时生效"
+            "English、中文，或跟随系统设置"
         );
+        // The row draws the two languages in their own names and offers the
+        // machine's answer as the third, which is the description's whole claim.
+        let drawn: Vec<&str> = SettingsRow::Language.option_labels().collect();
+        for named in ["English", "中文"] {
+            assert!(
+                drawn.contains(&named),
+                "the description offers {named:?} and the picker must draw it"
+            );
+        }
     }
 
     /// PIN (Q4): a description is a function of the row **and its values**.

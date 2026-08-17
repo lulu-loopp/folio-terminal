@@ -11162,6 +11162,7 @@ mod tests {
             dpi_milli: NonZeroU32::new(1000).unwrap(),
             font_rev: 1,
             theme_rev: 1,
+            lang_rev: 0,
         }
     }
 
