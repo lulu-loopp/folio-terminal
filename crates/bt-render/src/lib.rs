@@ -4048,26 +4048,36 @@ impl WindowRenderer {
     /// that knows how wide a number is.
     ///
     /// "Plain" is the whole of the difference from [`Self::measure_chrome_label`]
-    /// — the face's regular weight and no tracking, which is what the great
-    /// majority of this chrome's labels are drawn as. A caller whose label
-    /// carries either must measure with it; see the note on
-    /// [`chrome_label_attrs`].
+    /// — the face's regular weight, no tracking and proportional figures, which
+    /// is what the great majority of this chrome's labels are drawn as. A caller
+    /// whose label carries any of the three must measure with it; see the note
+    /// on [`chrome_label_attrs`].
     pub fn measure_chrome_text(
         &mut self,
         gpu: &mut GpuContext,
         text: &str,
         font_size_px: f32,
     ) -> f32 {
-        self.measure_chrome_label(gpu, text, font_size_px, ChromeLabelWeight::Regular, 0.0)
+        self.measure_chrome_label(
+            gpu,
+            text,
+            font_size_px,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+        )
     }
 
-    /// How wide `text` will be when drawn as a [`ChromeLabel`] carrying `weight`
-    /// and `letter_spacing_em`.
+    /// How wide `text` will be when drawn as a [`ChromeLabel`] carrying `weight`,
+    /// `letter_spacing_em` and `tabular_numerals`.
     ///
     /// The measurement a *button* needs: `.float-win .fly-head button` is
     /// `font-weight: 600; letter-spacing: .04em; text-transform: uppercase`, and
     /// a box sized from the untracked regular-weight width of the same string is
-    /// a box the caption overflows by a letter.
+    /// a box the caption overflows by a letter. The measurement a *meta column*
+    /// needs is the third of the three: `font-variant-numeric: tabular-nums`
+    /// widens `1` to the widest digit's advance, and a box cut from the
+    /// proportional width is a box the age runs out of.
     pub fn measure_chrome_label(
         &mut self,
         gpu: &mut GpuContext,
@@ -4075,6 +4085,7 @@ impl WindowRenderer {
         font_size_px: f32,
         weight: ChromeLabelWeight,
         letter_spacing_em: f32,
+        tabular_numerals: bool,
     ) -> f32 {
         measure_chrome_label(
             &mut gpu.font_system,
@@ -4082,6 +4093,7 @@ impl WindowRenderer {
             font_size_px,
             weight,
             letter_spacing_em,
+            tabular_numerals,
         )
     }
 
@@ -6433,6 +6445,7 @@ impl Renderer {
         font_size_px: f32,
         weight: ChromeLabelWeight,
         letter_spacing_em: f32,
+        tabular_numerals: bool,
     ) -> f32 {
         self.window.measure_chrome_label(
             &mut self.gpu,
@@ -6440,6 +6453,7 @@ impl Renderer {
             font_size_px,
             weight,
             letter_spacing_em,
+            tabular_numerals,
         )
     }
 
@@ -6733,6 +6747,7 @@ fn measure_chrome_label(
     font_size_px: f32,
     weight: ChromeLabelWeight,
     letter_spacing_em: f32,
+    tabular_numerals: bool,
 ) -> f32 {
     if text.is_empty() {
         return 0.0;
@@ -6745,11 +6760,17 @@ fn measure_chrome_label(
     buffer.set_size(None, Some(line_height));
     buffer.set_text(
         text,
-        // Tabular figures are deliberately not a parameter: they are a *fixed*
-        // advance per digit, so they can only ever make a measured string
-        // narrower than the proportional one, and the two callers that set them
-        // both size their box off the widest digit already.
-        &chrome_label_attrs(weight, letter_spacing_em, false),
+        // **Tabular figures are a parameter, and they were not** (user report,
+        // 2026-08-17). The note that stood here said they could only ever make a
+        // string narrower, so measuring without them was safe. It is the wrong
+        // way round: `tnum` gives *every* digit the widest digit's advance, so a
+        // string carrying a narrow one — `1h`, `Aug 10`, a short hash with a `1`
+        // in it — shapes **wider** than the same string measured proportionally.
+        // A right-aligned label whose box was cut from the narrow number then
+        // has its `left` clamped to that box's left edge by `shape_chrome_labels`
+        // and runs off the right of it, where the clip cuts the last glyph in
+        // half. That is what the Git page's meta column was doing at every width.
+        &chrome_label_attrs(weight, letter_spacing_em, tabular_numerals),
         Shaping::Advanced,
         None,
     );
@@ -12559,6 +12580,15 @@ mod tests {
     /// number, because the number is the face's business and the *agreement* is
     /// ours. `.float-win .fly-head button` (mock-up 720-725) is the case that
     /// found it, and the loop keeps the plain and tabular cases honest beside it.
+    ///
+    /// **The tabular rows are the second half of the same lesson** (user report,
+    /// 2026-08-17): the doc above already claimed the loop kept them honest and
+    /// the loop had no such column, because the measurer refused `tnum` as a
+    /// parameter on the belief that tabular figures can only narrow a string.
+    /// They widen every narrow digit to the widest one's advance, so `1h` and
+    /// `Aug 10` and `8c56194` are each a couple of pixels longer than they
+    /// measured — which is exactly how much of the last glyph the Git page's
+    /// meta column was losing off its right edge.
     #[cfg(target_os = "windows")]
     #[test]
     fn a_chrome_labels_measured_width_is_the_width_its_glyphs_take() {
@@ -12566,13 +12596,14 @@ mod tests {
         let mut swash_cache = SwashCache::new();
         let cap_height_ratio = chrome_cap_height_ratio(&mut font_system, &mut swash_cache)
             .expect("the chrome sans face publishes or renders a cap height");
-        for (what, text, size, weight, tracking) in [
+        for (what, text, size, weight, tracking, tabular) in [
             (
                 "`.fly-head button` — the float's DOCK",
                 "DOCK",
                 10.0_f32,
                 ChromeLabelWeight::SemiBold,
                 0.04_f32,
+                false,
             ),
             // The same button at 200%, where a per-glyph tracking error is twice
             // as large and a rounding-sized tolerance would hide it.
@@ -12582,6 +12613,7 @@ mod tests {
                 20.0,
                 ChromeLabelWeight::SemiBold,
                 0.04,
+                false,
             ),
             (
                 "a plain pane title",
@@ -12589,6 +12621,7 @@ mod tests {
                 11.5,
                 ChromeLabelWeight::Regular,
                 0.0,
+                false,
             ),
             (
                 "a focused pane title, which is Medium",
@@ -12596,9 +12629,46 @@ mod tests {
                 11.5,
                 ChromeLabelWeight::Medium,
                 0.0,
+                false,
+            ),
+            // `.gbr .gtime` — a branch row's age, the string in the user's own
+            // screenshot with half its `h` cut off.
+            (
+                "a Git row's age, in tabular figures",
+                "1h",
+                10.0,
+                ChromeLabelWeight::Regular,
+                0.0,
+                true,
+            ),
+            (
+                "an older age, which falls back to a date",
+                "Aug 10",
+                10.0,
+                ChromeLabelWeight::Regular,
+                0.0,
+                true,
+            ),
+            // `.gcommit code` — the short hash at the far right of a commit row.
+            (
+                "a short hash, in tabular figures",
+                "8c56194",
+                10.5,
+                ChromeLabelWeight::Regular,
+                0.0,
+                true,
+            ),
+            (
+                "the same hash at 200%",
+                "8c56194",
+                21.0,
+                ChromeLabelWeight::Regular,
+                0.0,
+                true,
             ),
         ] {
-            let measured = measure_chrome_label(&mut font_system, text, size, weight, tracking);
+            let measured =
+                measure_chrome_label(&mut font_system, text, size, weight, tracking, tabular);
             let label = ChromeLabel {
                 text: text.to_owned(),
                 // Laid out in a box far wider than the text wants, so the run
@@ -12611,7 +12681,7 @@ mod tests {
                 align_center: false,
                 letter_spacing_em: tracking,
                 weight,
-                tabular_numerals: false,
+                tabular_numerals: tabular,
             };
             let laid_out = shape_chrome_labels(
                 &mut font_system,

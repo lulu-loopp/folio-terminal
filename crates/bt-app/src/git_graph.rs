@@ -892,8 +892,9 @@ pub struct GraphWorkingFile {
     /// `crate::git_panel::badges_of`'s own answer — the same letters the Git
     /// page draws for the same file, because they are the same file.
     pub badges: Vec<crate::git_panel::GitBadge>,
-    /// R25's mapping: a row under the staged heading opens `--cached`.
-    pub staged: bool,
+    /// R25's mapping and the two readings beside it — see
+    /// [`crate::git::GitGroup::diff_against`].
+    pub against: crate::preview::GitDiffAgainst,
 }
 
 impl GraphViewRow {
@@ -2051,7 +2052,7 @@ pub fn build(
                     renamed_from: file.path.1.clone(),
                     working: Some(GraphWorkingFile {
                         badges: file.badges.clone(),
-                        staged: file.staged,
+                        against: file.against,
                     }),
                     // The working tree's letters are the two it already wears;
                     // its counts are not asked for, because the status this row
@@ -2096,7 +2097,12 @@ pub fn build(
                             &commit.author_name,
                             author_room,
                             author_font,
-                            measure,
+                            // The cutter takes a plain measurer, and the column
+                            // it is cutting for is drawn plainly — one face, so
+                            // the adapter names it rather than assuming it.
+                            &mut |text: &str, size: f32| {
+                                measure(text, size, crate::git_panel::MeasureFace::PLAIN)
+                            },
                         )
                     } else {
                         String::new()
@@ -2115,7 +2121,13 @@ pub fn build(
                             .iter()
                             .filter(|reference| look.filter.draws(reference.kind))
                             .map(|reference| GraphRefPill {
-                                text_width: measure(&reference.name, ref_font),
+                                text_width: measure(
+                                    &reference.name,
+                                    ref_font,
+                                    crate::git_panel::MeasureFace::weighted(
+                                        ChromeLabelWeight::SemiBold,
+                                    ),
+                                ),
                                 name: reference.name.clone(),
                                 head: reference.head,
                                 kind: reference.kind,
@@ -2222,18 +2234,25 @@ fn toolbar_of(
     };
     let count = search_count(look.search);
     GraphToolbar {
-        repo_width: measure(&repo, repo_font),
+        // `.ggv-head .repo` is 500 — measured at the regular weight the name
+        // was a couple of pixels short of its own box and the masthead beside it
+        // started that much too far left.
+        repo_width: measure(
+            &repo,
+            repo_font,
+            crate::git_panel::MeasureFace::weighted(ChromeLabelWeight::Medium),
+        ),
         repo,
-        filter_width: measure(&filter, tool_font),
+        filter_width: measure(&filter, tool_font, crate::git_panel::MeasureFace::PLAIN),
         filter,
-        search_width: measure(&search, tool_font),
+        search_width: measure(&search, tool_font, crate::git_panel::MeasureFace::PLAIN),
         search,
         search_typed: !shown.is_empty(),
         // The `\u{d7}` clears what has been *committed*: a composition is not
         // yet text, and offering to clear it would be offering to delete
         // something the IME has not handed over.
         search_clearable: !typed.is_empty(),
-        search_count_width: measure(&count, tool_font),
+        search_count_width: measure(&count, tool_font, crate::git_panel::MeasureFace::FIGURES),
         search_count: count,
         search_focused: look.search.focused,
         // The caret stands after the text the reader has typed up to the caret
@@ -2243,6 +2262,7 @@ fn toolbar_of(
         caret_x: measure(
             &format!("{}{}", look.search.before_caret, look.search.preedit),
             tool_font,
+            crate::git_panel::MeasureFace::PLAIN,
         ),
         busy,
     }
@@ -2399,7 +2419,7 @@ fn commit_detail(
                 break;
             }
             body.extend(crate::tooltip::wrap(paragraph, room, |text| {
-                measure(text, body_font)
+                measure(text, body_font, crate::git_panel::MeasureFace::PLAIN)
             }));
         }
     }
@@ -2434,14 +2454,14 @@ fn commit_detail(
         meta.push_str(GRAPH_META_PARENTS);
     }
     let meta_font = GRAPH_META_FONT_LOGICAL_PX * scale;
-    let meta_width = measure(&meta, meta_font);
+    let meta_width = measure(&meta, meta_font, crate::git_panel::MeasureFace::PLAIN);
     let parents = commit
         .parents
         .iter()
         .map(|parent| {
             let short = short_hash(parent);
             GraphParentChip {
-                width: measure(&short, meta_font),
+                width: measure(&short, meta_font, crate::git_panel::MeasureFace::FIGURES),
                 short,
                 hash: parent.clone(),
             }
@@ -2529,7 +2549,7 @@ fn file_tooltip(entry: &crate::git::GitCommitFile) -> String {
 struct WorkingFile {
     path: (String, Option<String>),
     badges: Vec<crate::git_panel::GitBadge>,
-    staged: bool,
+    against: crate::preview::GitDiffAgainst,
 }
 
 /// What the working tree unfolds into: **staged, then changed, then untracked**.
@@ -2553,7 +2573,7 @@ fn working_files(cache: &crate::git::GitCache) -> Vec<WorkingFile> {
         status.group(group).map(move |entry| WorkingFile {
             path: (entry.path.clone(), entry.renamed_from.clone()),
             badges: crate::git_panel::badges_of(entry),
-            staged: group == crate::git::GitGroup::Staged,
+            against: group.diff_against(),
         })
     })
     .collect()
@@ -2706,16 +2726,18 @@ pub fn row_open(
         GraphViewRow::Commit(commit) => Some(crate::git_panel::GitRowOpen::Expand {
             hash: commit.hash.clone(),
         }),
-        // **A working-tree file opens a working-tree diff** (V5), through R25's
-        // one mapping: the staged group is a claim about the index and asks
-        // `--cached`, every other group is about the tree. A `git show` of `*`
-        // would be a question about a commit that does not exist.
+        // **A working-tree file opens a working-tree diff** (V5), through the
+        // one mapping in [`crate::git::GitGroup::diff_against`]: the staged
+        // group is a claim about the index and asks `--cached`, the changed
+        // group is about the tree, and an untracked file is a whole file against
+        // nothing. A `git show` of `*` would be a question about a commit that
+        // does not exist.
         GraphViewRow::File(file) => Some(crate::git_panel::GitRowOpen::Document {
             source: match (&file.working, &file.range) {
                 (Some(working), _) => crate::preview::PreviewSource::GitDiff {
                     root: root.to_owned(),
                     path: file.path.clone(),
-                    staged: working.staged,
+                    against: working.against,
                 },
                 // **A comparison's file opens the comparison's diff** (D6), and
                 // not this commit's: the row is a claim about what is different
@@ -4590,7 +4612,9 @@ mod tests {
     /// arithmetic somebody can do in their head — which is what lets a wrap
     /// assertion say how many characters fit rather than "about this many".
     fn looked(state: &GraphState, look: GraphLook<'_>, body: [f32; 4]) -> GraphContent {
-        let mut measure = |text: &str, _: f32| text.chars().count() as f32 * 6.0;
+        let mut measure = |text: &str, _: f32, _: crate::git_panel::MeasureFace| {
+            text.chars().count() as f32 * 6.0
+        };
         build(
             state,
             look,
@@ -4647,7 +4671,7 @@ mod tests {
         let state = state_of(straight(10_000), false);
         let body = [0.0, 0.0, 900.0, 600.0];
         let mut calls = 0_usize;
-        let mut measure = |text: &str, _size: f32| {
+        let mut measure = |text: &str, _size: f32, _: crate::git_panel::MeasureFace| {
             calls += 1;
             text.len() as f32 * 6.0
         };
@@ -4684,7 +4708,7 @@ mod tests {
             content.rows.len()
         );
         // And the window is *where the reader is*, not the top of the list.
-        let mut deep = |_: &str, _: f32| 30.0;
+        let mut deep = |_: &str, _: f32, _: crate::git_panel::MeasureFace| 30.0;
         let scrolled = build(
             &state,
             GraphLook {
@@ -4712,7 +4736,7 @@ mod tests {
     fn the_next_page_is_wanted_only_near_the_end() {
         let state = state_of(straight(200), true);
         let body = [0.0, 0.0, 900.0, 600.0];
-        let mut measure = |_: &str, _: f32| 30.0;
+        let mut measure = |_: &str, _: f32, _: crate::git_panel::MeasureFace| 30.0;
         let top = build(
             &state,
             GraphLook {
@@ -4768,7 +4792,7 @@ mod tests {
     fn the_lane_column_holds_its_width_until_the_window_leaves_it() {
         let state = state_of(straight(200), false);
         let body = [0.0, 0.0, 900.0, 600.0];
-        let mut measure = |_: &str, _: f32| 30.0;
+        let mut measure = |_: &str, _: f32, _: crate::git_panel::MeasureFace| 30.0;
         // A width held for a row inside the window survives, even though this
         // straight history needs only one lane.
         let held = build(
@@ -4992,7 +5016,8 @@ mod tests {
             None
         );
         // And it does not move when the list is scrolled.
-        let mut measure = |text: &str, _: f32| text.len() as f32 * 6.0;
+        let mut measure =
+            |text: &str, _: f32, _: crate::git_panel::MeasureFace| text.len() as f32 * 6.0;
         let scrolled = build(
             &state,
             GraphLook {
@@ -5151,8 +5176,14 @@ mod tests {
             })
             .collect();
         assert_eq!(files.len(), 2, "staged, and changed");
-        assert_eq!(files[0].working.as_ref().map(|w| w.staged), Some(true));
-        assert_eq!(files[1].working.as_ref().map(|w| w.staged), Some(false));
+        assert_eq!(
+            files[0].working.as_ref().map(|w| w.against),
+            Some(crate::preview::GitDiffAgainst::Index)
+        );
+        assert_eq!(
+            files[1].working.as_ref().map(|w| w.against),
+            Some(crate::preview::GitDiffAgainst::WorkingTree)
+        );
     }
 
     /// V5 — the row's dot is in `HEAD`'s own lane, and its road runs down into
@@ -5228,7 +5259,7 @@ mod tests {
                 source: crate::preview::PreviewSource::GitDiff {
                     root: root.to_owned(),
                     path: "staged.txt".to_owned(),
-                    staged: true,
+                    against: crate::preview::GitDiffAgainst::Index,
                 },
                 name: "staged.txt.diff".to_owned(),
                 renamed_from: None,
@@ -5238,14 +5269,24 @@ mod tests {
         assert!(matches!(
             &opened[1],
             crate::git_panel::GitRowOpen::Document {
-                source: crate::preview::PreviewSource::GitDiff { staged: false, path, .. },
+                source: crate::preview::PreviewSource::GitDiff {
+                    against: crate::preview::GitDiffAgainst::WorkingTree,
+                    path,
+                    ..
+                },
                 ..
             } if path == "mod.txt"
         ));
+        // And the untracked one is the *third* reading and not the second: a
+        // file git has no copy of is a whole file against nothing.
         assert!(matches!(
             &opened[2],
             crate::git_panel::GitRowOpen::Document {
-                source: crate::preview::PreviewSource::GitDiff { staged: false, path, .. },
+                source: crate::preview::PreviewSource::GitDiff {
+                    against: crate::preview::GitDiffAgainst::Nothing,
+                    path,
+                    ..
+                },
                 ..
             } if path == "new.txt"
         ));
@@ -5265,7 +5306,8 @@ mod tests {
     #[test]
     fn exactly_the_selected_row_wears_the_selected_ground() {
         let state = state_of(straight(20), false);
-        let mut measure = |text: &str, _: f32| text.len() as f32 * 6.0;
+        let mut measure =
+            |text: &str, _: f32, _: crate::git_panel::MeasureFace| text.len() as f32 * 6.0;
         let content = build(
             &state,
             GraphLook {
@@ -5394,7 +5436,7 @@ mod tests {
     #[test]
     fn walking_the_selection_to_the_end_asks_for_the_next_page() {
         let state = state_of(straight(200), true);
-        let mut measure = |_: &str, _: f32| 30.0;
+        let mut measure = |_: &str, _: f32, _: crate::git_panel::MeasureFace| 30.0;
         let top = frame(&state, None, WIDE);
         assert!(!top.wants_more);
         // End, then the scroll that reveals it.
@@ -6315,7 +6357,9 @@ mod tests {
             None
         );
         // And it does not move when the list is scrolled — the whole of "fixed".
-        let mut measure = |text: &str, _: f32| text.chars().count() as f32 * 6.0;
+        let mut measure = |text: &str, _: f32, _: crate::git_panel::MeasureFace| {
+            text.chars().count() as f32 * 6.0
+        };
         let scrolled = build(
             &state,
             GraphLook::default(),

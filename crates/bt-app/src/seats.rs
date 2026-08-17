@@ -9689,7 +9689,13 @@ pub fn hit_git_panel(
             continue;
         };
         let row = &content.rows[index];
-        if let Some(act) = crate::git_panel::act_at(row, geometry.row_rect(index), scale, x, y) {
+        // `revealed: true` — [`crate::git_panel::GitPanelGeometry::row_at`] has
+        // just said the pointer is inside this row, and that *is* the reveal
+        // (see `git_panel::GIT_ACT_REVEAL`). A verb on any other row is not on
+        // screen, and this function is never asked about one.
+        if let Some(act) =
+            crate::git_panel::act_at(row, geometry.row_rect(index), scale, true, x, y)
+        {
             return Some(ChromeTarget::GitAct {
                 seat: placement.id,
                 index,

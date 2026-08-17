@@ -237,12 +237,12 @@ pub enum GitQuestion {
     ///
     /// See [`answer`]'s arm for the three command lines.
     Search { root: PathBuf, query: String },
-    /// "How does this file differ?" — `staged` is the whole of the `--cached`
+    /// "How does this file differ?" — `against` carries the `--cached`
     /// mapping (R25). Asked when a changed-file row opens a diff.
     Diff {
         root: PathBuf,
         path: String,
-        staged: bool,
+        against: crate::preview::GitDiffAgainst,
         /// **Where a rename came from**, when this file is one.
         ///
         /// Not decoration: `git diff --cached -- <new path>` on a staged rename
@@ -599,6 +599,68 @@ pub fn ref_name_fault(name: &str) -> Option<RefNameFault> {
     None
 }
 
+/// **The command line one file's diff is** — the three readings, in one place.
+///
+/// Lifted out of [`answer`] on [`write_arguments`]'s own rule: a command line
+/// built inside a `match` in a function that needs a subprocess to run is a
+/// command line nothing can read. The three arms are three commands and not one
+/// command with a flag, which is the whole of the untracked ruling (see
+/// [`crate::preview::GitDiffAgainst`]).
+///
+/// `renamed_from` puts **both halves of a rename** in front of git, in git's own
+/// order — see `GitQuestion::Diff::renamed_from` for why a pathspec naming only
+/// the new name turns a rename into a brand-new file. It has no business in the
+/// untracked arm: `--no-index` takes two *operands* and not a pathspec, and a
+/// file git has never seen was never renamed.
+///
+/// Every path goes in as its own argument, after `--`, and never through a
+/// shell — so a space, a quote or an ideograph in a name needs no escaping and
+/// gets none. `core.quotepath=false` is set for every question in
+/// [`git_command`], so what comes back names the file the same way.
+#[must_use]
+pub fn diff_arguments(
+    against: crate::preview::GitDiffAgainst,
+    path: &str,
+    renamed_from: Option<&str>,
+) -> Vec<String> {
+    use crate::preview::GitDiffAgainst;
+    let mut words = vec!["diff".to_owned(), "--no-color".to_owned()];
+    match against {
+        GitDiffAgainst::Index => words.push("--cached".to_owned()),
+        GitDiffAgainst::WorkingTree => {}
+        // **The whole file, as one addition.** `/dev/null` is git's own spelling
+        // of "nothing" here and it is a string comparison inside
+        // `diff-no-index.c`, not a path the operating system has to have — so it
+        // is as true on Windows as anywhere else. `--no-index` is also the only
+        // way to ask: `git diff` walks the index, and a file that is not in the
+        // index is a pathspec that matches nothing.
+        GitDiffAgainst::Nothing => {
+            words.push("--no-index".to_owned());
+            words.push("--".to_owned());
+            words.push("/dev/null".to_owned());
+            words.push(path.to_owned());
+            return words;
+        }
+    }
+    words.push("--".to_owned());
+    if let Some(from) = renamed_from {
+        words.push(from.to_owned());
+    }
+    words.push(path.to_owned());
+    words
+}
+
+/// Whether a `diff` that exited non-zero did so because the two sides **differ**.
+///
+/// True only for the untracked reading, and only for git's documented `1`: a
+/// `--no-index` diff is a comparison of two files and reports its verdict in the
+/// exit code, the way `cmp` does. Every other exit code from it, and every
+/// non-zero from the other two readings, is still a fault — an exit status is
+/// not a licence to swallow whatever git said on the way out.
+fn diff_differed(against: crate::preview::GitDiffAgainst, run: &GitRun) -> bool {
+    against == crate::preview::GitDiffAgainst::Nothing && run.code == Some(1)
+}
+
 /// **The command line one write verb is**, and what goes down its standard input.
 ///
 /// Split out of [`answer`] so that the boundary this slice was given can be
@@ -756,13 +818,13 @@ impl GitQuestion {
                 Self::Diff {
                     root: left,
                     path: from,
-                    staged: was,
+                    against: was,
                     ..
                 },
                 Self::Diff {
                     root: right,
                     path: to,
-                    staged: is,
+                    against: is,
                     ..
                 },
             ) => left == right && from == to && was == is,
@@ -882,7 +944,7 @@ pub enum GitAnswer {
     Diff {
         root: PathBuf,
         path: String,
-        staged: bool,
+        against: crate::preview::GitDiffAgainst,
         outcome: GitOutcome<String>,
     },
     Show {
@@ -1040,6 +1102,26 @@ pub enum GitGroup {
     Staged,
     Changes,
     Untracked,
+}
+
+impl GitGroup {
+    /// **Which of a repository's copies a row in this group is measured against**
+    /// — R25's mapping, and the one place it is written.
+    ///
+    /// Three groups, three comparisons, one function: the panel, the graph's
+    /// working-tree rows and the right-click menu all opened a diff of their own
+    /// accord and all three said `group == Staged` to themselves, which is how
+    /// an untracked file came to be asked the changed file's question and
+    /// answered with an empty page (user report, 2026-08-17). A mapping that
+    /// lives in three `match`es is a mapping that can be wrong in two of them.
+    #[must_use]
+    pub fn diff_against(self) -> crate::preview::GitDiffAgainst {
+        match self {
+            Self::Staged => crate::preview::GitDiffAgainst::Index,
+            Self::Changes => crate::preview::GitDiffAgainst::WorkingTree,
+            Self::Untracked => crate::preview::GitDiffAgainst::Nothing,
+        }
+    }
 }
 
 /// One file a commit touched (R15) — one record of `--name-status`.
@@ -1913,6 +1995,15 @@ fn classify_failure(stderr: &str) -> GitFault {
 /// A finished child: what it printed, and whether it was happy.
 struct GitRun {
     ok: bool,
+    /// What the child exited with, when it exited at all.
+    ///
+    /// `ok` is `status.success()` and answers the only question almost every
+    /// question here has. One does not fit it: `git diff --no-index` is
+    /// documented to exit **1 when the two files differ**, which for the
+    /// untracked reading is the ordinary outcome and not a failure — so that one
+    /// arm reads the number rather than the verdict. `None` on the platforms
+    /// where a signal took the child, which on Windows is never.
+    code: Option<i32>,
     stdout: Vec<u8>,
     stderr: String,
 }
@@ -2033,6 +2124,7 @@ fn run_git_with_input(
                 let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
                 return Ok(GitRun {
                     ok: status.success(),
+                    code: status.code(),
                     stdout,
                     stderr,
                 });
@@ -2091,11 +2183,14 @@ fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
             outcome: Err(fault),
         },
         GitQuestion::Diff {
-            root, path, staged, ..
+            root,
+            path,
+            against,
+            ..
         } => GitAnswer::Diff {
             root: root.clone(),
             path: path.clone(),
-            staged: *staged,
+            against: *against,
             outcome: Err(fault),
         },
         GitQuestion::CommitFiles { root, hash } => GitAnswer::CommitFiles {
@@ -2385,27 +2480,25 @@ pub fn answer(
         GitQuestion::Diff {
             root,
             path,
-            staged,
+            against,
             renamed_from,
         } => {
-            let mut arguments = vec![OsStr::new("diff"), OsStr::new("--no-color")];
-            if *staged {
-                arguments.push(OsStr::new("--cached"));
-            }
-            arguments.push(OsStr::new("--"));
-            // **Both halves of a rename, in git's own order.** See
-            // `GitQuestion::Diff::renamed_from`: a pathspec naming only the new
-            // name turns a rename into a brand-new file.
-            if let Some(from) = renamed_from {
-                arguments.push(OsStr::new(from));
-            }
-            arguments.push(OsStr::new(path));
+            let words = diff_arguments(*against, path, renamed_from.as_deref());
+            let arguments: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
             let command = git_command(program, root, &arguments);
             match run_git(command, timeout) {
-                Ok(run) if run.ok => GitAnswer::Diff {
+                // **The one question here whose success is not `status.success()`.**
+                // `--no-index` is a `diff` between two files and answers the
+                // shell's own convention for that: 0 when they are the same, 1
+                // when they are not. One is what an untracked file always gets,
+                // because a file against `/dev/null` always differs, and reading
+                // it as a failure would put git's silence on the page under a
+                // refusal card. Anything else is still a fault, and still says
+                // whatever git said.
+                Ok(run) if run.ok || diff_differed(*against, &run) => GitAnswer::Diff {
                     root: root.clone(),
                     path: path.clone(),
-                    staged: *staged,
+                    against: *against,
                     outcome: Ok(String::from_utf8_lossy(&run.stdout).into_owned()),
                 },
                 Ok(run) => faulted(question, classify_failure(&run.stderr)),
@@ -4102,18 +4195,21 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn a_staged_diff_and_an_unstaged_diff_are_not_the_same_question() {
         let (tx, rx) = mpsc::channel();
-        let diff = |staged: bool| GitRequest {
+        let diff = |against: crate::preview::GitDiffAgainst| GitRequest {
             host: GitHost::Column(seat(1)),
             question: GitQuestion::Diff {
                 root: PathBuf::from(r"D:\repo"),
                 path: "src/main.rs".to_owned(),
-                staged,
+                against,
                 renamed_from: None,
             },
         };
-        tx.send(diff(false)).unwrap();
-        tx.send(diff(true)).unwrap();
-        tx.send(diff(false)).unwrap();
+        tx.send(diff(crate::preview::GitDiffAgainst::WorkingTree))
+            .unwrap();
+        tx.send(diff(crate::preview::GitDiffAgainst::Index))
+            .unwrap();
+        tx.send(diff(crate::preview::GitDiffAgainst::WorkingTree))
+            .unwrap();
         drop(tx);
         let mut served = Vec::new();
         run_git_worker(rx, |request| served.push(request));
@@ -4122,8 +4218,8 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             2,
             "the repeated unstaged question collapses; the staged one does not"
         );
-        assert_eq!(served[0], diff(true));
-        assert_eq!(served[1], diff(false));
+        assert_eq!(served[0], diff(crate::preview::GitDiffAgainst::Index));
+        assert_eq!(served[1], diff(crate::preview::GitDiffAgainst::WorkingTree));
     }
 
     /// PIN — two pages of history are two questions; the same page twice is one.
@@ -4297,7 +4393,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
             GitQuestion::Diff {
                 root: PathBuf::from(r"D:\repo"),
                 path: "a.rs".to_owned(),
-                staged: true,
+                against: crate::preview::GitDiffAgainst::Index,
                 renamed_from: None,
             },
             GitQuestion::Show {
@@ -5197,7 +5293,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             !cache.accept(GitAnswer::Diff {
                 root: root.clone(),
                 path: "src/main.rs".to_owned(),
-                staged: true,
+                against: crate::preview::GitDiffAgainst::Index,
                 outcome: Ok("diff --git a/src/main.rs b/src/main.rs\n".to_owned()),
             }),
             "a diff is not this cache's to keep"
@@ -5440,7 +5536,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             let question = GitQuestion::Diff {
                 root: root.clone(),
                 path: "renamed.txt".to_owned(),
-                staged: true,
+                against: crate::preview::GitDiffAgainst::Index,
                 renamed_from: renamed_from.map(str::to_owned),
             };
             let GitAnswer::Diff { outcome, .. } =
@@ -5470,19 +5566,28 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         );
     }
 
-    /// **The four documents a change list can open, against a real
-    /// repository** — R25's mapping and G-3's honest states, end to end.
+    /// **The documents a change list can open, against a real repository** —
+    /// R25's mapping and G-3's honest states, end to end.
     ///
     /// Every claim here is checked against what a person typing the command in
     /// the pane beside the panel would see, which is the whole argument for the
-    /// CLI backend: the staged reading is compared **byte for byte** with `git
-    /// diff --cached`, not merely inspected for plausibility.
+    /// CLI backend: each reading is compared **byte for byte** with the command
+    /// line it stands for, not merely inspected for plausibility.
     ///
-    /// MUTATION: ignore `staged` when building the `diff` arguments. The staged
-    /// and unstaged readings become the same text, and the byte-for-byte
-    /// comparison against `--cached` fails on the first of them.
+    /// **The untracked reading is the one this test was reopened for** (user
+    /// report, 2026-08-17). It used to assert that an untracked file's document
+    /// is *empty* — which was true of the command being run and false of the
+    /// question being asked. A file git has never had a copy of has no working
+    /// tree/index difference to report, so the page said "No changes to show"
+    /// about a file that is nothing but change. The reading it gets now is the
+    /// whole file against nothing, and the last three cases hold it for the
+    /// three names that break naive quoting: a subdirectory, a space, and an
+    /// ideograph.
+    ///
+    /// MUTATION: map `GitGroup::Untracked` to `GitDiffAgainst::WorkingTree` in
+    /// `diff_against`. Every untracked assertion below goes empty at once.
     #[test]
-    fn a_real_repository_answers_four_ways_and_each_matches_the_command_line() {
+    fn a_real_repository_answers_every_way_and_each_matches_the_command_line() {
         let git = real_git();
         let root = std::env::temp_dir().join(format!(
             "folio-git-diff-{}-{}",
@@ -5513,12 +5618,18 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             .expect("written");
         std::fs::write(root.join("blob.bin"), [0u8, 9, 9, 9]).expect("written");
         std::fs::write(root.join("fresh.txt"), "never seen\n").expect("written");
+        // The three names a naive command line loses: one inside a folder, one
+        // with a space in it, one written in characters that are not ASCII.
+        std::fs::create_dir_all(root.join("sub/deep")).expect("a folder is made");
+        std::fs::write(root.join("sub/deep/nested.txt"), "in a folder\n").expect("written");
+        std::fs::write(root.join("a name with spaces.txt"), "spaced out\n").expect("written");
+        std::fs::write(root.join("\u{4e2d}\u{6587}.txt"), "\u{4e2d}\u{6587}\n").expect("written");
 
-        let ask = |path: &str, staged: bool| {
+        let ask = |path: &str, against: crate::preview::GitDiffAgainst| {
             let question = GitQuestion::Diff {
                 root: root.clone(),
                 path: path.to_owned(),
-                staged,
+                against,
                 renamed_from: None,
             };
             let GitAnswer::Diff { outcome, .. } =
@@ -5532,7 +5643,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             |arguments: &[&str]| String::from_utf8_lossy(&run(arguments).stdout).into_owned();
 
         // ① R25's mapping: a STAGED row's document *is* `git diff --cached`.
-        let staged = ask("text.txt", true);
+        let staged = ask("text.txt", crate::preview::GitDiffAgainst::Index);
         assert_eq!(
             staged,
             command_line(&["diff", "--no-color", "--cached", "--", "text.txt"]),
@@ -5542,7 +5653,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         assert!(staged.contains("+staged") && !staged.contains("+working"));
 
         // ② And a CHANGES row's is the working tree's — a different document.
-        let unstaged = ask("text.txt", false);
+        let unstaged = ask("text.txt", crate::preview::GitDiffAgainst::WorkingTree);
         assert_eq!(
             unstaged,
             command_line(&["diff", "--no-color", "--", "text.txt"])
@@ -5551,7 +5662,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         assert_ne!(staged, unstaged, "two readings, two documents (R25)");
 
         // ③ The binary honesty: git's own one line, and nothing invented.
-        let binary = ask("blob.bin", false);
+        let binary = ask("blob.bin", crate::preview::GitDiffAgainst::WorkingTree);
         assert!(
             binary.contains("Binary files a/blob.bin and b/blob.bin differ"),
             "git says it in one line — {binary}"
@@ -5561,12 +5672,161 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             "and there is no hunk, because there is nothing to show line by line"
         );
 
-        // ④ An untracked file has no working-tree diff — git has never had a
-        // copy to differ from — and empty is what the pane says a sentence
-        // about (`crate::preview::GIT_DOCUMENT_EMPTY`).
-        assert!(ask("fresh.txt", false).is_empty());
+        // ④ **An untracked file is a whole file of additions**, and asking the
+        // working tree/index question about it is what used to answer nothing.
+        let asked_the_old_way = ask("fresh.txt", crate::preview::GitDiffAgainst::WorkingTree);
+        assert!(
+            asked_the_old_way.is_empty(),
+            "the question that had no answer still has none — this is the bug, \
+             recorded rather than removed"
+        );
+        let fresh = ask("fresh.txt", crate::preview::GitDiffAgainst::Nothing);
+        assert!(
+            fresh.contains("+never seen"),
+            "and the question that has an answer gets the file, line by line — {fresh}"
+        );
+        assert!(
+            fresh.contains("--- /dev/null"),
+            "against nothing, which is what makes every line an addition — {fresh}"
+        );
+        assert!(
+            !fresh
+                .lines()
+                .any(|line| line.starts_with('-') && !line.starts_with("---")),
+            "and nothing is removed, because there was nothing there — {fresh}"
+        );
+
+        // ⑤ The three awkward names, each through the same door. A path is one
+        // argument to `CreateProcess` and never a word in a shell, so a space
+        // needs no quoting; `core.quotepath=false` is what keeps the ideograph
+        // out of octal escapes in what comes back.
+        for (path, line) in [
+            ("sub/deep/nested.txt", "+in a folder"),
+            ("a name with spaces.txt", "+spaced out"),
+            ("\u{4e2d}\u{6587}.txt", "+\u{4e2d}\u{6587}"),
+        ] {
+            let whole = ask(path, crate::preview::GitDiffAgainst::Nothing);
+            assert!(
+                whole.contains(line),
+                "`{path}` reads as its own contents — {whole}"
+            );
+            assert!(
+                whole.contains(path),
+                "and git names it the way the row does, unescaped — {whole}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The command line each of the three readings is** — no subprocess, so
+    /// the argv itself is the assertion.
+    ///
+    /// [`write_arguments`]'s own rule, applied to the read side: a command built
+    /// inside a `match` in a function that needs a repository to run is a
+    /// command nothing can read. The untracked arm in particular has to be
+    /// *seen* — `--no-index` with `/dev/null` in front of the path is not a flag
+    /// on the other two commands, it is a different command, and that is the
+    /// whole of the ruling.
+    ///
+    /// MUTATION: drop `/dev/null` from the untracked arm. `git diff --no-index`
+    /// with one operand is a usage error, and the pane gets git's complaint
+    /// where its file should be.
+    #[test]
+    fn each_of_the_three_readings_is_its_own_command_line() {
+        use crate::preview::GitDiffAgainst;
+        assert_eq!(
+            diff_arguments(GitDiffAgainst::Index, "src/main.rs", None),
+            ["diff", "--no-color", "--cached", "--", "src/main.rs"]
+        );
+        assert_eq!(
+            diff_arguments(GitDiffAgainst::WorkingTree, "src/main.rs", None),
+            ["diff", "--no-color", "--", "src/main.rs"]
+        );
+        assert_eq!(
+            diff_arguments(GitDiffAgainst::Nothing, "src/main.rs", None),
+            [
+                "diff",
+                "--no-color",
+                "--no-index",
+                "--",
+                "/dev/null",
+                "src/main.rs"
+            ]
+        );
+        // Both halves of a rename, in git's own order, on the two readings a
+        // rename can happen in.
+        assert_eq!(
+            diff_arguments(GitDiffAgainst::Index, "new.txt", Some("old.txt")),
+            ["diff", "--no-color", "--cached", "--", "old.txt", "new.txt"]
+        );
+        assert_eq!(
+            diff_arguments(GitDiffAgainst::WorkingTree, "new.txt", Some("old.txt")),
+            ["diff", "--no-color", "--", "old.txt", "new.txt"]
+        );
+        // And never on the third: `--no-index` takes two operands and not a
+        // pathspec, and a file git has never seen was never renamed.
+        assert_eq!(
+            diff_arguments(GitDiffAgainst::Nothing, "new.txt", Some("old.txt")),
+            [
+                "diff",
+                "--no-color",
+                "--no-index",
+                "--",
+                "/dev/null",
+                "new.txt"
+            ]
+        );
+        // A name with a space and a name with an ideograph are each one
+        // argument, whole, and nothing quotes or escapes them on the way.
+        for path in [
+            "a name with spaces.txt",
+            "\u{4e2d}\u{6587}.txt",
+            "sub/deep/n.txt",
+        ] {
+            for against in [
+                GitDiffAgainst::Index,
+                GitDiffAgainst::WorkingTree,
+                GitDiffAgainst::Nothing,
+            ] {
+                let words = diff_arguments(against, path, None);
+                assert_eq!(
+                    words.last().map(String::as_str),
+                    Some(path),
+                    "{against:?} hands `{path}` over as itself"
+                );
+            }
+        }
+    }
+
+    /// **The one comparison whose exit code is a verdict and not a failure.**
+    ///
+    /// `git diff --no-index` reports the way `cmp` does: 0 for the same, 1 for
+    /// different. Every untracked file is different from `/dev/null`, so 1 is
+    /// the ordinary outcome — and reading it as a failure would put git's silent
+    /// exit under a refusal card on the page. Every other code, and every
+    /// non-zero from the other two readings, is still a fault.
+    ///
+    /// MUTATION: return `true` from `diff_differed` for any non-zero code. A
+    /// repository git refused to read stops saying so and shows an empty patch.
+    #[test]
+    fn only_the_untracked_reading_may_exit_one() {
+        use crate::preview::GitDiffAgainst;
+        let ran = |code: Option<i32>| GitRun {
+            ok: code == Some(0),
+            code,
+            stdout: Vec::new(),
+            stderr: String::new(),
+        };
+        assert!(diff_differed(GitDiffAgainst::Nothing, &ran(Some(1))));
+        assert!(!diff_differed(GitDiffAgainst::Nothing, &ran(Some(128))));
+        assert!(!diff_differed(GitDiffAgainst::Nothing, &ran(None)));
+        for against in [GitDiffAgainst::Index, GitDiffAgainst::WorkingTree] {
+            assert!(
+                !diff_differed(against, &ran(Some(1))),
+                "{against:?} has no verdict to report in its exit code"
+            );
+        }
     }
 
     // ── v2 ④: the named write verbs, and the boundary they sit inside ──────
