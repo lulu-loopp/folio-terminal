@@ -492,6 +492,15 @@ pub enum Integration {
     CmdPrompt,
 }
 
+/// The profile whose PSReadLine is the one this product can repair.
+///
+/// Named rather than spelled at the two places that compare against it: the
+/// invitation's trigger (`create_leaf_session`) and `psreadline.rs`'s own
+/// header. `pwsh` ships a PSReadLine new enough to anchor itself and every
+/// other profile is not a PowerShell at all, so this id is the whole of the
+/// feature's audience.
+pub const WINDOWS_POWERSHELL_ID: &str = "winps";
+
 pub const PROFILES: [Profile; 5] = [
     Profile {
         id: "pwsh",
@@ -533,7 +542,7 @@ pub const PROFILES: [Profile; 5] = [
         integration: Integration::PowerShellOptIn,
     },
     Profile {
-        id: "winps",
+        id: WINDOWS_POWERSHELL_ID,
         // The qualifier was always this row's real name rather than one the list
         // invented; the version is the ruling above, and 5.1 is where this product
         // ends rather than where it happens to be.

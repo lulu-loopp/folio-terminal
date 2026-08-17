@@ -16,10 +16,11 @@ use std::path::PathBuf;
 
 use bt_persist::{
     DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1,
-    PreviewPaneV1, PreviewPoolEntryV1, ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION,
-    SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
-    SessionThemeV1, SessionV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1,
-    ThemeModeV1, read_session, read_settings, write_session_atomic, write_settings_atomic,
+    PreviewPaneV1, PreviewPoolEntryV1, PsReadLineInviteV1, ReadReport, RecentSeedV1,
+    SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
+    SessionTabLayoutV1, SessionThemeV1, SessionV1, SettingsV1, SplitDirectionV1, TabPreviewV1,
+    TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
+    write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -559,11 +560,13 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 7,
+        SETTINGS_SCHEMA_VERSION, 8,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
-         the direction-less split's direction the v5→v6, and the interface \
-         language the v6→v7 (§1.3)"
+         the direction-less split's direction the v5→v6, the interface \
+         language the v6→v7, and the grid's face, its size and the PSReadLine \
+         invitation's state the v7→v8 — three keys in one bump because all three \
+         arrive with their readers in one change (§1.3)"
     );
     assert!(
         defaults.display_formulas,
@@ -653,6 +656,53 @@ fn settings_v6_fixture_migrates_to_v7_following_the_system_and_disturbs_nothing(
         v7.split_direction,
         SplitDirectionV1::Down,
         "v6→v7 is structural: every sibling crosses untouched"
+    );
+}
+
+/// PIN (the font rows and the PSReadLine invitation, 2026-08-17) — a v7 settings
+/// file migrates to v8 with an unnamed face at 16 logical pixels and an
+/// invitation nobody has been shown, and every sibling crosses untouched.
+///
+/// The fixture is non-default in all seven of its older fields (§1.3 rule 1),
+/// `language: "Chinese"` deliberately among them: it is the sibling added one
+/// version ago, and therefore the one a copy-paste of the step above would most
+/// plausibly reset while inserting its own keys.
+///
+/// `""` and not `"Consolas"` is the half worth pinning, and it is `v3_to_v4`'s
+/// ruling reappearing. Every v7 build drew Consolas because it was the only face
+/// it had; naming it here would be indistinguishable from a user who opened the
+/// list and picked it, and would go on being written into files long after the
+/// build's default face had moved.
+#[test]
+fn settings_v7_fixture_migrates_to_v8_with_an_unnamed_face_and_disturbs_nothing() {
+    let (v8, report) = read_settings(&fixture_path("settings_v7_chinese_right.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v8.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        v8.terminal_font_family, "",
+        "a v7 build never asked which face to draw the grid in, so the migration \
+         must write the answer that defers rather than one that decides"
+    );
+    assert_eq!(
+        v8.terminal_font_size, 16,
+        "16 is the size every v7 build drew at — the step writes that answer \
+         down rather than changing it"
+    );
+    assert_eq!(
+        v8.psreadline_invite,
+        PsReadLineInviteV1::NotAsked,
+        "a v7 build had no invitation, so this user is owed the offer once"
+    );
+    assert_eq!(v8.theme_mode, ThemeModeV1::Dark);
+    assert!(!v8.display_formulas);
+    assert!(!v8.inline_formulas);
+    assert_eq!(v8.default_profile, "wsl");
+    assert!(!v8.git_panel);
+    assert_eq!(v8.split_direction, SplitDirectionV1::Right);
+    assert_eq!(
+        v8.language,
+        LanguageV1::Chinese,
+        "v7→v8 is structural: every sibling crosses untouched"
     );
 }
 

@@ -2109,6 +2109,30 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover { filter: brightness(1.07); }
   .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* A button that cannot act says so and stays where it is. It never wears the
+     accent — an accent fill is a recommendation, and there is nothing to
+     recommend — and it does not light under the pointer. The sentence that
+     explains it is `.reason`, immediately above the row: a dark button with
+     nothing beside it is a dead button, which is the thing this forbids. */
+  .btn[disabled] {
+    background: var(--win); border-color: var(--border); color: var(--ink3);
+    cursor: default;
+  }
+  .btn[disabled]:hover { background: var(--win); filter: none; }
+
+  /* ── The PSReadLine invitation (§7.1.6c-3b) ──
+     The restore prompt's face, with the one difference that decides everything
+     else: this one DIMS. The prompt floats over a window that already works;
+     this stands in front of a shell that has just started and is about to be
+     used with a bug the window can fix. It sits under the dirty gate (which
+     guards work already being lost) and over the settings dialog (which keeps a
+     row for the same question, so nothing is lost by being covered). */
+  .invite-scrim {
+    position: fixed; inset: 0; z-index: 49; background: rgba(0,0,0,.42);
+    opacity: 0; visibility: hidden; transition: opacity 120ms ease, visibility 0s 120ms;
+  }
+  .invite-scrim.show { opacity: 1; visibility: visible; transition: opacity 120ms ease; }
+  .invite .reason { margin: 0 0 14px; font-size: 12.5px; color: var(--ink3); line-height: 1.5; }
 
   /* ── Settings ── */
   .overlay {
@@ -2497,6 +2521,42 @@
   </div>
 </div>
 
+<!-- THE PSReadLine INVITATION (§7.1.6c-3b).
+
+     `Windows PowerShell 5.1` ships PSReadLine 2.0.0, and on 2.0.0 the input
+     line stays where it was when the window is resized — the private
+     resize-anchor chord Folio sends is swallowed as a no-op there, because the
+     only repair 2.0.0 offers clears the viewport. So the fix this product
+     already ships does nothing on the shell most Windows users open first, and
+     nothing on screen says so.
+
+     Four facts and no persuasion: what the machine has, what it costs today,
+     what installing writes and where, and how it comes back out. The version is
+     read out of band once per process (`powershell.exe -NoProfile
+     -NonInteractive`) rather than over a private OSC — the integration script is
+     opt-in and manual, so an OSC would reach only the people who have already
+     edited their profile, and under `AllSigned` the script is refused outright,
+     which is precisely the machine where Install has to be dark.
+
+     Asked once. Refusing moves the stored state to `Declined`, which is owed
+     exactly one more showing and only right after the font size is changed —
+     the one action whose visible symptom on an unpatched 5.1 IS the bug. After
+     that, never again; Settings ▸ Terminal keeps the row. -->
+<div class="invite-scrim" id="invite-scrim"></div>
+<div class="restore invite" id="invite" role="dialog" aria-labelledby="invite-h" style="z-index:50">
+  <h1 id="invite-h">Keep the input line in place when the window resizes?</h1>
+  <p class="sub">Windows PowerShell ships with PSReadLine 2.0.0. On that version the input line stays where it was when the window is resized, and the repair Folio sends does nothing. Installing writes PSReadLine 2.4.6 to C:\Users\you\Documents\WindowsPowerShell\Modules\PSReadLine\2.4.6. It takes effect in PowerShell sessions started after that, and Settings ▸ Terminal removes it.</p>
+  <!-- Shown only under an execution policy that would refuse an unsigned script
+       module — `AllSigned` or `Restricted`. PSReadLine is a `.psm1`, so writing
+       the files there would report success and produce a module no shell would
+       load. -->
+  <p class="reason" id="invite-reason" hidden>Windows' execution policy is AllSigned, which refuses to load an unsigned module.</p>
+  <div class="restore-actions">
+    <button class="btn" id="btn-psrl-later">Not now</button>
+    <button class="btn primary" id="btn-psrl-install">Install</button>
+  </div>
+</div>
+
 <div class="window" id="win" data-tabs="horizontal" tabindex="-1">
   <div class="titlebar">
     <div class="drag">
@@ -2646,6 +2706,65 @@
           </div>
         </div>
 
+        <!-- THE GRID'S FACE, AND NOT THE WINDOW'S (§7.1.6c-3b).
+
+             Two rows and not one, next to each other, because they are one
+             decision made in two halves — and a reader who has changed either
+             is about to look for the other. Both are hot: the DPI path already
+             exists to re-measure a grid and tell every shell its new column
+             count, and a font change is that same event arriving through
+             another door.
+
+             The description names what the row does NOT move, because "font" on
+             a terminal's settings page reads as "all the text". The window's own
+             labels keep their face, and that is a stated left-out rather than an
+             oversight: `chrome_cap_height_ratio` is resolved once because a
+             chrome face cannot change, and the font loader deliberately never
+             enumerates `Fonts/` at startup. Both would have to move first.
+
+             The family list is every monospaced family DirectWrite reports
+             (`IDWriteFont1::IsMonospacedFont`), alphabetical without regard to
+             case, with the default always among them — a combo whose selected
+             row is missing from its own list draws as a blank. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Terminal font</div>
+            <div class="desc">The face the grid is drawn in; the window's own labels keep theirs</div>
+          </div>
+          <div class="combo" data-combo="termfont">
+            <button aria-haspopup="listbox"><span class="value">Consolas</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="cascadia" role="option"><span class="tick">✓</span>Cascadia Mono</div>
+              <div class="combo-item selected" data-v="consolas" role="option"><span class="tick">✓</span>Consolas</div>
+              <div class="combo-item" data-v="lucida" role="option"><span class="tick">✓</span>Lucida Console</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- A list and not a spinner, which is every other picker's ruling here:
+             a control that accepts any number owes the user a validator, a clamp
+             and an answer to what happens at 4 and at 400. One-pixel steps
+             through the range anybody reads at, then two-pixel steps above it —
+             at 20 logical pixels a single pixel is a 5% change nobody picking
+             from a list is trying to express. 16 is the default and the size
+             every frame before this row existed was drawn at. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Font size</div>
+            <div class="desc">How large grid text is drawn, before the display's scaling</div>
+          </div>
+          <div class="combo" data-combo="fontsize">
+            <button aria-haspopup="listbox"><span class="value">16</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="12" role="option"><span class="tick">✓</span>12</div>
+              <div class="combo-item" data-v="14" role="option"><span class="tick">✓</span>14</div>
+              <div class="combo-item selected" data-v="16" role="option"><span class="tick">✓</span>16</div>
+              <div class="combo-item" data-v="18" role="option"><span class="tick">✓</span>18</div>
+              <div class="combo-item" data-v="20" role="option"><span class="tick">✓</span>20</div>
+            </div>
+          </div>
+        </div>
+
         <div class="row" id="row-railmode">
           <div class="text">
             <div class="title">Sidebar</div>
@@ -2683,6 +2802,40 @@
 
         <section class="settings-page" data-page="terminal">
         <div class="group-label">Terminal</div>
+        <!-- THE ROW THAT PUT THIS PAGE IN THE RAIL (§7.1.6c-3b).
+
+             `Terminal` had a word, a heading and a page for two slices and did
+             not appear, because the rail is derived from which categories have
+             rows. This is the first one, and the page arrived with it — no list
+             of rail items was edited anywhere.
+
+             An On/Off picker and not a pair of buttons: what is being decided is
+             a state — is Folio's patched PSReadLine installed on this machine —
+             and a state with two values is what every other picker here already
+             draws. Both items can be dark, which is the second reason the combo
+             fits. `On` is dark under an execution policy that would refuse an
+             unsigned module; `Off` is dark unless the copy on disk is byte for
+             byte the one Folio wrote — the removal never touches somebody else's
+             module, and identity is checked by content rather than by a marker
+             file Folio left in a directory PowerShell scans.
+
+             The description is the one line in this dialog that reports a fact
+             about the machine rather than about the setting: which PSReadLine is
+             installed, and what that costs today. It is also where the reason a
+             greyed item is grey is written. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">PSReadLine patch</div>
+            <div class="desc" id="psrl-desc">2.0.0 on this machine · the resize repair does nothing</div>
+          </div>
+          <div class="combo" data-combo="psreadline">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
         <div class="row">
           <div class="text">
             <div class="title">Line wrapping</div>

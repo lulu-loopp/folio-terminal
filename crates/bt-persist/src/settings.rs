@@ -13,17 +13,17 @@ use serde::{Deserialize, Serialize};
 ///
 /// v2 adds `display_formulas`, v3 adds `inline_formulas`, v4 adds
 /// `default_profile`, v5 adds `git_panel`, v6 adds `split_direction`, v7 adds
-/// `language`. §2's "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is satisfied
-/// the way §1.3 intends it to be: each field arrives in the same change that
-/// gives it a reader, not ahead of one.
+/// `language`, v8 adds `terminal_font_family`, `terminal_font_size` and
+/// `psreadline_invite`. §2's "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is
+/// satisfied the way §1.3 intends it to be: each field arrives in the same
+/// change that gives it a reader, not ahead of one.
 ///
-/// **v7 carries `language` alone**, and that is the ruling rather than an
-/// oversight: the Settings block has three fields queued behind it — a font, and
-/// the PSReadLine invitation's asked/declined/installed bit — and neither has a
-/// row to read it yet, so writing them here now would be §2's own "只写字段 = 死
-/// 规格" mistake in the same change that quotes it. They join this version if
-/// they land before it is committed, and take v8 if they do not.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 7;
+/// **v8 carries three fields and it is one bump**, because all three arrive with
+/// their readers in the same change: the Appearance block's two font rows and
+/// the Terminal page's PSReadLine row. What v8 deliberately does *not* carry is
+/// `interface_font_family` — the chrome's own face stays fixed in this version,
+/// so a field for it would be §2's "只写字段 = 死规格" exactly.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 8;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -37,17 +37,40 @@ pub const SETTINGS_SCHEMA_VERSION: u32 = 7;
 /// gone" already goes down instead of through a second one.
 pub const DEFAULT_PROFILE_UNSET: &str = "";
 
-/// `settings.json` v7 — docs/M2-persistence-schema-v1.md §2:
+/// The terminal font family a `settings.json` that has never named one is read as.
+///
+/// The empty string rather than `"Consolas"`, and it is [`DEFAULT_PROFILE_UNSET`]'s
+/// reasoning applied to a face instead of a shell: this crate does not know which
+/// families the machine has. `"Consolas"` written here would be a settings file
+/// asserting that a particular face exists — a spelling that goes on being written
+/// into every file long after the reader's default has moved, and one that cannot
+/// be told apart from a user who deliberately picked Consolas out of the list. An
+/// unnamed family means "whatever this build's default face is", which every
+/// reader already has to handle, because a family the file names may equally have
+/// been uninstalled since.
+pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "";
+
+/// The terminal font size, in logical pixels, of a file that has never named one.
+///
+/// 16 because that is the number `bt_render`'s `BASE_FONT_SIZE_LOGICAL_PX` has
+/// been since the first frame this product drew; the row writes the answer down
+/// rather than changing it.
+pub const DEFAULT_TERMINAL_FONT_SIZE: u8 = 16;
+
+/// `settings.json` v8 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 7,
+///   "schema_version": 8,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
 ///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
 ///   "git_panel": true | false,
 ///   "split_direction": "Auto" | "Right" | "Down",
-///   "language": "System" | "English" | "Chinese"
+///   "language": "System" | "English" | "Chinese",
+///   "terminal_font_family": "Consolas" | "Cascadia Mono" | … | "",
+///   "terminal_font_size": 10..=24,
+///   "psreadline_invite": "NotAsked" | "Declined" | "Installed" | "Dismissed"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +162,49 @@ pub struct SettingsV1 {
     /// `bt_app::i18n`, which argues it at length and owns the row's promise that
     /// a change applies at the next start.
     pub language: LanguageV1,
+    /// Which face the **grid** is drawn in — never the window's own chrome
+    /// (`docs/DESIGN.md` §7.1.6c-3b).
+    ///
+    /// The distinction is the field's whole meaning and not a caveat about it.
+    /// A terminal's font is a monospace grid: every cell is one advance wide,
+    /// the renderer measures that advance once and every glyph, box-drawing rule
+    /// and cursor position is derived from it. The chrome's labels are set in a
+    /// proportional sans whose cap height is measured at construction and treated
+    /// as a property of the face; there is no field here that moves it, on
+    /// purpose, and §7.1.6c-3b names the two things that would have to change
+    /// first.
+    ///
+    /// A family **name**, never a path: the file the name resolves to moves with
+    /// a Windows update, and two machines that both have "Cascadia Mono" do not
+    /// have it in the same place. [`DEFAULT_TERMINAL_FONT_FAMILY`] is the
+    /// unnamed case; a named family that this machine does not have degrades the
+    /// same way, to the build's default face, per §5.4 逐叶降级.
+    pub terminal_font_family: String,
+    /// How large the grid's face is drawn, in **logical** pixels — the number
+    /// before the monitor's scale factor multiplies it.
+    ///
+    /// Logical and not physical for the reason `theme_mode` stores a mode: a
+    /// physical size would freeze the monitor the choice was made on, so moving
+    /// the window to a 150% display would shrink the text the user had just
+    /// sized. The renderer multiplies by the scale factor of whichever monitor
+    /// the window is on, every time it changes, and has since the first frame.
+    ///
+    /// A `u8` because the row offers a list, not a spinner, and no monospace
+    /// grid on a terminal wants three digits. This crate does not clamp it: a
+    /// file written by a newer build may name a size this one's list does not
+    /// contain, and the reader's answer is to draw at that size, which it can.
+    pub terminal_font_size: u8,
+    /// Whether the user has been offered the patched PSReadLine, and what they
+    /// said (`docs/DESIGN.md` §7.1.6c-3b).
+    ///
+    /// It is a preference and not a fact about the machine, which is why it is in
+    /// this file rather than being derived at startup from what is installed. The
+    /// fact — which PSReadLine the machine actually has — is read out of band
+    /// every run and is never written down, because it changes without Folio.
+    /// What cannot be re-derived is whether this person has already been asked
+    /// and said no; asking again every launch is the behaviour this field exists
+    /// to make impossible.
+    pub psreadline_invite: PsReadLineInviteV1,
 }
 
 impl Default for SettingsV1 {
@@ -152,8 +218,35 @@ impl Default for SettingsV1 {
             git_panel: true,
             split_direction: SplitDirectionV1::default(),
             language: LanguageV1::default(),
+            terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
+            psreadline_invite: PsReadLineInviteV1::default(),
         }
     }
+}
+
+/// How far the PSReadLine invitation has got with this user — `docs/DESIGN.md`
+/// §7.1.6c-3b.
+///
+/// Four values and not a `bool`, because the invitation has to distinguish three
+/// kinds of "do not show this again" that behave differently the next time the
+/// window opens, and a two-state field would have to guess between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PsReadLineInviteV1 {
+    /// Never offered. The only state from which the dialog appears unprompted.
+    #[default]
+    NotAsked,
+    /// Offered once and refused. The dialog is owed exactly one more appearance,
+    /// and only immediately after the user changes the font size — the one
+    /// action whose visible symptom on an unpatched 5.1 is the bug the patch
+    /// fixes. After that it goes to [`Self::Dismissed`] whatever the answer.
+    Declined,
+    /// Folio wrote the module. The Terminal page offers to remove it; nothing
+    /// asks again.
+    Installed,
+    /// Refused twice, or refused after the second showing. Nothing asks again,
+    /// ever, on this machine — the Terminal page's row remains the only way in.
+    Dismissed,
 }
 
 /// Which language the interface is written in — `docs/DESIGN.md` §7.1.6c-3.
@@ -290,6 +383,100 @@ mod tests {
             let text = serde_json::to_string(&settings).unwrap();
             let read: SettingsV1 = serde_json::from_str(&text).unwrap();
             assert_eq!(read.split_direction, direction);
+            assert_eq!(read, settings);
+        }
+    }
+
+    /// PIN — a settings file that has never been asked which face to draw the
+    /// grid in names no family, and says so with the empty string rather than
+    /// with `"Consolas"`.
+    ///
+    /// The named default is the trap. `"Consolas"` on disk is indistinguishable
+    /// from a user who opened the list and picked Consolas out of it, so the day
+    /// the build's default face moves, every file ever written pins the old one
+    /// — and this crate would be asserting that a particular family exists on a
+    /// machine it knows nothing about. It is `default_profile`'s ruling, and the
+    /// same empty string carries it.
+    #[test]
+    fn the_default_terminal_font_is_unnamed_and_sixteen_logical_pixels() {
+        let defaults = SettingsV1::default();
+        assert_eq!(defaults.terminal_font_family, DEFAULT_TERMINAL_FONT_FAMILY);
+        assert_eq!(defaults.terminal_font_size, DEFAULT_TERMINAL_FONT_SIZE);
+        assert_eq!(
+            DEFAULT_TERMINAL_FONT_SIZE, 16,
+            "16 logical pixels is what `bt_render::BASE_FONT_SIZE_LOGICAL_PX` has \
+             been since the first frame; the row writes that answer down rather \
+             than changing it"
+        );
+        let wire = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(wire["terminal_font_family"], serde_json::Value::from(""));
+        assert!(
+            wire["terminal_font_family"].is_string(),
+            "a family is named, never numbered — an index into a machine's font \
+             list means a different face on the next machine"
+        );
+        assert_eq!(wire["terminal_font_size"], serde_json::Value::from(16));
+    }
+
+    /// PIN — a settings file that has never been shown the PSReadLine
+    /// invitation says `NotAsked`, and says it with a word.
+    #[test]
+    fn a_settings_file_that_was_never_shown_the_invitation_says_so() {
+        let defaults = SettingsV1::default();
+        assert_eq!(defaults.psreadline_invite, PsReadLineInviteV1::NotAsked);
+        let wire = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(
+            wire["psreadline_invite"],
+            serde_json::Value::from("NotAsked")
+        );
+    }
+
+    /// PIN — every invitation state survives a round trip, and the four are
+    /// four rather than a `bool`, because each answers the next launch
+    /// differently.
+    #[test]
+    fn every_invitation_state_survives_a_round_trip_through_the_file() {
+        for state in [
+            PsReadLineInviteV1::NotAsked,
+            PsReadLineInviteV1::Declined,
+            PsReadLineInviteV1::Installed,
+            PsReadLineInviteV1::Dismissed,
+        ] {
+            let settings = SettingsV1 {
+                psreadline_invite: state,
+                ..SettingsV1::default()
+            };
+            let text = serde_json::to_string(&settings).unwrap();
+            let read: SettingsV1 = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.psreadline_invite, state);
+            assert_eq!(read, settings);
+        }
+    }
+
+    /// PIN — a named family and a chosen size survive a round trip, including a
+    /// size this build's own list does not offer.
+    ///
+    /// The odd size is the half worth pinning: a file written by a newer build
+    /// may name 17, and this crate's job is to hand it back unchanged rather
+    /// than to snap it onto a list it does not own. Clamping here would be the
+    /// persistence layer holding an opinion about the row's options.
+    #[test]
+    fn a_chosen_family_and_size_survive_a_round_trip_including_an_unlisted_size() {
+        for (family, size) in [
+            ("Cascadia Mono", 14u8),
+            ("MS Gothic", 24),
+            ("Consolas", 17),
+            ("", 10),
+        ] {
+            let settings = SettingsV1 {
+                terminal_font_family: family.to_owned(),
+                terminal_font_size: size,
+                ..SettingsV1::default()
+            };
+            let text = serde_json::to_string(&settings).unwrap();
+            let read: SettingsV1 = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.terminal_font_family, family);
+            assert_eq!(read.terminal_font_size, size);
             assert_eq!(read, settings);
         }
     }

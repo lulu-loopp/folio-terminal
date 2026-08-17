@@ -42,6 +42,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (4, migrate_settings_v4_to_v5),
     (5, migrate_settings_v5_to_v6),
     (6, migrate_settings_v6_to_v7),
+    (7, migrate_settings_v7_to_v8),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -143,6 +144,33 @@ fn migrate_settings_v6_to_v7(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(7));
         object.insert("language".to_owned(), Value::from("System"));
+    }
+    value
+}
+
+/// v7 -> v8: the grid's face, its size, and how far the PSReadLine invitation
+/// has got — all three carrying **what the build already did** forward.
+///
+/// The first step here to insert three keys at once, and that is the ruling
+/// rather than a shortcut: all three arrive with their readers in one change, so
+/// splitting them across three versions would be three migrations describing one
+/// moment. What matters is that none of the three values is a choice made on the
+/// user's behalf.
+///
+/// - `""` for the family is `v3_to_v4`'s answer exactly — a v7 build drew
+///   Consolas because that was the only face it had, not because anyone picked
+///   it, and writing `"Consolas"` would pin a decision its owner never made
+///   *and* freeze the default the day it moves.
+/// - `16` for the size is `v5_to_v6`'s answer: it is the number every v7 build
+///   drew at, written down at the moment it became a question.
+/// - `"NotAsked"` is the literal truth. A v7 build had no invitation, so this
+///   user has not been offered anything and is owed the offer once.
+fn migrate_settings_v7_to_v8(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(8));
+        object.insert("terminal_font_family".to_owned(), Value::from(""));
+        object.insert("terminal_font_size".to_owned(), Value::from(16));
+        object.insert("psreadline_invite".to_owned(), Value::from("NotAsked"));
     }
     value
 }
@@ -672,6 +700,48 @@ mod tests {
         assert_eq!(migrated["default_profile"], json!("gitbash"));
         assert_eq!(migrated["git_panel"], json!(false));
         assert_eq!(migrated["split_direction"], json!("Down"));
+    }
+
+    /// PIN — v7 -> v8 writes the unnamed family, 16, and `NotAsked`, and leaves
+    /// every sibling exactly as it found it (rule 3, "迁移函数只做结构升级").
+    ///
+    /// The fixture is non-default in all seven older fields, `language`
+    /// deliberately among them for the reason `split_direction` was above: it is
+    /// the sibling added one version ago and therefore the one a copy-paste of
+    /// the step above would most plausibly reset.
+    ///
+    /// `""` and not `"Consolas"` is the assertion with teeth. A step that wrote
+    /// the build's current default face would pass every test on the machine it
+    /// ran on and pin a decision its owner never made into every file on disk.
+    #[test]
+    fn real_settings_v7_to_v8_migration_adds_an_unnamed_face_and_an_unasked_invitation() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 7,
+                "theme_mode": "Light",
+                "display_formulas": false,
+                "inline_formulas": true,
+                "default_profile": "gitbash",
+                "git_panel": false,
+                "split_direction": "Down",
+                "language": "Chinese"
+            }),
+            7,
+            8,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(8));
+        assert_eq!(migrated["terminal_font_family"], json!(""));
+        assert_eq!(migrated["terminal_font_size"], json!(16));
+        assert_eq!(migrated["psreadline_invite"], json!("NotAsked"));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(migrated["inline_formulas"], json!(true));
+        assert_eq!(migrated["default_profile"], json!("gitbash"));
+        assert_eq!(migrated["git_panel"], json!(false));
+        assert_eq!(migrated["split_direction"], json!("Down"));
+        assert_eq!(migrated["language"], json!("Chinese"));
     }
 
     #[test]

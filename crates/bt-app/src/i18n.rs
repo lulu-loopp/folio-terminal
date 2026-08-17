@@ -228,6 +228,14 @@ pub enum Text {
     RowSplitDirection,
     RowDefaultProfile,
     RowLanguage,
+    /// The grid's face. **Not the window's** — the description says so, because
+    /// "font" in a terminal's settings is ambiguous and the ambiguity is the
+    /// whole complaint a reader would have.
+    RowTerminalFont,
+    RowFontSize,
+    /// The Terminal page's first row, and therefore the row that puts that page
+    /// in the rail at all.
+    RowPsReadLine,
 
     DescTheme,
     DescCursor,
@@ -239,6 +247,8 @@ pub enum Text {
     DescSplitDirection,
     DescDefaultProfile,
     DescLanguage,
+    DescTerminalFont,
+    DescFontSize,
 
     /// Shared by Theme and Language, which is the point: it is one word meaning
     /// one thing — "ask Windows" — in both rows.
@@ -262,6 +272,25 @@ pub enum Text {
 
     /// The card raised when the Language row is answered.
     LanguageRestartToast,
+
+    // ── the PSReadLine row and its invitation ──────────────────────
+    /// The row's line while the out-of-band probe has not answered yet. It is a
+    /// real state and not a placeholder: the probe starts a process, and on a
+    /// cold machine that takes long enough to see.
+    PsReadLineProbing,
+    /// `settings.json` says Folio installed the module and the directory is not
+    /// there. Something outside Folio removed it, which is a fact the row owes
+    /// the reader rather than a state to silently correct.
+    PsReadLineRowGone,
+    /// The invitation's own question. It names the symptom the reader has
+    /// already seen — the input line that does not follow the window — rather
+    /// than the module, because the module is not what they noticed.
+    PsReadLineInviteTitle,
+    PsReadLineInstall,
+    /// The refusal, worded so it is plainly not the last chance: the Terminal
+    /// page keeps the row.
+    PsReadLineNotNow,
+    PsReadLineRemovedToast,
 
     // ── the `˅` profile menu ───────────────────────────────────────────────
     /// Lower case is deliberate: it is an annotation, not a label.
@@ -447,6 +476,9 @@ impl Text {
             Self::RowSplitDirection => pick(lang, "Split direction", "分屏方向"),
             Self::RowDefaultProfile => pick(lang, "Default profile", "默认配置文件"),
             Self::RowLanguage => pick(lang, "Language", "语言"),
+            Self::RowTerminalFont => pick(lang, "Terminal font", "终端字体"),
+            Self::RowFontSize => pick(lang, "Font size", "字号"),
+            Self::RowPsReadLine => pick(lang, "PSReadLine patch", "PSReadLine 补丁"),
 
             Self::DescTheme => pick(
                 lang,
@@ -497,6 +529,20 @@ impl Text {
                 "Applies the next time Folio starts",
                 "下次启动 Folio 时生效",
             ),
+            // Names what it does *not* move, because that is the question a
+            // reader has when a terminal offers one font row: the chrome keeps
+            // its own face, and a line that said only "the font" would promise
+            // otherwise.
+            Self::DescTerminalFont => pick(
+                lang,
+                "The face the grid is drawn in; the window's own labels keep theirs",
+                "网格所用的字体；窗口自身的文字保持原样",
+            ),
+            Self::DescFontSize => pick(
+                lang,
+                "How large grid text is drawn, before the display's scaling",
+                "网格文字画多大，尚未乘显示器的缩放",
+            ),
 
             Self::OptionSystem => pick(lang, "System", "系统"),
             Self::OptionLight => pick(lang, "Light", "浅色"),
@@ -518,6 +564,34 @@ impl Text {
                 lang,
                 "Restart Folio to switch the language",
                 "重启 Folio 以切换语言",
+            ),
+
+            Self::PsReadLineProbing => pick(
+                lang,
+                "Checking this machine's PSReadLine",
+                "正在检查本机的 PSReadLine",
+            ),
+            Self::PsReadLineRowGone => pick(
+                lang,
+                "The copy Folio installed is no longer on disk",
+                "Folio 安装的那一份已不在磁盘上",
+            ),
+            // **Length-sensitive.** The dialog's title is one unwrapped line in
+            // a 400px float, exactly as the dirty gate's is; the first draft
+            // ("…when the window resizes?") ran off the right edge on a real
+            // window. It still names the symptom the reader has already seen
+            // rather than the module, which is the half that matters.
+            Self::PsReadLineInviteTitle => pick(
+                lang,
+                "Keep the input line in place on resize?",
+                "让输入行在缩放后留在原位？",
+            ),
+            Self::PsReadLineInstall => pick(lang, "Install", "安装"),
+            Self::PsReadLineNotNow => pick(lang, "Not now", "以后再说"),
+            Self::PsReadLineRemovedToast => pick(
+                lang,
+                "Removed. New PowerShell sessions use the module Windows ships",
+                "已移除。新开的 PowerShell 会话将使用 Windows 自带的模块",
             ),
 
             // ── the `˅` profile menu ───────────────────────────────────────
@@ -689,7 +763,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 118] = [
+    pub const ALL: [Self; 129] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -731,6 +805,9 @@ impl Text {
         Self::RowSplitDirection,
         Self::RowDefaultProfile,
         Self::RowLanguage,
+        Self::RowTerminalFont,
+        Self::RowFontSize,
+        Self::RowPsReadLine,
         Self::DescTheme,
         Self::DescCursor,
         Self::DescFormulas,
@@ -741,6 +818,8 @@ impl Text {
         Self::DescSplitDirection,
         Self::DescDefaultProfile,
         Self::DescLanguage,
+        Self::DescTerminalFont,
+        Self::DescFontSize,
         Self::OptionSystem,
         Self::OptionLight,
         Self::OptionDark,
@@ -757,6 +836,12 @@ impl Text {
         Self::OptionSplitRight,
         Self::OptionSplitDown,
         Self::LanguageRestartToast,
+        Self::PsReadLineProbing,
+        Self::PsReadLineRowGone,
+        Self::PsReadLineInviteTitle,
+        Self::PsReadLineInstall,
+        Self::PsReadLineNotNow,
+        Self::PsReadLineRemovedToast,
         Self::ProfileHintDefault,
         Self::ProfileHintUnavailable,
         Self::ProfileHintCurrent,
@@ -828,6 +913,108 @@ pub fn new_tab_tip(profile_title: &str) -> String {
     match current() {
         Lang::English => format!("New tab ({profile_title})"),
         Lang::Chinese => format!("新建标签（{profile_title}）"),
+    }
+}
+
+/// The invitation's body: what the machine has, what it costs today, what
+/// installing writes and where, and how it comes back out.
+///
+/// Four facts and no persuasion. Both versions are parameters because the
+/// module version this build ships is a Rust constant that `folio.ps1`'s own
+/// gate reads too — a literal here would be the third place it is written, and
+/// the one nothing would catch when it moved.
+#[must_use]
+pub fn psreadline_invite_body(found: &str, patched: &str, path: &str) -> String {
+    match current() {
+        Lang::English => format!(
+            "Windows PowerShell ships with PSReadLine {found}. On that version the input line \
+             stays where it was when the window is resized, and the repair Folio sends does \
+             nothing. Installing writes PSReadLine {patched} to {path}. It takes effect in \
+             PowerShell sessions started after that, and Settings ▸ Terminal removes it."
+        ),
+        Lang::Chinese => format!(
+            "Windows PowerShell 自带的 PSReadLine 是 {found}。在这个版本上，缩放窗口后输入行会\
+             停在原处，Folio 发出的修复指令不起作用。安装会把 PSReadLine {patched} 写入 \
+             {path}，对此后新开的 PowerShell 会话生效，并可在设置 ▸ 终端中移除。"
+        ),
+    }
+}
+
+/// Why the Install button is dark.
+///
+/// Windows' script execution policy governs `.psm1` files, and PSReadLine is a
+/// script module: under `AllSigned` or `Restricted` a module Folio writes would
+/// be refused at import. The button is disabled rather than allowed to write
+/// files that cannot load, and the reason is on screen rather than in a card
+/// after the fact.
+#[must_use]
+pub fn psreadline_policy_reason(policy: &str) -> String {
+    match current() {
+        Lang::English => format!(
+            "Windows' execution policy is {policy}, which refuses to load an unsigned module."
+        ),
+        Lang::Chinese => format!("Windows 的执行策略是 {policy}，不会加载未签名的模块。"),
+    }
+}
+
+/// The row's line when the machine's PSReadLine is older than the patched one.
+#[must_use]
+pub fn psreadline_row_outdated(found: &str) -> String {
+    match current() {
+        Lang::English => format!("{found} on this machine · the resize repair does nothing"),
+        Lang::Chinese => format!("本机为 {found} · 缩放修复不起作用"),
+    }
+}
+
+/// The row's line after Folio has written the module.
+#[must_use]
+pub fn psreadline_row_installed(patched: &str) -> String {
+    match current() {
+        Lang::English => format!("{patched} · installed by Folio"),
+        Lang::Chinese => format!("{patched} · 由 Folio 安装"),
+    }
+}
+
+/// The row's line when the machine already had a new enough module of its own.
+#[must_use]
+pub fn psreadline_row_current(found: &str) -> String {
+    match current() {
+        Lang::English => format!("{found} on this machine · already anchors itself"),
+        Lang::Chinese => format!("本机为 {found} · 已自带正确的锚点"),
+    }
+}
+
+/// The card raised when the module lands.
+#[must_use]
+pub fn psreadline_installed_toast(patched: &str) -> String {
+    match current() {
+        Lang::English => {
+            format!("PSReadLine {patched} installed. PowerShell sessions started after this use it")
+        }
+        Lang::Chinese => {
+            format!("已安装 PSReadLine {patched}。此后新开的 PowerShell 会话将使用它")
+        }
+    }
+}
+
+/// The card raised when writing the module failed, carrying what Windows said.
+///
+/// The operating system's own sentence is passed through rather than
+/// summarised: it is the only text that distinguishes a full disk from a
+/// redirected Documents folder from a file another process is holding open.
+#[must_use]
+pub fn psreadline_install_failed(message: &str) -> String {
+    match current() {
+        Lang::English => format!("Could not install PSReadLine: {message}"),
+        Lang::Chinese => format!("安装 PSReadLine 失败：{message}"),
+    }
+}
+
+#[must_use]
+pub fn psreadline_remove_failed(message: &str) -> String {
+    match current() {
+        Lang::English => format!("Could not remove PSReadLine: {message}"),
+        Lang::Chinese => format!("移除 PSReadLine 失败：{message}"),
     }
 }
 

@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    Debouncer, ExitState, LanguageV1, ReadReport, SETTINGS_SCHEMA_VERSION, SettingsV1,
-    SplitDirectionV1, ThemeModeV1, WriteAlertAction, WriteFailureTracker, create_sentinel,
-    probe_sentinel, read_settings, remove_sentinel, write_settings_atomic,
+    Debouncer, ExitState, LanguageV1, PsReadLineInviteV1, ReadReport, SETTINGS_SCHEMA_VERSION,
+    SettingsV1, SplitDirectionV1, ThemeModeV1, WriteAlertAction, WriteFailureTracker,
+    create_sentinel, probe_sentinel, read_settings, remove_sentinel, write_settings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -38,6 +38,9 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         git_panel: false,
         split_direction: SplitDirectionV1::Down,
         language: LanguageV1::Chinese,
+        terminal_font_family: "Cascadia Mono".to_owned(),
+        terminal_font_size: 20,
+        psreadline_invite: PsReadLineInviteV1::Installed,
     };
     write_settings_atomic(&path, &settings).unwrap();
 
@@ -68,6 +71,18 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     );
     assert!(
         on_disk.contains("\"split_direction\": \"Down\""),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"terminal_font_family\": \"Cascadia Mono\""),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"terminal_font_size\": 20"),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"psreadline_invite\": \"Installed\""),
         "written file must be human-readable JSON: {on_disk}"
     );
 }

@@ -59,7 +59,7 @@ fn settings_from_a_future_schema_version_refuses_and_does_not_partially_parse() 
     // heard of, at a schema_version this build cannot understand.
     std::fs::write(
         &path,
-        r##"{"schema_version": 8, "theme_mode": "Dark", "accent_color": "#ff00ff"}"##,
+        r##"{"schema_version": 9, "theme_mode": "Dark", "accent_color": "#ff00ff"}"##,
     )
     .unwrap();
 
@@ -72,7 +72,7 @@ fn settings_from_a_future_schema_version_refuses_and_does_not_partially_parse() 
         report,
         ReadReport::FellBackToDefaults {
             reason: FallbackReason::FutureSchemaVersion {
-                found: 8,
+                found: SETTINGS_SCHEMA_VERSION + 1,
                 current: SETTINGS_SCHEMA_VERSION
             }
         }

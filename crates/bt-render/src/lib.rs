@@ -112,8 +112,23 @@ use theme::{
 /// glance.
 pub const SEARCH_MATCH_RADIUS_LOGICAL_PX: f32 = 3.0;
 
-const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
-const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
+/// The grid's font size, in logical pixels, when nothing has chosen one.
+///
+/// It was a `const` and is now a *default*, because the Appearance block's Font
+/// size row makes it a runtime value ([`GpuContext::set_terminal_font`]). The
+/// number is unchanged: 16 is what every frame this product has drawn was drawn
+/// at, and `bt_persist::DEFAULT_TERMINAL_FONT_SIZE` is the same 16 written down
+/// on the persistence side.
+pub const DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
+/// How tall a row is as a multiple of the font size — 22 over 16, the pair this
+/// renderer has always used.
+///
+/// A **ratio** and not a second size, and that is the whole of what makes the
+/// Font size row work: a fixed 22-pixel line under a 24-pixel face would clip
+/// every descender, and a fixed 22 under a 10-pixel face would draw a grid of
+/// mostly air. At 16 it reproduces the old 22.0 exactly, so no existing frame
+/// moves by a pixel.
+pub const LINE_HEIGHT_TO_FONT_SIZE_RATIO: f32 = 22.0 / 16.0;
 const PADDING_LOGICAL_PX: f32 = 8.0;
 const NARROW_SHAPING_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
@@ -270,7 +285,27 @@ fn math_overflow_fade_slabs(
     slabs
 }
 
-const PRIMARY_FONT_FAMILY: &str = "Consolas";
+/// The family the grid is drawn in when nothing has chosen one, and the family
+/// this renderer's fixed startup file list actually loads.
+///
+/// A *default* rather than *the* primary family since the Terminal font row
+/// landed: what "primary" means at any moment is whatever
+/// `fontdb`'s `Family::Monospace` currently resolves to, which
+/// [`GpuContext::set_terminal_font`] moves. Every place that used to compare
+/// against this constant now asks the database instead — see
+/// [`primary_font_family`] — because a comparison against a constant would
+/// answer "no" for the face actually on screen.
+const DEFAULT_PRIMARY_FONT_FAMILY: &str = "Consolas";
+
+/// The family `Family::Monospace` resolves to right now.
+///
+/// One function rather than a field, because `fontdb` already stores the answer
+/// and a second copy is a second thing that can go stale. It is the grid's face
+/// and never the chrome's: the window's own labels ask for `Family::SansSerif`,
+/// which nothing in this slice moves.
+fn primary_font_family(font_system: &FontSystem) -> &str {
+    font_system.db().family_name(&Family::Monospace)
+}
 const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
 const SEGOE_COLOR_EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
 const TEXT_SYMBOL_FONT_FAMILY: &str = "Segoe UI Symbol";
@@ -295,10 +330,33 @@ pub struct CellMetrics {
 }
 
 impl CellMetrics {
+    /// Measure the grid at the renderer's default face size.
+    ///
+    /// Kept as its own entry point because the default size is what every test
+    /// and every headless probe means by "the grid", and threading a size
+    /// through thirty call sites to say 16 each time would bury the one place
+    /// where the number is not 16.
     fn measure(font_system: &mut FontSystem, scale_factor: f64) -> Result<Self, RenderError> {
+        Self::measure_at(
+            font_system,
+            scale_factor,
+            DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX,
+        )
+    }
+
+    /// Measure the grid at a chosen face size, in logical pixels.
+    ///
+    /// The row height comes out of [`LINE_HEIGHT_TO_FONT_SIZE_RATIO`] rather
+    /// than from a constant, so a larger face gets a taller row and the
+    /// descenders that a fixed row height would clip stay inside the cell.
+    fn measure_at(
+        font_system: &mut FontSystem,
+        scale_factor: f64,
+        font_size_logical_px: f32,
+    ) -> Result<Self, RenderError> {
         let scale = scale_factor as f32;
-        let font_size_px = BASE_FONT_SIZE_LOGICAL_PX * scale;
-        let cell_height_px = BASE_LINE_HEIGHT_LOGICAL_PX * scale;
+        let font_size_px = font_size_logical_px * scale;
+        let cell_height_px = font_size_logical_px * LINE_HEIGHT_TO_FONT_SIZE_RATIO * scale;
         let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, cell_height_px));
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, None);
@@ -2104,7 +2162,22 @@ pub struct GpuContext {
     /// The chrome sans face's cap height per em, resolved once: it is a property
     /// of the face, so neither a DPI change nor a new title nor a second window
     /// can move it.
+    ///
+    /// **Nothing in the Terminal font row touches this.** The grid's face is a
+    /// setting; the chrome's is not, and this field is one of the two reasons
+    /// why (`docs/DESIGN.md` §7.1.6c-3b names the other). A settings row that
+    /// changed the sans face would leave this ratio describing the face it
+    /// replaced, and every chrome label would sit off its own centre line.
     chrome_cap_height_ratio: f32,
+    /// How large the **grid's** face is drawn, in logical pixels, for every
+    /// window on this device.
+    ///
+    /// On the device and not on the window because the `FontSystem` it is a
+    /// property of is on the device: one font database serves every window, so
+    /// two windows cannot be at two sizes any more than they can be in two
+    /// families. A per-window size wants a per-window database, which is the
+    /// cost this renderer's shared-database design exists to avoid.
+    terminal_font_size_logical_px: f32,
     /// The device-layer half of [`RendererInitTimings`]. `surface_configure`
     /// is a window's cost and is stored on [`WindowRenderer`]; the field is left
     /// zero here and filled in by [`Renderer::init_timings`].
@@ -3134,6 +3207,7 @@ impl GpuContext {
             math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
             math_texture_evictions: 0,
             chrome_cap_height_ratio,
+            terminal_font_size_logical_px: DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX,
             init_timings: RendererInitTimings {
                 adapter: adapter_time,
                 device: device_time,
@@ -3144,6 +3218,65 @@ impl GpuContext {
                 render_resources: render_resources_time,
             },
         })
+    }
+
+    /// Point the **grid's** face at a family and a size — never the chrome's.
+    ///
+    /// The two halves of the Appearance block's font rows arrive together
+    /// because they cost the same thing: every measurement, every shaped run
+    /// and every composed row is derived from the pair, so changing one is
+    /// exactly as invalidating as changing both, and a caller that could change
+    /// them separately would pay twice for one visible change.
+    ///
+    /// **The files come in rather than being looked up here.** This renderer
+    /// builds its font database from a fixed file list on purpose (see
+    /// [`terminal_font_system`]) — enumerating `Fonts/` is the startup cost that
+    /// design exists to avoid, and this crate has no business opening a system
+    /// font collection. `bt-platform` enumerates once, when the user opens the
+    /// picker, and hands back name and paths together; an empty `files` is the
+    /// ordinary case for a family the startup list already loaded.
+    ///
+    /// Loading is idempotent and cheap on repeat: `fontdb` refuses a face it
+    /// already holds, so re-choosing a family the user has picked before does
+    /// not grow the database.
+    ///
+    /// The caller must follow this with [`WindowRenderer::apply_font_change`]
+    /// for every window on the device. This function moves the database and the
+    /// size; it cannot reach the per-window caches that are now stale, and a
+    /// window that is never told will go on drawing rows composed in the old
+    /// face until something else invalidates them.
+    pub fn set_terminal_font(
+        &mut self,
+        family: &str,
+        files: &[std::path::PathBuf],
+        size_logical_px: f32,
+    ) {
+        for file in files {
+            let _ = self.font_system.db_mut().load_font_file(file);
+        }
+        // Asked of the database rather than assumed from `family`: a family the
+        // machine no longer has (uninstalled since it was written to
+        // `settings.json`) must leave the grid on the face it can actually
+        // draw, not on a name that resolves to nothing.
+        let family = if family.is_empty() || !font_family_available(&self.font_system, family) {
+            DEFAULT_PRIMARY_FONT_FAMILY
+        } else {
+            family
+        };
+        self.font_system.db_mut().set_monospace_family(family);
+        self.terminal_font_size_logical_px = size_logical_px;
+    }
+
+    /// The grid's face size in logical pixels, as last set.
+    #[must_use]
+    pub fn terminal_font_size_logical_px(&self) -> f32 {
+        self.terminal_font_size_logical_px
+    }
+
+    /// The family the grid's face currently resolves to.
+    #[must_use]
+    pub fn terminal_font_family(&self) -> &str {
+        primary_font_family(&self.font_system)
     }
 
     /// The swapchain format this context's atlas and pipelines were baked for.
@@ -3972,7 +4105,49 @@ impl WindowRenderer {
         gpu: &mut GpuContext,
         scale_factor: f64,
     ) -> Result<CellMetrics, RenderError> {
-        self.metrics = CellMetrics::measure(&mut gpu.font_system, scale_factor)?;
+        let metrics = CellMetrics::measure_at(
+            &mut gpu.font_system,
+            scale_factor,
+            gpu.terminal_font_size_logical_px,
+        )?;
+        self.adopt_metrics(gpu, metrics);
+        Ok(self.metrics)
+    }
+
+    /// Re-measure and re-shape after [`GpuContext::set_terminal_font`] moved the
+    /// grid's face or its size.
+    ///
+    /// **The same invalidation as a DPI change, and deliberately the same code
+    /// path.** A new face and a new monitor are one event to everything
+    /// downstream of the measurement: both change the advance, the row height
+    /// and the baseline, so both make every measurement, every shaped run,
+    /// every composed row and every rasterized band describe a grid that is no
+    /// longer on screen. Two lists that had to be kept in step by hand would
+    /// drift the first time one of them gained an entry — see
+    /// [`Self::adopt_metrics`], which is that one list.
+    ///
+    /// The scale factor is the window's own and is not passed in: a font change
+    /// does not move the window, so the monitor it is on is the monitor it was
+    /// already on.
+    pub fn apply_font_change(&mut self, gpu: &mut GpuContext) -> Result<CellMetrics, RenderError> {
+        let metrics = CellMetrics::measure_at(
+            &mut gpu.font_system,
+            self.metrics.scale_factor,
+            gpu.terminal_font_size_logical_px,
+        )?;
+        self.adopt_metrics(gpu, metrics);
+        Ok(self.metrics)
+    }
+
+    /// Take a freshly measured grid and throw away everything that described
+    /// the old one.
+    ///
+    /// The whole list, in one place, because the failure mode of a font or DPI
+    /// change is never a crash — it is a window that keeps drawing correct
+    /// glyphs at the wrong size, from a cache whose key did not happen to
+    /// include the thing that moved.
+    fn adopt_metrics(&mut self, gpu: &mut GpuContext, metrics: CellMetrics) {
+        self.metrics = metrics;
         self.text_rows.clear();
         self.status_overlay = None;
         self.composed_row_cache.clear();
@@ -3980,7 +4155,17 @@ impl WindowRenderer {
         self.narrow_shaping_cache.clear();
         self.wide_shaping_cache.clear();
         gpu.math_textures.clear();
-        Ok(self.metrics)
+    }
+
+    /// How many times this window's grid has been re-measured.
+    ///
+    /// Every composed row is keyed by it, so a caller that keys anything else on
+    /// the shape of the grid — the math layout, which caches typeset bands
+    /// against the metrics they were laid out for — has to read the same number
+    /// rather than assume one.
+    #[must_use]
+    pub fn font_revision(&self) -> u64 {
+        self.font_revision
     }
 
     /// Grow the per-seat glyphon slots so each of `count` seats owns one.
@@ -5626,7 +5811,14 @@ impl WindowRenderer {
                 top,
                 right - left,
                 bottom - top,
-                self.metrics.font_size_px / BASE_FONT_SIZE_LOGICAL_PX,
+                // Box-drawing and block geometry is authored against the
+                // renderer's default face size, so the scale it wants is "how
+                // much bigger than that is this cell's face" — which is the
+                // physical size over the default *logical* one, exactly as it
+                // was before the size became a setting. A DPI change and a Font
+                // size change both move `font_size_px`, and both should thicken
+                // these rules by the same factor.
+                self.metrics.font_size_px / DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX,
             ) else {
                 continue;
             };
@@ -6253,6 +6445,35 @@ impl Renderer {
 
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
         self.window.update_scale_factor(&mut self.gpu, scale_factor)
+    }
+
+    /// Move the grid's face and re-measure this window, as one call.
+    ///
+    /// One call because the two halves cannot be usefully separated from
+    /// outside: a device whose database has moved and a window that has not
+    /// re-measured is a window drawing rows composed in a face it is no longer
+    /// asking for, and there is no moment in between that a caller would want.
+    /// (A second window on the same device is the exception the singular has
+    /// not met yet — when it exists, it wants
+    /// [`GpuContext::set_terminal_font`] once and
+    /// [`WindowRenderer::apply_font_change`] per window.)
+    ///
+    /// The window's own labels are not affected. `docs/DESIGN.md` §7.1.6c-3b.
+    pub fn apply_terminal_font(
+        &mut self,
+        family: &str,
+        files: &[std::path::PathBuf],
+        size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        self.gpu.set_terminal_font(family, files, size_logical_px);
+        self.window.apply_font_change(&mut self.gpu)
+    }
+
+    /// How many times this window's grid has been re-measured — see
+    /// [`WindowRenderer::font_revision`].
+    #[must_use]
+    pub fn font_revision(&self) -> u64 {
+        self.window.font_revision()
     }
 
     pub fn present(
@@ -7525,7 +7746,7 @@ fn terminal_font_system() -> FontSystem {
     for file in CJK_FALLBACK_FONT_FILES {
         let _ = db.load_font_file(fonts.join(file));
     }
-    db.set_monospace_family(PRIMARY_FONT_FAMILY);
+    db.set_monospace_family(DEFAULT_PRIMARY_FONT_FAMILY);
     load_chrome_sans_family(&mut db, &fonts);
     FontSystem::new_with_locale_and_db_and_fallback("en-US".to_owned(), db, FolioFallback)
 }
@@ -7890,11 +8111,11 @@ fn align_ink_offsets(
 }
 
 fn is_primary_font_id(font_system: &FontSystem, id: glyphon::fontdb::ID) -> bool {
-    font_system.db().face(id).is_some_and(|face| {
-        face.families
-            .iter()
-            .any(|(family, _)| family == PRIMARY_FONT_FAMILY)
-    })
+    let primary = primary_font_family(font_system);
+    font_system
+        .db()
+        .face(id)
+        .is_some_and(|face| face.families.iter().any(|(family, _)| family == primary))
 }
 
 fn shape_narrow_glyphs(
@@ -8127,7 +8348,12 @@ fn is_text_coordinated_symbol(character: char) -> bool {
 
 fn primary_font_supports_text(font_system: &mut FontSystem, text: &str) -> bool {
     let primary_id = font_system.db().query(&glyphon::fontdb::Query {
-        families: &[Family::Name(PRIMARY_FONT_FAMILY)],
+        // `Family::Monospace` and not a name: the grid's face is whatever
+        // `set_terminal_font` last pointed the database at, and asking by name
+        // would keep answering for Consolas after the user chose something else
+        // — which decides whether a symbol is drawn from the grid's face or
+        // from the fallback chain.
+        families: &[Family::Monospace],
         weight: Weight::NORMAL,
         stretch: Stretch::Normal,
         style: Style::Normal,
@@ -9897,7 +10123,10 @@ mod tests {
         cell.style.flags.insert(CellFlags::ITALIC);
         let glyphs = shape_narrow_for_test(&[cell], &mut font_system, metrics);
         let glyph = first_layout_glyph(&glyphs[0].buffer);
-        assert_eq!(glyph_family(&font_system, &glyph), PRIMARY_FONT_FAMILY);
+        assert_eq!(
+            glyph_family(&font_system, &glyph),
+            DEFAULT_PRIMARY_FONT_FAMILY
+        );
         assert_eq!(glyph.font_size, metrics.font_size_px);
     }
 
@@ -10054,11 +10283,19 @@ mod tests {
             assert_eq!(metrics.scale_factor, scale_factor);
             assert_eq!(
                 metrics.font_size_px,
-                BASE_FONT_SIZE_LOGICAL_PX * scale_factor as f32
+                DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX * scale_factor as f32
             );
             assert_eq!(
                 metrics.cell_height_px,
-                (BASE_LINE_HEIGHT_LOGICAL_PX * scale_factor as f32).ceil()
+                (DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX
+                    * LINE_HEIGHT_TO_FONT_SIZE_RATIO
+                    * scale_factor as f32)
+                    .ceil(),
+                "the row height is a ratio of the face size now, and at the                  default size it must still be the 22 logical pixels it always was"
+            );
+            assert_eq!(
+                DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX * LINE_HEIGHT_TO_FONT_SIZE_RATIO,
+                22.0
             );
 
             let cursor = bt_viewport::GridCursor {
@@ -13755,6 +13992,112 @@ mod tests {
             assert!(
                 other.narrow_glyphs > 0,
                 "and draws them through the one atlas the first window already grew"
+            );
+        }
+
+        /// PIN (the Font size row, 2026-08-17) — **a font change invalidates
+        /// exactly what a DPI change invalidates.**
+        ///
+        /// The failure this exists to catch never crashes and never looks wrong
+        /// in a unit test: a window that keeps drawing correct glyphs from rows
+        /// that were composed for the old grid, because the cache key did not
+        /// happen to include the thing that moved. So the assertions are the
+        /// four observable consequences of the invalidation list, not a reading
+        /// of the list itself —
+        ///
+        /// 1. the grid is re-measured (a bigger face is a wider, taller cell),
+        /// 2. `font_revision` moves, which is what re-keys every composed row,
+        /// 3. a frame that was warm a moment ago misses the row cache, and
+        /// 4. re-choosing the same font is still a full invalidation, because
+        ///    the caller cannot know that nothing moved and a no-op that
+        ///    *sometimes* skipped the clear would be the worst of both.
+        ///
+        /// MUTATIONS: ① drop `composed_row_cache.clear()` from `adopt_metrics`
+        /// and (3) goes green-to-red — the second frame hits the cache and the
+        /// old rows are drawn at the new cell size; ② drop the `font_revision`
+        /// bump and (2) and (3) both fail; ③ measure at the default size instead
+        /// of `gpu.terminal_font_size_logical_px` and (1) fails.
+        #[test]
+        fn changing_the_grids_face_re_measures_it_and_leaves_no_row_cached() {
+            let mut gpu = context();
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("a window");
+
+            let before = window.metrics();
+            let revision_before = window.font_revision();
+            let frame = single_cell_cursor_frame(before);
+            let warm = window.probe_frame(&mut gpu, &frame).expect("one frame");
+            assert_eq!(warm.row_cache_misses, 1, "the first frame composes its row");
+            let warm_again = window
+                .probe_frame(&mut gpu, &frame)
+                .expect("the same frame");
+            assert_eq!(
+                warm_again.row_cache_misses, 0,
+                "and the second finds it — which is the state the change has to undo"
+            );
+
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], 24.0);
+            let after = window.apply_font_change(&mut gpu).expect("a re-measure");
+
+            assert!(
+                after.cell_height_px > before.cell_height_px,
+                "24 logical pixels of face wants a taller row than 16 did                  ({} vs {})",
+                after.cell_height_px,
+                before.cell_height_px
+            );
+            assert!(
+                after.cell_width_px > before.cell_width_px,
+                "and a wider cell ({} vs {})",
+                after.cell_width_px,
+                before.cell_width_px
+            );
+            assert_eq!(
+                after.font_size_px, 24.0,
+                "at scale 1.0 the physical size is the logical one"
+            );
+            assert_eq!(
+                after.scale_factor, before.scale_factor,
+                "a font change does not move the window to another monitor"
+            );
+            assert!(
+                window.font_revision() > revision_before,
+                "every composed row is keyed by this number"
+            );
+
+            let cold = window
+                .probe_frame(&mut gpu, &single_cell_cursor_frame(after))
+                .expect("one frame at the new size");
+            assert_eq!(
+                cold.row_cache_misses, 1,
+                "nothing composed for the old grid may survive into the new one"
+            );
+
+            // (4) — the same font again is still a full invalidation.
+            let revision = window.font_revision();
+            gpu.set_terminal_font(DEFAULT_PRIMARY_FONT_FAMILY, &[], 24.0);
+            window.apply_font_change(&mut gpu).expect("a re-measure");
+            assert!(window.font_revision() > revision);
+        }
+
+        /// PIN — a family this machine does not have leaves the grid on the face
+        /// it can actually draw.
+        ///
+        /// `settings.json` holds a family *name*, and a name outlives the font:
+        /// uninstall it, or open the file on another machine, and the row that
+        /// was chosen names nothing. Pointing `fontdb` at a family it has never
+        /// heard of makes `Family::Monospace` resolve to whatever the database's
+        /// first face happens to be — for this database, an emoji font — so the
+        /// whole grid would come up in Noto Color Emoji's fallback outlines.
+        #[test]
+        fn a_family_this_machine_does_not_have_falls_back_to_the_face_it_draws() {
+            let mut gpu = context();
+            gpu.set_terminal_font("No Such Family Is Installed", &[], 16.0);
+            assert_eq!(gpu.terminal_font_family(), DEFAULT_PRIMARY_FONT_FAMILY);
+            gpu.set_terminal_font("", &[], 16.0);
+            assert_eq!(
+                gpu.terminal_font_family(),
+                DEFAULT_PRIMARY_FONT_FAMILY,
+                "an unnamed family is the settings file's way of saying `the default`"
             );
         }
 

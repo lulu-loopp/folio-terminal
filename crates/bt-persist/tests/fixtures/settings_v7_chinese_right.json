@@ -1,0 +1,10 @@
+{
+  "theme_mode": "Dark",
+  "display_formulas": false,
+  "inline_formulas": false,
+  "default_profile": "wsl",
+  "git_panel": false,
+  "split_direction": "Right",
+  "language": "Chinese",
+  "schema_version": 7
+}

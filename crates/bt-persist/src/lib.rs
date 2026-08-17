@@ -57,8 +57,8 @@ pub use session::{
     WindowStateV1,
 };
 pub use settings::{
-    DEFAULT_PROFILE_UNSET, LanguageV1, SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1,
-    ThemeModeV1,
+    DEFAULT_PROFILE_UNSET, DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_SIZE, LanguageV1,
+    PsReadLineInviteV1, SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1, ThemeModeV1,
 };
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};
 

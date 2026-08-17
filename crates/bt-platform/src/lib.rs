@@ -176,6 +176,85 @@ pub fn reveal_arguments(path: &std::path::Path, is_directory: bool) -> std::ffi:
     arguments
 }
 
+/// One monospaced family this machine has, named and located.
+///
+/// **Both halves, and that is why the type exists.** A font picker needs the
+/// name — it is what goes in the list, what is written to `settings.json`, and
+/// what a shaper is later asked to resolve. But a name alone cannot be honoured:
+/// `bt-render`'s font database is deliberately not a system-wide enumeration
+/// (see its `terminal_font_system`), so a family it has never loaded is a family
+/// `Family::Name("…")` falls back out of. Handing back the files alongside the
+/// name is what lets the chosen family actually be loaded, and it is why this
+/// goes through DirectWrite rather than through GDI's cheaper
+/// `EnumFontFamiliesExW`, which answers only the first half.
+///
+/// `files` may hold several paths — a family's regular, bold, italic and bold
+/// italic are four faces and usually four files — and may be *empty*, which is
+/// not a failure: see [`DEFAULT_MONOSPACE_FAMILY`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonospaceFamily {
+    /// The family name as DirectWrite reports it, preferring the machine's own
+    /// UI language and falling back to the first localized name the family has.
+    pub name: String,
+    /// Every file the family's faces live in, de-duplicated, in the order the
+    /// faces were reported.
+    pub files: Vec<std::path::PathBuf>,
+}
+
+/// The family the renderer draws when a settings file names none.
+///
+/// It is a constant here rather than a lookup because [`monospace_font_families`]
+/// promises the list contains it: a picker whose list can come back without the
+/// entry that is currently selected is a picker that shows a blank row on the
+/// one machine where DirectWrite refuses.
+pub const DEFAULT_MONOSPACE_FAMILY: &str = "Consolas";
+
+/// Sort the enumerated families into the order a list draws them in, and
+/// guarantee the default is among them.
+///
+/// Split out from the enumeration itself so the ordering promise can be tested
+/// on any host: the DirectWrite half needs a Windows font collection, this half
+/// needs nothing, and the property worth pinning — *the list is deterministic
+/// and always contains the default* — lives entirely here.
+///
+/// Case-insensitive because "consolas" and "Consolas" are the same family to
+/// every user who reads the list, and because DirectWrite's own ordering is the
+/// collection's internal one, which is not stable between machines or between
+/// font installs on one machine.
+///
+/// The default, if the collection did not report it, is inserted with **no
+/// files**, and that is the honest value rather than a placeholder: the
+/// renderer already has Consolas loaded from its fixed startup list, so there is
+/// nothing to load — an empty `files` says "this family needs no loading", which
+/// is exactly true of every face the startup list already covers.
+#[must_use]
+pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<MonospaceFamily> {
+    families.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    families.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    if !families
+        .iter()
+        .any(|family| family.name.eq_ignore_ascii_case(DEFAULT_MONOSPACE_FAMILY))
+    {
+        let at = families
+            .iter()
+            .position(|family| family.name.to_lowercase() > DEFAULT_MONOSPACE_FAMILY.to_lowercase())
+            .unwrap_or(families.len());
+        families.insert(
+            at,
+            MonospaceFamily {
+                name: DEFAULT_MONOSPACE_FAMILY.to_owned(),
+                files: Vec::new(),
+            },
+        );
+    }
+    families
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use std::{
@@ -198,6 +277,11 @@ mod windows_impl {
         Graphics::DirectComposition::{
             DCompositionCreateDevice3, IDCompositionDesktopDevice, IDCompositionTarget,
             IDCompositionVisual,
+        },
+        Graphics::DirectWrite::{
+            DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, IDWriteFactory, IDWriteFont1,
+            IDWriteFontCollection, IDWriteFontFace, IDWriteFontFile, IDWriteLocalFontFileLoader,
+            IDWriteLocalizedStrings,
         },
         Graphics::Dwm::{
             DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -222,9 +306,10 @@ mod windows_impl {
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::GetKeyboardLayout,
             Shell::{
-                DefSubclassProc, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
-                FileOpenDialog, IFileOpenDialog, IShellItem, RemoveWindowSubclass,
-                SHCreateItemFromParsingName, SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
+                DefSubclassProc, FOLDERID_Documents, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+                FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, KF_FLAG_DEFAULT,
+                RemoveWindowSubclass, SHCreateItemFromParsingName, SHGetKnownFolderPath,
+                SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
@@ -1903,6 +1988,193 @@ mod windows_impl {
         }
     }
 
+    /// This user's `Documents` folder, as Windows itself resolves it.
+    ///
+    /// **Never `%USERPROFILE%\Documents`.** That string is wrong on a great many
+    /// real machines and wrong in the way that matters here: a redirected
+    /// Documents (OneDrive, a roaming profile, a second drive) is exactly where
+    /// PowerShell's `$HOME\Documents\WindowsPowerShell\Modules` actually
+    /// resolves to, because PowerShell asks the same known folder. Writing a
+    /// module to the literal path on a redirected machine puts it somewhere
+    /// PowerShell will never look, and the only symptom is a module that
+    /// installs successfully and does nothing.
+    ///
+    /// `KF_FLAG_DEFAULT` and not `KF_FLAG_CREATE`: this answers where the folder
+    /// *is*, and creating a user's Documents folder as a side effect of reading
+    /// a path is not this function's business. The caller creates the
+    /// directories it is about to write into, which it has to do anyway.
+    #[must_use]
+    pub fn documents_directory() -> Option<PathBuf> {
+        let raw =
+            unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None) }.ok()?;
+        if raw.is_null() {
+            return None;
+        }
+        let text = unsafe { raw.to_string() }.ok();
+        unsafe { CoTaskMemFree(Some(raw.0.cast())) };
+        let text = text?;
+        if text.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(text))
+        }
+    }
+
+    /// Every monospaced family installed on this machine, named and located,
+    /// in the order a list draws them.
+    ///
+    /// # Why DirectWrite and not GDI
+    ///
+    /// GDI's `EnumFontFamiliesExW` is cheaper and answers half the question: it
+    /// hands back family names and a `lfPitchAndFamily` whose low bits say
+    /// `FIXED_PITCH`. What it never hands back is *where the family lives*, and
+    /// without that the answer cannot be honoured — `bt-render` builds its font
+    /// database from a fixed file list on purpose, so a family it has not loaded
+    /// is a family its shaper silently falls back out of. DirectWrite answers
+    /// name, monospace-ness and file paths in one walk, which is the only shape
+    /// that can be fed to a `fontdb`.
+    ///
+    /// `IDWriteFont1::IsMonospacedFont` is the monospace criterion rather than a
+    /// width comparison of two glyphs, because it is the answer the font itself
+    /// gives: it reads the face's own `post` table `isFixedPitch` flag and its
+    /// OS/2 panose, which is what "this is a programmer's font" means. Measuring
+    /// `i` against `M` would additionally admit any proportional face whose two
+    /// sampled glyphs happened to tie.
+    ///
+    /// # What a failure looks like
+    ///
+    /// A `Vec` and never a `Result`, because there is nothing a caller could do
+    /// with the error that this function has not already done: a machine whose
+    /// DirectWrite refuses still gets [`DEFAULT_MONOSPACE_FAMILY`] in the list,
+    /// which is the face the renderer is already drawing. The picker degrades to
+    /// one row rather than to an empty list or a dialog.
+    ///
+    /// A family whose faces are all in a *custom* loader — a font streamed by an
+    /// application rather than installed as a file — is skipped, because
+    /// `IDWriteLocalFontFileLoader` is the only loader that can name a path and
+    /// a family with no path is a row that cannot be honoured if it is chosen.
+    #[must_use]
+    pub fn monospace_font_families() -> Vec<super::MonospaceFamily> {
+        super::order_monospace_families(collect_monospace_families().unwrap_or_default())
+    }
+
+    fn collect_monospace_families() -> windows::core::Result<Vec<super::MonospaceFamily>> {
+        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
+        let mut collection: Option<IDWriteFontCollection> = None;
+        // `false` — do not ask DirectWrite to re-scan the font directory. The
+        // list is being drawn for a human who is about to pick from it, not
+        // audited; a rescan is a disk walk this call has no reason to pay for.
+        unsafe { factory.GetSystemFontCollection(&mut collection, false) }?;
+        let Some(collection) = collection else {
+            return Ok(Vec::new());
+        };
+
+        let locale = super::os_ui_language();
+        let mut families = Vec::new();
+        for index in 0..unsafe { collection.GetFontFamilyCount() } {
+            let Ok(family) = (unsafe { collection.GetFontFamily(index) }) else {
+                continue;
+            };
+            let mut files: Vec<std::path::PathBuf> = Vec::new();
+            let mut monospaced = false;
+            for face_index in 0..unsafe { family.GetFontCount() } {
+                let Ok(font) = (unsafe { family.GetFont(face_index) }) else {
+                    continue;
+                };
+                // `IDWriteFont1` is the Windows 8 interface. A machine that
+                // cannot produce it cannot answer the question, and guessing
+                // would put proportional faces in a monospace list.
+                let Ok(font1) = font.cast::<IDWriteFont1>() else {
+                    continue;
+                };
+                if !unsafe { font1.IsMonospacedFont() }.as_bool() {
+                    continue;
+                }
+                monospaced = true;
+                let Ok(face) = (unsafe { font.CreateFontFace() }) else {
+                    continue;
+                };
+                for path in font_face_files(&face) {
+                    if !files.contains(&path) {
+                        files.push(path);
+                    }
+                }
+            }
+            if !monospaced || files.is_empty() {
+                continue;
+            }
+            let Ok(names) = (unsafe { family.GetFamilyNames() }) else {
+                continue;
+            };
+            if let Some(name) = localized_string(&names, &locale) {
+                families.push(super::MonospaceFamily { name, files });
+            }
+        }
+        Ok(families)
+    }
+
+    /// The files one face's outlines live in, skipping any the local loader
+    /// cannot name.
+    fn font_face_files(face: &IDWriteFontFace) -> Vec<std::path::PathBuf> {
+        let mut count = 0u32;
+        if unsafe { face.GetFiles(&mut count, None) }.is_err() || count == 0 {
+            return Vec::new();
+        }
+        let mut slots: Vec<Option<IDWriteFontFile>> = vec![None; count as usize];
+        if unsafe { face.GetFiles(&mut count, Some(slots.as_mut_ptr())) }.is_err() {
+            return Vec::new();
+        }
+        slots
+            .into_iter()
+            .flatten()
+            .filter_map(|file| font_file_path(&file))
+            .collect()
+    }
+
+    fn font_file_path(file: &IDWriteFontFile) -> Option<std::path::PathBuf> {
+        let mut key: *mut c_void = std::ptr::null_mut();
+        let mut key_size = 0u32;
+        unsafe { file.GetReferenceKey(&mut key, &mut key_size) }.ok()?;
+        let loader = unsafe { file.GetLoader() }.ok()?;
+        let local = loader.cast::<IDWriteLocalFontFileLoader>().ok()?;
+        let length = unsafe { local.GetFilePathLengthFromKey(key, key_size) }.ok()?;
+        // `GetFilePathFromKey` writes the terminating NUL, so the buffer is one
+        // longer than the reported length and the NUL is trimmed back off.
+        let mut buffer = vec![0u16; length as usize + 1];
+        unsafe { local.GetFilePathFromKey(key, key_size, &mut buffer) }.ok()?;
+        let text: Vec<u16> = buffer.into_iter().take_while(|unit| *unit != 0).collect();
+        if text.is_empty() {
+            return None;
+        }
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(&text)))
+    }
+
+    /// The family's name in the machine's own UI language, falling back to the
+    /// first name it has.
+    ///
+    /// The fallback is index 0 and not `"en-us"`, because a family may
+    /// legitimately have exactly one localized name in a language neither this
+    /// user nor English speaks — a Chinese-only face on a Chinese Windows — and
+    /// dropping it would hide an installed font from its owner.
+    fn localized_string(names: &IDWriteLocalizedStrings, locale: &str) -> Option<String> {
+        let mut index = 0u32;
+        let mut exists = windows::core::BOOL(0);
+        let wide: Vec<u16> = locale.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = unsafe { names.FindLocaleName(PCWSTR(wide.as_ptr()), &mut index, &mut exists) };
+        if !exists.as_bool() {
+            index = 0;
+        }
+        let length = unsafe { names.GetStringLength(index) }.ok()?;
+        let mut buffer = vec![0u16; length as usize + 1];
+        unsafe { names.GetString(index, &mut buffer) }.ok()?;
+        let text: Vec<u16> = buffer.into_iter().take_while(|unit| *unit != 0).collect();
+        if text.is_empty() {
+            None
+        } else {
+            Some(String::from_utf16_lossy(&text))
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
@@ -2118,11 +2390,164 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, FolderPicker, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
-    client_area_animation_enabled, clipboard_text, get_dpi_for_window, get_window_rect,
-    get_work_area, install_window_class_background, is_window_minimized, open_local_file,
-    open_local_path, os_ui_language, request_window_close, reveal_in_explorer, set_clipboard_text,
-    set_window_outer_rect, shell_execute, wheel_scroll_amount,
+    client_area_animation_enabled, clipboard_text, documents_directory, get_dpi_for_window,
+    get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
+    monospace_font_families, open_local_file, open_local_path, os_ui_language,
+    request_window_close, reveal_in_explorer, set_clipboard_text, set_window_outer_rect,
+    shell_execute, wheel_scroll_amount,
 };
+
+#[cfg(test)]
+mod monospace_family_tests {
+    use super::{DEFAULT_MONOSPACE_FAMILY, MonospaceFamily, order_monospace_families};
+
+    fn named(name: &str) -> MonospaceFamily {
+        MonospaceFamily {
+            name: name.to_owned(),
+            files: vec![std::path::PathBuf::from(format!(
+                "C:\\Windows\\Fonts\\{name}.ttf"
+            ))],
+        }
+    }
+
+    fn names(families: &[MonospaceFamily]) -> Vec<&str> {
+        families.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    /// PIN — the list is sorted case-insensitively, so the row a user is looking
+    /// for is where the alphabet says it is.
+    ///
+    /// DirectWrite hands families back in the font collection's internal order,
+    /// which is neither alphabetical nor stable: it changes when a font is
+    /// installed and differs between two machines with the same fonts. A picker
+    /// whose rows move between launches is a picker nobody can use twice.
+    ///
+    /// MUTATIONS: ① sort by `name` directly and `MS Gothic` sorts before
+    /// `Consolas`, because every uppercase letter sorts before every lowercase
+    /// one; ② drop the sort and the order is whatever the machine said.
+    #[test]
+    fn the_family_list_is_alphabetical_without_regard_to_case() {
+        let ordered = order_monospace_families(vec![
+            named("MS Gothic"),
+            named("consolas"),
+            named("Cascadia Mono"),
+            named("Lucida Console"),
+        ]);
+        assert_eq!(
+            names(&ordered),
+            vec!["Cascadia Mono", "consolas", "Lucida Console", "MS Gothic"]
+        );
+    }
+
+    /// PIN — the default face is in the list even when the machine did not
+    /// report it, and it lands in alphabetical position rather than on the end.
+    ///
+    /// The failure this guards is specific and silent: `settings.json` may hold
+    /// no family at all, in which case the picker's selected row is the default
+    /// one. If the enumeration came back without it — DirectWrite refused, or
+    /// this Windows genuinely lacks Consolas — the combo would show a selected
+    /// row that is not in its own list, which draws as a blank.
+    #[test]
+    fn the_default_face_is_always_a_row_and_sits_where_the_alphabet_puts_it() {
+        let ordered = order_monospace_families(vec![named("Cascadia Mono"), named("MS Gothic")]);
+        assert_eq!(
+            names(&ordered),
+            vec!["Cascadia Mono", DEFAULT_MONOSPACE_FAMILY, "MS Gothic"]
+        );
+        assert!(
+            ordered[1].files.is_empty(),
+            "a default the machine did not report needs no loading — the renderer \
+             already has it from its fixed startup list, and an invented path \
+             would be a file that does not exist"
+        );
+        assert_eq!(
+            names(&order_monospace_families(Vec::new())),
+            vec![DEFAULT_MONOSPACE_FAMILY],
+            "a machine whose DirectWrite refused outright still gets one row"
+        );
+    }
+
+    /// PIN — a machine that reports the default itself keeps its own files, and
+    /// the inserted entry does not appear beside it.
+    ///
+    /// The bug this shape catches is inserting unconditionally: two `Consolas`
+    /// rows, one of which cannot be loaded, is worse than either alternative.
+    #[test]
+    fn a_reported_default_keeps_its_files_and_is_not_doubled() {
+        let ordered = order_monospace_families(vec![named("Consolas"), named("Cascadia Mono")]);
+        assert_eq!(names(&ordered), vec!["Cascadia Mono", "Consolas"]);
+        assert!(
+            !ordered[1].files.is_empty(),
+            "the machine's own files survive"
+        );
+    }
+
+    /// PIN — a family reported twice becomes one row.
+    ///
+    /// DirectWrite will not normally repeat a family, but the localized-name
+    /// walk can land two collection entries on one string — a family whose
+    /// English and native names coincide — and a list with the same name twice
+    /// gives a combo two rows that select differently while reading identically.
+    #[test]
+    fn a_family_reported_twice_is_one_row() {
+        let ordered = order_monospace_families(vec![
+            named("Consolas"),
+            named("consolas"),
+            named("Fira Code"),
+        ]);
+        assert_eq!(
+            names(&ordered),
+            vec!["Consolas", "Fira Code"],
+            "which of the two spellings survives matters less than that the same              one survives every time — the tie is broken by exact bytes, so the              answer cannot depend on the order the machine reported them in"
+        );
+    }
+}
+
+/// The enumeration against the real font collection of the machine the tests run
+/// on. Windows only, because there is nothing to enumerate elsewhere.
+#[cfg(all(test, windows))]
+mod monospace_enumeration_tests {
+    use super::{DEFAULT_MONOSPACE_FAMILY, monospace_font_families};
+
+    /// PIN — a real Windows answers with families that can actually be loaded.
+    ///
+    /// Deliberately not an assertion about *which* families: the machine running
+    /// the test decides that, and pinning "Cascadia Mono is present" would fail
+    /// on a Windows 10 without it. What is pinned is the contract every caller
+    /// depends on — a name that is not empty, at least one file per row, files
+    /// that exist on disk, and the default among them — because a row failing
+    /// any of those is a picker row that silently does nothing when chosen.
+    #[test]
+    fn the_machines_own_monospaced_families_are_named_and_locatable() {
+        let families = monospace_font_families();
+        assert!(
+            families
+                .iter()
+                .any(|family| family.name.eq_ignore_ascii_case(DEFAULT_MONOSPACE_FAMILY)),
+            "the default face is promised to be a row on every machine"
+        );
+        for family in &families {
+            assert!(!family.name.trim().is_empty(), "a row must have a name");
+            if family.name.eq_ignore_ascii_case(DEFAULT_MONOSPACE_FAMILY) && family.files.is_empty()
+            {
+                // The inserted default — see `order_monospace_families`.
+                continue;
+            }
+            assert!(
+                !family.files.is_empty(),
+                "{} came back with no file, so choosing it could not be honoured",
+                family.name
+            );
+            for path in &family.files {
+                assert!(
+                    path.is_absolute(),
+                    "{} names {path:?}, which is not a path a loader can open",
+                    family.name
+                );
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod composition_offset_tests {

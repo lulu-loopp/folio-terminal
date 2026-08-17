@@ -367,6 +367,105 @@ pub const SPLIT_DIRECTION_OPTIONS: [SplitDirectionV1; 3] = [
 pub const LANGUAGE_OPTIONS: [LanguageV1; 3] =
     [LanguageV1::Chinese, LanguageV1::English, LanguageV1::System];
 
+/// The sizes the grid's face can be drawn at, in logical pixels.
+///
+/// **A list and not a spinner**, which is the same ruling every other picker in
+/// this dialog is built on: a control that accepts any number owes the user a
+/// validator, a clamp and an answer to what happens at 4 and at 400, and none of
+/// those is a question a font size is worth asking.
+///
+/// One-pixel steps through the range anybody reads at, then two-pixel steps
+/// above it, because at 20 logical pixels a single pixel is a 5% change nobody
+/// picking from a list is trying to express. 16 is the default and the number
+/// every frame before this row was drawn at.
+pub const FONT_SIZE_OPTIONS: [u8; 11] = [10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24];
+
+/// The numerals the size picker draws.
+///
+/// A parallel array of literals rather than a formatted `String`, because
+/// [`SettingsRow::option_label`] returns `&'static str` and a number is not a
+/// translatable string — the i18n table's own header lists quantities among the
+/// things that stay put in both languages. The two arrays are pinned to the same
+/// length and the same numbers by
+/// `every_font_size_has_exactly_its_own_numeral`.
+const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
+    "10", "11", "12", "13", "14", "15", "16", "18", "20", "22", "24",
+];
+
+/// This machine's monospaced families, enumerated once and kept for the life of
+/// the process.
+///
+/// **The `OnceLock` is what makes `option_label`'s `&'static str` honest.** A
+/// family name is a runtime string, and every other picker in this dialog hands
+/// back a literal; leaking one `Vec<String>` into a `static` gives the same
+/// lifetime without a `Box::leak` per row, without allocating on a dialog that
+/// redraws on hover, and without changing the signature of nine functions and
+/// their thirty call sites. The list cannot change under it, because the answer
+/// is only wanted while a picker is open and a font installed mid-session is a
+/// case every other program answers with "restart" too.
+///
+/// Enumerated lazily — the first time a caller actually asks — rather than at
+/// startup, because opening a system font collection is exactly the cost
+/// `bt_render::terminal_font_system` refuses to pay on every launch. The Settings
+/// dialog is the only thing that asks.
+static MONOSPACE_FAMILIES: std::sync::OnceLock<Vec<bt_platform::MonospaceFamily>> =
+    std::sync::OnceLock::new();
+
+/// Every monospaced family this machine has, in the order the picker draws them.
+#[must_use]
+pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
+    MONOSPACE_FAMILIES.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            bt_platform::monospace_font_families()
+        }
+        #[cfg(not(windows))]
+        {
+            bt_platform::order_monospace_families(Vec::new())
+        }
+    })
+}
+
+/// Which row of the family picker a stored family name is.
+///
+/// A name the machine does not have resolves to the default's row, which is the
+/// same degradation `bt_render::GpuContext::set_terminal_font` performs on the
+/// face itself: what the picker shows and what the grid is drawn in are then one
+/// answer, rather than a tick on a family nothing is rendering.
+#[must_use]
+pub fn family_index(name: &str) -> usize {
+    monospace_families()
+        .iter()
+        .position(|family| family.name.eq_ignore_ascii_case(name))
+        .or_else(|| {
+            monospace_families().iter().position(|family| {
+                family
+                    .name
+                    .eq_ignore_ascii_case(bt_platform::DEFAULT_MONOSPACE_FAMILY)
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// Which row of the size picker a stored size is, or the default's row for a
+/// size this build's list does not offer.
+///
+/// `bt_persist` deliberately does not clamp the stored size — a file written by
+/// a newer build may name 17 — so the degradation happens here, where the list
+/// that does not contain it lives.
+#[must_use]
+pub fn font_size_index(size: u8) -> usize {
+    FONT_SIZE_OPTIONS
+        .iter()
+        .position(|option| *option == size)
+        .unwrap_or_else(|| {
+            FONT_SIZE_OPTIONS
+                .iter()
+                .position(|option| *option == bt_persist::DEFAULT_TERMINAL_FONT_SIZE)
+                .unwrap_or(0)
+        })
+}
+
 /// The label a theme wears in the picker, matching the mock-up's own casing.
 fn theme_label(theme: ThemeModeV1) -> &'static str {
     match theme {
@@ -505,11 +604,11 @@ pub enum SettingsCategory {
     #[default]
     General,
     Appearance,
-    /// Mock-up 2555. **No rows yet, and therefore no rail item yet** — line
-    /// wrapping is the row that will bring it, and this build has no
-    /// line-wrapping setting to put here. The variant exists so the day it
-    /// arrives is a match arm rather than a category being invented under
-    /// pressure.
+    /// Mock-up 2555. **Born with the PSReadLine row** (§7.1.6c-3b): the variant
+    /// and its heading existed for two slices with nothing to put under them,
+    /// and `nav_items` derives the rail from what has content, so the page
+    /// appeared the moment it had one. Line wrapping is still the row the
+    /// mock-up drew here first, and it still has no setting behind it.
     Terminal,
     RenderedBlocks,
     /// The one category whose page is not a list of rows.
@@ -650,6 +749,43 @@ pub enum SettingsRow {
     /// it is that this window caches measured widths in a dozen places and has no
     /// language revision to invalidate them with.
     Language,
+    /// **The face the grid is drawn in** (§7.1.6c-3b) — never the window's own.
+    ///
+    /// Under `Appearance` and next to the size it travels with, because they are
+    /// one decision made in two halves and a reader who has changed one is about
+    /// to look for the other.
+    ///
+    /// The interface font is a **stated left-out** of this slice rather than an
+    /// oversight, and there are two named blockers: `GpuContext`'s
+    /// `chrome_cap_height_ratio`, resolved once because a face cannot change,
+    /// and `terminal_font_system`'s deliberate refusal to enumerate `Fonts/` at
+    /// startup — which the sans loader's two-file stack depends on. Both are
+    /// argued in `docs/DESIGN.md` §7.1.6c-3b.
+    TerminalFont,
+    /// How large that face is drawn, in logical pixels.
+    ///
+    /// Hot, like the family: the whole DPI path already exists to re-measure a
+    /// grid and tell every shell its new cell size, and a font size change is
+    /// the same event arriving through another door.
+    FontSize,
+    /// **The Terminal page's first row**, and therefore the row that puts that
+    /// page in the rail (§7.1.6c-3b).
+    ///
+    /// An On/Off picker and not a pair of buttons, and the choice is worth
+    /// stating because the ticket left it open. What the user is deciding is a
+    /// state — *is Folio's patched PSReadLine installed on this machine* — and a
+    /// state with two values is what every other picker in this dialog already
+    /// draws. A button row would have needed a tenth row function, a new hit
+    /// target, a new focus stop and a new drawing, to express the same two
+    /// answers less clearly.
+    ///
+    /// Both items can be unavailable, which is the second reason the combo fits:
+    /// `On` is dark under an execution policy that would refuse the module, and
+    /// `Off` is dark unless the copy on disk is byte for byte the one Folio
+    /// wrote. That is [`Self::DefaultProfile`]'s greyed-item machinery, already
+    /// spelled once for both the hit test and the draw, and the description
+    /// carries the reason.
+    PsReadLine,
 }
 
 impl SettingsRow {
@@ -666,9 +802,17 @@ impl SettingsRow {
     #[must_use]
     pub fn category(self) -> SettingsCategory {
         match self {
-            Self::Theme | Self::Cursor | Self::TabLayout | Self::Sidebar | Self::SplitDirection => {
-                SettingsCategory::Appearance
-            }
+            Self::Theme
+            | Self::Cursor
+            | Self::TabLayout
+            | Self::Sidebar
+            | Self::SplitDirection
+            | Self::TerminalFont
+            | Self::FontSize => SettingsCategory::Appearance,
+            // The row the mock-up's `Terminal` page was waiting for. It is about
+            // what a shell does rather than what the window looks like, which is
+            // the line that page's name draws.
+            Self::PsReadLine => SettingsCategory::Terminal,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas | Self::InlineFormulas => SettingsCategory::RenderedBlocks,
@@ -701,6 +845,9 @@ impl SettingsRow {
             // Mock-up 2467.
             Self::DefaultProfile => Text::RowDefaultProfile.text(),
             Self::Language => Text::RowLanguage.text(),
+            Self::TerminalFont => Text::RowTerminalFont.text(),
+            Self::FontSize => Text::RowFontSize.text(),
+            Self::PsReadLine => Text::RowPsReadLine.text(),
         }
     }
 
@@ -728,10 +875,6 @@ impl SettingsRow {
     /// still a choice among literals. A `String` here would allocate on every
     /// frame of a dialog that redraws on hover.
     #[must_use]
-    #[allow(
-        unused_variables,
-        reason = "the two rows that read it are not built yet"
-    )]
     pub fn description(self, values: SettingsValues) -> &'static str {
         match self {
             // Mock-up 2496, word for word. It used to read "Light or dark" with
@@ -771,6 +914,16 @@ impl SettingsRow {
             // The one line in this dialog that describes *when* rather than
             // what, because "when" is the surprising half. See the variant.
             Self::Language => Text::DescLanguage.text(),
+            // Says what it does *not* move, because "font" on a terminal's
+            // settings page reads as "all the text" and the chrome keeps its
+            // own face.
+            Self::TerminalFont => Text::DescTerminalFont.text(),
+            Self::FontSize => Text::DescFontSize.text(),
+            // The one description in the dialog that reports a fact about the
+            // machine rather than about the setting: which PSReadLine is
+            // installed, and what that costs today. It is also where the reason
+            // a greyed item is grey is written — see the variant.
+            Self::PsReadLine => crate::psreadline::row_description(values.psreadline),
         }
     }
 
@@ -780,7 +933,11 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.len(),
             Self::Cursor => CURSOR_OPTIONS.len(),
-            Self::Formulas | Self::InlineFormulas | Self::GitPanel => FORMULA_OPTIONS.len(),
+            Self::Formulas | Self::InlineFormulas | Self::GitPanel | Self::PsReadLine => {
+                FORMULA_OPTIONS.len()
+            }
+            Self::TerminalFont => monospace_families().len(),
+            Self::FontSize => FONT_SIZE_OPTIONS.len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
@@ -805,9 +962,16 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.get(index).copied().map(theme_label),
             Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
-            Self::Formulas | Self::InlineFormulas | Self::GitPanel => {
+            Self::Formulas | Self::InlineFormulas | Self::GitPanel | Self::PsReadLine => {
                 FORMULA_OPTIONS.get(index).copied().map(on_off_label)
             }
+            // `&'static str` out of a runtime string, without a leak per call:
+            // the list is enumerated once into a `static`, which outlives every
+            // caller by construction. See [`monospace_families`].
+            Self::TerminalFont => monospace_families()
+                .get(index)
+                .map(|family| family.name.as_str()),
+            Self::FontSize => FONT_SIZE_LABELS.get(index).copied(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
@@ -859,6 +1023,16 @@ impl SettingsRow {
                 .get(index)
                 .copied()
                 .unwrap_or(false),
+            // The second row whose items can be unavailable, and the only one
+            // where choosing an unavailable item would *do* something: `On`
+            // under a refusing execution policy writes files no shell will load,
+            // and `Off` on a module Folio did not write deletes somebody else's
+            // directory. Answered once, read by the hit test and the draw alike.
+            Self::PsReadLine => match FORMULA_OPTIONS.get(index).copied() {
+                Some(true) => values.psreadline_install_available,
+                Some(false) => values.psreadline_remove_available,
+                None => false,
+            },
             _ => index < self.option_count(),
         }
     }
@@ -887,6 +1061,16 @@ impl SettingsRow {
             Self::Language => LANGUAGE_OPTIONS
                 .iter()
                 .position(|it| *it == values.language),
+            Self::TerminalFont => Some(values.terminal_font),
+            Self::FontSize => Some(values.font_size),
+            // The *state of the machine*, not a stored preference: what the row
+            // shows ticked is whether the module is on disk, which is what a
+            // reader is actually asking. `settings.json`'s own field records
+            // whether they were asked, which is a different question and has no
+            // picker.
+            Self::PsReadLine => FORMULA_OPTIONS.iter().position(|it| {
+                *it == (values.psreadline == crate::psreadline::RowState::InstalledByFolio)
+            }),
             // The *resolved* default, which is why the caller hands over an index
             // rather than the stored id. **Mock-up bug not copied** (2471): its
             // combo button is born with the literal text `PowerShell` and only
@@ -922,11 +1106,14 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         rows.push(SettingsRow::Sidebar);
     }
     rows.push(SettingsRow::SplitDirection);
+    rows.push(SettingsRow::TerminalFont);
+    rows.push(SettingsRow::FontSize);
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
     rows.push(SettingsRow::Language);
     rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
+    rows.push(SettingsRow::PsReadLine);
     rows
 }
 
@@ -960,11 +1147,12 @@ impl SettingsContent<'_> {
     /// **The rail**, derived: every category with something on its page, in
     /// [`SettingsCategory::ALL`]'s order.
     ///
-    /// This is where the placeholder ruling actually lives. `Terminal` has a
-    /// variant, a heading and a page and still does not appear, because it has
-    /// no rows — and neither will `Profiles` or `Language` until the day they
-    /// do. `Shortcuts` is always here because its page is a table this build
-    /// ships, never empty.
+    /// This is where the placeholder ruling actually lives, and `Terminal` is
+    /// the proof it works: it had a variant, a heading and a page for two slices
+    /// and did not appear, because it had no rows — and it appeared the moment
+    /// the PSReadLine row gave it one, with nothing else in this file touched.
+    /// `Shortcuts` is always here because its page is a table this build ships,
+    /// never empty.
     #[must_use]
     pub fn nav_items(&self) -> Vec<SettingsCategory> {
         SettingsCategory::ALL
@@ -1031,6 +1219,25 @@ pub struct SettingsValues {
     /// alone by that degradation, so nothing here can quietly consume a choice
     /// the user made before they uninstalled something.
     pub default_profile: usize,
+    /// Which row of the family picker is ticked — an index, resolved against
+    /// this machine's list, never the stored name.
+    ///
+    /// [`SettingsValues::default_profile`]'s ruling for the same reason: the
+    /// dialog shows what is actually being drawn, so a family that has been
+    /// uninstalled since it was chosen ticks the face the grid really has. The
+    /// stored name is left alone by that resolution.
+    pub terminal_font: usize,
+    /// Which row of the size picker is ticked. An index for `terminal_font`'s
+    /// reason — a size this build's list does not offer resolves to the default
+    /// rather than leaving the combo blank.
+    pub font_size: usize,
+    /// What the PSReadLine row is describing, reconciled from the out-of-band
+    /// probe and the module actually on disk.
+    pub psreadline: crate::psreadline::RowState,
+    /// Whether the row's `On` item can be chosen on this machine.
+    pub psreadline_install_available: bool,
+    /// Whether its `Off` item can be — true only for a module Folio wrote.
+    pub psreadline_remove_available: bool,
     /// Which profiles this machine can start, in table order.
     ///
     /// An array rather than a borrowed `ProfilePrograms`, so this type stays
@@ -1061,6 +1268,11 @@ impl SettingsValues {
             split_direction: SplitDirectionV1::Auto,
             language: LanguageV1::System,
             default_profile: profiles::FALLBACK_PROFILE,
+            terminal_font: 0,
+            font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
+            psreadline: crate::psreadline::RowState::Outdated,
+            psreadline_install_available: true,
+            psreadline_remove_available: false,
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
             profile_available: [true; profiles::PROFILES.len()],
@@ -2259,6 +2471,40 @@ pub fn language_requested(target: SettingsTarget) -> Option<LanguageV1> {
     match target {
         SettingsTarget::Choice(SettingsRow::Language, index) => {
             LANGUAGE_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The grid's face, as a press on the family picker — the family's **name**,
+/// which is what `settings.json` stores and what the renderer resolves.
+#[must_use]
+pub fn terminal_font_requested(target: SettingsTarget) -> Option<&'static str> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::TerminalFont, index) => monospace_families()
+            .get(index)
+            .map(|family| family.name.as_str()),
+        _ => None,
+    }
+}
+
+/// The grid's face size in logical pixels, as a press on the size picker.
+#[must_use]
+pub fn font_size_requested(target: SettingsTarget) -> Option<u8> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::FontSize, index) => {
+            FONT_SIZE_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether the patched PSReadLine was asked for or asked to go.
+#[must_use]
+pub fn psreadline_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::PsReadLine, index) => {
+            FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -4896,13 +5142,23 @@ mod tests {
             );
             ellipsised.push(row.row);
         }
+        // **The family picker is excluded from the exact list, and only from
+        // it.** Its values are the names of whatever fonts the machine running
+        // this test has installed — `Cascadia Mono` fits and
+        // `DejaVu Sans Mono for Powerline` does not — so asserting whether it
+        // ellipsises would be asserting a fact about a font list this repository
+        // does not own. Every mechanical claim above still applies to it: the
+        // drawn text fits the box, and if it gave way it gave way with an `…`
+        // after a prefix of the real name.
+        ellipsised.retain(|row| *row != SettingsRow::TerminalFont);
         ellipsised.sort_by_key(|row| format!("{row:?}"));
         assert_eq!(
             ellipsised,
             vec![SettingsRow::DefaultProfile, SettingsRow::SplitDirection],
             "the long profile title and `Auto (longer edge)` are the two \
-             values that cannot fit the 118px button, and every other row's \
-             option is one short word that must be left alone"
+             values this build's own tables can produce that cannot fit the \
+             118px button, and every other row's option is one short word that \
+             must be left alone"
         );
     }
 
@@ -5710,6 +5966,7 @@ mod tests {
                     SettingsCategory::Appearance,
                     SettingsCategory::RenderedBlocks,
                     SettingsCategory::General,
+                    SettingsCategory::Terminal,
                 ],
                 "{tab_layout:?}: every category with rows is shown once, its rows \
                  together"
@@ -5724,17 +5981,19 @@ mod tests {
     /// a row filed nowhere is a control nobody can reach, and a row filed twice
     /// is a switch that disagrees with itself two words apart.
     ///
-    /// The second is the placeholder ruling, stated as a property: `Terminal`
-    /// exists as a category, has a heading and a page, and is **not** in the
-    /// rail — because it has no rows, exactly as `Profiles` and `Language` will
-    /// not be in it until theirs arrive. A door onto an empty room is a worse
-    /// promise than no door.
+    /// The second is the placeholder ruling, stated as a property: the rail is
+    /// the categories that **have** rows, in declaration order, and nothing
+    /// else. `Terminal` is the proof it works from both sides — it sat in
+    /// `ALL` with a heading and a page and stayed out of the rail for two
+    /// slices, and it joined the rail the day §7.1.6c-3b's PSReadLine row gave
+    /// it content, with no list of rail items edited anywhere. A door onto an
+    /// empty room is a worse promise than no door.
     ///
     /// MUTATIONS:
-    /// (1) file a row under `Terminal` — it appears in the rail, which is the
-    ///     derivation working;
-    /// (2) list the categories in the rail from `ALL` without the filter —
-    ///     `Terminal` appears with nothing on it and this goes red.
+    /// (1) take the PSReadLine row out of `visible_rows` — `Terminal` leaves the
+    ///     rail on its own, which is the derivation working;
+    /// (2) list the categories in the rail from `ALL` without the filter — a
+    ///     category with nothing on it appears and this goes red.
     #[test]
     fn every_row_is_on_exactly_one_page_and_every_page_in_the_rail_has_something_on_it() {
         for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
@@ -5761,16 +6020,35 @@ mod tests {
                 vec![
                     SettingsCategory::General,
                     SettingsCategory::Appearance,
+                    SettingsCategory::Terminal,
                     SettingsCategory::RenderedBlocks,
                     SettingsCategory::Shortcuts,
                 ],
                 "{tab_layout:?}: the rail is the categories with content, in \
-                 declaration order - Terminal has none and is not offered"
+                 declaration order"
             );
-            assert!(
-                !rail.contains(&SettingsCategory::Terminal),
-                "a page with no rows is not a door"
-            );
+            // The other direction of the same rule, stated where it can still
+            // be stated now that every category has content: strike the rows
+            // of any one page and its word must leave the rail on its own.
+            for absent in SettingsCategory::ALL {
+                let kept: Vec<SettingsRow> = rows
+                    .iter()
+                    .copied()
+                    .filter(|row| row.category() != absent)
+                    .collect();
+                let thinner = SettingsContent {
+                    rows: &kept,
+                    shortcuts: if absent == SettingsCategory::Shortcuts {
+                        &[]
+                    } else {
+                        &lines
+                    },
+                };
+                assert!(
+                    !thinner.nav_items().contains(&absent),
+                    "{absent:?} keeps its word in the rail with nothing on its                      page — a door onto an empty room"
+                );
+            }
             assert_eq!(
                 content.first_category(),
                 SettingsCategory::General,
@@ -6245,11 +6523,14 @@ mod tests {
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::SplitDirection,
+                SettingsRow::TerminalFont,
+                SettingsRow::FontSize,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
-                SettingsRow::DefaultProfile
+                SettingsRow::DefaultProfile,
+                SettingsRow::PsReadLine
             ]
         );
         assert_eq!(
@@ -6260,16 +6541,20 @@ mod tests {
                 SettingsRow::TabLayout,
                 SettingsRow::Sidebar,
                 SettingsRow::SplitDirection,
+                SettingsRow::TerminalFont,
+                SettingsRow::FontSize,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
-                SettingsRow::DefaultProfile
+                SettingsRow::DefaultProfile,
+                SettingsRow::PsReadLine
             ],
             "Sidebar still lands directly under the row it depends on, Split \
-             direction under the pair of them as the Appearance group's last \
-             row, the two formula rows stay together as the whole of the \
-             second group, and Startup's one row is last"
+             direction under the pair of them, the two font rows next to each \
+             other because they are one decision in two halves, the two formula \
+             rows together as the whole of the Rendered blocks group, and the \
+             PSReadLine row last because it is the whole of the Terminal page"
         );
     }
 

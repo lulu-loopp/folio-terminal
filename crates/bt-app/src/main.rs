@@ -28,6 +28,7 @@ mod persist;
 mod preview;
 mod preview_edit;
 mod profiles;
+mod psreadline;
 mod restore;
 mod search;
 mod seats;
@@ -4301,6 +4302,29 @@ struct Runtime {
     /// The dirty-buffer gate, when one of the three doors has stopped to ask
     /// (P123-P125).
     dirty_gate: restore::DirtyGate,
+    /// The PSReadLine invitation, when the probe has found a shell that would
+    /// benefit (§7.1.6c-3b).
+    psreadline_invite: psreadline::Invite,
+    /// This user's Documents folder, asked of Windows once.
+    ///
+    /// Once because it cannot move under a running process, and stored rather
+    /// than re-asked because both the row and the dialog need it and a known
+    /// folder lookup is a COM call.
+    psreadline_documents: Option<PathBuf>,
+    /// Whether the module Folio installs is on disk **right now**, byte for
+    /// byte.
+    ///
+    /// Cached because it is nine file reads and the settings dialog asks on
+    /// every frame it draws; refreshed at the two moments it can change — an
+    /// install and a removal — and once when the probe lands, which is the first
+    /// point at which anything wants to know.
+    psreadline_installed: bool,
+    /// Whether the size row has been answered since the invitation was refused.
+    ///
+    /// The one exception in the trigger table, and it is deliberately *not*
+    /// persisted: it is a fact about this sitting, and a file that remembered it
+    /// would let a refusal from last month be re-opened by a font change today.
+    psreadline_size_changed: bool,
     /// Whether the gate's `Discard` has asked for the window to go.
     ///
     /// A flag rather than a call, because the shut belongs to the event loop:
@@ -12421,6 +12445,38 @@ impl FormulaSwitches {
     }
 }
 
+/// Point the renderer at the face `settings.json` names, and hand back the grid
+/// it measures.
+///
+/// A free function because it is wanted at two moments that have nothing else in
+/// common: once before the first frame, when there is no `Runtime` yet, and
+/// again whenever the row is answered, when there is. Reading the settings in
+/// one place is what stops the two from diverging — a startup that resolved the
+/// family differently from the hot path would draw one face until the row was
+/// touched and another one after.
+fn apply_stored_terminal_font(
+    renderer: &mut Renderer,
+    settings: &bt_persist::SettingsV1,
+) -> Result<bt_render::CellMetrics> {
+    let family = settings.terminal_font_family.as_str();
+    // Only enumerated when the file actually names a family. A default install
+    // never opens the system font collection at startup, which is the cost
+    // `bt_render::terminal_font_system` refuses to pay and this must not
+    // reintroduce.
+    let files = if family.is_empty() {
+        Vec::new()
+    } else {
+        settings::monospace_families()
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(family))
+            .map(|candidate| candidate.files.clone())
+            .unwrap_or_default()
+    };
+    renderer
+        .apply_terminal_font(family, &files, f32::from(settings.terminal_font_size))
+        .context("remeasure the terminal grid at the chosen face")
+}
+
 /// Spawn one shell for one Terminal leaf, sized to the rectangle it will draw
 /// into.
 ///
@@ -12440,6 +12496,13 @@ fn create_leaf_session(
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
     let chosen = profiles::PROFILES[seed.profile];
+    // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
+    // this process, because the module that is broken is the one `Windows
+    // PowerShell 5.1` ships and nothing else on this machine is affected by it.
+    // Idempotent — see `psreadline::begin_probe`.
+    if chosen.id == profiles::WINDOWS_POWERSHELL_ID {
+        psreadline::begin_probe();
+    }
     let mut resolved_program = None;
     let mut pty = if probe_input.is_none() {
         // **The line the picker was missing.** Choosing a profile used to change
@@ -13595,6 +13658,10 @@ impl Runtime {
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
         let settings_store = persist::SettingsStore::open();
+        // Before the first pane can start a probe of its own. A no-op unless
+        // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
+        // for why the door exists and what it deliberately does not override.
+        psreadline::install_probe_override();
         // **The language, before anything is measured.** Every width in this
         // window is measured from the words that go in it, and the first of
         // those measurements happens as soon as a chrome frame is built — so the
@@ -13776,6 +13843,13 @@ impl Runtime {
             eprintln!("BT_STARTUP alpha offered={:?}", alpha.offered);
             eprintln!("BT_STARTUP alpha chosen={:?}", alpha.chosen);
         }
+        // **Before the first grid is measured**, which is the whole of why it is
+        // here and not after the seats are solved: every rectangle below is
+        // derived from `renderer.metrics()`, so a face applied afterwards would
+        // put a window on screen whose columns were counted for a different
+        // cell. The hot path (`apply_terminal_font`) re-solves all of that; this
+        // one has nothing to re-solve yet.
+        apply_stored_terminal_font(&mut renderer, settings_store.loaded())?;
         ensure_metrics_match_authoritative_scale(
             renderer.metrics().scale_factor,
             startup_scale_factor,
@@ -14024,6 +14098,10 @@ impl Runtime {
             files_row_clicks: FilesRowClicks::default(),
             root_menu: profiles::RootMenu::default(),
             dirty_gate: restore::DirtyGate::default(),
+            psreadline_invite: psreadline::Invite::default(),
+            psreadline_documents: psreadline::documents_directory(),
+            psreadline_installed: false,
+            psreadline_size_changed: false,
             window_close_requested: false,
             preview_menu: profiles::PreviewMenu::default(),
             preview_head_measures: BTreeMap::new(),
@@ -17585,6 +17663,16 @@ impl Runtime {
             split_direction: self.settings_store.loaded().split_direction,
             language: self.settings_store.loaded().language,
             default_profile: self.default_profile(),
+            terminal_font: settings::family_index(
+                &self.settings_store.loaded().terminal_font_family,
+            ),
+            font_size: settings::font_size_index(self.settings_store.loaded().terminal_font_size),
+            psreadline: self.psreadline_row_state(),
+            psreadline_install_available: psreadline::install_available(
+                psreadline::probe(),
+                self.psreadline_row_state(),
+            ) && self.psreadline_documents.is_some(),
+            psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
             profile_available: std::array::from_fn(|index| {
                 self.profile_programs.is_available(index)
             }),
@@ -17659,6 +17747,18 @@ impl Runtime {
                 &layout,
                 (width as f32, height as f32),
                 self.dirty_gate.hover(),
+            )
+        } else if let Some(layout) = self.psreadline_invite_layout() {
+            // **Under the gate and over the settings dialog.** The gate stands in
+            // front of an action already under way and nothing may cover it; this
+            // stands in front of a shell that has just started, which outranks a
+            // dialog the user opened on purpose — and the dialog is where the
+            // same question keeps a row, so nothing is lost by being covered.
+            let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+            restore::invite_build(
+                &layout,
+                (width as f32, height as f32),
+                self.psreadline_invite.hover(),
             )
         } else if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
@@ -18462,6 +18562,22 @@ impl Runtime {
         if let Some(language) = settings::language_requested(target) {
             self.apply_language(language)?;
         }
+        if let Some(family) = settings::terminal_font_requested(target) {
+            let size = self.settings_store.loaded().terminal_font_size;
+            self.apply_terminal_font(family.to_owned(), size)?;
+        }
+        if let Some(size) = settings::font_size_requested(target) {
+            let family = self.settings_store.loaded().terminal_font_family.clone();
+            if self.apply_terminal_font(family, size)? {
+                // S110's one exception to "asked once": the row whose visible
+                // consequence on an unpatched 5.1 *is* the bug the module fixes.
+                // See `psreadline::invite_decision`.
+                self.psreadline_size_changed = true;
+            }
+        }
+        if let Some(install) = settings::psreadline_requested(target) {
+            self.apply_psreadline(install)?;
+        }
         // Both rail combos go through the one constructor: the layout choice
         // keeps the sidebar mode standing and the sidebar choice keeps the
         // layout standing, and Q190's combination rule inside `RailState`
@@ -19043,6 +19159,256 @@ impl Runtime {
         }
         self.toast(notice.kind, notice.anchor, None, notice.body)?;
         Ok(true)
+    }
+
+    /// **The grid's face and size, changed while the window is up.**
+    ///
+    /// The DPI path arriving through another door, and it performs the same six
+    /// steps in the same order because they answer the same question: the cell
+    /// has changed size, so every rectangle derived from it is stale and every
+    /// shell has to be told how many columns it now has.
+    ///
+    /// 1. re-measure and invalidate (`Renderer::apply_terminal_font`),
+    /// 2. tell every leaf in every tab its new cell — a font is a fact about the
+    ///    window, so no pane anywhere is exempt, exactly as a DPI change is,
+    /// 3. re-derive the work area and the window's minimum inner size, because
+    ///    the minimum is stated in cells,
+    /// 4. re-solve the seat layout into the same surface,
+    /// 5. resize every PTY through the existing gate and debounce,
+    /// 6. re-key the math layout and publish.
+    ///
+    /// Returns whether anything changed. No restart card: unlike the Language
+    /// row, this one takes effect where the user can see it.
+    fn apply_terminal_font(&mut self, family: String, size: u8) -> Result<bool> {
+        let current = self.settings_store.loaded();
+        if current.terminal_font_family == family && current.terminal_font_size == size {
+            return Ok(false);
+        }
+        let mut settings = current.clone();
+        settings.terminal_font_family = family;
+        settings.terminal_font_size = size;
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        let metrics = apply_stored_terminal_font(&mut self.renderer, self.settings_store.loaded())?;
+        for tab in &mut self.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.session
+                    .set_cell_height_subpixels(metrics.cell_height_subpixels());
+                leaf.session
+                    .set_cell_width_subpixels(cell_width_subpixels(metrics));
+                leaf.session
+                    .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+            }
+        }
+        let physical = self.window.inner_size();
+        if physical.width > 0 && physical.height > 0 {
+            let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+            self.refresh_work_area();
+            self.apply_window_min_inner_size()?;
+            self.resolve_seat_layout(render_physical);
+            self.resize_leaves_to_layout(
+                Instant::now(),
+                "rebuild terminal grid after a font change",
+            )?;
+        }
+        self.sync_math_layout_key();
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
+    /// What the Terminal page's PSReadLine row is describing.
+    fn psreadline_row_state(&self) -> psreadline::RowState {
+        psreadline::row_state(
+            psreadline::probe(),
+            self.settings_store.loaded().psreadline_invite,
+            self.psreadline_installed,
+        )
+    }
+
+    /// Re-read whether the module is on disk. Cheap enough at the three moments
+    /// it is called and far too expensive on every frame — see the field.
+    fn refresh_psreadline_installed(&mut self) -> bool {
+        let installed = self
+            .psreadline_documents
+            .as_deref()
+            .is_some_and(psreadline::is_folios_copy);
+        let changed = self.psreadline_installed != installed;
+        self.psreadline_installed = installed;
+        changed
+    }
+
+    /// Write the module, or take Folio's own copy back off disk.
+    ///
+    /// Both halves report: an install that silently did nothing and a removal
+    /// that silently refused are the two ways this row could lie. The refusal
+    /// carries the operating system's own sentence, because on the machine where
+    /// it fires nobody else can see it.
+    fn apply_psreadline(&mut self, install: bool) -> Result<bool> {
+        let Some(documents) = self.psreadline_documents.clone() else {
+            return Ok(false);
+        };
+        if install {
+            match psreadline::install_into(&documents) {
+                Ok(_) => {
+                    self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Installed);
+                    self.refresh_psreadline_installed();
+                    self.toast(
+                        toast::ToastKind::Ok,
+                        toast::ToastAnchor::Window,
+                        None,
+                        i18n::psreadline_installed_toast(psreadline::PATCHED_VERSION),
+                    )?;
+                }
+                Err(error) => {
+                    self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        None,
+                        i18n::psreadline_install_failed(&error.to_string()),
+                    )?;
+                    return Ok(false);
+                }
+            }
+        } else {
+            match psreadline::remove_from(&documents) {
+                // `Ok(false)` is the guard having refused: the directory holds
+                // something this build did not write. The picker greys that
+                // item, so reaching here means the two answers disagreed, and
+                // the honest report is that nothing was removed.
+                Ok(false) => return Ok(false),
+                Ok(true) => {
+                    self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Dismissed);
+                    self.refresh_psreadline_installed();
+                    self.toast(
+                        toast::ToastKind::Ok,
+                        toast::ToastAnchor::Window,
+                        None,
+                        i18n::Text::PsReadLineRemovedToast.text().to_owned(),
+                    )?;
+                }
+                Err(error) => {
+                    self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        None,
+                        i18n::psreadline_remove_failed(&error.to_string()),
+                    )?;
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn record_psreadline_invite(&mut self, state: bt_persist::PsReadLineInviteV1) {
+        if self.settings_store.loaded().psreadline_invite == state {
+            return;
+        }
+        let mut settings = self.settings_store.loaded().clone();
+        settings.psreadline_invite = state;
+        self.settings_store.store(settings);
+    }
+
+    /// Raise the invitation once the probe has answered and the table says it is
+    /// owed — `psreadline::invite_decision`.
+    ///
+    /// Polled from the event loop rather than pushed from the probe thread,
+    /// because raising a modal is a change to the window and the window is this
+    /// thread's. The check is three comparisons on the common path.
+    fn raise_psreadline_invite_if_due(&mut self) -> Result<()> {
+        if self.psreadline_invite.is_open() || psreadline::probe().is_none() {
+            return Ok(());
+        }
+        if self.refresh_psreadline_installed() {
+            // The first reading, taken when the probe lands. A module already on
+            // disk answers the question before it is asked.
+        }
+        if self.psreadline_installed {
+            return Ok(());
+        }
+        let decision = psreadline::invite_decision(
+            psreadline::probe(),
+            self.settings_store.loaded().psreadline_invite,
+            self.psreadline_size_changed,
+        );
+        if decision != psreadline::InviteDecision::Show {
+            return Ok(());
+        }
+        // The second showing is spent whether it is answered or not: a dialog
+        // raised by a font-size change has had its one exception.
+        if self.psreadline_size_changed {
+            self.psreadline_size_changed = false;
+        }
+        self.psreadline_invite.open();
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The invitation, measured against a real font, or nothing while it is shut.
+    fn psreadline_invite_layout(&mut self) -> Option<restore::InviteLayout> {
+        if !self.psreadline_invite.is_open() {
+            return None;
+        }
+        let documents = self.psreadline_documents.clone()?;
+        let (body, reason) = psreadline::invite_body(
+            psreadline::probe(),
+            &psreadline::module_directory(&documents),
+        );
+        let install_enabled = reason.is_none();
+        let title = i18n::Text::PsReadLineInviteTitle.text();
+        let decline_text = i18n::Text::PsReadLineNotNow.text();
+        let install_text = i18n::Text::PsReadLineInstall.text();
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let room = restore::content_width(width, scale);
+        let renderer = &mut self.renderer;
+        let mut wrap = |text: &str| {
+            restore::wrap(text, room, |line| {
+                renderer.measure_chrome_text(line, restore::SUB_FONT_LOGICAL_PX * scale)
+            })
+        };
+        let message_lines = wrap(&body);
+        let reason_lines = reason.as_deref().map(&mut wrap).unwrap_or_default();
+        let content = restore::InviteContent {
+            title,
+            message_lines,
+            reason_lines,
+            decline_text,
+            install_text,
+            install_enabled,
+            decline_text_width: renderer
+                .measure_chrome_text(decline_text, restore::BUTTON_FONT_LOGICAL_PX * scale),
+            install_text_width: renderer
+                .measure_chrome_text(install_text, restore::BUTTON_FONT_LOGICAL_PX * scale),
+        };
+        Some(restore::invite_layout(&content, width, height, scale))
+    }
+
+    /// One press on the invitation, or Esc.
+    fn answer_psreadline_invite(&mut self, target: restore::InviteTarget) -> Result<()> {
+        match target {
+            restore::InviteTarget::Panel => return Ok(()),
+            restore::InviteTarget::Decline => {
+                let next =
+                    psreadline::state_after_decline(self.settings_store.loaded().psreadline_invite);
+                self.record_psreadline_invite(next);
+            }
+            restore::InviteTarget::Install => {
+                self.apply_psreadline(true)?;
+            }
+        }
+        self.psreadline_invite.close();
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
@@ -21263,6 +21629,7 @@ impl Runtime {
                 .as_ref()
                 .is_some_and(|menu| menu.prompt.is_some()),
             menu_or_dialog: self.dirty_gate.is_open()
+                || self.psreadline_invite.is_open()
                 || self.settings.is_open()
                 || self.file_menu.is_some()
                 || self.git_menu.is_some()
@@ -34039,6 +34406,17 @@ impl Runtime {
         self.note_preview_link_hover(free.then_some(position))?;
         // The overlay owns the pointer the way it owns the next click: no chrome
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
+        // The invitation takes the pointer outright, scrim included, in the
+        // order it is drawn: under the gate, over the dialog.
+        if let Some(layout) = self.psreadline_invite_layout() {
+            let over = restore::invite_hit(&layout, position.x, position.y);
+            if self.psreadline_invite.set_hover(Some(over)) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         if let Some(layout) = self.settings_layout() {
             let hover = settings::hit(&layout, self.settings_values(), position.x, position.y);
             if self.settings.set_hover(Some(hover)) && self.refresh_overlay() {
@@ -36606,6 +36984,18 @@ impl Runtime {
             }
             return Ok(());
         }
+        // The invitation, in the order it is drawn. Every press is swallowed,
+        // its own scrim included, and a press on a disabled Install lands on
+        // `Panel` and answers nothing.
+        if let (Some(layout), Some(position)) =
+            (self.psreadline_invite_layout(), self.pointer_position)
+        {
+            if state == ElementState::Pressed && button == MouseButton::Left {
+                let target = restore::invite_hit(&layout, position.x, position.y);
+                self.answer_psreadline_invite(target)?;
+            }
+            return Ok(());
+        }
         // A modal means MODAL. Ahead of the chrome router, so the caption run —
         // the gear included — is behind the scrim like everything else, and no
         // press reaches a divider, a seat, the terminal's selection or a peek.
@@ -38062,6 +38452,19 @@ impl Runtime {
             }
             return Ok(());
         }
+        // **The invitation owns the keyboard too**, in the order it is drawn.
+        // Esc declines, which is the answer that changes nothing on the machine
+        // — and every other key is swallowed rather than typed into a shell
+        // behind a scrim. Enter presses nothing on purpose: the affirmative here
+        // writes files, and a dialog that appeared while somebody was typing
+        // must not be able to install a module with the return key they were
+        // already reaching for.
+        if self.psreadline_invite.is_open() {
+            if !event.repeat && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                self.answer_psreadline_invite(restore::InviteTarget::Decline)?;
+            }
+            return Ok(());
+        }
         // **A modal owns the keyboard, and now has somewhere to put it.** Esc
         // unwinds one layer per press (§7.1.5: the open picker first, then the
         // dialog), Tab and the arrows walk the dialog's own focus order, and
@@ -38955,10 +39358,16 @@ impl Runtime {
         // keeps same-source old pixels only while the replacement is pending.
         let width_cells = nonzero_u32(self.grid.columns.get());
         let dpi_milli = self.renderer.metrics().dpi_milli();
+        let font_rev = self.renderer.font_revision();
         self.session.set_layout_key(LayoutKey {
             width_cells,
             dpi_milli,
-            font_rev: 1,
+            // The window's own count, not a constant. It was `1` for as long as
+            // nothing could change the face; the Terminal font row can, and a
+            // frozen revision here would leave every typeset band rastered for
+            // the previous cell — correct glyphs at the wrong size, from a cache
+            // whose key did not include the thing that moved.
+            font_rev,
             theme_rev: theme_revision(),
         });
     }
@@ -39696,6 +40105,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             return;
         }
         let now = Instant::now();
+        // Polled here rather than pushed from the probe's thread: raising a
+        // modal is a change to the window, and the window is this thread's.
+        if let Err(error) = runtime.raise_psreadline_invite_if_due() {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.advance_cursor_blink_if_due(now) {
             self.fail(event_loop, error);
             return;
