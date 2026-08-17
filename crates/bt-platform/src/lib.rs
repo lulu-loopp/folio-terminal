@@ -121,6 +121,27 @@ pub fn logical_px_for_dpi(logical_px: u32, dpi: u32) -> i32 {
     scaled.min(i32::MAX as u64) as i32
 }
 
+/// The offset a [`Compositor`] gives its GPU visual, in the physical pixels
+/// every rectangle in this program is already expressed in.
+///
+/// # A physical pixel is already a physical pixel
+///
+/// DirectComposition takes `f32` where the rest of this program carries `i32`,
+/// and the whole of the conversion is that cast — which is exactly the point of
+/// naming it. A visual's offset is in **physical** pixels (WebView2 spike Q4:
+/// measured on a 1.5x monitor and correct to the pixel), and every rectangle
+/// `bt-layout` produces is already physical, so the one mistake available here
+/// is to helpfully multiply by a scale factor on the way past. There is nothing
+/// to multiply by; there is a cast.
+///
+/// The cast is exact for every coordinate a desktop can produce: `f32` carries
+/// every integer up to 2^24, and a virtual desktop spanning four 8K monitors
+/// does not reach one ten-thousandth of that.
+#[must_use]
+pub fn composition_visual_offset(x: i32, y: i32) -> (f32, f32) {
+    (x as f32, y as f32)
+}
+
 /// The parameters `explorer.exe` is handed to **reveal** a path (user ruling,
 /// 2026-08-13).
 ///
@@ -166,12 +187,16 @@ mod windows_impl {
             atomic::{AtomicI32, Ordering},
         },
     };
-    use windows::core::{HRESULT, PCWSTR};
+    use windows::core::{HRESULT, IUnknown, Interface, PCWSTR};
 
     use windows::Win32::{
         Foundation::{
             COLORREF, ERROR_CANCELLED, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM,
             LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError, WIN32_ERROR, WPARAM,
+        },
+        Graphics::DirectComposition::{
+            DCompositionCreateDevice3, IDCompositionDesktopDevice, IDCompositionTarget,
+            IDCompositionVisual,
         },
         Graphics::Dwm::{
             DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -217,7 +242,7 @@ mod windows_impl {
 
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, WheelScrollAmount,
-        WindowRect, custom_frame_hit_test, logical_px_for_dpi,
+        WindowRect, composition_visual_offset, custom_frame_hit_test, logical_px_for_dpi,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -237,6 +262,188 @@ mod windows_impl {
     const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
     const CAPTION_BUTTON_COUNT: i32 = 4;
+
+    /// The DirectComposition visual tree one window presents through.
+    ///
+    /// # Why the picture stopped going straight to the HWND
+    ///
+    /// It is the same picture, drawn by the same renderer, and on screen it is
+    /// the same pixels. What changed is the door: wgpu's dx12 backend offers
+    /// [`PreMultiplied`][premultiplied] composite alpha **only** to a visual
+    /// target (`wgpu-hal-30.0.0/src/dx12/adapter.rs:1364` answers a
+    /// `WndHandle` target with `vec![Opaque]` and nothing else), and a window
+    /// that cannot be configured `PreMultiplied` can never have a hole cut in
+    /// it for a web preview to show through. So the ground moves first, alone,
+    /// with nothing above it: this slice changes where the swapchain hangs and
+    /// changes nothing about what is drawn into it. (WebView2 spike, 切片建议
+    /// item 1.)
+    ///
+    /// # The tree
+    ///
+    /// ```text
+    /// target  ← CreateTargetForHwnd(hwnd, topmost = true)
+    ///  └─ root                    ← IDCompositionTarget::SetRoot
+    ///      └─ gpu                 ← the swapchain wgpu hangs here
+    /// ```
+    ///
+    /// `topmost = true` is load-bearing rather than decorative: the whole tree
+    /// is composed **above** the window's own painting, so anywhere the visuals
+    /// do not cover shows the window class background brush
+    /// ([`install_window_class_background`]) and not the desktop behind it.
+    /// That is the same brush that has always been under the swapchain, so a
+    /// frame that has not been presented yet looks exactly as it did before.
+    ///
+    /// The web preview's own visual becomes a second child of `root` in a later
+    /// slice; the shape above is already the shape that takes it.
+    ///
+    /// # Failure is failure
+    ///
+    /// There is no fallback to an HWND swapchain. DirectComposition is present
+    /// on every Windows this product supports, and a second presentation path
+    /// kept alive "just in case" would be a second set of alpha semantics, a
+    /// second resize behaviour and a second thing to photograph at acceptance —
+    /// carried permanently against a failure mode that does not exist. If this
+    /// constructor fails, the window fails to open and says why.
+    ///
+    /// [premultiplied]: https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/ne-dxgi1_2-dxgi_alpha_mode
+    pub struct Compositor {
+        /// The one object that commits. See [`Compositor::commit`].
+        device: IDCompositionDesktopDevice,
+        /// Held for its lifetime and read by nothing: this handle **is** the
+        /// binding between the tree and the HWND, and dropping it unbinds it.
+        _target: IDCompositionTarget,
+        /// Likewise: the root is reached through the target from here on, and
+        /// the slice that adds a web visual will reach it through a method
+        /// rather than through this field.
+        _root: IDCompositionVisual,
+        gpu: IDCompositionVisual,
+    }
+
+    impl Compositor {
+        /// Build the tree for one window. The window must already exist.
+        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
+            let hwnd = HWND(hwnd.get() as *mut c_void);
+            // A null rendering device is the documented way to ask for a
+            // composition device that only arranges visuals: this one never
+            // rasterizes anything itself, because the only content it will ever
+            // hold is a swapchain wgpu made on its own D3D12 device.
+            let device: IDCompositionDesktopDevice =
+                unsafe { DCompositionCreateDevice3(None::<&IUnknown>) }
+                    .map_err(|error| compositor_failure("DCompositionCreateDevice3", &error))?;
+            let target = unsafe { device.CreateTargetForHwnd(hwnd, true) }.map_err(|error| {
+                compositor_failure("IDCompositionDesktopDevice::CreateTargetForHwnd", &error)
+            })?;
+            let root = Self::create_visual(&device, "root")?;
+            let gpu = Self::create_visual(&device, "gpu")?;
+            unsafe { root.AddVisual(&gpu, true, None::<&IDCompositionVisual>) }
+                .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual", &error))?;
+            unsafe { target.SetRoot(&root) }
+                .map_err(|error| compositor_failure("IDCompositionTarget::SetRoot", &error))?;
+            let compositor = Self {
+                device,
+                _target: target,
+                _root: root,
+                gpu,
+            };
+            // The tree exists on screen only once it is committed, and this one
+            // is empty until wgpu sets the swapchain on `gpu` — so what this
+            // commit publishes is "a tree with nothing in it", which looks
+            // exactly like the window did a moment ago. Committing here anyway
+            // keeps the invariant simple: at no point does this type hold
+            // uncommitted structure it is relying on someone else to publish.
+            compositor.commit()?;
+            Ok(compositor)
+        }
+
+        fn create_visual(
+            device: &IDCompositionDesktopDevice,
+            role: &str,
+        ) -> Result<IDCompositionVisual, String> {
+            let visual = unsafe { device.CreateVisual() }.map_err(|error| {
+                compositor_failure(
+                    &format!("IDCompositionDevice2::CreateVisual({role})"),
+                    &error,
+                )
+            })?;
+            // `CreateVisual` hands back an `IDCompositionVisual2`; the base
+            // interface is what carries the offset and what wgpu expects on the
+            // other side of `gpu_visual_ptr`, so the narrowing happens once,
+            // here, rather than at every call.
+            visual.cast::<IDCompositionVisual>().map_err(|error| {
+                compositor_failure(&format!("IDCompositionVisual2::cast({role})"), &error)
+            })
+        }
+
+        /// The raw `IDCompositionVisual` wgpu builds its surface upon.
+        ///
+        /// No ownership travels with it. wgpu increments the visual's COM
+        /// refcount when it takes the pointer and holds that reference for as
+        /// long as the surface lives (`wgpu-hal-30.0.0/src/dx12/mod.rs:551`), so
+        /// the surface cannot outlive its content even if this `Compositor` is
+        /// dropped first.
+        #[must_use]
+        pub fn gpu_visual_ptr(&self) -> *mut c_void {
+            self.gpu.as_raw()
+        }
+
+        /// Move the GPU visual inside the window, in **physical** pixels.
+        ///
+        /// The main window's is `(0, 0)` and stays there — the swapchain covers
+        /// the whole client area. The parameter exists because a window whose
+        /// swapchain is one child among several is the shape this tree was built
+        /// for, and because putting the conversion in one place is what stops
+        /// someone scaling a physical rectangle by a scale factor a second time
+        /// (see [`composition_visual_offset`]).
+        ///
+        /// Takes effect on the next [`Compositor::commit`], with that frame,
+        /// atomically — which is the whole reason the WebView2 spike measured
+        /// zero seam here and 4–10px of tearing on the child-window path.
+        pub fn set_gpu_offset(&self, x: i32, y: i32) -> Result<(), String> {
+            let (x, y) = composition_visual_offset(x, y);
+            unsafe { self.gpu.SetOffsetX2(x) }
+                .map_err(|error| compositor_failure("IDCompositionVisual::SetOffsetX", &error))?;
+            unsafe { self.gpu.SetOffsetY2(y) }
+                .map_err(|error| compositor_failure("IDCompositionVisual::SetOffsetY", &error))
+        }
+
+        /// Publish this frame. **Call once per presented frame.**
+        ///
+        /// # wgpu does not commit, and nothing else will
+        ///
+        /// When wgpu creates or resizes the swapchain it calls `SetContent` on
+        /// our visual and stops there — `wgpu-hal-30.0.0/src/dx12/mod.rs:1619`,
+        /// the `SurfaceTarget::Visual` arm, which is deliberately *not* the
+        /// `VisualFromWndHandle` arm right above it where wgpu owns the
+        /// composition device and does commit. Whoever owns the DirectComposition
+        /// device owns the commit, and that is this type. Miss it and the picture
+        /// does not move — not a dropped frame, not a stutter: nothing on screen
+        /// ever changes again, while every trace in the program reports frames
+        /// being presented normally.
+        ///
+        /// The app therefore calls this at exactly one place, immediately after
+        /// the one call that presents a frame — see `Runtime::present_seats_and_commit`
+        /// in `crates/bt-app/src/main.rs`, which is the only caller of
+        /// `Renderer::present_seats` in the program.
+        pub fn commit(&self) -> Result<(), String> {
+            unsafe { self.device.Commit() }
+                .map_err(|error| compositor_failure("IDCompositionDevice2::Commit", &error))
+        }
+    }
+
+    /// One shape for every DirectComposition refusal: the call that refused, in
+    /// its own name, and the `HRESULT` in both of the forms a search will be
+    /// run on — Windows' sentence and the hex code the documentation indexes.
+    ///
+    /// Pure, and separated from the call sites for the same reason every other
+    /// bridge in this crate separates its pure half: it is the part that can be
+    /// wrong without a window, and therefore the part a test can hold.
+    fn compositor_failure(step: &str, error: &windows::core::Error) -> String {
+        format!(
+            "{step} failed: {} (0x{:08X})",
+            error.message(),
+            error.code().0 as u32
+        )
+    }
 
     /// Keeps winit's ordinary overlapped-window styles (and therefore native
     /// snap, resize borders, minimize animation and system-menu semantics) while
@@ -1641,11 +1848,42 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, MathMenuState, names_a_program,
-            primary_language_id, retry_open_clipboard, validate_local_image_path,
+            CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, MathMenuState, compositor_failure,
+            names_a_program, primary_language_id, retry_open_clipboard, validate_local_image_path,
             validate_openable_path,
         };
         use std::path::{Path, PathBuf};
+
+        /// A DirectComposition refusal has to be readable by the person holding
+        /// the machine it refused on, and there is no fallback path to soften it
+        /// — the window simply does not open. So the message must carry three
+        /// things: which call refused, what Windows called it, and the hex code
+        /// the documentation is indexed by.
+        ///
+        /// MUTATIONS:
+        /// ① drop the `{step}` and the message no longer says which of the six
+        ///    DComp calls failed — every one of them reads "failed: ...";
+        /// ② format the code as `{:X}` of the `i32` and `E_OUTOFMEMORY` prints
+        ///    as `-2147024882`'s hex, which is not a string anyone can search.
+        #[test]
+        fn a_composition_failure_names_the_call_and_carries_the_hresult_both_ways() {
+            let error = windows::core::Error::from_hresult(super::HRESULT(0x8007_000E_u32 as i32));
+            let message =
+                compositor_failure("IDCompositionDesktopDevice::CreateTargetForHwnd", &error);
+            assert!(
+                message.starts_with("IDCompositionDesktopDevice::CreateTargetForHwnd failed: "),
+                "the call that refused leads: {message}"
+            );
+            assert!(
+                message.ends_with("(0x8007000E)"),
+                "and the searchable code closes it: {message}"
+            );
+            assert!(
+                message.len()
+                    > "IDCompositionDesktopDevice::CreateTargetForHwnd failed:  (0x8007000E)".len(),
+                "with Windows' own sentence in between: {message}"
+            );
+        }
 
         #[test]
         fn clipboard_open_retry_is_bounded_and_can_recover() {
@@ -1821,12 +2059,52 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    CustomWindowFrame, FolderPicker, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
+    Compositor, CustomWindowFrame, FolderPicker, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
     client_area_animation_enabled, clipboard_text, get_dpi_for_window, get_window_rect,
     get_work_area, install_window_class_background, is_window_minimized, open_local_file,
     open_local_path, request_window_close, reveal_in_explorer, set_clipboard_text,
     set_window_outer_rect, shell_execute, wheel_scroll_amount,
 };
+
+#[cfg(test)]
+mod composition_offset_tests {
+    use super::composition_visual_offset;
+
+    /// PIN (WebView2 spike Q4) — **a visual's offset is in physical pixels and
+    /// nothing multiplies it again.**
+    ///
+    /// The spike measured this on a 144-DPI monitor: the `DeviceRect` the layout
+    /// produced, handed over unchanged, landed on the pixel. The failure this
+    /// pins is the plausible one — someone reads "offset" and "DPI" in the same
+    /// paragraph and scales by `scale_factor` on the way through, which is
+    /// correct-looking at 96 DPI and puts the whole picture at double the offset
+    /// on the machine this product is developed on.
+    ///
+    /// MUTATIONS:
+    /// ① multiply by any constant other than one and the first two assertions
+    ///    go red at once;
+    /// ② round or clamp the input and the negative case goes red — a visual left
+    ///    of its parent's origin is an ordinary thing to ask for.
+    #[test]
+    fn a_visual_offset_is_the_physical_pixel_it_was_handed() {
+        assert_eq!(composition_visual_offset(0, 0), (0.0, 0.0));
+        assert_eq!(composition_visual_offset(786, 710), (786.0, 710.0));
+        assert_eq!(composition_visual_offset(-3780, -160), (-3780.0, -160.0));
+    }
+
+    /// And the cast is exact across every coordinate a desktop can name, which
+    /// is what makes the `i32` -> `f32` narrowing a rename rather than a
+    /// rounding. `f32` is exact to 2^24; the largest virtual desktop anyone can
+    /// assemble is three orders of magnitude short of that.
+    #[test]
+    fn the_cast_to_the_compositors_float_loses_nothing_a_desktop_can_produce() {
+        for pixel in [-131_072, -65_536, -1, 1, 65_536, 131_072] {
+            let (x, y) = composition_visual_offset(pixel, pixel);
+            assert_eq!(x as i32, pixel, "x survived the round trip");
+            assert_eq!(y as i32, pixel, "y survived the round trip");
+        }
+    }
+}
 
 #[cfg(test)]
 mod reveal_tests {

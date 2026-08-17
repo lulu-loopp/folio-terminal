@@ -243,6 +243,8 @@ let frame = bt_platform::CustomWindowFrame::install(hwnd)?;
 
 **状态：片 A1 落地 2ea208f**（2026-08-16；`GpuContext` / `WindowRenderer` / `Renderer` 门面 / `HeadlessRenderProbe` 折回两层 / 标题栏几何收成一处；设计记于 `docs/DESIGN.md` §2.2）。Q5 第 3 条（新窗必须走 `set_window_outer_rect`）只留了注，实现归开第二个窗的那一片。
 
+**状态：片 A2 落地**（2026-08-17）——**窗口改经 DirectComposition visual 呈现**，同时是 Web 预览块的片 1（`docs/spikes/spike-webview2.md` 切片建议 item 1）。`WindowRenderer` 的 surface 现在可以从 `IDCompositionVisual` 建（`bt_render::WindowTarget::{Hwnd, CompositionVisual}`，visual 必须配 `PreMultiplied`），`bt-platform` 新增 `Compositor` 持有 DComp device、target 与视觉树并每帧 commit（wgpu 对我们的 visual 只 `SetContent` 不 `Commit`）。本片对多窗的意义：**第二个窗要连带第二棵视觉树**——`Compositor::new(hwnd)` 是按 HWND 参数化的，和 Q5 里 `CustomWindowFrame::install(hwnd)` 一样一行，但它必须和那一行一起出现在开第二个窗的地方，否则第二个窗建不出 surface。设计记于 `docs/DESIGN.md` §2.3。
+
 **片 B —— `Runtime` 切成 App 层和 Window 层**
 
 `App { session_store, settings_store, recent, profile_programs, 主题/光标样式, workers(裁决后) }` + `WindowRuntime { window, renderer(WindowRenderer), custom_window_frame, math_context_menu, folder_picker, ime_system_caret, tabs, active_tab, 输入现场, 悬停, 手势, 窗级 UI, 几何 }`。

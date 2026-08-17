@@ -765,6 +765,22 @@ pub enum RenderError {
         context: wgpu::TextureFormat,
         surface: wgpu::TextureFormat,
     },
+    /// The adapter did not offer the one composite alpha mode this target has to
+    /// be configured with.
+    ///
+    /// An error and never a substitution, for the same reason as
+    /// [`RenderError::FormatMismatch`]: a composition-visual surface quietly
+    /// configured `Opaque` would present today's picture perfectly and would
+    /// have destroyed the property the whole slice exists to establish, with no
+    /// symptom until a web preview is asked to show through it.
+    #[error(
+        "a {target:?} surface must be configured {required:?}, and this adapter offered {offered:?}"
+    )]
+    AlphaModeUnavailable {
+        target: WindowTargetKind,
+        required: wgpu::CompositeAlphaMode,
+        offered: Vec<wgpu::CompositeAlphaMode>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2095,6 +2111,144 @@ pub struct GpuContext {
     init_timings: RendererInitTimings,
 }
 
+/// What a window's swapchain is built upon.
+///
+/// # Two doors, and the alpha they are offered is the difference
+///
+/// wgpu's dx12 backend answers a window-handle target with exactly one
+/// composite alpha mode — `vec![Opaque]`,
+/// `wgpu-hal-30.0.0/src/dx12/adapter.rs:1364` — and a
+/// **composition-visual** target with the whole set, `PreMultiplied` among them.
+/// That single line is why this enum exists: a surface that will one day have a
+/// hole cut in it for a web preview to show through has to be `PreMultiplied`,
+/// and no amount of configuring an HWND swapchain will make it so.
+///
+/// Both arms produce the same picture today. Nothing above this layer knows
+/// which door it came through except [`SurfaceAlphaReport`], which records the
+/// answer for the startup trace.
+pub enum WindowTarget {
+    /// The window itself — on Windows, its `HWND`. wgpu builds the swapchain
+    /// with `CreateSwapChainForHwnd` and the desktop compositor owns the
+    /// presentation entirely.
+    Hwnd(wgpu::SurfaceTarget<'static>),
+    /// An `IDCompositionVisual` the caller owns, as a raw COM pointer.
+    ///
+    /// wgpu takes a reference on it and holds that reference for the surface's
+    /// whole life, so the pointer only has to be a live visual **at the moment
+    /// the surface is created**. What the caller keeps owing afterwards is the
+    /// commit: see `bt_platform::Compositor::commit`.
+    CompositionVisual(*mut std::ffi::c_void),
+}
+
+/// Which of [`WindowTarget`]'s two doors a window came through, kept after the
+/// target itself has been consumed into a surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowTargetKind {
+    Hwnd,
+    CompositionVisual,
+}
+
+impl WindowTarget {
+    #[must_use]
+    fn kind(&self) -> WindowTargetKind {
+        match self {
+            Self::Hwnd(_) => WindowTargetKind::Hwnd,
+            Self::CompositionVisual(_) => WindowTargetKind::CompositionVisual,
+        }
+    }
+}
+
+/// What the adapter offered this surface and what it was configured with.
+///
+/// Kept so the startup trace can print both, exactly as the WebView2 spike
+/// printed them — the offered list is the evidence for the chosen mode, and
+/// reading the chosen mode alone would leave "why not the other one" unanswered
+/// on a machine where it goes wrong.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurfaceAlphaReport {
+    pub target: WindowTargetKind,
+    pub offered: Vec<wgpu::CompositeAlphaMode>,
+    pub chosen: wgpu::CompositeAlphaMode,
+}
+
+/// The composite alpha mode a target **must** be configured with.
+///
+/// Not a preference and not a search through a ranked list: each door has one
+/// right answer, and the surface that cannot give it is a surface this program
+/// will not present through. An HWND target is `Opaque` because that is the
+/// only thing dx12 offers it; a visual target is `PreMultiplied` because that
+/// is the whole reason for going through a visual at all, and configuring one
+/// `Opaque` would build the ground for the web slice and then pave over it.
+#[must_use]
+fn required_alpha_mode(target: WindowTargetKind) -> wgpu::CompositeAlphaMode {
+    match target {
+        WindowTargetKind::Hwnd => wgpu::CompositeAlphaMode::Opaque,
+        WindowTargetKind::CompositionVisual => wgpu::CompositeAlphaMode::PreMultiplied,
+    }
+}
+
+/// Assert the adapter offered what this target requires, and say what it did
+/// offer when it did not.
+///
+/// Pure, and separated from the surface for the reason every gate in this file
+/// is: a headless probe cannot make a composition visual, so the only way this
+/// decision can be held by a test is to hand it the list rather than a surface.
+fn choose_alpha_mode(
+    target: WindowTargetKind,
+    offered: &[wgpu::CompositeAlphaMode],
+) -> Result<wgpu::CompositeAlphaMode, RenderError> {
+    let required = required_alpha_mode(target);
+    if offered.contains(&required) {
+        Ok(required)
+    } else {
+        Err(RenderError::AlphaModeUnavailable {
+            target,
+            required,
+            offered: offered.to_vec(),
+        })
+    }
+}
+
+/// Build the surface one of [`WindowTarget`]'s two doors names.
+///
+/// # The one `unsafe` in this crate, and why it is here rather than in `bt-platform`
+///
+/// `bt-platform` is this workspace's deliberately narrow `unsafe` boundary and
+/// everything else inherits `unsafe_code = "deny"`. The exception is exactly one
+/// call, `Instance::create_surface_unsafe`, and it cannot be moved: what it
+/// produces is a `wgpu::Surface`, and `bt-platform` neither depends on wgpu nor
+/// should start to — it would drag the whole graphics stack into the crate whose
+/// entire point is being small enough to audit. The COM half of the arrangement
+/// *is* in `bt-platform`: `Compositor` makes the visual, owns it and commits it.
+/// What crosses the boundary is a raw pointer, and this is the one line that
+/// dereferences it.
+///
+/// # SAFETY
+///
+/// wgpu asks for a live `IDCompositionVisual` at the moment of the call and
+/// nothing more: it takes its own reference on the visual and holds it for the
+/// surface's whole life
+/// (`wgpu-hal-30.0.0/src/dx12/mod.rs:551`, `from_raw_borrowed(..).to_owned()`).
+/// The pointer arrives from `bt_platform::Compositor::gpu_visual_ptr`, which
+/// returns the raw pointer of a visual that `Compositor` owns; the caller holds
+/// that `Compositor` across this call. A null or dangling pointer is therefore
+/// not reachable from any caller in this program, and no caller outside it can
+/// construct a `WindowTarget::CompositionVisual` without reading the safety
+/// note on the variant.
+#[allow(unsafe_code)]
+fn create_surface(
+    instance: &wgpu::Instance,
+    target: WindowTarget,
+) -> Result<wgpu::Surface<'static>, RenderError> {
+    match target {
+        WindowTarget::Hwnd(target) => instance.create_surface(target),
+        WindowTarget::CompositionVisual(visual) => unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual))
+        },
+    }
+    .map_err(|error| RenderError::Wgpu(error.to_string()))
+}
+
 /// Where one [`WindowRenderer`] puts its frame.
 ///
 /// A swapchain image and an offscreen attachment differ in exactly two places —
@@ -2102,7 +2256,7 @@ pub struct GpuContext {
 /// compositor — and in nothing else: same format, same size discipline, same
 /// pass. Keeping them one type is what lets the headless probe be a real window
 /// renderer instead of a parallel copy of one.
-enum WindowTarget {
+enum FrameTarget {
     Surface(Box<wgpu::Surface<'static>>),
     Offscreen(wgpu::Texture),
 }
@@ -2116,7 +2270,7 @@ enum AcquiredFrame {
 }
 
 /// What acquiring this frame's attachment said, decided before anything is done
-/// about it so the borrow of [`WindowTarget`] ends first — the reconfigure a
+/// about it so the borrow of [`FrameTarget`] ends first — the reconfigure a
 /// suboptimal swapchain asks for needs `&mut self`.
 enum SurfaceAcquisition {
     Frame(wgpu::SurfaceTexture),
@@ -2134,8 +2288,12 @@ enum SurfaceAcquisition {
 /// size and two windows at 1.5x and 2.0x are two sets of pixel font sizes
 /// (spike Q3).
 pub struct WindowRenderer {
-    target: WindowTarget,
+    target: FrameTarget,
     config: wgpu::SurfaceConfiguration,
+    /// What the adapter offered this surface and what it was configured with,
+    /// or `None` for a window drawing into a texture — an offscreen attachment
+    /// is never composited and has no alpha mode to report.
+    alpha_report: Option<SurfaceAlphaReport>,
     configured_size: (u32, u32),
     /// The terminal seat's rectangle inside the swapchain (§4.1). Equal to the
     /// whole surface whenever the tree is a lone terminal leaf.
@@ -3110,16 +3268,14 @@ impl WindowRenderer {
     /// presented on this device.
     pub fn new(
         gpu: &mut GpuContext,
-        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        target: WindowTarget,
         width: u32,
         height: u32,
         scale_factor: f64,
     ) -> Result<Self, RenderError> {
-        let surface = gpu
-            .instance
-            .create_surface(target)
-            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
-        Self::from_surface(gpu, surface, width, height, scale_factor)
+        let kind = target.kind();
+        let surface = create_surface(&gpu.instance, target)?;
+        Self::from_surface(gpu, surface, kind, width, height, scale_factor)
     }
 
     /// The same window, when the caller already holds the surface — which the
@@ -3127,6 +3283,7 @@ impl WindowRenderer {
     fn from_surface(
         gpu: &mut GpuContext,
         surface: wgpu::Surface<'static>,
+        target: WindowTargetKind,
         width: u32,
         height: u32,
         scale_factor: f64,
@@ -3136,24 +3293,37 @@ impl WindowRenderer {
         let mut config = surface
             .get_default_config(&gpu.adapter, swapchain_size.0, swapchain_size.1)
             .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
-        config.format = surface
-            .get_capabilities(&gpu.adapter)
+        let capabilities = surface.get_capabilities(&gpu.adapter);
+        config.format = capabilities
             .formats
-            .into_iter()
+            .iter()
+            .copied()
             .find(wgpu::TextureFormat::is_srgb)
             .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
         gpu.accept_format(config.format)?;
+        // The gate, before the surface is configured rather than after: a
+        // visual target that cannot be `PreMultiplied` is not this program's
+        // window, and configuring it anyway would leave a swapchain on screen
+        // that looks right and is not.
+        config.alpha_mode = choose_alpha_mode(target, &capabilities.alpha_modes)?;
+        let alpha_report = SurfaceAlphaReport {
+            target,
+            offered: capabilities.alpha_modes.clone(),
+            chosen: config.alpha_mode,
+        };
         config.desired_maximum_frame_latency = 1;
         surface.configure(&gpu.device, &config);
         let surface_configure_time = phase_started.elapsed();
-        Self::assemble(
+        let mut window = Self::assemble(
             gpu,
-            WindowTarget::Surface(Box::new(surface)),
+            FrameTarget::Surface(Box::new(surface)),
             config,
             swapchain_size,
             scale_factor,
             surface_configure_time,
-        )
+        )?;
+        window.alpha_report = Some(alpha_report);
+        Ok(window)
     }
 
     /// A window renderer with a texture where its swapchain would be.
@@ -3200,7 +3370,7 @@ impl WindowRenderer {
         };
         Self::assemble(
             gpu,
-            WindowTarget::Offscreen(texture),
+            FrameTarget::Offscreen(texture),
             config,
             size,
             scale_factor,
@@ -3213,7 +3383,7 @@ impl WindowRenderer {
     /// produces, and the caches keyed by the pixel font size those metrics name.
     fn assemble(
         gpu: &mut GpuContext,
-        target: WindowTarget,
+        target: FrameTarget,
         config: wgpu::SurfaceConfiguration,
         configured_size: (u32, u32),
         scale_factor: f64,
@@ -3265,10 +3435,13 @@ impl WindowRenderer {
         // shaping caches count hits, misses and evictions whether or not the
         // trace is on, which is what `bt-replay` reports. A window on a
         // swapchain pays for that counting only when someone asked for it.
-        let measure_shaping = trace_perf || matches!(target, WindowTarget::Offscreen(_));
+        let measure_shaping = trace_perf || matches!(target, FrameTarget::Offscreen(_));
         Ok(Self {
             target,
             config,
+            // Filled in by `from_surface`, which is the only constructor with a
+            // compositor to answer to.
+            alpha_report: None,
             configured_size,
             seat: SeatViewport::whole(configured_size.0, configured_size.1),
             chrome_quads: Vec::new(),
@@ -3344,6 +3517,13 @@ impl WindowRenderer {
                 target,
             })
         })
+    }
+
+    /// What the adapter offered this window's surface and what it was
+    /// configured with. `None` for an offscreen target.
+    #[must_use]
+    pub fn alpha_report(&self) -> Option<&SurfaceAlphaReport> {
+        self.alpha_report.as_ref()
     }
 
     pub fn presentation_geometry(&self, gpu: &GpuContext) -> PresentationGeometry {
@@ -5248,8 +5428,8 @@ impl WindowRenderer {
     /// rest of the frame reads.
     fn configure_surface(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
         match &mut self.target {
-            WindowTarget::Surface(surface) => surface.configure(&gpu.device, &self.config),
-            WindowTarget::Offscreen(texture) => {
+            FrameTarget::Surface(surface) => surface.configure(&gpu.device, &self.config),
+            FrameTarget::Offscreen(texture) => {
                 *texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Folio offscreen window target"),
                     size: wgpu::Extent3d {
@@ -5272,11 +5452,11 @@ impl WindowRenderer {
 
     /// Ask the target for this frame's attachment, and decide nothing about it.
     ///
-    /// Split from acting on the answer so the borrow of [`WindowTarget`] ends
+    /// Split from acting on the answer so the borrow of [`FrameTarget`] ends
     /// before `&mut self` is needed again for a reconfigure.
     fn acquire(&self) -> SurfaceAcquisition {
         match &self.target {
-            WindowTarget::Surface(surface) => match surface.get_current_texture() {
+            FrameTarget::Surface(surface) => match surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(texture) => SurfaceAcquisition::Frame(texture),
                 wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                     SurfaceAcquisition::Suboptimal(texture)
@@ -5298,7 +5478,7 @@ impl WindowRenderer {
             // the same texture until a resize replaces it. Its view is taken
             // here, where the target is already in hand, so that the frame never
             // has to ask a second time which kind of target it is drawing into.
-            WindowTarget::Offscreen(texture) => {
+            FrameTarget::Offscreen(texture) => {
                 SurfaceAcquisition::Offscreen(texture.create_view(&Default::default()))
             }
         }
@@ -5873,18 +6053,25 @@ impl Renderer {
     /// be baked for it. A second window skips the first three steps entirely —
     /// [`WindowRenderer::new`] against the [`GpuContext`] this built.
     pub async fn new(
-        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        target: WindowTarget,
         width: u32,
         height: u32,
         scale_factor: f64,
     ) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance
-            .create_surface(target)
-            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let kind = target.kind();
+        let surface = create_surface(&instance, target)?;
         let mut gpu = GpuContext::bootstrap_for_surface(instance, &surface).await?;
-        let window = WindowRenderer::from_surface(&mut gpu, surface, width, height, scale_factor)?;
+        let window =
+            WindowRenderer::from_surface(&mut gpu, surface, kind, width, height, scale_factor)?;
         Ok(Self { gpu, window })
+    }
+
+    /// What the adapter offered this window's surface and what it was
+    /// configured with, for the startup trace.
+    #[must_use]
+    pub fn alpha_report(&self) -> Option<&SurfaceAlphaReport> {
+        self.window.alpha_report()
     }
 
     /// The two layers, borrowed apart.
@@ -13051,6 +13238,145 @@ mod tests {
             small_line, full_line,
             "the line box is the paragraph's, whatever the run is set at"
         );
+    }
+
+    /// The multiwindow block's slice A2 (= the web preview block's slice 1).
+    ///
+    /// None of it needs an adapter, and that is the point: a headless probe
+    /// cannot make a DirectComposition visual, so the decision that matters —
+    /// which alpha mode a target is configured with, and what happens when the
+    /// adapter will not give it — is a pure function taking the offered list,
+    /// and these tests hand it the two lists dx12 actually produces.
+    mod composition_ground {
+        use super::*;
+
+        /// The two lists, verbatim from `wgpu-hal-30.0.0/src/dx12/adapter.rs:1364`.
+        fn dx12_offers(target: WindowTargetKind) -> Vec<wgpu::CompositeAlphaMode> {
+            match target {
+                WindowTargetKind::Hwnd => vec![wgpu::CompositeAlphaMode::Opaque],
+                WindowTargetKind::CompositionVisual => vec![
+                    wgpu::CompositeAlphaMode::Auto,
+                    wgpu::CompositeAlphaMode::Inherit,
+                    wgpu::CompositeAlphaMode::Opaque,
+                    wgpu::CompositeAlphaMode::PostMultiplied,
+                    wgpu::CompositeAlphaMode::PreMultiplied,
+                ],
+            }
+        }
+
+        /// PIN (WebView2 spike, Q1) — **a visual target is `PreMultiplied` and
+        /// an HWND target is `Opaque`**, and the choice is made by which door
+        /// the window came through rather than by taking whatever is first in
+        /// the offered list.
+        ///
+        /// The visual target offers five modes and `Auto` is the one
+        /// `get_default_config` would leave in place. `Auto` presents today's
+        /// opaque picture perfectly well, which is exactly why this is pinned:
+        /// nothing on screen would ever say it had been picked, and the hole the
+        /// web slice cuts would simply come out black.
+        ///
+        /// MUTATIONS:
+        /// ① return the first offered mode instead of the required one and the
+        ///    visual case reads `Auto`;
+        /// ② give both doors the same answer and one of the two assertions goes
+        ///    red whichever answer is chosen.
+        #[test]
+        fn a_visual_is_configured_premultiplied_and_a_window_handle_opaque() {
+            assert_eq!(
+                choose_alpha_mode(
+                    WindowTargetKind::CompositionVisual,
+                    &dx12_offers(WindowTargetKind::CompositionVisual)
+                )
+                .expect("dx12 offers PreMultiplied to a visual target"),
+                wgpu::CompositeAlphaMode::PreMultiplied
+            );
+            assert_eq!(
+                choose_alpha_mode(WindowTargetKind::Hwnd, &dx12_offers(WindowTargetKind::Hwnd))
+                    .expect("dx12 offers Opaque to a window-handle target"),
+                wgpu::CompositeAlphaMode::Opaque
+            );
+        }
+
+        /// And an adapter that will not offer it is a refusal carrying what it
+        /// did offer — never a substitution.
+        ///
+        /// The shape of the mistake this forbids is the one the whole slice is
+        /// built to avoid: a composition-visual surface silently configured
+        /// `Opaque` looks correct in every screenshot and has quietly undone the
+        /// only property the slice was for.
+        #[test]
+        fn an_adapter_that_will_not_give_the_required_mode_is_an_error_and_not_a_substitution() {
+            let offered = [
+                wgpu::CompositeAlphaMode::Auto,
+                wgpu::CompositeAlphaMode::Opaque,
+            ];
+            match choose_alpha_mode(WindowTargetKind::CompositionVisual, &offered) {
+                Err(RenderError::AlphaModeUnavailable {
+                    target,
+                    required,
+                    offered,
+                }) => {
+                    assert_eq!(target, WindowTargetKind::CompositionVisual);
+                    assert_eq!(required, wgpu::CompositeAlphaMode::PreMultiplied);
+                    assert_eq!(
+                        offered,
+                        vec![
+                            wgpu::CompositeAlphaMode::Auto,
+                            wgpu::CompositeAlphaMode::Opaque
+                        ],
+                        "the refusal carries the evidence, because on the machine where \
+                         this fires nobody else can see the list"
+                    );
+                }
+                other => panic!("expected AlphaModeUnavailable, got {other:?}"),
+            }
+        }
+
+        /// Both doors exist and both are reachable from outside this crate.
+        ///
+        /// A compile-shaped test rather than a behavioural one: what could break
+        /// here is the plumbing — a variant that stops being public, or a
+        /// `SurfaceTarget` conversion that no longer accepts what the app holds
+        /// — and none of that can be caught by a running window on the machine
+        /// that already works.
+        #[test]
+        fn both_window_targets_can_be_named_and_told_apart() {
+            // Never handed to wgpu: what is under test is the discriminant, and
+            // `kind` reads it without touching what it points at.
+            let visual = WindowTarget::CompositionVisual(std::ptr::null_mut());
+            assert_eq!(visual.kind(), WindowTargetKind::CompositionVisual);
+            assert_eq!(
+                required_alpha_mode(visual.kind()),
+                wgpu::CompositeAlphaMode::PreMultiplied
+            );
+            // The `Hwnd` arm is exercised by its kind alone: constructing a
+            // `SurfaceTarget` needs a real window handle, and what is being
+            // pinned is that the two kinds are distinct and answer differently.
+            assert_ne!(WindowTargetKind::Hwnd, WindowTargetKind::CompositionVisual);
+            assert_eq!(
+                required_alpha_mode(WindowTargetKind::Hwnd),
+                wgpu::CompositeAlphaMode::Opaque
+            );
+        }
+
+        /// An offscreen window has no alpha mode to report, and says so rather
+        /// than inventing one — `bt-replay` draws into a texture that is never
+        /// composited with anything.
+        #[test]
+        fn a_window_drawing_into_a_texture_reports_no_alpha_mode() {
+            let mut gpu =
+                pollster::block_on(GpuContext::headless(wgpu::TextureFormat::Bgra8UnormSrgb))
+                    .expect("a headless device context on this machine's adapter");
+            let window = WindowRenderer::offscreen(
+                &mut gpu,
+                64,
+                64,
+                1.0,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+            )
+            .expect("an offscreen window");
+            assert!(window.alpha_report().is_none());
+        }
     }
 
     /// The multiwindow block's slice A1. Every test here needs a real adapter:

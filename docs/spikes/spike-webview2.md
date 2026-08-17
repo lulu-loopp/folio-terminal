@@ -238,6 +238,8 @@ BT_SPIKE_WV2 boot failed: start webview host: CreateCoreWebView2EnvironmentWithO
 按"能独立验收"切，从下往上：
 
 1. **渲染器改造（最大的一刀，且影响全局）**：`Renderer::new` 增加"从 `IDCompositionVisual` 建 surface"的路径，`alpha_mode` 随之可变；`bt-platform` 增加 `Compositor`（DComp device / target / 视觉树 / 每帧 commit）。验收：不带任何网页，主窗改走 DComp 路径后一切照旧、颜色无变化、resize 无回归。**这一步不碰 WebView2**，是纯地基。
+
+   **状态：已落地（2026-08-17，与多窗块 片 A2 同一片）。** `bt_platform::Compositor`（device / `CreateTargetForHwnd(hwnd, topmost=true)` / root + gpu 两个 visual / `set_gpu_offset` / `commit`）、`bt_render::WindowTarget::{Hwnd, CompositionVisual}` 与纯函数 `choose_alpha_mode`（visual 必须 `PreMultiplied`，给不出是 `RenderError::AlphaModeUnavailable`，不允许替代）、app 侧唯一的呈现漏斗 `Runtime::present_seats_and_commit`（present 的下一条语句就是 commit）。实机 `BT_STARTUP_TRACE` 复现了本 spike 的两行：`offered=[Auto, Inherit, Opaque, PostMultiplied, PreMultiplied]` / `chosen=PreMultiplied`。逐像素验收：六个画面窗口内部差异 0 像素、最大通道差 0；resize 二十步无黑带无撕裂。设计记于 `docs/DESIGN.md` §2.3。
 2. **座位挖洞**：让渲染路径知道"某个座位是外部内容，不落笔"。验收：预览座位处透出窗口类背景，浮窗/菜单/模态照常盖上去。这一步就能把 Q1 的结论在产品代码里复现。
 3. **WebView2 托管**：`bt-platform` 里加 `WebPreview`（环境 → composition controller → `SetRootVisualTarget` → `SetBounds` + visual offset，跟 `preview_body_rect`（`crates/bt-app/src/seats.rs:10045`）逐帧走）。验收：网页出现在座位内，动画中 `edge-scan.ps1` 零缝。
 4. **输入接线**：`KeyboardOwner`（`main.rs:4137`）加预览变体；`AcceleratorKeyPressed` 里查 `shortcuts::BINDINGS` 并对命中项 `SetHandled(true)`；鼠标在"预览座位且未被 overlay 遮挡"时转发 `SendMouseInput`（spike 里已有这个 hit-test）；点到别处时显式 `SetFocus` 抢回。验收：全局和弦在网页持有焦点时仍然生效；IME 在网页内可用且宿主 caret 不插手。

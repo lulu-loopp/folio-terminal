@@ -112,6 +112,28 @@
 
 **顺手收拢的两笔小账（spike Q5）：** ① 标题栏几何的两份副本收成一处——`bt-platform` 私有的 `TITLE_BAR_LOGICAL_PX`/`CAPTION_BUTTON_LOGICAL_PX` 删除，改由 `CustomWindowFrame::install(hwnd, CustomFrameGeometry { … })` 从 `bt-render` 的 `WINDOW_TITLE_BAR_LOGICAL_PX`/`WINDOW_CAPTION_BUTTON_LOGICAL_PX` 传入：**画的和点的必须是同一个数**，而这个数属于画它的那一侧。② 新窗必须走 `set_window_outer_rect` 重述几何（否则每开一次大一圈），本片只在建窗处留注，实现留给开第二个窗的那一片。
 
+### 2.3 窗口经由 DirectComposition visual 呈现（多窗块 片 A2 = Web 预览块 片 1，2026-08-17，已落地）
+
+**每个窗口的 swapchain 不再挂在 HWND 上，而是挂在一棵我们自己持有的 DirectComposition 视觉树上。** 依据是 WebView2 spike（`docs/spikes/spike-webview2.md` 结论段与切片建议 item 1）量到的一条硬事实：wgpu 的 dx12 后端**只对 visual 目标提供 `PreMultiplied`**，对 HWND 目标只给 `vec![Opaque]`（`wgpu-hal-30.0.0/src/dx12/adapter.rs:1364`）。座位处不落笔、让网页从洞里透上来，前提就是这一个 alpha 模式；它拿不到，后面整条预览块都无从谈起。所以地基先动，且**只动地基**：这一片不碰 WebView2，画的东西一个像素都不变。
+
+**树的形状**（`bt_platform::Compositor`，全树唯一的 unsafe 边界）：
+
+```
+target  ← CreateTargetForHwnd(hwnd, topmost = true)
+ └─ root                 ← IDCompositionTarget::SetRoot
+     └─ gpu              ← wgpu 的 swapchain（SetContent），偏移物理像素
+```
+
+`topmost = true` 有实际作用：整棵树composite 在窗口自身绘制**之上**，于是两个 visual 没覆盖到的地方露出的仍是窗口类背景刷（`install_window_class_background`）而不是桌面——与 swapchain 直接挂在 HWND 上时看到的是同一块底色。预览块自己的 visual 将来是 `root` 的第二个子节点，形状已经就位。
+
+**谁 commit：我们，每帧一次。** wgpu 建/改 swapchain 时只对我们的 visual 调 `SetContent`，**不调 `Commit`**（`wgpu-hal-30.0.0/src/dx12/mod.rs:1619` 的 `SurfaceTarget::Visual` 分支，与它上面自建设备的 `VisualFromWndHandle` 分支正好相反）。持有 DComp device 的人负责 commit，漏掉不是掉帧而是**画面永远不动**，同时所有 trace 照常报告"帧已呈现"。所以 app 侧只留一个漏斗：`Runtime::present_seats_and_commit`（`crates/bt-app/src/main.rs`）是全程序**唯一**调用 `Renderer::present_seats` 的地方，commit 就是它的下一条语句；`redraw` 与 `present_retained_picture` 两条路都从这里过，resize 的呈现是 `redraw` 而不是第三条路。
+
+**alpha 是断言不是偏好。** `bt_render::WindowTarget::{Hwnd, CompositionVisual}` 两扇门各自只有一个正确答案——HWND 是 `Opaque`（dx12 只给这一个），visual 是 `PreMultiplied`——由纯函数 `choose_alpha_mode` 判定，adapter 给不出就是 `RenderError::AlphaModeUnavailable { target, required, offered }`。**不允许替代**：一个被悄悄配成 `Opaque` 的 visual surface 今天的画面完全正确，而这一片存在的唯一理由已经被抹掉，且要等到预览块的洞画出来是黑的才会发现。清屏色仍是不透明（`a: 1.0`）——挖洞是下一片的事。`BT_STARTUP_TRACE` 打印 offered 与 chosen 两行，与 spike 的输出格式一致。
+
+**没有退回 HWND swapchain 的路。** DirectComposition 在本产品支持的每一版 Windows 上都在；留一条"以防万一"的旧路等于永久背着两套 alpha 语义、两套 resize 行为、两份要拍照验收的表面，去防一个不存在的失败模式。建不出 visual surface 就是开窗失败并说明原因。
+
+**验收是逐像素的。** 同一台机器、同一块桌面矩形、指针停在窗外、每个状态各拍五帧（用于剔除自己会动的光标），A2 与 main 的 release 版对比：start / dir / 文件列 / 设置 / 缩小 / 还原六个画面，窗口内部**差异像素 0、最大通道差 0**；只有窗口自己那圈两像素 DWM 边框与圆角在变，而它在**同一个构建**的两次运行之间同样在变（main×2 = 906px，A2×2 = 10652px），因为那里合成的是窗口背后的桌面。**白底也照拍**（`BT_BG=#FFFFFF`——预乘 alpha 出错时深色底看不出来、白底一眼看得出）：start / dir / 设置三帧内部同样 0 像素差，白到屏幕上正好是 (255,255,255)。resize 期二十步逐帧对比：两个构建都没有黑带、没有撕裂、没有未画到的带；main 有一帧是 DWM 把上一帧拉伸后的画面，A2 一帧都没有——它呈现的始终是刚好那么大的真帧。
+
 ## 3. 内容模型
 
 ### 3.1 内容生命周期事件表（v3.7：单一所有权版）

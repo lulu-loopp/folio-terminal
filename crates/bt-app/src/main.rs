@@ -3743,6 +3743,15 @@ struct Runtime {
     /// for one before they do anything.
     folder_pick: Option<FolderPick>,
     custom_window_frame: bt_platform::CustomWindowFrame,
+    /// The DirectComposition tree this window's picture is published through
+    /// (multiwindow slice A2 / web-preview slice 1).
+    ///
+    /// Owned here and not by the renderer because the renderer is a wgpu object
+    /// and this is a COM object, and because the one thing it is asked to do —
+    /// [`bt_platform::Compositor::commit`] — has to happen after every present
+    /// and wgpu will never do it. See [`Self::present_seats_and_commit`], which
+    /// is the only place in this program that presents a frame.
+    compositor: bt_platform::Compositor,
     window: Arc<Window>,
     startup_started: Instant,
     trace_startup: bool,
@@ -13700,13 +13709,30 @@ impl Runtime {
         let physical = window.inner_size();
         let startup_scale_factor = startup_dpi.authoritative_scale;
         let phase_started = Instant::now();
+        // The visual tree first, because the swapchain hangs off it. Its
+        // `topmost = true` target composes above this window's own painting, so
+        // anywhere the swapchain has not reached yet — before the first present,
+        // and in the band a resize opens up — shows the class background brush
+        // installed a few lines above, exactly as it did when the swapchain was
+        // the window's own.
+        let compositor = bt_platform::Compositor::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("open the window's DirectComposition visual tree")?;
         let mut renderer = pollster::block_on(Renderer::new(
-            Arc::clone(&window),
+            bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr()),
             physical.width,
             physical.height,
             startup_scale_factor,
         ))
         .context("initialize wgpu renderer")?;
+        if trace_startup && let Some(alpha) = renderer.alpha_report() {
+            // The spike printed exactly these two lines, and they are what a
+            // machine that goes wrong here will be asked for: the chosen mode
+            // alone leaves "why not the other one" unanswerable.
+            eprintln!("BT_STARTUP alpha target={:?}", alpha.target);
+            eprintln!("BT_STARTUP alpha offered={:?}", alpha.offered);
+            eprintln!("BT_STARTUP alpha chosen={:?}", alpha.chosen);
+        }
         ensure_metrics_match_authoritative_scale(
             renderer.metrics().scale_factor,
             startup_scale_factor,
@@ -13849,6 +13875,7 @@ impl Runtime {
             folder_picker,
             folder_pick: None,
             custom_window_frame,
+            compositor,
             window,
             startup_started,
             trace_startup,
@@ -38985,6 +39012,52 @@ impl Runtime {
         bodies
     }
 
+    /// **The one door a frame reaches the screen through.**
+    ///
+    /// # wgpu presents; the compositor publishes
+    ///
+    /// Since slice A2 this window's swapchain is the content of a
+    /// DirectComposition visual rather than the window's own surface, and wgpu's
+    /// dx12 backend calls `SetContent` on that visual without ever calling
+    /// `Commit` (`wgpu-hal-30.0.0/src/dx12/mod.rs:1619` — the `Visual` arm,
+    /// beside the `VisualFromWndHandle` arm where wgpu owns the composition
+    /// device and does commit). Whoever owns the DirectComposition device owns
+    /// the commit, and here that is [`Runtime::compositor`]. A present without
+    /// its commit is not a dropped frame — it is a screen that never changes
+    /// again while every trace in the program reports frames presenting
+    /// normally.
+    ///
+    /// So there is one funnel and it is grep-pinnable: **this is the only call
+    /// to `Renderer::present_seats` in `bt-app`**, and the commit is the
+    /// statement after it. Two callers reach it — [`Self::redraw`] with a newly
+    /// composed frame, and [`Self::present_retained_picture`] with the picture
+    /// already on the glass — and a resize present is `redraw` again, not a
+    /// third path.
+    ///
+    /// An associated function rather than a method because both callers hold a
+    /// borrow of some other part of `self` across the call: the retained-picture
+    /// path is presenting `self.last_presented_frame` itself.
+    ///
+    /// The commit is skipped when nothing was presented. `Skipped` and
+    /// `Reconfigure` both mean the swapchain handed back no image, so there is
+    /// nothing new for the compositor to publish and the frame is re-filed by
+    /// the caller.
+    fn present_seats_and_commit(
+        renderer: &mut Renderer,
+        compositor: &bt_platform::Compositor,
+        seat_frames: &[bt_render::SeatFrame<'_>],
+        trigger: FrameTrigger,
+    ) -> Result<PresentOutcome> {
+        let outcome = renderer.present_seats(seat_frames, trigger)?;
+        if matches!(outcome, PresentOutcome::Presented(_)) {
+            compositor
+                .commit()
+                .map_err(|error| anyhow!(error))
+                .context("publish the presented frame to the window's composition tree")?;
+        }
+        Ok(outcome)
+    }
+
     /// Put the picture that is already on the glass back on the glass, with
     /// whatever the renderer has been told since.
     ///
@@ -39055,10 +39128,13 @@ impl Runtime {
             occurred_at: now,
             source: FrameSource::Expose,
         };
-        match self
-            .renderer
-            .present_seats(&seat_frames, trigger)
-            .context("re-present the retained terminal picture")?
+        match Self::present_seats_and_commit(
+            &mut self.renderer,
+            &self.compositor,
+            &seat_frames,
+            trigger,
+        )
+        .context("re-present the retained terminal picture")?
         {
             PresentOutcome::Presented(_) => Ok(()),
             // The swapchain was not ready. The picture is unchanged and still
@@ -39185,10 +39261,13 @@ impl Runtime {
                 focused: false,
             });
         }
-        match self
-            .renderer
-            .present_seats(&seat_frames, trigger)
-            .context("render terminal frame")?
+        match Self::present_seats_and_commit(
+            &mut self.renderer,
+            &self.compositor,
+            &seat_frames,
+            trigger,
+        )
+        .context("render terminal frame")?
         {
             PresentOutcome::Presented(receipt) => {
                 // The glass now holds the newest picture anyone composed. This
