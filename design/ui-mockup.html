@@ -1643,6 +1643,22 @@
   .gopen { margin-left: auto; border: none; background: none; cursor: pointer;
     color: var(--ink3); font-size: 11px; font-weight: 500; padding: 3px 8px; border-radius: 6px; }
   .gopen:hover { background: var(--hover); color: var(--ink); }
+  /* read the repository again — the masthead's other always-there button, and
+     the docked page's answer to "something outside this window changed it".
+     It holds the trailing edge and the graph door sits inside it, which is the
+     order the commit graph's own toolbar keeps: refresh is the one control
+     that never leaves, so it is the one that is always in the same corner.
+     Square and marked rather than worded, for .gopen's own reason — a word in a
+     masthead beside a branch name reads as part of the name. */
+  .gref { border: none; background: none; cursor: pointer; color: var(--ink3);
+    padding: 3px; border-radius: 6px; display: flex; align-items: center; }
+  .gref svg { width: 13px; height: 13px; }
+  .gref:hover { background: var(--hover); color: var(--ink); }
+  /* while any of the three questions is out, the branch name goes quiet — not a
+     spinner: a reading that usually finishes inside a frame does not deserve a
+     second thing on the strip claiming attention, and a name that has gone
+     quiet says "this is what I last knew" without asking anybody to watch it */
+  .git-branch.reading > span:first-child { color: var(--ink3); }
   .gud { color: var(--ink2); font-size: 10.5px; font-weight: 500;
     border: 1px solid var(--border); border-radius: 9px; padding: 1px 7px; }
   .glabel { padding: 14px 2px 5px; font-size: 9.5px; letter-spacing: .09em;
@@ -5404,6 +5420,7 @@
         ${g.ahead ? `<span class="gud" title="${g.ahead} commits to push">↑ ${g.ahead}</span>` : ""}
         ${g.behind ? `<span class="gud" title="${g.behind} commits to pull">↓ ${g.behind}</span>` : ""}
         <button class="gopen" data-root="${escAttr(leaf.files.root)}" title="Open the full commit graph">Graph</button>
+        <button class="gref" data-root="${escAttr(leaf.files.root)}" title="Read the repository again"><svg><use href="#i-refresh"/></svg></button>
       </div>
       <div class="glabel">Branches (${g.branches.length})</div>
       <div class="gsec">
@@ -8511,6 +8528,18 @@
     }
     const gop = e.target.closest(".gopen");
     if (gop) { openGitGraph(gop.dataset.root); return; }
+    /* the native page re-asks status/refs/log — three questions, each once —
+       and keeps the answers it has on screen until the new ones land; the head
+       goes quiet meanwhile and the rows never blank. Here there is one static
+       repository to re-read, so the press stands the head down for the length of
+       a plausible read and then repaints: what the mock-up is fixing is where the
+       button lives, what it says, and what the page does while it waits. */
+    const gref = e.target.closest(".gref");
+    if (gref) {
+      const head = gref.closest(".git-branch");
+      if (head) { head.classList.add("reading"); setTimeout(render, 400); }
+      return;
+    }
     const ggrow = e.target.closest(".ggrow");
     if (ggrow) {
       const pv = leavesOf(activeTab().tree).filter(isPreviewLeaf)

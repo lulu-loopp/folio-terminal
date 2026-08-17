@@ -270,8 +270,9 @@ mod windows_impl {
 
     use windows::Win32::{
         Foundation::{
-            COLORREF, ERROR_CANCELLED, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM,
-            LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError, WIN32_ERROR, WPARAM,
+            COLORREF, CloseHandle, ERROR_CANCELLED, GetLastError, GlobalFree, HANDLE, HGLOBAL,
+            HWND, LPARAM, LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError, WAIT_EVENT,
+            WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
         },
         Globalization::{GetUserDefaultUILanguage, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME},
         Graphics::DirectComposition::{
@@ -291,6 +292,13 @@ mod windows_impl {
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
             MONITORINFO, MonitorFromWindow,
         },
+        Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
+            FILE_NOTIFY_CHANGE, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
+            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            ReadDirectoryChangesW,
+        },
         System::{
             Com::{
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
@@ -300,7 +308,9 @@ mod windows_impl {
                 CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
                 OpenClipboard, SetClipboardData,
             },
+            IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
+            Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects},
         },
         UI::{
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
@@ -2385,17 +2395,389 @@ mod windows_impl {
             assert!(validate_openable_path(Path::new("C:\\notes\\bad\0.txt")).is_err());
         }
     }
+
+    /// **A subscription to one directory tree's change notifications.**
+    ///
+    /// The kernel's own `ReadDirectoryChangesW`, held open by a thread of its
+    /// own: the filesystem tells us when something under `path` moved, and
+    /// nothing here ever asks. That distinction is the whole reason this type is
+    /// allowed to exist under DESIGN §7.1.3g ② (R31) — a repository is not read
+    /// because time passed, and a change notification is not time passing.
+    ///
+    /// **It says only that something changed.** The `FILE_NOTIFY_INFORMATION`
+    /// records the kernel writes are read for nothing at all — not the names, not
+    /// the actions — because the caller's next move is to ask `git status`, which
+    /// is the one thing that can say what a change *means*. Parsing them here
+    /// would be a second, worse answer to a question this crate cannot answer:
+    /// whether a write to `target\debug\foo.pdb` matters is a question about a
+    /// `.gitignore`, and a watcher that tried to decide it would be wrong on
+    /// somebody's repository and silent about it. A zero-length completion —
+    /// the kernel's way of saying the buffer overflowed and it has stopped
+    /// keeping track — is therefore not a special case but the ordinary one:
+    /// *something changed*, which is all any of them ever say.
+    ///
+    /// **Dropping it cancels.** The watcher thread waits on the directory's
+    /// completion and on a stop event at once, so `drop` is a `SetEvent` and a
+    /// join rather than a flag the thread notices on its next notification —
+    /// which for a directory nothing is writing to would be never.
+    pub struct DirWatch {
+        dir: SendHandle,
+        stop: SendHandle,
+        change: SendHandle,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    /// A kernel handle on its way to the thread that will use it.
+    ///
+    /// A raw `HANDLE` is not `Send` because it is a pointer-shaped value and the
+    /// compiler cannot know what it points at. These three are process-wide
+    /// kernel objects with exactly one user apiece — the watcher thread — and
+    /// [`DirWatch::drop`] joins that thread before closing any of them, so there
+    /// is no moment at which two threads hold one of these and no moment at which
+    /// a closed handle is still reachable.
+    #[derive(Clone, Copy)]
+    struct SendHandle(HANDLE);
+
+    // SAFETY: see the type's own note. The handle is created on the calling
+    // thread, used only by the watcher thread, and closed by the calling thread
+    // after that thread has been joined.
+    unsafe impl Send for SendHandle {}
+
+    /// 64 KiB, the largest buffer the kernel will fill for a *network* directory
+    /// and a comfortable one for a local tree.
+    ///
+    /// A bigger buffer buys fewer overflows and nothing else, and an overflow is
+    /// not a failure here: it is the same word — *something changed* — arriving
+    /// with less detail than usual, and this watcher reads no detail. So the size
+    /// is chosen to be unremarkable rather than tuned.
+    const DIR_WATCH_BUFFER_BYTES: usize = 64 * 1024;
+
+    /// Everything that can move under a working tree and mean something to git:
+    /// files and folders appearing, disappearing or being renamed, contents
+    /// written, sizes changing, and attributes (which is how a read-only flag or
+    /// a hidden bit arrives).
+    ///
+    /// Deliberately **not** `LAST_ACCESS`: reading a file changes nothing git can
+    /// see, and a grep across the tree would otherwise be a storm of notifications
+    /// about nothing.
+    const DIR_WATCH_FILTER: FILE_NOTIFY_CHANGE = FILE_NOTIFY_CHANGE(
+        FILE_NOTIFY_CHANGE_FILE_NAME.0
+            | FILE_NOTIFY_CHANGE_DIR_NAME.0
+            | FILE_NOTIFY_CHANGE_LAST_WRITE.0
+            | FILE_NOTIFY_CHANGE_SIZE.0
+            | FILE_NOTIFY_CHANGE_ATTRIBUTES.0,
+    );
+
+    impl DirWatch {
+        /// Start watching `path` and everything under it.
+        ///
+        /// `wake` is called on the watcher thread, once per notification, and is
+        /// expected to do nothing but record the news and nudge whatever loop is
+        /// going to act on it. Anything slower belongs on the other side of that
+        /// nudge: this thread is the only thing standing between the kernel's
+        /// buffer and an overflow.
+        ///
+        /// **Failure is quiet and final.** A path on a network share, a `\\wsl$`
+        /// mount, a directory the process may not open — all of them come back as
+        /// an error here and the caller's answer is to have no watcher for that
+        /// repository, not to try again in a moment. Retrying is a timer, and a
+        /// timer is the thing this whole mechanism exists to avoid.
+        pub fn start(
+            path: &Path,
+            wake: impl Fn() + Send + 'static,
+        ) -> Result<Self, std::io::Error> {
+            let mut units = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+            if units.contains(&0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "watched path contains an embedded NUL",
+                ));
+            }
+            units.push(0);
+            // `FILE_LIST_DIRECTORY` is the access right `ReadDirectoryChangesW`
+            // needs, `BACKUP_SEMANTICS` is what lets `CreateFileW` open a
+            // directory at all, and `OVERLAPPED` is what lets the read be
+            // cancelled — without it the thread would block in the kernel with
+            // no way out but a change that may never come.
+            //
+            // All three shares are granted because this handle must not be the
+            // reason somebody else cannot rename or delete a file in their own
+            // working tree.
+            let dir = unsafe {
+                CreateFileW(
+                    PCWSTR(units.as_ptr()),
+                    FILE_LIST_DIRECTORY.0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                    None,
+                )
+            }
+            .map_err(win32_io_error)?;
+            // Manual-reset, both of them. The stop event has to stay signalled
+            // once it is set — the thread may be anywhere between two waits when
+            // `drop` fires — and the completion event is reset by hand before
+            // each read so that a stale signal cannot be mistaken for an answer
+            // to the read that has not been issued yet.
+            let change = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(handle) => handle,
+                Err(error) => {
+                    unsafe { close(dir) };
+                    return Err(win32_io_error(error));
+                }
+            };
+            let stop = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(handle) => handle,
+                Err(error) => {
+                    unsafe { close(dir) };
+                    unsafe { close(change) };
+                    return Err(win32_io_error(error));
+                }
+            };
+            let (dir, change, stop) = (SendHandle(dir), SendHandle(change), SendHandle(stop));
+            let thread = std::thread::Builder::new()
+                .name("bt-dir-watch".to_owned())
+                .spawn(move || watch_loop(dir, change, stop, wake));
+            match thread {
+                Ok(thread) => Ok(Self {
+                    dir,
+                    stop,
+                    change,
+                    thread: Some(thread),
+                }),
+                Err(error) => {
+                    unsafe { close(dir.0) };
+                    unsafe { close(change.0) };
+                    unsafe { close(stop.0) };
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    impl Drop for DirWatch {
+        fn drop(&mut self) {
+            // The thread cancels its own read: the stop event is one of the two
+            // things it is waiting on, so setting it is enough, and a
+            // `CancelIoEx` from here would be a second thread reaching into an
+            // operation whose `OVERLAPPED` lives on that thread's stack.
+            unsafe {
+                let _ = SetEvent(self.stop.0);
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            // Only now: a handle closed while the thread still held it would be a
+            // handle reused for something else by the time it got round to using
+            // it, which is the one Win32 bug that reads as a different subsystem
+            // misbehaving.
+            unsafe {
+                close(self.dir.0);
+                close(self.change.0);
+                close(self.stop.0);
+            }
+        }
+    }
+
+    /// The watcher thread: issue a read, wait for it or for the stop, repeat.
+    fn watch_loop(dir: SendHandle, change: SendHandle, stop: SendHandle, wake: impl Fn()) {
+        // `u32` and not `u8`: the kernel writes `FILE_NOTIFY_INFORMATION` records
+        // into this and requires DWORD alignment, which a `Vec<u8>` does not
+        // promise. Nothing reads the records — see [`DirWatch`] — but the
+        // alignment is a precondition of the call, not of the parsing.
+        let mut buffer = vec![0u32; DIR_WATCH_BUFFER_BYTES / std::mem::size_of::<u32>()];
+        // Declared once, outside the loop, so that its address is fixed for as
+        // long as the kernel may be writing to it — and written afresh at the top
+        // of every pass, because the kernel leaves its own status in the fields a
+        // second read would otherwise inherit. The read is always awaited or
+        // cancelled before the next iteration reuses it.
+        let mut overlapped;
+        loop {
+            overlapped = OVERLAPPED {
+                hEvent: change.0,
+                ..OVERLAPPED::default()
+            };
+            unsafe {
+                if ResetEvent(change.0).is_err() {
+                    return;
+                }
+            }
+            let issued = unsafe {
+                ReadDirectoryChangesW(
+                    dir.0,
+                    buffer.as_mut_ptr().cast::<std::ffi::c_void>(),
+                    u32::try_from(DIR_WATCH_BUFFER_BYTES).unwrap_or(u32::MAX),
+                    // Recursively. A repository is a tree and a commit touches
+                    // any depth of it.
+                    true,
+                    DIR_WATCH_FILTER,
+                    None,
+                    Some(std::ptr::from_mut(&mut overlapped)),
+                    None,
+                )
+            };
+            if issued.is_err() {
+                // The directory went away, or the handle did. There is nothing
+                // left to watch and nothing to report: the caller keeps whatever
+                // it last knew, and the page's own refresh is still there.
+                return;
+            }
+            let signalled = unsafe { WaitForMultipleObjects(&[stop.0, change.0], false, INFINITE) };
+            if signalled != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                // Stopped, or the wait itself failed. Either way this thread is
+                // finished — but the read it issued is still outstanding, and the
+                // `OVERLAPPED` it is writing into is about to go out of scope, so
+                // it is cancelled and *waited for* before that happens.
+                unsafe {
+                    let _ = CancelIoEx(dir.0, Some(std::ptr::from_ref(&overlapped)));
+                    let mut ignored = 0u32;
+                    let _ = GetOverlappedResult(dir.0, &overlapped, &mut ignored, true);
+                }
+                return;
+            }
+            let mut written = 0u32;
+            let completed = unsafe { GetOverlappedResult(dir.0, &overlapped, &mut written, false) };
+            if completed.is_err() {
+                return;
+            }
+            // `written == 0` is the kernel saying the buffer overflowed and it
+            // has stopped keeping track of what changed. It is reported exactly
+            // like every other notification, because it carries exactly the same
+            // information this watcher uses: something changed.
+            wake();
+        }
+    }
+
+    /// Close a handle, ignoring the failure that can only mean it was not one.
+    unsafe fn close(handle: HANDLE) {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+    }
+
+    fn win32_io_error(error: windows::core::Error) -> std::io::Error {
+        std::io::Error::from_raw_os_error(error.code().0)
+    }
 }
 
 #[cfg(windows)]
 pub use windows_impl::{
-    Compositor, CustomWindowFrame, FolderPicker, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
-    client_area_animation_enabled, clipboard_text, documents_directory, get_dpi_for_window,
-    get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
-    monospace_font_families, open_local_file, open_local_path, os_ui_language,
+    Compositor, CustomWindowFrame, DirWatch, FolderPicker, ImeSystemCaret, MathContextMenu,
+    PROGRAM_REFUSED, client_area_animation_enabled, clipboard_text, documents_directory,
+    get_dpi_for_window, get_window_rect, get_work_area, install_window_class_background,
+    is_window_minimized, monospace_font_families, open_local_file, open_local_path, os_ui_language,
     request_window_close, reveal_in_explorer, set_clipboard_text, set_window_outer_rect,
     shell_execute, wheel_scroll_amount,
 };
+
+/// The one test in this crate that talks to the kernel about a real directory.
+///
+/// It is here rather than in `bt-app` because the thing under test is the
+/// subscription itself: that `ReadDirectoryChangesW` reaches a callback at all,
+/// and that dropping the handle stops it. Everything above this — when a change
+/// becomes a re-read, and of what — is arithmetic and is tested where it lives
+/// (`bt_app::git_watch`).
+#[cfg(all(test, windows))]
+mod dir_watch_tests {
+    use super::DirWatch;
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    /// Generous, because this is a claim about *eventually* and the machine
+    /// running it may be building something. A notification for a local
+    /// directory arrives in single-digit milliseconds; five seconds is the
+    /// difference between "slow" and "never", which is the only difference this
+    /// test is about.
+    const ARRIVES_WITHIN: Duration = Duration::from_secs(5);
+    /// And the other way round, where the claim is "nothing at all": long enough
+    /// that a notification which was going to come would have.
+    const SILENCE_FOR: Duration = Duration::from_millis(600);
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "bt-dir-watch-{}-{name}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("make a scratch directory");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// PIN — **a file appearing under a watched tree reaches the callback, and a
+    /// dropped watch stops reaching it.**
+    ///
+    /// The two halves are one test because the second is only meaningful after
+    /// the first: "no events arrived" is what a watcher that never worked also
+    /// reports. Proving the wake-up first is what makes the silence afterwards
+    /// evidence of a cancellation rather than of a mistake in the setup.
+    #[test]
+    fn a_watched_directory_reports_a_change_and_stops_when_dropped() {
+        let scratch = Scratch::new("basic");
+        let (tx, rx) = mpsc::channel::<()>();
+        let watch = DirWatch::start(&scratch.0, move || {
+            let _ = tx.send(());
+        })
+        .expect("watch a directory this process just made");
+
+        std::fs::write(scratch.0.join("appeared.txt"), b"hello").expect("write a file");
+        rx.recv_timeout(ARRIVES_WITHIN)
+            .expect("the kernel reports a file appearing under a watched tree");
+
+        // Depth: a repository is a tree, and a commit touches any depth of it.
+        while rx.try_recv().is_ok() {}
+        std::fs::create_dir_all(scratch.0.join("a").join("b")).expect("make a subtree");
+        std::fs::write(scratch.0.join("a").join("b").join("deep.txt"), b"hi").expect("write deep");
+        rx.recv_timeout(ARRIVES_WITHIN)
+            .expect("and reports one several directories down: the watch is recursive");
+
+        drop(watch);
+        // Drain whatever was already in flight when the watch was dropped — the
+        // claim is about what happens *after* the cancellation, not about a
+        // notification that had already been posted.
+        while rx.try_recv().is_ok() {}
+        std::fs::write(scratch.0.join("after.txt"), b"and this").expect("write after the drop");
+        let deadline = Instant::now() + SILENCE_FOR;
+        while Instant::now() < deadline {
+            assert!(
+                rx.try_recv().is_err(),
+                "a dropped watch has stopped: nothing written afterwards reaches it"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// PIN — **a path that cannot be watched fails quietly and finally.**
+    ///
+    /// The caller's answer to this is to have no watcher for that repository,
+    /// which is a state the rest of the machinery is built to live in: the
+    /// window-focus trigger and the page's own refresh button are what cover a
+    /// network share. What it must never be is an error a user is shown or a
+    /// thing that is retried, because retrying on a schedule is the polling this
+    /// whole mechanism exists to avoid.
+    #[test]
+    fn a_directory_that_is_not_there_declines_to_be_watched() {
+        let missing = std::env::temp_dir().join("bt-dir-watch-no-such-directory-ever");
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(
+            DirWatch::start(&missing, || {}).is_err(),
+            "nothing to subscribe to, and no thread left running to say so later"
+        );
+    }
+}
 
 #[cfg(test)]
 mod monospace_family_tests {

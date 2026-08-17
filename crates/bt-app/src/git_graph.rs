@@ -1432,7 +1432,9 @@ impl GraphTool {
             Self::Filter => "Which branches this graph is of",
             Self::Search => "Search commits by message, author or hash",
             Self::SearchClear => "Clear the search",
-            Self::Refresh => "Read the repository again",
+            // The panel's masthead button says the same thing, from the same
+            // constant — see [`crate::git_panel::GIT_REFRESH_TOOLTIP`].
+            Self::Refresh => crate::git_panel::GIT_REFRESH_TOOLTIP,
         }
     }
 }
@@ -1806,16 +1808,11 @@ pub fn build(
         selected,
         ..
     } = look;
-    // **Anything at all in flight makes the head quiet** (T5). Written as "is
-    // any of the three still coming" rather than as a flag the refresh button
-    // sets, because the same three questions are re-asked by a checkout, by a
-    // filter change and by the first frame of a graph — and a reader watching a
-    // head that only went quiet when *they* pressed refresh would be being told
-    // the other three had already finished.
-    let busy = state.cache.rereading()
-        || matches!(state.cache.log(), crate::git::GitSlot::Pending)
-        || matches!(state.cache.refs(), crate::git::GitSlot::Pending)
-        || matches!(state.cache.status(), crate::git::GitSlot::Pending);
+    // **Anything at all in flight makes the head quiet** (T5) — the cache's own
+    // sentence, which the panel's masthead now reads too. It lived here as four
+    // lines until the docked page grew a refresh of its own and needed exactly
+    // the same answer; see [`crate::git::GitCache::reading`].
+    let busy = state.cache.reading();
     let mut content = GraphContent {
         scroll_px,
         selected,

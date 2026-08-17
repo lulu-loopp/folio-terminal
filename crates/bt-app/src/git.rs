@@ -2739,9 +2739,15 @@ impl<T> GitSlot<T> {
 /// to clone, and folding it in would quietly copy a repository's history every
 /// time somebody asked where a column is rooted.
 ///
-/// **When it goes stale (R31).** Two moments and no others: the column is
-/// re-rooted somewhere else, or something asks for a refresh. There is no timer
-/// here and no watcher — a repository is not read because time passed.
+/// **When it goes stale (R31).** Three moments and no others: the column is
+/// re-rooted somewhere else, one of this window's own write verbs came back, or
+/// **something happened that could have changed it** — a shell in this tab
+/// finishing a command inside this repository ([`should_reread`]), the kernel
+/// reporting a change under it ([`crate::git_watch`]), the window coming back to
+/// the foreground, or a press on a refresh button. There is no timer here and no
+/// polling: a repository is not read because time passed. The watcher is not a
+/// counter-example and the distinction is the whole of why it is allowed — it
+/// speaks only when the filesystem does.
 #[derive(Clone, Debug, Default)]
 pub struct GitCache {
     /// The folder this cache is about — the column's root, not the repository's.
@@ -2849,6 +2855,65 @@ pub enum GitRole {
     Graph,
 }
 
+/// **R31's third invalidation moment, as one predicate** — should the repository
+/// a surface is showing be read again, because a shell standing inside it just
+/// finished a command?
+///
+/// Two conditions, and the second is not the first restated. A surface nobody is
+/// looking at is never read, whatever happens in any shell: that is the same gate
+/// [`crate::columns_wanting_git`] keeps for the first reading, and it is kept
+/// again here because "something changed" is not on its own a reason to spend a
+/// subprocess. And the command has to have happened *in* this repository — a
+/// `cargo build` in an unrelated tree is not news about this one.
+///
+/// `pane_cwd` is an `Option` because it genuinely is one: a shell that has never
+/// reported over OSC 7 has no folder this window knows about, and the honest
+/// answer for it is *no* rather than a guess at where it might be standing.
+///
+/// A free function taking the facts rather than a method, for
+/// [`crate::columns_wanting_git`]'s reason exactly: the promise is about what is
+/// *not* read, and a promise that can only be checked by starting a window is a
+/// promise nothing checks.
+#[must_use]
+pub fn should_reread(root: &Path, pane_cwd: Option<&Path>, page_showing: bool) -> bool {
+    page_showing && pane_cwd.is_some_and(|cwd| stands_inside(root, cwd))
+}
+
+/// Is `path` the folder `root`, or somewhere under it?
+///
+/// **Component by component, never by string prefix.** `C:\a\bc` starts with the
+/// characters of `C:\a\b` and is not inside it, and a trigger that read it as one
+/// would re-read a repository every time a command finished in the directory
+/// *next door* to it — a wrong answer that only ever shows up on somebody else's
+/// disk. Case-insensitively on Windows, on [`same_step`]'s own reasoning: `d:\repo`
+/// and `D:\repo` are one place.
+#[must_use]
+pub fn stands_inside(root: &Path, path: &Path) -> bool {
+    let mut steps = path.components();
+    for want in root.components() {
+        match steps.next() {
+            Some(have) if same_step(want.as_os_str(), have.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Whether two path components name the same thing.
+///
+/// The one place this platform's case rule is written down for a path, so a tree
+/// that drew no badges and a trigger that never fired cannot disagree about
+/// whether `D:` and `d:` are the same drive.
+#[must_use]
+pub fn same_step(want: &std::ffi::OsStr, have: &std::ffi::OsStr) -> bool {
+    if cfg!(windows) {
+        want.to_string_lossy()
+            .eq_ignore_ascii_case(&have.to_string_lossy())
+    } else {
+        want == have
+    }
+}
+
 impl GitCache {
     /// A cache for a repository whose root is already known.
     ///
@@ -2938,10 +3003,54 @@ impl GitCache {
         questions
     }
 
+    /// **The same three questions, unless the last set is still owed** — what an
+    /// invalidation moment nobody asked for out loud gets (R31's third moment).
+    ///
+    /// [`Self::begin_reread`]'s guarded twin, and the guard is the whole
+    /// difference. A press on a refresh button is a person saying *now*, and it
+    /// is answered every time it is made. A command ending and a window coming
+    /// back are not gestures at this page at all: they arrive in bursts — ten
+    /// commands pasted into a shell end ten times — and a burst that started ten
+    /// re-reads would spend thirty subprocesses to learn what the first three
+    /// were already on their way to say. So while anything is still owed this
+    /// asks nothing and answers with an empty list, which is also how a caller
+    /// knows there is nothing to tell the worker about.
+    ///
+    /// The predicate is [`Self::reading`] and not the re-read counter alone: the
+    /// very first reading of a page counts too. A `Pending` status is a question
+    /// already out for exactly the answer this would ask for again.
+    pub fn begin_reread_unless_owed(&mut self) -> Vec<GitQuestion> {
+        if self.reading() {
+            return Vec::new();
+        }
+        self.begin_reread()
+    }
+
     /// Whether a re-read is still out (T5) — what draws the head quietly.
     #[must_use]
     pub fn rereading(&self) -> bool {
         self.rereading > 0
+    }
+
+    /// **Is anything about this repository still on its way?** (T5)
+    ///
+    /// "Is any of the three still coming" rather than "was refresh pressed",
+    /// because the same three questions are asked by a checkout, by a filter
+    /// change, by the first frame of a page and by R31's third moment — and a
+    /// reader watching a head that only went quiet when *they* pressed refresh
+    /// would be being told the other three had already finished.
+    ///
+    /// One derivation with three readers: the graph's head, the panel's head, and
+    /// [`Self::begin_reread_unless_owed`]'s guard against stacking. It was the
+    /// graph's own local `busy` until the panel needed the same sentence — and
+    /// the guard needed exactly the same one, which is what settled where it
+    /// belongs.
+    #[must_use]
+    pub fn reading(&self) -> bool {
+        self.rereading()
+            || matches!(self.status, GitSlot::Pending)
+            || matches!(self.refs, GitSlot::Pending)
+            || matches!(self.log, GitSlot::Pending)
     }
 
     /// One of a re-read's three answers has landed.
@@ -4991,6 +5100,135 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             outcome: Ok(parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE)),
         });
         assert!(!cache.rereading(), "and the last one hands the ink back");
+    }
+
+    /// PIN (R31's third invalidation moment, A) — **a command that ended
+    /// somewhere else is not news about this repository**, and "somewhere else"
+    /// is decided on path components rather than on characters.
+    ///
+    /// The `C:\a\bc` case is the one this exists for. Its characters begin with
+    /// the characters of `C:\a\b`, so a string prefix says it is inside — and a
+    /// trigger that believed it would re-read a repository every time a command
+    /// finished in the directory *next door* to it, which is a wrong answer that
+    /// only ever appears on somebody else's disk.
+    #[test]
+    fn a_command_re_reads_only_the_repository_it_was_run_inside() {
+        let root = Path::new(r"C:\a\b");
+
+        assert!(
+            should_reread(root, Some(Path::new(r"C:\a\b")), true),
+            "the root itself is inside the root"
+        );
+        assert!(
+            should_reread(root, Some(Path::new(r"C:\a\b\c\d")), true),
+            "and so is anywhere under it, however deep"
+        );
+        assert!(
+            !should_reread(root, Some(Path::new(r"C:\a\bc")), true),
+            "but not the folder next door whose name merely starts the same way"
+        );
+        assert!(
+            !should_reread(root, Some(Path::new(r"C:\a")), true),
+            "and not the folder above it: a parent is not inside its child"
+        );
+        assert!(
+            !should_reread(root, Some(Path::new(r"D:\a\b")), true),
+            "nor the same path on another drive"
+        );
+
+        // Windows is case-insensitive about all of it, which is the same rule
+        // `repo_prefix` keeps for the badges — `d:\repo` and `D:\repo` are one
+        // place, and a trigger that disagreed with the tree about that would be
+        // wrong exactly where nobody would think to look.
+        assert_eq!(
+            should_reread(Path::new(r"d:\Repo"), Some(Path::new(r"D:\repo\src")), true),
+            cfg!(windows)
+        );
+
+        // And the two conditions that are not about the path at all.
+        assert!(
+            !should_reread(root, Some(Path::new(r"C:\a\b")), false),
+            "a page nobody is looking at is never read, whatever happened in any \
+             shell — R31's gate, kept a second time"
+        );
+        assert!(
+            !should_reread(root, None, true),
+            "and a shell that has never reported a folder is answered no rather \
+             than guessed at"
+        );
+    }
+
+    /// PIN (R31's third invalidation moment, coalescing) — **a burst is one
+    /// piece of news**: while any answer is owed, an automatic re-read asks
+    /// nothing at all.
+    ///
+    /// Ten commands pasted into a shell end ten times. Ten unguarded re-reads
+    /// would be thirty subprocesses spent to learn what the first three were
+    /// already on their way to say — the polling R31 forbids, arriving by another
+    /// door. The guard is the cache's own [`GitCache::reading`] and therefore
+    /// also covers the *first* reading of a page: a `Pending` status is a
+    /// question already out for exactly the answer this would ask for again.
+    ///
+    /// The button is deliberately not guarded. A person pressing refresh twice
+    /// means it twice.
+    #[test]
+    fn an_automatic_reread_does_not_stack_on_one_that_is_still_owed() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Page);
+
+        // The first reading is out: three questions are Pending and nothing else
+        // may ask for them.
+        for question in cache.pending_questions() {
+            cache.mark_pending(&question);
+        }
+        assert!(cache.reading(), "the page's own first reading is a reading");
+        assert!(
+            cache.begin_reread_unless_owed().is_empty(),
+            "a command that ends while the page is still loading asks nothing"
+        );
+
+        let answer_all = |cache: &mut GitCache| {
+            cache.accept(GitAnswer::Status {
+                root: root.clone(),
+                outcome: Ok(parse_status(STATUS_Z)),
+            });
+            cache.accept(GitAnswer::Refs {
+                root: root.clone(),
+                outcome: Ok(parse_refs(REFS, RECORDED_AT)),
+            });
+            cache.accept(GitAnswer::Log {
+                root: root.clone(),
+                skip: 0,
+                outcome: Ok(parse_log(LOG_Z, RECORDED_AT, 0, GIT_LOG_PAGE)),
+            });
+        };
+        answer_all(&mut cache);
+        assert!(!cache.reading(), "settled");
+
+        assert_eq!(
+            cache.begin_reread_unless_owed().len(),
+            3,
+            "settled, so the first command end asks the three"
+        );
+        for _ in 0..9 {
+            assert!(
+                cache.begin_reread_unless_owed().is_empty(),
+                "and the nine behind it ask nothing while those three are owed"
+            );
+        }
+        assert_eq!(
+            cache.begin_reread().len(),
+            3,
+            "the button is not the burst: a person pressing it means it"
+        );
+
+        answer_all(&mut cache);
+        assert!(!cache.reading());
+        assert_eq!(
+            cache.begin_reread_unless_owed().len(),
+            3,
+            "and once the answers are in, the next thing that happens is heard"
+        );
     }
 
     /// T2/T3 — changing the filter throws the history away and re-asks it with

@@ -302,6 +302,13 @@ pub const GIT_COMMITS_HEADING: &str = "COMMITS";
 /// Mock-up 4952, cut to what this slice draws: the merge curve is here, the
 /// lanes are G-4's.
 pub const GIT_COMMITS_TOOLTIP: &str = "Recent history, newest first — the curve marks a merge, where a branch's history joins this line";
+/// What both refresh buttons say — the panel masthead's and the graph toolbar's
+/// (T5).
+///
+/// Written once because it is one verb on one repository, seen from the two
+/// surfaces that show it. Two spellings of it would be two things to learn, and
+/// the one that got edited would be whichever surface the editor had open.
+pub const GIT_REFRESH_TOOLTIP: &str = "Read the repository again";
 
 // ── the verbs ──────────────────────────────────────────────────────────────
 
@@ -333,6 +340,23 @@ pub enum GitAct {
     /// because a word in a masthead beside a branch name reads as part of the
     /// name.
     OpenGraph,
+    /// The masthead's other button: **read this repository again** (R31's third
+    /// invalidation moment).
+    ///
+    /// [`Self::OpenGraph`]'s neighbour and its opposite in one respect: that one
+    /// opens a surface, this one asks a question. It is here for the reason the
+    /// user report gave — the graph has had a refresh since v2 ③ (T5) and the
+    /// docked panel had no way at all to say "check", so a `touch` in the pane
+    /// beside it left the page confidently wrong with no control to correct it.
+    /// The automatic moments cover the shells that report themselves; this covers
+    /// every other way a repository moves, including a shell that reports
+    /// nothing.
+    ///
+    /// **The same mark the graph's toolbar wears** ([`ChromeMark::Refresh`]) and
+    /// the same sentence, because it is the same verb on the same repository seen
+    /// from the other surface; two words for one act is two things for a reader
+    /// to learn.
+    Refresh,
 }
 
 impl GitAct {
@@ -352,6 +376,7 @@ impl GitAct {
             Self::UnstageAll => "Unstage all",
             Self::LoadMore => "Load fifty more commits",
             Self::OpenGraph => "Open the full commit graph",
+            Self::Refresh => GIT_REFRESH_TOOLTIP,
         }
     }
 
@@ -366,6 +391,7 @@ impl GitAct {
             // Never drawn as a glyph — the whole row is the button.
             Self::LoadMore => ChromeMark::Plus,
             Self::OpenGraph => ChromeMark::GitGraph,
+            Self::Refresh => ChromeMark::Refresh,
         }
     }
 
@@ -380,20 +406,22 @@ impl GitAct {
             Self::Unstage | Self::UnstageAll => Some(GitWriteVerb::Unstage),
             Self::Discard if untracked => Some(GitWriteVerb::DiscardUntracked),
             Self::Discard => Some(GitWriteVerb::Discard),
-            Self::LoadMore | Self::OpenGraph => None,
+            Self::LoadMore | Self::OpenGraph | Self::Refresh => None,
         }
     }
 
     /// Whether this button is there before the pointer is.
     ///
-    /// **One of the six is, and it is the one that is a door rather than a
-    /// verb.** R12's three rungs are about hover verbs — controls that act on
-    /// the row they sit in, and whose whole discipline is zero footprint at rest
-    /// (mock-up 1611, and see [`GIT_ACT_REVEAL`] for what "zero" now costs).
-    /// The masthead's `Graph` is not one of those: it opens another surface, it
-    /// is the only way in to that surface, and the mock-up draws it as a plain
-    /// always-there button (`.gopen`, line 1567). A door nobody can see is a
-    /// feature nobody finds.
+    /// **The masthead's two are, and neither of them is a hover verb.** R12's
+    /// three rungs are about controls that act on the row they sit in, and whose
+    /// whole discipline is zero footprint at rest (mock-up 1611, and see
+    /// [`GIT_ACT_REVEAL`] for what "zero" now costs). Neither masthead button is
+    /// one of those. `Graph` opens another surface and is the only way in to it,
+    /// and the mock-up draws it as a plain always-there button (`.gopen`, line
+    /// 1567); `Refresh` is about the whole repository rather than about a row,
+    /// and it is the control a reader goes looking for precisely when the page in
+    /// front of them looks wrong — a door nobody can see is a feature nobody
+    /// finds, and that goes double for the one that fixes the page.
     ///
     /// [`GitAct::LoadMore`] answers `false` and is nevertheless always offered:
     /// it is not asked here at all, because it has no corner to hide in — the
@@ -401,7 +429,7 @@ impl GitAct {
     /// doing. [`act_boxes`] settles it before the reveal is consulted.
     #[must_use]
     pub fn rests_visible(self) -> bool {
-        matches!(self, Self::OpenGraph)
+        matches!(self, Self::OpenGraph | Self::Refresh)
     }
 
     /// Whether pressing this needs a confirmation first (R14).
@@ -425,6 +453,9 @@ pub enum GitPress {
     Gate,
     /// Ask the repository for another page of history.
     MoreCommits,
+    /// Ask this repository's three questions again, keeping the page up while
+    /// the answers come (T5) — the masthead's refresh.
+    Reread,
     /// Put the graph on the preview seat. Asks the repository nothing by itself
     /// — the document does its own asking once it is open.
     Graph,
@@ -443,6 +474,9 @@ pub fn press_outcome(act: GitAct, untracked: bool) -> GitPress {
     }
     if act == GitAct::OpenGraph {
         return GitPress::Graph;
+    }
+    if act == GitAct::Refresh {
+        return GitPress::Reread;
     }
     if act.needs_gate() {
         return GitPress::Gate;
@@ -567,10 +601,17 @@ pub struct GitHead {
     /// finishes inside a frame; a name that has gone quiet says "this is what I
     /// last knew" without asking anybody to watch it.
     ///
-    /// A field on the head rather than an argument to the painter because the
-    /// panel draws this same head and must not be made to answer a question it
-    /// does not have: it is `false` there, always, and the painter reads one
-    /// value from one place.
+    /// A field on the head rather than an argument to the painter, because both
+    /// surfaces that draw this head answer the question and the painter should
+    /// read one value from one place. Both of them answer it the same way, out of
+    /// [`crate::git::GitCache::reading`] — the panel has had its own refresh
+    /// button since R31's third invalidation moment, and a page that re-read
+    /// itself without saying so would be a page that changed under a reader with
+    /// nothing to attribute the change to.
+    ///
+    /// [`masthead`] itself cannot answer it: it is handed a status, and "is
+    /// anything still coming" is a fact about the cache. So it leaves it `false`
+    /// and its two callers fill it in.
     pub muted: bool,
 }
 
@@ -1228,9 +1269,15 @@ pub fn build(
         GitSlot::Idle | GitSlot::Pending => (None, None),
     };
 
-    content
-        .rows
-        .push(GitRow::Masthead(masthead(status, scale, measure)));
+    let mut head = masthead(status, scale, measure);
+    // **The head goes quiet while anything is owed** (T5), on this page for the
+    // same reason it does on the graph's: the panel now has a refresh of its own,
+    // and R31's third moment re-reads it without anybody pressing anything. The
+    // predicate is the cache's ([`crate::git::GitCache::reading`]) rather than
+    // this page's, so the two surfaces cannot disagree about whether a reading is
+    // still out.
+    head.muted = cache.reading();
+    content.rows.push(GitRow::Masthead(head));
 
     // **Branches first** (G25's group order, R9's contents): the list of places
     // this repository can stand, with the one it is standing on at the top. The
@@ -1557,7 +1604,7 @@ fn masthead(
         branch,
         named,
         pills,
-        // The panel never says this — see the field.
+        // Filled in by the two callers that hold a cache — see the field.
         muted: false,
     }
 }
@@ -1882,7 +1929,7 @@ pub fn act_boxes(
             GitGroup::Changes | GitGroup::Untracked => vec![GitAct::Stage, GitAct::Discard],
         },
         GitRow::Heading { act, .. } => act.iter().copied().collect(),
-        GitRow::Masthead(_) => vec![GitAct::OpenGraph],
+        GitRow::Masthead(_) => MASTHEAD_ACTS.to_vec(),
         // **The whole row is the button.** It has no glyph and no reserved
         // corner — it is a sentence you press — so its box is the row's own, and
         // saying that here rather than in the press handler is what makes the
@@ -1903,19 +1950,47 @@ pub fn act_boxes(
         .into_iter()
         .filter(|act| revealed || act.rests_visible())
         .collect();
+    place_acts(&acts, rect, scale, act_trailing_padding(row))
+}
+
+/// **The masthead's two buttons, trailing edge first** (G24 + T5).
+///
+/// Refresh holds the edge and the door to the graph sits inside it, which is the
+/// order the graph's own toolbar already keeps: there, refresh is pinned to the
+/// trailing edge and is the one control that never leaves however narrow the
+/// strip gets (T1's collapse ruling). A reader who has learned where "check
+/// this again" lives on one surface finds it in the same corner on the other.
+///
+/// Named once because two things read it: [`act_boxes`], which places them, and
+/// [`pill_boxes`], whose room ends where the leftmost of them begins.
+const MASTHEAD_ACTS: [GitAct; 2] = [GitAct::Refresh, GitAct::OpenGraph];
+
+/// Lay a row's verbs out right to left from its trailing edge, inside its own
+/// padding.
+///
+/// **Inside the row's own padding, not flush with its edge** (user report,
+/// 2026-08-16). The verbs are the last flex child of a padded row — `.grow` is
+/// `padding: 5px 7px`, `.glabel` and the masthead `2px` — so their trailing edge
+/// is the padding's, exactly where the row's text already stops (`push_change`
+/// clips the name at `rect[2] - pad - reserved`). Drawn from `rect[2]` itself the
+/// `+` touched the row's rounded corner and its pill overran the ground it lit.
+///
+/// Split out of [`act_boxes`] so that [`pill_boxes`] can ask where the masthead's
+/// buttons *will* be without re-deriving the arithmetic. It had a copy of it —
+/// one button's width and one gap — and the copy was correct for exactly as long
+/// as the masthead had one button.
+fn place_acts(
+    acts: &[GitAct],
+    rect: [f32; 4],
+    scale: f32,
+    trailing_padding_logical_px: f32,
+) -> Vec<(GitAct, [f32; 4])> {
     let box_ = (GIT_ACT_LOGICAL_PX * scale).round().max(1.0);
     let gap = (GIT_ACT_GAP_LOGICAL_PX * scale).round();
     let middle = ((rect[1] + rect[3] - box_) / 2.0).round();
     let mut placed = Vec::with_capacity(acts.len());
-    // **Inside the row's own padding, not flush with its edge** (user report,
-    // 2026-08-16). The verbs are the last flex child of a padded row — `.grow`
-    // is `padding: 5px 7px`, `.glabel` and the masthead `2px` — so their
-    // trailing edge is the padding's, exactly where the row's text already
-    // stops (`push_change` clips the name at `rect[2] - pad - reserved`). Drawn
-    // from `rect[2]` itself the `+` touched the row's rounded corner and its
-    // pill overran the ground it lit.
-    let mut edge = rect[2] - (act_trailing_padding(row) * scale).round();
-    for act in acts {
+    let mut edge = rect[2] - (trailing_padding_logical_px * scale).round();
+    for &act in acts {
         let left = edge - box_;
         if left < rect[0] {
             break;
@@ -1971,12 +2046,13 @@ pub fn pill_boxes(head: &GitHead, rect: [f32; 4], scale: f32) -> Vec<[f32; 4]> {
     let height = (GIT_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
     let pad = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
     let top = ((rect[1] + rect[3] - height) / 2.0).round();
-    // The `Graph` button holds the trailing edge (G24's `margin-left:auto`), so
-    // the pills' room ends where its own box begins. Taken from [`act_boxes`]
-    // rather than re-measured, on this function's own rule: two derivations of
-    // one edge is a pill drawn under a button.
-    let button = (GIT_ACT_LOGICAL_PX * scale).round().max(1.0) + gap;
-    let limit = (rect[2] - button).max(rect[0]);
+    // The masthead's buttons hold the trailing edge (G24's `margin-left:auto`),
+    // so the pills' room ends where the leftmost of them begins. Laid out by
+    // [`place_acts`] rather than re-measured here, on this function's own rule:
+    // two derivations of one edge is a pill drawn under a button — which is
+    // exactly what the arithmetic this replaced would have produced the moment a
+    // second button joined the first.
+    let limit = masthead_acts_left(rect, scale, gap);
     let name_right = (rect[0] + mark + gap + head.branch_width).min(limit);
     let mut left = name_right + gap;
     let mut boxes = Vec::with_capacity(head.pills.len());
@@ -1989,6 +2065,19 @@ pub fn pill_boxes(head: &GitHead, rect: [f32; 4], scale: f32) -> Vec<[f32; 4]> {
         left += width + gap;
     }
     boxes
+}
+
+/// Where the masthead's leftmost button begins, less one gap — the edge its
+/// branch name and its pills both stop at.
+///
+/// One number, read by the pill layout above and by the painter of the name, so
+/// that a name too long for its strip is cut at the button rather than under it.
+fn masthead_acts_left(rect: [f32; 4], scale: f32, gap: f32) -> f32 {
+    let left = place_acts(&MASTHEAD_ACTS, rect, scale, GIT_HEAD_PADDING_X_LOGICAL_PX)
+        .iter()
+        .map(|(_, box_)| box_[0])
+        .fold(rect[2], f32::min);
+    (left - gap).max(rect[0])
 }
 
 /// Every tooltip this page offers, keyed by row.
@@ -2293,10 +2382,16 @@ pub fn push_git_masthead(
     ));
 
     let name_left = mark_rect[2] + gap;
+    // **Cut at the buttons and not at the strip's edge.** The pills have always
+    // stopped where the masthead's controls begin ([`pill_boxes`]); the name was
+    // clipped at `rect[2]`, which was invisible while one button sat in a corner
+    // a long branch name rarely reached and is not invisible now that two do. One
+    // edge, [`masthead_acts_left`]'s, for the name and the pills alike.
+    let limit = masthead_acts_left(rect, scale, gap);
     let name_rect = [
         name_left,
         rect[1],
-        (name_left + head.branch_width).min(rect[2]),
+        (name_left + head.branch_width).min(limit),
         rect[3],
     ];
     labels.push(ChromeLabel {
@@ -3244,7 +3339,7 @@ fn repo_prefix(repo: &Path, dir: &Path) -> Option<String> {
     let mut steps = dir.components();
     for want in repo.components() {
         let have = steps.next()?;
-        if !same_step(want.as_os_str(), have.as_os_str()) {
+        if !crate::git::same_step(want.as_os_str(), have.as_os_str()) {
             return None;
         }
     }
@@ -3254,15 +3349,6 @@ fn repo_prefix(repo: &Path, dir: &Path) -> Option<String> {
         prefix.push('/');
     }
     Some(prefix)
-}
-
-fn same_step(want: &std::ffi::OsStr, have: &std::ffi::OsStr) -> bool {
-    if cfg!(windows) {
-        want.to_string_lossy()
-            .eq_ignore_ascii_case(&have.to_string_lossy())
-    } else {
-        want == have
-    }
 }
 
 /// The tree row id a repo-relative path has, seen from a column at `prefix`.
@@ -3594,18 +3680,110 @@ mod tests {
         );
     }
 
-    /// G24/R27 — the masthead carries the door to the full graph.
+    /// G24/R27 + T5 — the masthead carries the door to the full graph and the
+    /// button that reads the repository again, in that order from the inside out.
+    ///
+    /// **Refresh holds the trailing edge**, which is the graph toolbar's own
+    /// order (T1: refresh is pinned to the edge and is the one control that never
+    /// leaves). A reader who has learned which corner "check this again" lives in
+    /// on one surface finds it in the same corner on the other.
+    ///
+    /// Both are there before the pointer is (`revealed: false`): one is a door
+    /// nobody can otherwise find, the other is the control a reader goes looking
+    /// for precisely when the page in front of them looks wrong.
     #[test]
-    fn the_masthead_offers_the_graph() {
+    fn the_masthead_offers_the_graph_and_a_refresh() {
         let content = rows_of(&answered(b"", Vec::new(), false));
         let masthead = &content.rows[0];
         assert!(matches!(masthead, GitRow::Masthead(_)));
-        let acts: Vec<GitAct> = act_boxes(masthead, [0.0, 0.0, 240.0, 30.0], 1.0, false)
-            .into_iter()
-            .map(|(act, _)| act)
-            .collect();
-        assert_eq!(acts, vec![GitAct::OpenGraph]);
+        let rect = [0.0, 0.0, 240.0, 30.0];
+        let boxes = act_boxes(masthead, rect, 1.0, false);
+        assert_eq!(
+            boxes.iter().map(|(act, _)| *act).collect::<Vec<_>>(),
+            vec![GitAct::Refresh, GitAct::OpenGraph],
+            "trailing edge first, so refresh is the outermost of the two"
+        );
         assert_eq!(press_outcome(GitAct::OpenGraph, false), GitPress::Graph);
+        assert_eq!(press_outcome(GitAct::Refresh, false), GitPress::Reread);
+        assert_eq!(GitAct::Refresh.mark(), ChromeMark::Refresh);
+        assert_eq!(GitAct::Refresh.tooltip(false), GIT_REFRESH_TOOLTIP);
+        assert!(
+            !GitAct::Refresh.needs_gate() && GitAct::Refresh.verb(false).is_none(),
+            "it writes nothing, so it asks nothing first"
+        );
+
+        // **The button ends at the padding, not at the row's edge** (the 2026-08-16
+        // report, one button along): the masthead's own inset is what its last
+        // child stops at, and a mark drawn from `rect[2]` would touch the corner.
+        let (_, first) = boxes[0];
+        assert!(
+            (first[2] - (rect[2] - GIT_HEAD_PADDING_X_LOGICAL_PX)).abs() < f32::EPSILON,
+            "the outermost button's trailing edge is the masthead's padding, not \
+             the strip's edge: {first:?}"
+        );
+        // And the second sits inside the first, one gap along, without overlapping.
+        let (_, second) = boxes[1];
+        assert!(
+            second[2] < first[0],
+            "the door is inside the refresh with a gap between them: {second:?} {first:?}"
+        );
+        assert!(
+            (first[0] - second[2] - GIT_ACT_GAP_LOGICAL_PX).abs() < f32::EPSILON,
+            "and the gap is the row's own"
+        );
+
+        // The pills and the branch name stop where the buttons begin. This is the
+        // arithmetic that was a private copy inside `pill_boxes` — one button wide
+        // — and would have drawn a pill under the refresh the day it arrived.
+        let GitRow::Masthead(head) = masthead else {
+            unreachable!("checked above")
+        };
+        assert!(
+            masthead_acts_left(rect, 1.0, GIT_HEAD_GAP_LOGICAL_PX) <= second[0],
+            "the room the name and the pills share ends at the innermost button"
+        );
+        for pill in pill_boxes(head, rect, 1.0) {
+            assert!(
+                pill[2] <= second[0],
+                "no pill runs under a button: {pill:?}"
+            );
+        }
+    }
+
+    /// T5 — **the docked page's head goes quiet while anything is owed**, and it
+    /// is the cache that says so.
+    ///
+    /// The panel used to hard-code `false` here, which was true for exactly as
+    /// long as the page had no way to re-read itself: R31's third invalidation
+    /// moment re-reads it with nobody pressing anything, and a page that changed
+    /// under a reader with nothing to attribute the change to is worse than one
+    /// that is a second out of date. The predicate is
+    /// [`crate::git::GitCache::reading`] so that this surface and the graph
+    /// cannot disagree about whether a reading is still out.
+    #[test]
+    fn the_pages_branch_name_goes_quiet_while_the_repository_is_being_read() {
+        let mut cache = with_branches(
+            answered(b"## main ", Vec::new(), false),
+            vec![branch("main", true, 0, 0)],
+        );
+        let head_of_page = |cache: &GitCache| match &rows_of(cache).rows[0] {
+            GitRow::Masthead(head) => (head.branch.clone(), head.named, head.muted),
+            row => unreachable!("the masthead leads the page, found {row:?}"),
+        };
+        assert_eq!(
+            head_of_page(&cache),
+            ("main".to_owned(), true, false),
+            "settled, the branch is a name in the text ink"
+        );
+
+        assert_eq!(cache.begin_reread().len(), 3);
+        let (branch, named, muted) = head_of_page(&cache);
+        assert_eq!(
+            (branch.as_str(), named, muted),
+            ("main", true, true),
+            "with the three out it is the same name, said quietly — the page is \
+             still up and still true, it may simply have got older"
+        );
     }
 
     fn change_rows(content: &GitPanelContent) -> Vec<GitChangeRow> {
@@ -4958,12 +5136,13 @@ mod tests {
         );
     }
 
-    /// The masthead's door out to the graph is **not** a hover verb, and the
-    /// reveal must not take it (R12's own carve-out, [`GitAct::rests_visible`]).
+    /// The masthead's two buttons are **not** hover verbs, and the reveal must
+    /// not take either (R12's own carve-out, [`GitAct::rests_visible`]).
     ///
     /// MUTATION: drop the `rests_visible` term from `act_boxes`'s filter. A
     /// repository's only way in to its own history disappears until somebody
-    /// happens to point at the branch name.
+    /// happens to point at the branch name, and so does the only control that
+    /// can correct a page a reader has just noticed is wrong.
     #[test]
     fn the_graph_door_is_there_before_the_pointer_is() {
         let content = rows_of(&answered(b"## main\0", Vec::new(), false));
@@ -4979,7 +5158,7 @@ mod tests {
                     .iter()
                     .map(|(act, _)| *act)
                     .collect::<Vec<_>>(),
-                vec![GitAct::OpenGraph],
+                vec![GitAct::Refresh, GitAct::OpenGraph],
                 "revealed = {revealed}"
             );
         }
