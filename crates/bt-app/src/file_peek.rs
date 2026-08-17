@@ -791,6 +791,10 @@ pub fn build(
                     width_px: picture.width_px,
                     height_px: picture.height_px,
                     opacity: 1.0,
+                    // The card's picture is always fitted to its ground, so it
+                    // is inside its own box by construction — the crop is the
+                    // preview float's, whose picture can be zoomed past its body.
+                    clip: None,
                 });
             }
         }

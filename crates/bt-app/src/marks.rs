@@ -911,6 +911,10 @@ impl ChromeMarkRasters {
                 width_px: raster.width_px,
                 height_px: raster.height_px,
                 opacity: sprite.opacity,
+                // A mark is laid out to fit the control it belongs to, so there
+                // is nothing for it to be cropped by — see
+                // [`bt_render::ChromeIcon::clip`], whose one caller is a picture.
+                clip: None,
             });
             kept.insert(key, raster);
         }

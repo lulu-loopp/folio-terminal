@@ -2752,6 +2752,23 @@ pub struct ChromeIcon {
     /// `.ticon-wrap.dead`'s .35 — and in both the artwork is unchanged and only
     /// its presence varies.
     pub opacity: f32,
+    /// The box this raster may be **seen** in, in physical pixels of the whole
+    /// surface — CSS `overflow: hidden` on the element it is drawn inside.
+    ///
+    /// `None` for every mark, and that is the honest default: a chrome mark is
+    /// laid out to fit the control it belongs to, so it has nothing to be cropped
+    /// by. What needs it is a *picture* — [`OverlayLayer::images`]' tenant — once
+    /// the picture can be larger than the box it is looked at through. A preview
+    /// float's zoomed image is exactly that: at 400% the drawn rectangle runs
+    /// past the window's body on every side, and without a crop it would paint
+    /// over that window's own head, its foot and the desk beside it.
+    ///
+    /// Applied by cropping the quad and its texture coordinates together rather
+    /// than by a scissor, because a layer's marks are one draw list under one
+    /// scissor and a per-icon scissor would break it into one draw per mark. The
+    /// two are the same picture: a crop of the geometry with the matching crop of
+    /// the sample rectangle is what a scissor does, computed once on the CPU.
+    pub clip: Option<[f32; 4]>,
 }
 
 /// One flat fill of the modal overlay, in physical pixels of the whole surface.
@@ -2986,6 +3003,9 @@ impl PartialEq for ChromeIcon {
             && self.rect == other.rect
             && self.width_px == other.width_px
             && self.height_px == other.height_px
+            // The crop is placement, exactly as `rect` is: the same raster seen
+            // through a box that moved is a different set of pixels on screen.
+            && self.clip == other.clip
             // Opacity is *not* covered by the key — deliberately, so that a
             // breathing mark reuses one raster — which means it is the one
             // property of an icon that this comparison has to read for itself.
@@ -5379,16 +5399,25 @@ impl WindowRenderer {
             {
                 let left = icon.rect[0] + tile_x as f32 * scale_x;
                 let top = icon.rect[1] + tile_y as f32 * scale_y;
-                let first_vertex = vertices.len() as u32;
-                vertices.extend(math_quad_vertices(
+                let tile = [
                     left,
                     top,
                     left + tile_width as f32 * scale_x,
                     top + tile_height as f32 * scale_y,
-                    0.0,
-                    0.0,
-                    1.0,
-                    1.0,
+                ];
+                let Some((quad, uv)) = cropped_icon_quad(tile, icon.clip) else {
+                    continue;
+                };
+                let first_vertex = vertices.len() as u32;
+                vertices.extend(math_quad_vertices(
+                    quad[0],
+                    quad[1],
+                    quad[2],
+                    quad[3],
+                    uv[0],
+                    uv[1],
+                    uv[2],
+                    uv[3],
                     surface_width,
                     surface_height,
                     icon.opacity,
@@ -8786,6 +8815,43 @@ fn create_math_pipeline(
         cache: None,
     });
     (pipeline, bind_group_layout, sampler)
+}
+
+/// One tile of a [`ChromeIcon`], cut down to the box it may be seen in.
+///
+/// Returns the quad and the fraction of the tile's own texture that quad now
+/// samples — the two have to move together or a cropped picture is a *scaled*
+/// picture, which is the bug this function exists to not have. `None` when the
+/// crop leaves nothing: a tile entirely outside its clip is a draw call that
+/// covers no pixels, and the caller skips it rather than emitting a degenerate
+/// quad.
+///
+/// A missing clip is not "clip to nothing" but "no crop was asked for", which is
+/// every chrome mark in the window.
+fn cropped_icon_quad(tile: [f32; 4], clip: Option<[f32; 4]>) -> Option<([f32; 4], [f32; 4])> {
+    let Some(clip) = clip else {
+        return Some((tile, [0.0, 0.0, 1.0, 1.0]));
+    };
+    let (width, height) = (tile[2] - tile[0], tile[3] - tile[1]);
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let quad = [
+        tile[0].max(clip[0]),
+        tile[1].max(clip[1]),
+        tile[2].min(clip[2]),
+        tile[3].min(clip[3]),
+    ];
+    if quad[2] <= quad[0] || quad[3] <= quad[1] {
+        return None;
+    }
+    let uv = [
+        (quad[0] - tile[0]) / width,
+        (quad[1] - tile[1]) / height,
+        (quad[2] - tile[0]) / width,
+        (quad[3] - tile[1]) / height,
+    ];
+    Some((quad, uv))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12945,6 +13011,7 @@ mod tests {
             width_px: 26,
             height_px: 26,
             opacity,
+            clip: None,
         };
         assert_ne!(
             icon(1.0),
@@ -13703,6 +13770,47 @@ mod tests {
         );
     }
 
+    /// A preview float's picture can be zoomed past its own window — at 400% the
+    /// drawn rectangle runs off every side of the body — and the window has no
+    /// scissor of its own to catch it: a layer's marks are one draw list under
+    /// the whole-surface scissor. So the crop is geometry, and the pin is that
+    /// the texture coordinates are cropped *with* it. Crop the quad alone and the
+    /// picture is not clipped but squeezed, which is the same picture at the
+    /// wrong scale and reads as a rendering bug rather than as a window edge.
+    #[test]
+    fn a_cropped_icon_samples_only_the_part_of_itself_that_is_still_visible() {
+        // A 100×100 tile at the origin, seen through a box that cuts its left
+        // quarter and its bottom half away.
+        let (quad, uv) =
+            cropped_icon_quad([0.0, 0.0, 100.0, 100.0], Some([25.0, 0.0, 100.0, 50.0]))
+                .expect("the visible part of a partly clipped tile");
+        assert_eq!(
+            quad,
+            [25.0, 0.0, 100.0, 50.0],
+            "the quad is the intersection"
+        );
+        assert_eq!(
+            uv,
+            [0.25, 0.0, 1.0, 0.5],
+            "and it samples exactly the fraction of the raster that box covers"
+        );
+
+        let (whole, uv) = cropped_icon_quad([10.0, 10.0, 20.0, 20.0], Some([0.0, 0.0, 40.0, 40.0]))
+            .expect("a tile wholly inside its clip is untouched");
+        assert_eq!(whole, [10.0, 10.0, 20.0, 20.0]);
+        assert_eq!(uv, [0.0, 0.0, 1.0, 1.0]);
+
+        assert!(
+            cropped_icon_quad([0.0, 0.0, 10.0, 10.0], Some([50.0, 50.0, 90.0, 90.0])).is_none(),
+            "a tile entirely outside its clip is not a draw call"
+        );
+
+        let (bare, uv) = cropped_icon_quad([3.0, 4.0, 5.0, 6.0], None)
+            .expect("no clip is not a clip to nothing");
+        assert_eq!(bare, [3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(uv, [0.0, 0.0, 1.0, 1.0]);
+    }
+
     /// M136: `.tip { opacity: 0; transition: opacity .09s ease }` fades a *popup*,
     /// not a fill — so the layer's opacity has to reach every channel the layer
     /// draws in. A fold that reached the fills and forgot the marks would show as
@@ -13733,6 +13841,7 @@ mod tests {
                 width_px: 1,
                 height_px: 1,
                 opacity: 0.5,
+                clip: None,
             }],
             opacity: 0.25,
             body: None,

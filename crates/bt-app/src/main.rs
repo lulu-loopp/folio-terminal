@@ -975,6 +975,32 @@ impl PreviewPanes {
         self.panes.iter_mut().map(|(id, pane)| (*id, pane))
     }
 
+    /// **Which surface's picture asked this exact question of the scale
+    /// worker**, if one of them did.
+    ///
+    /// The request ledger read back the way it was written: by the target tuple
+    /// (`content key, width, height`) that the asking picture recorded on itself
+    /// before sending. Because the ledger entry lives on the *pane*, it travels
+    /// with the pane — into a torn-off window, back into a docked pane — and the
+    /// answer finds its asker across either move. Routing the answer by "whoever
+    /// holds the texture lane now" instead is the 2026-08-17 report: in exactly
+    /// those two moments the lane holder is somebody else, or nobody, and the
+    /// answer was dropped while the entry it would have retired stayed set.
+    ///
+    /// An entry cannot outlive its host, and that is by construction rather than
+    /// by a sweep: it *is* a field of the pane, so [`Self::remove`] takes it away
+    /// with everything else the surface was holding.
+    fn awaiting_scale(&self, target: &PeekThumbnailTarget) -> Option<PreviewSurface> {
+        self.panes
+            .iter()
+            .find(|(_, pane)| {
+                pane.image
+                    .as_ref()
+                    .is_some_and(|picture| picture.pending.as_ref() == Some(target))
+            })
+            .map(|(surface, _)| *surface)
+    }
+
     /// Which buffers are on a surface right now.
     fn showing(&self) -> Vec<preview::PreviewSource> {
         self.panes
@@ -3634,17 +3660,26 @@ struct TabState {
     /// `Seats::landing_preview`, which answers "which pane would a newly opened
     /// file replace" and is free to answer "none of them".
     preview_panes: PreviewPanes,
-    /// **Whose picture is on the texture lane** — the one surface whose image is
-    /// actually rasterised this frame.
+    /// **Which _seat_ is on the texture lane** — the one pane whose picture is
+    /// rasterised through `bt_render`'s single `set_preview_image` slot.
     ///
-    /// This build rasterises one preview picture at a time, and this field names
-    /// whose. Every *identity* a picture has is per surface already
-    /// ([`PreviewPane::image`]), so a second picture keeps its head, its foot and
-    /// its meta line and loses only its pixels; what it cannot have is the
-    /// texture, because `bt_render` holds one `set_preview_image` slot. Making
+    /// Every *identity* a picture has is per surface already
+    /// ([`PreviewPane::image`]), so a second picture in a second pane keeps its
+    /// head, its foot and its meta line and loses only its pixels; what it
+    /// cannot have is the texture, because the renderer holds one slot. Making
     /// that lane plural is a `bt-render` change of its own and is not this
     /// slice's — so the limit is written down here rather than hidden in
     /// whichever call site happened to win the race.
+    ///
+    /// **A float is not in this competition, and the 2026-08-17 report is why.**
+    /// The slot is painted in the seat pass, a whole pass below the overlay
+    /// layers a floating window is drawn in, so a picture in a window could
+    /// never have used it: handed to the lane it would be drawn *behind* the
+    /// window that contains it. A float paints its picture on its own layer
+    /// instead ([`Runtime::preview_float_layer`]), where its document already
+    /// rides for exactly the same z-order reason — which is why this field is
+    /// only ever a [`PreviewSurface::Seat`], and why tearing a picture off a pane
+    /// gives the lane back without taking the picture away.
     preview_raster: Option<PreviewSurface>,
     /// This tab's shared pool of live preview buffers (`DESIGN.md` §7.1.3).
     ///
@@ -7467,6 +7502,21 @@ struct PreviewImageState {
     /// The shared resize quiet boundary. Geometry follows every pointer event, but the expensive
     /// exact-size resample is asked only after this instant lands without another resize.
     resize_scale_deadline: Option<Instant>,
+    /// **Where this picture stands this frame**, in physical pixels of the whole
+    /// surface — [`image_destination`]'s answer against the body its host gave
+    /// it, and `None` while there is nowhere for it to stand at all (the decode
+    /// is out, the body has no extent, the host has gone).
+    ///
+    /// It is filed on the picture rather than recomputed by whoever draws it,
+    /// because a picture has **two** hosts and only one of them is a seat. A
+    /// seat's pixels go down `bt_render`'s one `set_preview_image` slot, which is
+    /// handed a viewport and works the rectangle out for itself; a float's ride
+    /// its window's own mark channel, which is handed a rectangle. Writing the
+    /// rectangle down once, where the zoom and the clamp already are, is what
+    /// keeps the two hosts from arriving at two different answers to "how big is
+    /// this picture" — and it is the same discipline
+    /// [`image_destination`]'s own doc comment states: one rectangle, one author.
+    drawn: Option<[f32; 4]>,
 }
 
 impl PreviewImageState {
@@ -7479,6 +7529,7 @@ impl PreviewImageState {
             native: None,
             bytes: None,
             resize_scale_deadline: None,
+            drawn: None,
         }
     }
 
@@ -7567,6 +7618,37 @@ impl PreviewImageState {
 const IMAGE_ZOOM_STEP: f32 = 1.25;
 const IMAGE_ZOOM_MIN: f32 = 0.10;
 const IMAGE_ZOOM_MAX: f32 = 8.0;
+
+/// **Who holds the one texture lane once a view has landed on a surface.**
+///
+/// `bt_render` has a single `set_preview_image` slot and it is painted in the
+/// seat pass, so the lane is a *seat's* and at most one seat can have it
+/// ([`TabState::preview_raster`]). Every door that puts a view down on a surface
+/// — a file opened onto a pane, a window docked back into one — asks this, and
+/// that is the point: the rule used to be spelled out at the opening door and
+/// simply forgotten at the docking one, which is the second half of the
+/// 2026-08-17 report ("dock it back and the picture still never loads").
+///
+/// Three answers, and each is one sentence:
+///
+/// * a **float** changes nothing — it paints its picture on its own overlay
+///   layer, so it neither needs the slot nor may take it from a pane that does;
+/// * a **picture** landing on a seat takes the lane outright, because the view
+///   that was on that surface has just been overwritten and there is no
+///   incumbent left whose pixels could be taken away;
+/// * a **document** landing on a seat that *held* the lane gives it back, or the
+///   slot would go on showing a picture the surface no longer has.
+fn preview_lane_after_landing(
+    lane: Option<PreviewSurface>,
+    landing: PreviewSurface,
+    landed_a_picture: bool,
+) -> Option<PreviewSurface> {
+    match landing {
+        PreviewSurface::Float(_) | PreviewSurface::Peek => lane,
+        PreviewSurface::Seat(_) if landed_a_picture => Some(landing),
+        PreviewSurface::Seat(_) => lane.filter(|held| *held != landing),
+    }
+}
 
 /// Whether the picture is sized by the body or by a number the user chose.
 ///
@@ -13007,6 +13089,21 @@ fn assemble_tab_state(
         sessions.contains_key(&focused_leaf),
         "every tab holds a session for its focused leaf"
     );
+    // **The texture lane, read off the panes rather than passed in.** The one
+    // seat whose picture the renderer's single `set_preview_image` slot is spent
+    // on ([`TabState::preview_raster`]). Every door that lands a picture on a
+    // pane has to claim it ([`preview_lane_after_landing`]), and *being born
+    // holding one* is such a door: a restored session came back saying
+    // "Loading …" for good, because nothing ever named its pane as the lane's
+    // and the refit therefore never ran. Derived here so that no birth path can
+    // forget it — which is the same argument this whole function is.
+    //
+    // The first picture in insertion order when a tab arrives with two, because
+    // the slot is one; the tab merge already decides it that way.
+    let preview_raster = preview_panes
+        .iter()
+        .find(|(surface, pane)| matches!(surface, PreviewSurface::Seat(_)) && pane.image.is_some())
+        .map(|(surface, _)| surface);
     let tab = TabState {
         id,
         sessions,
@@ -13045,7 +13142,7 @@ fn assemble_tab_state(
         seat_layout,
         seat_overflow,
         preview_panes,
-        preview_raster: None,
+        preview_raster,
         preview_pool,
         preview_edit_focus: None,
         preview_views: PreviewViewStore::default(),
@@ -20713,7 +20810,9 @@ impl Runtime {
         // file somewhere in its own top-left corner for no reason anybody could
         // reconstruct.
         self.preview_pane_mut(surface).zoom = ImageZoom::FIT;
-        self.preview_raster = Some(surface);
+        // A picture has landed: the lane is this surface's if this surface is a
+        // pane, and untouched if it is a window ([`preview_lane_after_landing`]).
+        self.preview_raster = preview_lane_after_landing(self.preview_raster, surface, true);
         self.renderer.set_preview_image(None);
         self.refresh_preview_for_layout();
         self.refresh_chrome();
@@ -23649,22 +23748,6 @@ impl Runtime {
         })
     }
 
-    /// The picture on the texture lane right now — [`TabState::preview_raster`]'s
-    /// pane, and only that one.
-    ///
-    /// Every path that talks to the decoder or the sampler asks through here, so
-    /// "which picture is being rasterised" is one question with one answer rather
-    /// than a search that could find a second surface's.
-    fn preview_raster_image(&self) -> Option<&PreviewImageState> {
-        self.preview_pane(self.preview_raster?)?.image.as_ref()
-    }
-
-    /// The same, mutably.
-    fn preview_raster_image_mut(&mut self) -> Option<&mut PreviewImageState> {
-        let surface = self.preview_raster?;
-        self.preview_pane_mut(surface).image.as_mut()
-    }
-
     /// How one surface is looking at its picture (ticket #60).
     ///
     /// The glance card is answered `Fit` whatever it happens to be storing —
@@ -23712,16 +23795,98 @@ impl Runtime {
         (width > 0 && height > 0).then_some((body, [width, height]))
     }
 
+    /// **Every picture on screen, and nothing that is not one.**
+    ///
+    /// Two hosts, and the asymmetry in this list is the whole of the difference
+    /// between them. A *seat's* pixels go down `bt_render`'s one
+    /// `set_preview_image` slot, so at most one seat is here and
+    /// [`TabState::preview_raster`] says which. A *float's* do not need that slot
+    /// at all: its window is an overlay layer drawn a whole pass later, and its
+    /// picture rides that layer's own mark channel exactly as its document rides
+    /// the layer's body ([`Self::preview_float_layer`]) — so every float is here,
+    /// and none of them can be starved of a lane by a pane.
+    ///
+    /// Every float, not only this tab's, for [`Self::preview_surfaces`]' reason:
+    /// a window torn out of another tab is still standing, and a picture that
+    /// stopped being refit the moment you looked somewhere else would freeze at
+    /// whatever size it was last seen at.
+    fn preview_picture_hosts(&self) -> Vec<PreviewSurface> {
+        self.preview_surfaces()
+            .into_iter()
+            .filter(|surface| match surface {
+                PreviewSurface::Seat(_) => self.preview_raster == Some(*surface),
+                PreviewSurface::Float(_) => true,
+                // The glance card mirrors a picture through its own path
+                // ([`Self::file_peek_picture`]) and holds no `PreviewImageState`
+                // to refit.
+                PreviewSurface::Peek => false,
+            })
+            .filter(|surface| {
+                self.preview_pane(*surface)
+                    .is_some_and(|pane| pane.image.is_some())
+            })
+            .collect()
+    }
+
+    /// The picture one surface is showing, if it is showing one.
+    fn preview_picture(&self, surface: PreviewSurface) -> Option<&PreviewImageState> {
+        self.preview_pane(surface)?.image.as_ref()
+    }
+
+    /// The same, mutably.
+    fn preview_picture_mut(&mut self, surface: PreviewSurface) -> Option<&mut PreviewImageState> {
+        self.preview_pane_mut(surface).image.as_mut()
+    }
+
+    /// **This surface's picture is not on screen this frame.**
+    ///
+    /// One door for every refusal below — the decode is still out, the body has
+    /// no extent, the host has no rectangle to give — because the two hosts stop
+    /// drawing in two different ways and no refusal should have to know which of
+    /// them it is talking to. The seat lane is emptied; a float's `drawn` is
+    /// taken away, which is the same sentence said to the layer that reads it.
+    ///
+    /// The pixels themselves are **kept**. A refusal is about this frame, and a
+    /// raster thrown away here is a raster the worker is asked for again the
+    /// moment the refusal lifts — which is exactly the resample storm R2 exists
+    /// to forbid.
+    fn hide_preview_picture(&mut self, surface: PreviewSurface) {
+        if let Some(picture) = self.preview_picture_mut(surface) {
+            picture.drawn = None;
+        }
+        if self.preview_raster == Some(surface) {
+            self.renderer.set_preview_image(None);
+        }
+    }
+
+    /// The earliest resize-quiet boundary any picture on screen is waiting on.
+    ///
+    /// Plural for [`Self::preview_picture_hosts`]' reason: a window resize defers
+    /// every picture's exact-size resample at once, and a wake scheduled off the
+    /// first of them only would leave the others soft until something else
+    /// happened to redraw.
+    fn preview_resample_deadline(&self) -> Option<Instant> {
+        self.preview_picture_hosts()
+            .into_iter()
+            .filter_map(|surface| self.preview_picture(surface)?.resize_scale_deadline)
+            .min()
+    }
+
     fn defer_preview_resample(&mut self, observed_at: Instant) {
-        if let Some(preview) = self.preview_raster_image_mut() {
-            preview.defer_resize_scale(observed_at);
+        for surface in self.preview_picture_hosts() {
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.defer_resize_scale(observed_at);
+            }
         }
     }
 
     fn finish_preview_resize_if_quiet(&mut self, now: Instant) -> Result<()> {
-        let due = self
-            .preview_raster_image_mut()
-            .is_some_and(|preview| preview.finish_resize_scale_if_quiet(now));
+        let mut due = false;
+        for surface in self.preview_picture_hosts() {
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                due |= picture.finish_resize_scale_if_quiet(now);
+            }
+        }
         if due {
             self.refresh_preview_for_layout();
             self.refresh_chrome();
@@ -23730,8 +23895,9 @@ impl Runtime {
         Ok(())
     }
 
-    /// Refit the current image to the solver's latest preview body. Decodes stay on the decoration
-    /// worker and Lanczos3 runs on its independent scale lane; this method only routes shared data.
+    /// Refit every picture on screen to the body its host gives it this frame.
+    /// Decodes stay on the decoration worker and Lanczos3 runs on its independent
+    /// scale lane; this method only routes shared data.
     fn refresh_preview_for_layout(&mut self) {
         // The document lane's half of the same refit. `refresh_preview_body`
         // rebuilds the parsed document first, so the heal below is clamping
@@ -23739,39 +23905,77 @@ impl Runtime {
         // — which is what makes a pane grown taller give its scroll back.
         self.refresh_preview_body();
         self.heal_preview_scroll();
-        // **The lane is a seat's.** `bt_render::PreviewImage` is addressed by
-        // `SeatId`, so a picture torn off into a float keeps its head, its foot
-        // and its meta line and has nowhere to put its pixels — see
-        // [`TabState::preview_raster`] for why that limit lives here rather than
-        // in whichever call site noticed it.
-        let Some(PreviewSurface::Seat(preview_seat)) = self.preview_raster else {
+        let hosts = self.preview_picture_hosts();
+        // The one `set_preview_image` slot, emptied when no seat is holding it —
+        // the lane is a seat's, and a frame in which no seat has a picture is a
+        // frame in which the slot must not still be showing the last one's.
+        if !hosts
+            .iter()
+            .any(|surface| self.preview_raster == Some(*surface))
+        {
             self.renderer.set_preview_image(None);
-            return;
-        };
-        let surface = PreviewSurface::Seat(preview_seat);
+        }
+        for surface in hosts {
+            self.refit_preview_picture(surface);
+        }
+    }
+
+    /// Fit **one** picture to the body its host gives it this frame, ask the
+    /// worker for the raster that box wants, and hand the pixels to the channel
+    /// that host draws on.
+    ///
+    /// **Everything about a picture except where its pixels land is the same on
+    /// both hosts** — the same path-keyed decode, the same zoom, the same
+    /// [`image_destination`], the same request ledger — so the fork is the two
+    /// arms at the bottom and not a second copy of this function. That is the
+    /// whole of the 2026-08-17 report: this arithmetic used to run for a seat
+    /// only, so a preview pane torn off into a window kept its head, its foot and
+    /// its meta line and showed nothing at all, and the request it had left in
+    /// flight was then answered to nobody.
+    fn refit_preview_picture(&mut self, surface: PreviewSurface) {
         let scale = self.renderer.metrics().scale_factor as f32;
-        // U8 — fitted against the solve and *placed* through the tween. The two
-        // are the same rectangle at rest and at the end of every flight; while
-        // one is running the picture travels with the head above it. This is one
-        // sample of the clock for one commit; the frames in between are re-placed
-        // by `redraw`, which is the only thing that runs per frame.
-        let Some(placement) = preview_image_placement(
-            &self.seats,
-            &self.seat_layout,
-            preview_seat,
-            scale,
-            self.pane_motion
-                .transform_of(preview_seat, Instant::now(), self.motion),
-        ) else {
-            self.renderer.set_preview_image(None);
+        // **U8 — a seat's box travels with its pane's tween**, and carries the
+        // crop a FLIP needs; a float's is its window's body, which does not
+        // animate, because a window is not a pane and does not fly to a slot.
+        // This is one sample of the clock for one commit; the frames in between
+        // are re-placed by `redraw`, which is the only thing that runs per frame.
+        let placement = match surface {
+            PreviewSurface::Seat(seat) => {
+                let Some(placement) = preview_image_placement(
+                    &self.seats,
+                    &self.seat_layout,
+                    seat,
+                    scale,
+                    self.pane_motion
+                        .transform_of(seat, Instant::now(), self.motion),
+                ) else {
+                    self.hide_preview_picture(surface);
+                    return;
+                };
+                Some(placement)
+            }
+            PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+        };
+        let Some(body_rect) = placement
+            .map(|placement| {
+                let body = placement.body;
+                [
+                    body.x as f32,
+                    body.y as f32,
+                    (body.x + body.width) as f32,
+                    (body.y + body.height) as f32,
+                ]
+            })
+            .or_else(|| self.preview_surface_body_rect(surface, scale))
+        else {
+            self.hide_preview_picture(surface);
             return;
         };
-        let body = placement.body;
         let Some(path) = self
-            .preview_raster_image()
-            .map(|preview| preview.path.clone())
+            .preview_picture(surface)
+            .map(|picture| picture.path.clone())
         else {
-            self.renderer.set_preview_image(None);
+            self.hide_preview_picture(surface);
             return;
         };
         let cache_key = normalized_local_image_path_key(&path);
@@ -23783,30 +23987,30 @@ impl Runtime {
                 height_px,
             }) => Some((key.clone(), Arc::clone(rgba), *width_px, *height_px)),
             Some(PeekCacheEntry::Pending) => {
-                self.renderer.set_preview_image(None);
+                self.hide_preview_picture(surface);
                 return;
             }
             Some(PeekCacheEntry::Failed) => {
-                if let Some(preview) = self.preview_raster_image_mut() {
-                    preview.failure.get_or_insert_with(|| {
+                if let Some(picture) = self.preview_picture_mut(surface) {
+                    picture.failure.get_or_insert_with(|| {
                         i18n::Text::PreviewFailedImageLoad.text().to_owned()
                     });
                 }
-                self.renderer.set_preview_image(None);
+                self.hide_preview_picture(surface);
                 return;
             }
             None => None,
         };
-        if let (Some(preview), Some((_, _, native_width, native_height))) =
-            (self.preview_raster_image_mut(), decoded.as_ref())
+        if let (Some(picture), Some((_, _, native_width, native_height))) =
+            (self.preview_picture_mut(surface), decoded.as_ref())
         {
-            preview.native = Some((*native_width, *native_height));
+            picture.native = Some((*native_width, *native_height));
         }
         let Some((content_key, rgba, native_width, native_height)) = decoded else {
-            self.renderer.set_preview_image(None);
+            self.hide_preview_picture(surface);
             if !self.math_worker_running {
-                if let Some(preview) = self.preview_raster_image_mut() {
-                    preview.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
+                if let Some(picture) = self.preview_picture_mut(surface) {
+                    picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
                 }
                 return;
             }
@@ -23820,8 +24024,8 @@ impl Runtime {
                 .is_ok()
             {
                 self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
-            } else if let Some(preview) = self.preview_raster_image_mut() {
-                preview.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
+            } else if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
             }
             return;
         };
@@ -23844,19 +24048,17 @@ impl Runtime {
         // A body or a decode with no extent has no rectangle to argue about, and
         // the arithmetic below would answer with a one-pixel smear rather than
         // with the refusal this has always been.
-        if body.width == 0 || body.height == 0 || native_width == 0 || native_height == 0 {
-            if let Some(preview) = self.preview_raster_image_mut() {
-                preview.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
+        if body_rect[2] <= body_rect[0]
+            || body_rect[3] <= body_rect[1]
+            || native_width == 0
+            || native_height == 0
+        {
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
             }
-            self.renderer.set_preview_image(None);
+            self.hide_preview_picture(surface);
             return;
         }
-        let body_rect = [
-            body.x as f32,
-            body.y as f32,
-            (body.x + body.width) as f32,
-            (body.y + body.height) as f32,
-        ];
         let image_px = [native_width, native_height];
         // **Re-clamped on the way out, and written back.** A pane made narrower
         // under a zoomed picture leaves a pan that is now past the end of its own
@@ -23888,43 +24090,66 @@ impl Runtime {
             native_width,
             native_height,
         ) else {
-            if let Some(preview) = self.preview_raster_image_mut() {
-                preview.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
             }
-            self.renderer.set_preview_image(None);
+            self.hide_preview_picture(surface);
             return;
         };
         let target = (content_key.clone(), raster_width, raster_height);
         let exact_raster = self
-            .preview_raster_image()
-            .and_then(|preview| preview.raster.as_ref())
+            .preview_picture(surface)
+            .and_then(|picture| picture.raster.as_ref())
             .is_some_and(|raster| raster.matches(&target));
-        if let Some(raster) = self
-            .preview_raster_image()
-            .and_then(|preview| preview.raster.as_ref())
-        {
-            // During a drag, keep the last texture on screen and let the sampler stretch it to the
-            // new fitted extent. It may be briefly soft, but the preview never vanishes; quiet-time
-            // delivery below replaces it with a one-to-one display raster.
-            self.renderer.set_preview_image(Some(PreviewImage {
-                seat: placement.seat,
-                clip: placement.clip,
-                key: raster.key.clone(),
-                rgba: Arc::clone(&raster.rgba),
-                width_px: raster.width_px,
-                height_px: raster.height_px,
-                display_width_px: display_width,
-                display_height_px: display_height,
-                pan_px: [clamped_pan[0].round(), clamped_pan[1].round()],
-            }));
-        } else {
-            self.renderer.set_preview_image(None);
+        // **The pixels, on whichever channel this host draws.** During a drag,
+        // keep the last texture on screen and let the sampler stretch it to the
+        // new fitted extent. It may be briefly soft, but the preview never
+        // vanishes; quiet-time delivery below replaces it with a one-to-one
+        // display raster.
+        let held = self
+            .preview_picture(surface)
+            .and_then(|picture| picture.raster.as_ref())
+            .map(|raster| {
+                (
+                    raster.key.clone(),
+                    Arc::clone(&raster.rgba),
+                    raster.width_px,
+                    raster.height_px,
+                )
+            });
+        match (placement, held) {
+            (Some(placement), Some((key, rgba, width_px, height_px))) => {
+                self.renderer.set_preview_image(Some(PreviewImage {
+                    seat: placement.seat,
+                    clip: placement.clip,
+                    key,
+                    rgba,
+                    width_px,
+                    height_px,
+                    display_width_px: display_width,
+                    display_height_px: display_height,
+                    pan_px: [clamped_pan[0].round(), clamped_pan[1].round()],
+                }));
+            }
+            (Some(_), None) => {
+                self.renderer.set_preview_image(None);
+            }
+            // A float paints from the rectangle filed just below: its window is
+            // an overlay layer a whole pass above the seat lane, so handing this
+            // picture to `set_preview_image` would draw it *behind* the very
+            // window that contains it — the same sentence
+            // [`Self::refresh_preview_body`] already makes about a float's
+            // document.
+            (None, _) => {}
+        }
+        if let Some(picture) = self.preview_picture_mut(surface) {
+            picture.drawn = Some(drawn);
         }
         if exact_raster {
             return;
         }
-        if self.preview_raster_image().is_some_and(|preview| {
-            preview.pending.as_ref() == Some(&target) || preview.resize_scale_deadline.is_some()
+        if self.preview_picture(surface).is_some_and(|picture| {
+            picture.pending.as_ref() == Some(&target) || picture.resize_scale_deadline.is_some()
         }) || !self.math_worker_running
         {
             return;
@@ -23939,12 +24164,12 @@ impl Runtime {
             })
             .is_ok()
         {
-            if let Some(preview) = self.preview_raster_image_mut() {
-                preview.pending = Some(target);
-                preview.failure = None;
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.pending = Some(target);
+                picture.failure = None;
             }
-        } else if let Some(preview) = self.preview_raster_image_mut() {
-            preview.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
+        } else if let Some(picture) = self.preview_picture_mut(surface) {
+            picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
         }
     }
 
@@ -31281,6 +31506,21 @@ impl Runtime {
         // place are the user's answer, and rows arriving later do not get to
         // move a window somebody has put somewhere.
         win.self_sizing = false;
+        // **A window under the hand is a body that moved**, and a picture in it
+        // has to be re-fitted to the box the next frame will draw — the float's
+        // half of what `commit_seat_geometry` does for a pane. The document beside
+        // it has always been rebuilt here for free, because a float's document is
+        // built into its layer; a picture is filed on the pane and would
+        // otherwise stay behind while its window travelled.
+        //
+        // The quiet boundary is deferred first, and it is the same one a divider
+        // drag uses: a resize by the grip changes the fitted extent on every
+        // pointer event, and asking the worker for each of them is the resample
+        // storm R2 exists to forbid. A *move* changes no extent, so the
+        // deferral costs it nothing and the exact raster it already holds is
+        // still exact.
+        self.defer_preview_resample(Instant::now());
+        self.refresh_preview_for_layout();
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -31926,6 +32166,37 @@ impl Runtime {
             fade,
         );
         layer.body = self.build_preview_body(surface);
+        // **The picture, on this window's own mark channel** (user report,
+        // 2026-08-17: "undock an image preview and the picture disappears").
+        //
+        // A seat's picture is drawn by `bt_render`'s one `set_preview_image`
+        // slot, which paints in the seat pass — a whole pass *below* the
+        // overlays, which is where this window's own face is drawn. So a picture
+        // handed to that lane by a float would be behind the very window that
+        // contains it, and the honest answer is the one this layer's document
+        // already uses: ride the layer. The glance card draws its thumbnail on
+        // exactly this channel ([`file_peek::build`]), so a window's picture is
+        // the same picture in the same kind of layer and not a second mechanism.
+        //
+        // Over the window's face and under its meta line, because a layer closes
+        // its three channels in that order. **Clipped to the body**, because a
+        // picture zoomed past 100% is larger than the box it is looked at
+        // through, and an uncropped one would paint over this window's head, its
+        // foot and the desk beside it — the crop is the float's answer to the
+        // scissor a preview seat gets from its own viewport.
+        if let Some(picture) = self.preview_picture(surface)
+            && let (Some(rect), Some(raster)) = (picture.drawn, picture.raster.as_ref())
+        {
+            layer.images.push(bt_render::ChromeIcon {
+                key: raster.key.clone(),
+                rect,
+                rgba: Arc::clone(&raster.rgba),
+                width_px: raster.width_px,
+                height_px: raster.height_px,
+                opacity: 1.0,
+                clip: Some(geometry.body),
+            });
+        }
         Some(layer)
     }
 
@@ -32425,9 +32696,11 @@ impl Runtime {
             self.sessions.insert(arrived, session);
             self.focused_leaf = arrived;
         }
-        // The texture lane is a seat's ([`TabState::preview_raster`]), so a
-        // picture carried into a window keeps its head, its foot and its meta
-        // line and gives the lane back.
+        // The texture lane is a *seat's* ([`TabState::preview_raster`]), so a
+        // picture carried into a window gives the lane back and paints on its
+        // window's own layer from there ([`Self::preview_float_layer`]) — it
+        // keeps its pixels along with its head, its foot and its meta line, and
+        // the raster it is already holding travels with the pane.
         if self.preview_raster == Some(surface) {
             self.preview_raster = None;
             self.renderer.set_preview_image(None);
@@ -32510,6 +32783,25 @@ impl Runtime {
             self.tabs[active].preview_pool.merge_buffer(incoming);
         }
         *self.preview_pane_mut(landing) = pane;
+        // **The texture lane, taken back** (user report, 2026-08-17).
+        // `pop_out_preview` hands it in because a float paints its own picture
+        // and has no use for the slot; docking is that move run backwards and
+        // has to ask for it again, or the pane that has just landed keeps its
+        // head, its foot and its meta line and never gets its pixels. Written
+        // unconditionally rather than `get_or_insert`: the line above has
+        // already overwritten whatever view was on this surface, so there is no
+        // incumbent left whose pixels this could be taking away. And released
+        // when what docked is a *document*, for the same reason read the other
+        // way — a lane pointing at a surface with no picture on it would go on
+        // showing the last picture that was there.
+        let index = self.preview_tab_index(landing);
+        let landed_a_picture = self.tabs[index]
+            .preview_panes
+            .get(landing)
+            .is_some_and(|pane| pane.image.is_some());
+        self.tabs[index].preview_raster =
+            preview_lane_after_landing(self.tabs[index].preview_raster, landing, landed_a_picture);
+        self.renderer.set_preview_image(None);
         if let PreviewSurface::Seat(seat) = landing {
             // `DOCK` is a button and this is the click on it: the pane you just
             // put down is the one you are looking at.
@@ -33020,10 +33312,19 @@ impl Runtime {
                                     });
                                 target_active && applied
                             }),
+                        // **Not gated on the asking tab still being the one on
+                        // screen.** The two completions below are the window's,
+                        // not a seat's: the decode lands in `peek_cache`, which
+                        // is one map per window and keyed by path, and the
+                        // resample is claimed by whichever picture is holding
+                        // that exact target. Dropping either because the tab
+                        // changed left the ledger entry it answers — a
+                        // `PeekCacheEntry::Pending`, a `PreviewImageState`'s
+                        // `pending` — set for good, and a picture whose question
+                        // is permanently outstanding is a picture that never
+                        // arrives.
                         DecorationWorkerCompletion::PeekImage { path, result } => {
-                            if target_active {
-                                self.complete_peek_image(path, result)?;
-                            }
+                            self.complete_peek_image(path, result)?;
                             // Peek state never enters frames, so no republish is needed.
                             false
                         }
@@ -33034,9 +33335,7 @@ impl Runtime {
                             false
                         }
                         DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
-                            if target_active {
-                                self.complete_preview_scale(scaled)?;
-                            }
+                            self.complete_preview_scale(scaled)?;
                             false
                         }
                     };
@@ -34479,9 +34778,21 @@ impl Runtime {
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
-        let preview_matches = self
-            .preview_raster_image()
-            .is_some_and(|preview| normalized_local_image_path_key(&preview.path) == cache_key);
+        // **Every picture waiting on this file, not just the lane's.** A decode
+        // is addressed by *path* and the answer is the same pixels for whoever
+        // asked: a pane, a window torn off it, or both at once. Asking only the
+        // texture lane meant a picture in a float was told nothing when its own
+        // decode failed and the frame that shows the answer was never owed.
+        let waiting: Vec<PreviewSurface> = self
+            .preview_picture_hosts()
+            .into_iter()
+            .filter(|surface| {
+                self.preview_picture(*surface).is_some_and(|picture| {
+                    normalized_local_image_path_key(&picture.path) == cache_key
+                })
+            })
+            .collect();
+        let preview_matches = !waiting.is_empty();
         match result {
             Ok(decoded) => {
                 self.peek_cache.insert(
@@ -34502,8 +34813,10 @@ impl Runtime {
             Err(error) => {
                 self.peek_cache
                     .insert(cache_key.clone(), PeekCacheEntry::Failed);
-                if preview_matches && let Some(preview) = self.preview_raster_image_mut() {
-                    preview.failure = Some(i18n::preview_failed(&error.to_string()));
+                for surface in &waiting {
+                    if let Some(picture) = self.preview_picture_mut(*surface) {
+                        picture.failure = Some(i18n::preview_failed(&error.to_string()));
+                    }
                 }
             }
         }
@@ -34565,11 +34878,39 @@ impl Runtime {
         Ok(())
     }
 
+    /// Take delivery of a preview's display-sized raster.
+    ///
+    /// **Addressed the way it was asked for — by the picture, never by the
+    /// host** (user report, 2026-08-17). A resample is a worker round trip, and
+    /// in that time the picture that asked for it may have changed hosts: a pane
+    /// torn off into a window, a window docked back into a pane. This used to
+    /// hand the answer to whoever held the texture lane *when it landed*, so in
+    /// exactly those two moments it was handed to nobody — and the request
+    /// ledger it left behind ([`PreviewImageState::pending`]) then made every
+    /// later refit answer "already asked", so the picture never came back at
+    /// all. The target tuple travels with the pane because it lives on it, which
+    /// is why looking the asker up by it is a routing that a move cannot break.
     fn complete_preview_scale(&mut self, scaled: bt_term::ScaledInlineImage) -> Result<()> {
-        let Some(preview) = self.preview_raster_image_mut() else {
+        let delivered: PeekThumbnailTarget = (
+            scaled.content_key.clone(),
+            scaled.width_px,
+            scaled.height_px,
+        );
+        // Every tab's plane, because a float's pane lives with the tab that
+        // opened the window and not with the one on screen — and a picture
+        // whose window you have since navigated away from is still a picture
+        // that asked a question.
+        let Some(surface) = self
+            .tabs
+            .iter()
+            .find_map(|tab| tab.preview_panes.awaiting_scale(&delivered))
+        else {
             return Ok(());
         };
-        if !preview.accept_scaled(scaled) {
+        if !self
+            .preview_picture_mut(surface)
+            .is_some_and(|picture| picture.accept_scaled(scaled))
+        {
             return Ok(());
         }
         self.refresh_preview_for_layout();
@@ -41101,9 +41442,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
-            runtime
-                .preview_raster_image()
-                .and_then(|preview| preview.resize_scale_deadline),
+            runtime.preview_resample_deadline(),
             runtime.session_store.deadline(),
             // The debounce a change notification started (R31's D). Absent —
             // and therefore costing nothing — for every window that is not
@@ -49463,6 +49802,158 @@ mod tests {
             },
         )));
         assert_eq!(preview.message(), None);
+    }
+
+    // ── the picture keeps its identity across a change of host ─────────────
+    //
+    // User report, 2026-08-17: "undock an image preview into a float and the
+    // picture disappears; dock it back and it still never loads". Three pins,
+    // one per link of the chain that broke.
+
+    fn pending_picture(path: &str, target: PeekThumbnailTarget) -> PreviewImageState {
+        let mut picture = PreviewImageState::new(PathBuf::from(path));
+        picture.pending = Some(target);
+        picture
+    }
+
+    /// RED before the fix: the resample was delivered to whoever held the
+    /// texture lane *when it landed*, and `pop_out_preview` hands the lane back
+    /// on the way out — so a question asked by a docked pane and answered while
+    /// it was a window went to nobody, and the ledger entry it should have
+    /// retired stayed set for good ("already asked" for every later refit).
+    ///
+    /// The move here is exactly `pop_out_preview`'s: the pane is taken out of the
+    /// plane whole and put back under a float's address.
+    #[test]
+    fn a_picture_torn_off_into_a_window_still_takes_delivery_of_its_resample() {
+        let seat = SeatId(7);
+        let float = 3_u64;
+        let target: PeekThumbnailTarget = ("push-pin".to_owned(), 320, 180);
+        let mut panes = PreviewPanes::default();
+        panes.entry(PreviewSurface::Seat(seat)).image =
+            Some(pending_picture("push-pin.png", target.clone()));
+
+        assert_eq!(
+            panes.awaiting_scale(&target),
+            Some(PreviewSurface::Seat(seat)),
+            "the docked pane is the one that asked"
+        );
+
+        // `pop_out_preview`: the view travels whole, under a new address.
+        let pane = panes.remove(PreviewSurface::Seat(seat)).expect("the pane");
+        *panes.entry(PreviewSurface::Float(float)) = pane;
+
+        assert_eq!(
+            panes.awaiting_scale(&target),
+            Some(PreviewSurface::Float(float)),
+            "and the window it became is still the one that asked"
+        );
+        // The texture lane, meanwhile, is nobody's — `pop_out_preview` hands it
+        // back on the way out, because a window paints its own picture. That is
+        // exactly why the answer must not be routed through it: at this instant
+        // there is no lane holder to hand it to, and the question above would
+        // then stay outstanding for good.
+        let lane: Option<PreviewSurface> = None;
+        assert_ne!(
+            lane,
+            panes.awaiting_scale(&target),
+            "the picture that asked is not the pane that happens to hold the lane"
+        );
+
+        let surface = panes.awaiting_scale(&target).expect("an asker");
+        let picture = panes
+            .entry(surface)
+            .image
+            .as_mut()
+            .expect("the picture that asked");
+        assert!(
+            picture.accept_scaled(bt_term::scale_inline_image(
+                &bt_term::InlineImageScaleTask {
+                    display_width_px: 320,
+                    display_height_px: 180,
+                    ..scale_task("push-pin", 320)
+                },
+            )),
+            "the answer lands on the picture that asked for it"
+        );
+        assert_eq!(picture.pending, None, "and retires the question with it");
+        assert!(picture.raster.is_some(), "leaving the pixels behind");
+        assert_eq!(
+            panes.awaiting_scale(&target),
+            None,
+            "nothing is left waiting on an answer that has arrived"
+        );
+    }
+
+    /// RED before the fix: `dock_preview_float` moved the view back onto a pane
+    /// and never asked for the texture lane again, so the re-docked picture was
+    /// never rasterised — head, foot and meta line, and no pixels. The rule is
+    /// one function now precisely because it has to be the same at both doors.
+    #[test]
+    fn docking_a_picture_takes_the_texture_lane_back_and_a_document_gives_it_up() {
+        let seat = PreviewSurface::Seat(SeatId(11));
+        let other = PreviewSurface::Seat(SeatId(12));
+        let window = PreviewSurface::Float(4_u64);
+
+        assert_eq!(
+            preview_lane_after_landing(None, seat, true),
+            Some(seat),
+            "a picture docked into a pane is the picture on the lane"
+        );
+        assert_eq!(
+            preview_lane_after_landing(Some(other), seat, true),
+            Some(seat),
+            "and it is the pane it landed on, not the one that had the lane"
+        );
+        assert_eq!(
+            preview_lane_after_landing(Some(seat), seat, false),
+            None,
+            "a document landing where the lane's picture was gives the lane up"
+        );
+        assert_eq!(
+            preview_lane_after_landing(Some(other), seat, false),
+            Some(other),
+            "and takes nothing from a pane that was not this one"
+        );
+        assert_eq!(
+            preview_lane_after_landing(Some(other), window, true),
+            Some(other),
+            "a window paints its own picture and never takes the lane"
+        );
+        assert_eq!(
+            preview_lane_after_landing(None, window, true),
+            None,
+            "not even when the lane is free"
+        );
+    }
+
+    /// The other half of the ledger's contract: an outstanding question belongs
+    /// to a *surface*, so it goes away with it. A pending target that outlived
+    /// its pane would be an answer routed to a host that no longer exists — and,
+    /// worse, a target a later picture could match by accident.
+    #[test]
+    fn an_in_flight_resample_cannot_outlive_the_surface_that_asked_for_it() {
+        let seat = PreviewSurface::Seat(SeatId(9));
+        let target: PeekThumbnailTarget = ("push-pin".to_owned(), 64, 64);
+        let mut panes = PreviewPanes::default();
+        panes.entry(seat).image = Some(pending_picture("push-pin.png", target.clone()));
+        assert_eq!(panes.awaiting_scale(&target), Some(seat));
+
+        panes.remove(seat);
+        assert_eq!(
+            panes.awaiting_scale(&target),
+            None,
+            "the pane closed and took its question with it"
+        );
+
+        // And the same when the surface stays but stops showing a picture.
+        panes.entry(seat).image = Some(pending_picture("push-pin.png", target.clone()));
+        panes.entry(seat).image = None;
+        assert_eq!(
+            panes.awaiting_scale(&target),
+            None,
+            "a surface that gave up its picture is not waiting on one"
+        );
     }
 
     #[test]
