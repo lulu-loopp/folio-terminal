@@ -545,6 +545,36 @@ pub enum Text {
     /// body names the file and the reason and is therefore a value-carrying
     /// string — see [`scheme_file_skipped`].
     SchemeFileSkipped,
+
+    // ── the window's ground and the window's posture (§7.1.6c-4b) ──────────
+    /// Appended at the end for the reason the scheme rows were, which is now a
+    /// standing rule for this table: a slice that inserted into the middle
+    /// would show as a diff across every line below it.
+    RowBackgroundImage,
+    RowImageFit,
+    RowImageOpacity,
+    RowBackgroundOpacity,
+    RowAcrylic,
+    RowAlwaysOnTop,
+    DescBackgroundImage,
+    DescImageFit,
+    DescImageOpacity,
+    DescBackgroundOpacity,
+    DescAcrylic,
+    DescAlwaysOnTop,
+    /// The sentence a greyed Acrylic row carries **instead of** its ordinary
+    /// description. The reason lives in the description line rather than in a
+    /// slot of its own, which is `psreadline::row_description`'s ruling: there
+    /// is one muted line under a title, and a row that is off has exactly one
+    /// thing worth saying there.
+    DescAcrylicUnavailable,
+    /// The same for a greyed Background opacity row.
+    DescBackgroundOpacityUnavailable,
+    OptionImageNone,
+    OptionImageChoose,
+    OptionFitStretch,
+    OptionFitFill,
+    OptionFitTile,
 }
 
 impl Text {
@@ -719,6 +749,59 @@ impl Text {
                 "深色窗口同理。文件放在 %APPDATA%\\Folio\\schemes",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
+
+            // ── the window's ground (§7.1.6c-4b) ───────────────────────────
+            Self::RowBackgroundImage => pick(lang, "Background image", "背景图片"),
+            Self::RowImageFit => pick(lang, "Image fit", "图片适配"),
+            Self::RowImageOpacity => pick(lang, "Image opacity", "图片不透明度"),
+            Self::RowBackgroundOpacity => pick(lang, "Background opacity", "背景不透明度"),
+            Self::RowAcrylic => pick(lang, "Acrylic", "亚克力"),
+            Self::RowAlwaysOnTop => pick(lang, "Always on top", "总在最前"),
+            Self::DescBackgroundImage => pick(
+                lang,
+                "Drawn once behind the window, beneath every pane",
+                "在整扇窗口背后画一次，位于每个窗格之下",
+            ),
+            Self::DescImageFit => pick(
+                lang,
+                "How the picture meets a window that is not its shape",
+                "图片与形状不同的窗口如何相配",
+            ),
+            Self::DescImageOpacity => pick(
+                lang,
+                "How much of the picture reaches the window",
+                "图片有多少落到窗口上",
+            ),
+            Self::DescBackgroundOpacity => pick(
+                lang,
+                "Panes and the window ground; text and menus stay opaque",
+                "作用于窗格与窗口底色；文字与菜单保持不透明",
+            ),
+            Self::DescAcrylic => pick(
+                lang,
+                "A Windows blur behind the ground. Visible only below full opacity",
+                "底色之后的 Windows 模糊。仅在不透明度低于 100% 时可见",
+            ),
+            Self::DescAlwaysOnTop => pick(
+                lang,
+                "The window stays above other windows",
+                "窗口保持在其他窗口之上",
+            ),
+            Self::DescAcrylicUnavailable => pick(
+                lang,
+                "This Windows has no system backdrop to draw",
+                "此版本 Windows 没有可用的系统背景材质",
+            ),
+            Self::DescBackgroundOpacityUnavailable => pick(
+                lang,
+                "This window is composited opaque",
+                "此窗口以不透明方式合成",
+            ),
+            Self::OptionImageNone => pick(lang, "None", "无"),
+            Self::OptionImageChoose => pick(lang, "Choose…", "选择…"),
+            Self::OptionFitStretch => pick(lang, "Stretch", "拉伸"),
+            Self::OptionFitFill => pick(lang, "Fill", "填充"),
+            Self::OptionFitTile => pick(lang, "Tile", "平铺"),
 
             Self::OptionSystem => pick(lang, "System", "系统"),
             Self::OptionLight => pick(lang, "Light", "浅色"),
@@ -933,7 +1016,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 133] = [
+    pub const ALL: [Self; 152] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1067,6 +1150,25 @@ impl Text {
         Self::DescLightScheme,
         Self::DescDarkScheme,
         Self::SchemeFileSkipped,
+        Self::RowBackgroundImage,
+        Self::RowImageFit,
+        Self::RowImageOpacity,
+        Self::RowBackgroundOpacity,
+        Self::RowAcrylic,
+        Self::RowAlwaysOnTop,
+        Self::DescBackgroundImage,
+        Self::DescImageFit,
+        Self::DescImageOpacity,
+        Self::DescBackgroundOpacity,
+        Self::DescAcrylic,
+        Self::DescAlwaysOnTop,
+        Self::DescAcrylicUnavailable,
+        Self::DescBackgroundOpacityUnavailable,
+        Self::OptionImageNone,
+        Self::OptionImageChoose,
+        Self::OptionFitStretch,
+        Self::OptionFitFill,
+        Self::OptionFitTile,
     ];
 }
 

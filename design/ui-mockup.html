@@ -2274,6 +2274,62 @@
   .combo-item .tick { width: 14px; font-size: 11px; color: var(--accent); visibility: hidden; }
   .combo-item.selected .tick { visibility: visible; }
   .combo-item.selected { color: var(--ink); }
+
+  /* ── THE SLIDER, born 2026-08-17 (Settings extension block, slice 4b) ──
+     The dialog's second control form, and the first one added since it was
+     built. It exists because two of this slice's four rows answer with a
+     PERCENTAGE — how much of the picture reaches the window, and how much of
+     the desktop reaches through it — and a percentage put in a combo is a list
+     of twenty-one items nobody wants to scroll to find 65 in. Every other row
+     in here still asks a question with a small named answer, and those stay
+     combos: this is not a new default, it is the form the two numeric rows owe.
+
+     IT OCCUPIES THE COMBO'S COLUMN, EXACTLY. 118px is the combo's `min-width`,
+     and the slider is 76 of track + 8 of gap + 34 of number = 118, so the right
+     edge of every control in the dialog is still one line. The number is
+     `tabular-nums` because it changes while you drag, and a proportional 8 is
+     narrower than a proportional 0 — without it the track would breathe in and
+     out under the thumb.
+
+     THE THUMB IS THE ACCENT AND SO IS THE FILLED HALF, because they are one
+     statement read two ways: the fill says how much, the thumb says where you
+     would grab to change it. The empty half is `--border` and not a tint of the
+     accent — an accent at low opacity reads as a disabled accent, and there is
+     nothing disabled here.
+
+     KEYBOARD: ←/→ step 5%, Home/End go to the ends. Five and not one because
+     the value is a percentage of a picture's presence, where one percent is
+     not a thing anybody can see, and twenty presses across the whole range is a
+     control you can actually drive without the mouse. */
+  .slider { flex: none; display: flex; align-items: center; gap: 8px; }
+  .slider .track {
+    position: relative; width: 76px; height: 4px;
+    border-radius: 2px; background: var(--border);
+  }
+  .slider .fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--accent); }
+  .slider .thumb {
+    position: absolute; top: 50%;
+    width: 12px; height: 12px; margin: -6px 0 0 -6px;
+    border-radius: 50%; background: var(--accent);
+  }
+  .slider:hover .thumb { transform: scale(1.15); }
+  .slider .num {
+    width: 34px; text-align: right;
+    font-size: 12.5px; color: var(--ink2); font-variant-numeric: tabular-nums;
+  }
+  .slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+  /* A row the machine cannot honour is greyed WHOLE — title, sentence and
+     control — and its sentence becomes the reason. Same ink and same rule as
+     the Shortcuts page's reserved lines and the greyed items in an open picker:
+     this is a thing you are being shown and cannot have, and a control that
+     looks live and does nothing is the thing that forbids. */
+  .row.unavailable .title,
+  .row.unavailable .desc { color: var(--ink3); }
+  .row.unavailable .combo > button { color: var(--ink3); cursor: default; }
+  .row.unavailable .combo > button:hover { background: none; }
+  .row.unavailable .slider .fill,
+  .row.unavailable .slider .thumb { background: var(--ink3); }
+
   /* ── THE CATEGORY RAIL, born 2026-08-17 (Settings extension block, slice 2) ──
      The comment that used to stand in the settings DOM said the rail was
      "deliberately NOT built yet: it waits for the Settings extension block, and
@@ -2800,6 +2856,119 @@
               <div class="combo-item" data-v="nord" role="option"><span class="tick">✓</span>Nord</div>
               <div class="combo-item" data-v="one-half-dark" role="option"><span class="tick">✓</span>One Half Dark</div>
               <div class="combo-item" data-v="solarized-dark" role="option"><span class="tick">✓</span>Solarized Dark</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── THE WINDOW'S GROUND: A PICTURE, AND HOW MUCH OF IT (§7.1.6c-4b) ──
+
+             Four rows for the ground and two for the window, in the order a
+             person actually decides them: is there a picture, how does it meet
+             a window that is not its shape, how much of it comes through, how
+             much of the DESKTOP comes through, is that blurred, and does the
+             window stay in front.
+
+             ONE PICTURE PER WINDOW, BEHIND EVERY PANE. A split is two views of
+             one place, not two places, so a picture drawn per pane would cut
+             itself in half at every divider and jump every time you dragged
+             one. It is painted once, over the whole window, under everything —
+             which is also why it costs one quad and one texture no matter how
+             many panes are open.
+
+             FIT IS THREE ANSWERS AND NOT A NUMBER: Stretch takes the window's
+             shape, Fill keeps the picture's and crops what will not fit, Tile
+             repeats it at its own size from the top-left. They are the three
+             things anybody means by "make it fit", and each is a different
+             sentence about what may be lost — aspect, edges, or nothing.
+
+             THE TWO PERCENTAGES ARE NOT THE SAME KNOB. Image opacity mixes the
+             picture with the scheme's background colour; background opacity
+             decides how much of that finished ground is there at all. Turning
+             the first down leaves an opaque window with a faint picture in it;
+             turning the second down lets the desktop through. A single knob
+             could not say both.
+
+             TEXT NEVER FADES. The ground is the clear and the panes' own
+             fills; every glyph, menu, dialog and float on top of it is opaque
+             at any setting, because a terminal you cannot read is not a
+             terminal. This is why the floor is 30% and not 0: below it the
+             ground stops being a surface and becomes a hole.
+
+             ACRYLIC IS THE SYSTEM'S BLUR, not ours (`DWMWA_SYSTEMBACKDROP_TYPE`
+             = `DWMSBT_TRANSIENTWINDOW`), and it has nothing to blur while the
+             ground is opaque — the description says so as a fact, not as a
+             warning. Where Windows does not know the attribute the row is
+             greyed whole and its sentence becomes the reason. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Background image</div>
+            <div class="desc">Drawn once behind the window, beneath every pane</div>
+          </div>
+          <div class="combo" data-combo="bgimage">
+            <button aria-haspopup="listbox"><span class="value">None</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="none" role="option"><span class="tick">✓</span>None</div>
+              <div class="combo-item" data-v="choose" role="option"><span class="tick">✓</span>Choose…</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Image fit</div>
+            <div class="desc">How the picture meets a window that is not its shape</div>
+          </div>
+          <div class="combo" data-combo="bgfit">
+            <button aria-haspopup="listbox"><span class="value">Fill</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="stretch" role="option"><span class="tick">✓</span>Stretch</div>
+              <div class="combo-item selected" data-v="fill" role="option"><span class="tick">✓</span>Fill</div>
+              <div class="combo-item" data-v="tile" role="option"><span class="tick">✓</span>Tile</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Image opacity</div>
+            <div class="desc">How much of the picture reaches the window</div>
+          </div>
+          <div class="slider" tabindex="0" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+            <div class="track"><div class="fill" style="right:0"></div><div class="thumb" style="left:100%"></div></div>
+            <div class="num">100%</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Background opacity</div>
+            <div class="desc">Panes and the window ground; text and menus stay opaque</div>
+          </div>
+          <div class="slider" tabindex="0" role="slider" aria-valuemin="30" aria-valuemax="100" aria-valuenow="100">
+            <div class="track"><div class="fill" style="right:0"></div><div class="thumb" style="left:100%"></div></div>
+            <div class="num">100%</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Acrylic</div>
+            <div class="desc">A Windows blur behind the ground. Visible only below full opacity</div>
+          </div>
+          <div class="combo" data-combo="acrylic">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Always on top</div>
+            <div class="desc">The window stays above other windows</div>
+          </div>
+          <div class="combo" data-combo="ontop">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
             </div>
           </div>
         </div>

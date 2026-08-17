@@ -33,7 +33,7 @@
 //! Nothing here is layout: the dialog is not a seat, takes no space from the
 //! solver, and is never persisted (a dialog does not survive a restart).
 
-use bt_persist::{LanguageV1, SplitDirectionV1, ThemeModeV1};
+use bt_persist::{BackgroundFitV1, LanguageV1, SplitDirectionV1, ThemeModeV1};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
@@ -142,6 +142,33 @@ pub const MENU_ITEM_FONT_LOGICAL_PX: f32 = COMBO_FONT_LOGICAL_PX;
 /// 7.33px wide in the mock-up, so its em box is the tightest bound that cannot
 /// cut the glyph, and a bound is all the value's own rectangle needs.
 const COMBO_CHEVRON_FONT_LOGICAL_PX: f32 = 8.5;
+// ── `.slider` (§7.1.6c-4b) ─────────────────────────────────────────────────
+// The dialog's second control form, and the first added since it was built. It
+// occupies the combo's column EXACTLY: 76 of track + 8 of gap + 34 of number is
+// 118, which is `COMBO_MIN_WIDTH_LOGICAL_PX`, so the right edge of every control
+// in the dialog is still one line. `the_slider_occupies_the_combos_column`
+// holds the three to that sum rather than trusting three literals to keep
+// agreeing.
+const SLIDER_TRACK_WIDTH_LOGICAL_PX: f32 = 76.0;
+const SLIDER_TRACK_HEIGHT_LOGICAL_PX: f32 = 4.0;
+const SLIDER_THUMB_LOGICAL_PX: f32 = 12.0;
+const SLIDER_GAP_LOGICAL_PX: f32 = 8.0;
+const SLIDER_VALUE_WIDTH_LOGICAL_PX: f32 = 34.0;
+const SLIDER_VALUE_FONT_LOGICAL_PX: f32 = 12.5;
+/// `.slider .track { border-radius: 2px }` — half its own height, so the ends
+/// are round rather than clipped.
+const SLIDER_TRACK_RADIUS_LOGICAL_PX: f32 = SLIDER_TRACK_HEIGHT_LOGICAL_PX / 2.0;
+/// What one press of `←`/`→` is worth.
+///
+/// Five and not one, because the value is a percentage of a picture's presence
+/// and one percent of that is not a thing anybody can see — while twenty presses
+/// across the whole range is a control that can actually be driven from the
+/// keyboard. It is also the granularity the number beside the track can show
+/// without ever looking like it failed to move.
+pub const SLIDER_STEP_PERCENT: u8 = 5;
+/// `.slider:hover .thumb { transform: scale(1.15) }`.
+const SLIDER_THUMB_HOVER_SCALE: f32 = 1.15;
+
 /// `.combo > button { gap: 10px }` — between the value and the chevron.
 const COMBO_GAP_LOGICAL_PX: f32 = 10.0;
 /// The mock-up's chevron is the character, not the `#i-chev` symbol: a solid
@@ -344,6 +371,33 @@ pub const SIDEBAR_OPTIONS: [RailMode; 2] = [RailMode::Expanded, RailMode::Icons]
 /// (`data-combo="wrap"`, `data-combo="attnchip"`) and the order a reader expects
 /// when the affirmative is the default.
 pub const FORMULA_OPTIONS: [bool; 2] = [true, false];
+/// What the Background image row's two items mean.
+///
+/// A named pair rather than a `bool`, because neither of them is the *value* of
+/// the row: the value is a path, and these two are the two things a person does
+/// to it. `Choose…` is a verb that opens the system's chooser and may come back
+/// with nothing; `None` is the only way to clear a picture once one is set, and
+/// giving it an item is what saves the row from needing a second control beside
+/// its button to undo itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageSource {
+    None,
+    Choose,
+}
+
+/// `None` first, which is [`FORMULA_OPTIONS`]' order for its reason: the state
+/// the row is born in reads first, and the verb reads second.
+pub const IMAGE_SOURCE_OPTIONS: [ImageSource; 2] = [ImageSource::None, ImageSource::Choose];
+
+/// The three ways a picture meets a window that is not its shape, in the
+/// mock-up's order (Stretch, Fill, Tile) — least to most of the picture's own
+/// geometry kept.
+pub const IMAGE_FIT_OPTIONS: [BackgroundFitV1; 3] = [
+    BackgroundFitV1::Stretch,
+    BackgroundFitV1::Fill,
+    BackgroundFitV1::Tile,
+];
+
 /// The three answers to "which way does a split with no direction of its own
 /// cut" (user ruling, 2026-08-16), with the historical behaviour first — which
 /// is both the product default and the order a reader expects when the first
@@ -544,6 +598,35 @@ fn tab_layout_label(layout: TabLayoutMode) -> &'static str {
     }
 }
 
+fn image_source_label(source: ImageSource) -> &'static str {
+    match source {
+        ImageSource::None => Text::OptionImageNone.text(),
+        ImageSource::Choose => Text::OptionImageChoose.text(),
+    }
+}
+
+fn image_fit_label(fit: BackgroundFitV1) -> &'static str {
+    match fit {
+        BackgroundFitV1::Stretch => Text::OptionFitStretch.text(),
+        BackgroundFitV1::Fill => Text::OptionFitFill.text(),
+        BackgroundFitV1::Tile => Text::OptionFitTile.text(),
+    }
+}
+
+/// Which row of the fit picker is ticked, for a stored fit.
+///
+/// A free function beside the other `*_index` resolvers, and public for their
+/// reason: the caller holds `bt_persist`'s value and the dialog speaks in
+/// indices, and doing the conversion in two places is how the ticked row comes
+/// to disagree with the window.
+#[must_use]
+pub fn image_fit_index(fit: BackgroundFitV1) -> usize {
+    IMAGE_FIT_OPTIONS
+        .iter()
+        .position(|candidate| *candidate == fit)
+        .unwrap_or(0)
+}
+
 /// The mock-up's own word for both states of every On/Off picker it draws.
 fn on_off_label(enabled: bool) -> &'static str {
     if enabled {
@@ -704,6 +787,162 @@ impl SettingsCategory {
     }
 }
 
+/// The span of whole percentages one slider row runs over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SliderRange {
+    pub min: u8,
+    pub max: u8,
+}
+
+impl SliderRange {
+    /// This range's own clamp — the one place a value is forced into it.
+    #[must_use]
+    pub const fn clamp(self, value: u8) -> u8 {
+        if value < self.min {
+            self.min
+        } else if value > self.max {
+            self.max
+        } else {
+            value
+        }
+    }
+
+    /// How far along the track a value sits, `0.0..=1.0`.
+    #[must_use]
+    pub fn fraction(self, value: u8) -> f32 {
+        let span = f32::from(self.max.saturating_sub(self.min));
+        if span <= 0.0 {
+            return 0.0;
+        }
+        f32::from(self.clamp(value) - self.min) / span
+    }
+
+    /// The value a fraction of the way along the track, rounded to the nearest
+    /// whole percentage.
+    ///
+    /// Rounded and not truncated, because this is what a drag produces: truncation
+    /// would make the thumb lag the pointer by up to a whole step on the way up
+    /// and sit exactly under it on the way down, which reads as the control
+    /// sticking.
+    #[must_use]
+    pub fn value_at(self, fraction: f32) -> u8 {
+        let span = f32::from(self.max.saturating_sub(self.min));
+        let offset = (fraction.clamp(0.0, 1.0) * span).round();
+        self.min.saturating_add(offset as u8).min(self.max)
+    }
+
+    /// One press of an arrow key, from `value` in the direction of `delta`.
+    ///
+    /// Stepping is from the value's own position and not from a grid: a file that
+    /// says 63 steps to 68, not to 65. Snapping to multiples would silently
+    /// rewrite a number the user may have typed into `settings.json` on purpose,
+    /// and the first arrow press is exactly when they would not be looking.
+    #[must_use]
+    pub fn stepped(self, value: u8, delta: i16) -> u8 {
+        let value = i16::from(self.clamp(value)) + delta * i16::from(SLIDER_STEP_PERCENT);
+        self.clamp(value.clamp(0, 255) as u8)
+    }
+}
+
+/// Which form a row's control takes.
+///
+/// Two, and the dialog intends to stay at two: a combo answers a question with a
+/// small named set, a slider answers one with a percentage, and every row in
+/// this product is one of those two questions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingsControl {
+    Combo,
+    Slider(SliderRange),
+}
+
+impl SettingsControl {
+    #[must_use]
+    pub const fn range(self) -> Option<SliderRange> {
+        match self {
+            Self::Combo => None,
+            Self::Slider(range) => Some(range),
+        }
+    }
+}
+
+/// Where a slider's parts land inside the control column.
+///
+/// **One derivation, four readers** — the paint, the hit test, the drag and the
+/// keyboard's own idea of where the thumb now is. The track is the thing that
+/// matters: a thumb is 12px wide and a track is 76, so a rule that measured the
+/// press against the *thumb's* travel rather than the track's length would put
+/// 100% six pixels short of the right-hand end, which is exactly far enough to
+/// be unreachable and not far enough to look like a bug.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SliderGeometry {
+    /// The whole control column — what a press has to land in to count.
+    pub band: [f32; 4],
+    /// The groove, full width, at its own 4px height.
+    pub track: [f32; 4],
+    /// The filled part of the groove, left edge to the thumb's centre.
+    pub fill: [f32; 4],
+    /// The thumb's own square, centred on its position along the track.
+    pub thumb: [f32; 4],
+    /// Where the percentage is written.
+    pub value: [f32; 4],
+}
+
+/// Solve one slider's geometry inside the box the row gave its control.
+///
+/// `combo` is the row's control rectangle — the same 118-wide box a picker would
+/// have had, which is what keeps the two forms in one column.
+#[must_use]
+pub fn slider_geometry(
+    combo: [f32; 4],
+    scale: f32,
+    range: SliderRange,
+    value: u8,
+) -> SliderGeometry {
+    let px = |logical: f32| logical * scale;
+    let track_width = px(SLIDER_TRACK_WIDTH_LOGICAL_PX);
+    let track_height = px(SLIDER_TRACK_HEIGHT_LOGICAL_PX);
+    let thumb = px(SLIDER_THUMB_LOGICAL_PX);
+    let middle = (combo[1] + combo[3]) / 2.0;
+    let track = [
+        combo[0],
+        middle - track_height / 2.0,
+        combo[0] + track_width,
+        middle + track_height / 2.0,
+    ];
+    let centre = track[0] + track_width * range.fraction(value);
+    SliderGeometry {
+        band: combo,
+        track,
+        fill: [track[0], track[1], centre.max(track[0]), track[3]],
+        thumb: [
+            centre - thumb / 2.0,
+            middle - thumb / 2.0,
+            centre + thumb / 2.0,
+            middle + thumb / 2.0,
+        ],
+        value: [
+            track[2] + px(SLIDER_GAP_LOGICAL_PX),
+            combo[1],
+            track[2] + px(SLIDER_GAP_LOGICAL_PX + SLIDER_VALUE_WIDTH_LOGICAL_PX),
+            combo[3],
+        ],
+    }
+}
+
+/// The value a press or drag at `x` is asking for.
+///
+/// Measured against the **track**, clamped at both ends, so that grabbing the
+/// thumb and dragging past the end of the dialog lands on the end of the range
+/// rather than wherever the arithmetic ran out.
+#[must_use]
+pub fn slider_value_at(combo: [f32; 4], scale: f32, range: SliderRange, x: f32) -> u8 {
+    let track_width = SLIDER_TRACK_WIDTH_LOGICAL_PX * scale;
+    if track_width <= 0.0 {
+        return range.min;
+    }
+    range.value_at((x - combo[0]) / track_width)
+}
+
 /// One line of the dialog's `.content`: a title, a description and a picker.
 ///
 /// An enumeration and not a set of named fields, because a row now exists in
@@ -740,6 +979,55 @@ pub enum SettingsRow {
     /// The palette a Dark window wears. Its description is where the pair says
     /// once where a user's own scheme files go.
     DarkScheme,
+    /// **The picture behind the window** (§7.1.6c-4b), and the five rows under
+    /// it that finish the same sentence.
+    ///
+    /// Directly under the scheme pair because that is where the ground is being
+    /// described: the schemes say what colour it is, these say whether there is
+    /// a picture on it, how it meets a window that is not its shape, how much of
+    /// it comes through, how much of the *desktop* comes through behind it, and
+    /// whether Windows blurs that. The last row of the six is a window posture
+    /// rather than a ground, and it is here because it is the one place a reader
+    /// looking for "how this window behaves" will already be.
+    ///
+    /// **A two-item picker and not a new control form.** `None` and `Choose…`
+    /// are the two things a person does to this row, the second opens the
+    /// system's own chooser, and the button carries the chosen file's name.
+    /// Clearing therefore has a first-class home — a browse button alone would
+    /// have needed a second control beside it to undo itself.
+    BackgroundImage,
+    /// How that picture meets a window that is not its shape: Stretch, Fill,
+    /// Tile. Three answers and not a number, because each is a different
+    /// sentence about what may be lost — the aspect ratio, the edges, or
+    /// nothing.
+    ImageFit,
+    /// **The dialog's first slider**, and the reason the form exists: this row's
+    /// answer is a percentage, and a percentage in a picker is a list of
+    /// twenty-one items nobody wants to scroll to find 65 in.
+    ImageOpacity,
+    /// How much of the window's ground is there at all — the row that lets the
+    /// desktop through. Floored at
+    /// `bt_persist::MINIMUM_BACKGROUND_OPACITY`, and its description states
+    /// what does *not* fade, because "background opacity" on a terminal reads
+    /// as "everything".
+    ///
+    /// One of the two rows in this dialog that can be greyed **whole**: it needs
+    /// a window composited with premultiplied alpha, and where the renderer did
+    /// not get one there is nothing here to offer.
+    BackgroundOpacity,
+    /// Windows' own blur behind the ground (`DWMWA_SYSTEMBACKDROP_TYPE`).
+    ///
+    /// The second row that can be greyed whole, and the one that actually is on
+    /// a real machine: the attribute arrived in Windows 11 22H2, and every older
+    /// Windows refuses it. The refusal is asked of DWM rather than of a build
+    /// number — see `bt_platform::system_backdrop_available`.
+    Acrylic,
+    /// Whether the window stays above other windows.
+    ///
+    /// The one row of the six that is visible with a picture, a blur and an
+    /// opacity all switched off, and the only one that is not about drawing at
+    /// all.
+    AlwaysOnTop,
     Cursor,
     TabLayout,
     Sidebar,
@@ -865,7 +1153,18 @@ impl SettingsRow {
             | Self::Sidebar
             | Self::SplitDirection
             | Self::TerminalFont
-            | Self::FontSize => SettingsCategory::Appearance,
+            | Self::FontSize
+            // The window's ground and the window's postures (§7.1.6c-4b). All
+            // six are Appearance, including `Always on top`: it is not a look,
+            // but it is not a language, a shell or a block either, and the page
+            // a reader hunting "how this window behaves" opens first is this
+            // one — the same judgement `Split direction` was filed under.
+            | Self::BackgroundImage
+            | Self::ImageFit
+            | Self::ImageOpacity
+            | Self::BackgroundOpacity
+            | Self::Acrylic
+            | Self::AlwaysOnTop => SettingsCategory::Appearance,
             // The row the mock-up's `Terminal` page was waiting for. It is about
             // what a shell does rather than what the window looks like, which is
             // the line that page's name draws.
@@ -907,6 +1206,12 @@ impl SettingsRow {
             Self::LightScheme => Text::RowLightScheme.text(),
             Self::DarkScheme => Text::RowDarkScheme.text(),
             Self::PsReadLine => Text::RowPsReadLine.text(),
+            Self::BackgroundImage => Text::RowBackgroundImage.text(),
+            Self::ImageFit => Text::RowImageFit.text(),
+            Self::ImageOpacity => Text::RowImageOpacity.text(),
+            Self::BackgroundOpacity => Text::RowBackgroundOpacity.text(),
+            Self::Acrylic => Text::RowAcrylic.text(),
+            Self::AlwaysOnTop => Text::RowAlwaysOnTop.text(),
         }
     }
 
@@ -986,7 +1291,103 @@ impl SettingsRow {
             // installed, and what that costs today. It is also where the reason
             // a greyed item is grey is written — see the variant.
             Self::PsReadLine => crate::psreadline::row_description(values.psreadline),
+            Self::BackgroundImage => Text::DescBackgroundImage.text(),
+            Self::ImageFit => Text::DescImageFit.text(),
+            Self::ImageOpacity => Text::DescImageOpacity.text(),
+            // The two rows that can be greyed whole say *why* on this line
+            // instead of saying what they do — `psreadline::row_description`'s
+            // ruling, generalised: there is one muted line under a title, and a
+            // row that cannot act has exactly one thing worth putting on it. It
+            // states the fact and does not apologise for it (user ruling
+            // 2026-08-17: UI copy carries no editorial).
+            Self::BackgroundOpacity => {
+                if values.translucency_available {
+                    Text::DescBackgroundOpacity.text()
+                } else {
+                    Text::DescBackgroundOpacityUnavailable.text()
+                }
+            }
+            Self::Acrylic => {
+                if values.acrylic_available {
+                    Text::DescAcrylic.text()
+                } else {
+                    Text::DescAcrylicUnavailable.text()
+                }
+            }
+            Self::AlwaysOnTop => Text::DescAlwaysOnTop.text(),
         }
+    }
+
+    /// Which of the dialog's two control forms this row answers with.
+    ///
+    /// **One answer, read by the layout, the hit test, the draw and the
+    /// keyboard** — [`option_enabled`](Self::option_enabled)'s ruling applied to
+    /// the control rather than to an item inside one. A row whose geometry said
+    /// "slider" while its hit test said "picker" is a track you can drag and a
+    /// menu that opens under your finger.
+    #[must_use]
+    pub fn control(self) -> SettingsControl {
+        match self {
+            Self::ImageOpacity => SettingsControl::Slider(SliderRange {
+                // A picture can be turned all the way off without being
+                // forgotten, which is what distinguishes this floor from the
+                // ground's: somebody comparing two wallpapers wants 0 to mean
+                // "show me the window without it", not "unset the row".
+                min: 0,
+                max: 100,
+            }),
+            Self::BackgroundOpacity => SettingsControl::Slider(SliderRange {
+                min: bt_persist::MINIMUM_BACKGROUND_OPACITY,
+                max: 100,
+            }),
+            _ => SettingsControl::Combo,
+        }
+    }
+
+    /// Whether this machine can honour this row at all.
+    ///
+    /// `false` greys the row **whole** — title, sentence and control — and turns
+    /// its description into the reason (see [`description`](Self::description)).
+    /// That is the Shortcuts page's `reserved` line one surface over, and it is
+    /// the same sentence: this is a thing you are being shown and cannot have.
+    ///
+    /// The row is still drawn and still a focus stop. Drawn, because the reason
+    /// is the point — a row that vanished on Windows 10 would leave a reader
+    /// hunting for a feature they had read about. A focus stop, because a ring
+    /// is not an action: what the greying forbids is a control that *appears to
+    /// act*, and both the hit test and `activate` refuse this one.
+    #[must_use]
+    pub fn available(self, values: SettingsValues) -> bool {
+        match self {
+            Self::Acrylic => values.acrylic_available,
+            Self::BackgroundOpacity => values.translucency_available,
+            _ => true,
+        }
+    }
+
+    /// Where the ring goes and what a press lands on, for this row's control.
+    #[must_use]
+    pub fn control_target(self) -> SettingsTarget {
+        match self.control() {
+            SettingsControl::Combo => SettingsTarget::Combo(self),
+            SettingsControl::Slider(_) => SettingsTarget::Slider(self),
+        }
+    }
+
+    /// What a slider row currently reads, as a whole percentage — `None` for
+    /// every row that is not a slider.
+    #[must_use]
+    pub fn slider_value(self, values: SettingsValues) -> Option<u8> {
+        let range = self.control().range()?;
+        let value = match self {
+            Self::ImageOpacity => values.background_image_opacity,
+            Self::BackgroundOpacity => values.background_opacity,
+            _ => return None,
+        };
+        // Clamped on the way out, because a hand-edited `settings.json` is
+        // allowed to say 7 (`bt_persist` deliberately stores what it was given)
+        // and a thumb outside its own track is a thumb somewhere else entirely.
+        Some(range.clamp(value))
     }
 
     /// How many items this row's picker holds.
@@ -1011,6 +1412,14 @@ impl SettingsRow {
             // list the ⌄ menu uses"). Not a copy of it — the same table — so a
             // fifth profile appears in both surfaces or in neither.
             Self::DefaultProfile => profiles::PROFILES.len(),
+            Self::BackgroundImage => IMAGE_SOURCE_OPTIONS.len(),
+            Self::ImageFit => IMAGE_FIT_OPTIONS.len(),
+            Self::Acrylic | Self::AlwaysOnTop => FORMULA_OPTIONS.len(),
+            // A slider has no items. Zero rather than a refusal, because
+            // `option_labels` is what the layout measures the control column
+            // against, and the honest measurement of a control that never opens
+            // a menu is no words at all.
+            Self::ImageOpacity | Self::BackgroundOpacity => 0,
         }
     }
 
@@ -1051,6 +1460,15 @@ impl SettingsRow {
             Self::DefaultProfile => {
                 (index < profiles::PROFILES.len()).then(|| profiles::title(index))
             }
+            Self::BackgroundImage => IMAGE_SOURCE_OPTIONS
+                .get(index)
+                .copied()
+                .map(image_source_label),
+            Self::ImageFit => IMAGE_FIT_OPTIONS.get(index).copied().map(image_fit_label),
+            Self::Acrylic | Self::AlwaysOnTop => {
+                FORMULA_OPTIONS.get(index).copied().map(on_off_label)
+            }
+            Self::ImageOpacity | Self::BackgroundOpacity => None,
         }
     }
 
@@ -1150,6 +1568,23 @@ impl SettingsRow {
             // whole of the fix, and it is free here because there is no second
             // place holding the button's caption.
             Self::DefaultProfile => Some(values.default_profile),
+            // Ticked on what the window is actually doing: `None` is ticked
+            // while no picture is named, and neither item is ticked once one
+            // is — because the answer then is the file itself, and the button is
+            // carrying its name.
+            Self::BackgroundImage => (!values.background_image)
+                .then(|| {
+                    IMAGE_SOURCE_OPTIONS
+                        .iter()
+                        .position(|it| *it == ImageSource::None)
+                })
+                .flatten(),
+            Self::ImageFit => Some(values.background_fit),
+            Self::Acrylic => FORMULA_OPTIONS.iter().position(|it| *it == values.acrylic),
+            Self::AlwaysOnTop => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.always_on_top),
+            Self::ImageOpacity | Self::BackgroundOpacity => None,
         }
     }
 }
@@ -1172,6 +1607,21 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         SettingsRow::Theme,
         SettingsRow::LightScheme,
         SettingsRow::DarkScheme,
+        // The window's ground, immediately under the pair that says what colour
+        // it is (user ruling 2026-08-17, §7.1.6c-4b) — the rest of the same
+        // sentence, read downwards: is there a picture, how does it meet the
+        // window, how much of it comes through, how much of the desktop comes
+        // through behind it, is that blurred, and does the window stay in front.
+        //
+        // Unconditional, unlike `Sidebar`: the two rows a machine may not be
+        // able to honour are greyed rather than dropped, because the reason is
+        // what a reader came for — see `SettingsRow::available`.
+        SettingsRow::BackgroundImage,
+        SettingsRow::ImageFit,
+        SettingsRow::ImageOpacity,
+        SettingsRow::BackgroundOpacity,
+        SettingsRow::Acrylic,
+        SettingsRow::AlwaysOnTop,
         SettingsRow::Cursor,
         SettingsRow::TabLayout,
     ];
@@ -1328,6 +1778,32 @@ pub struct SettingsValues {
     /// `Copy` and `build`/`hit` can keep taking it by value. Four bools is the
     /// whole of what those two need to know about the filesystem.
     pub profile_available: [bool; profiles::PROFILES.len()],
+    /// Whether a picture is named — **not which one**. The name is a path and
+    /// this struct is `Copy` + `Eq`; the button's caption comes through
+    /// [`build`]'s own `background_image` argument, which is where a borrowed
+    /// string belongs.
+    pub background_image: bool,
+    /// Which row of the fit picker is ticked — an index, never the stored enum,
+    /// for `terminal_font`'s reason.
+    pub background_fit: usize,
+    /// How much of the picture reaches the window, 0–100 whole percent.
+    pub background_image_opacity: u8,
+    /// How much of the ground reaches the window, 30–100 whole percent.
+    pub background_opacity: u8,
+    pub acrylic: bool,
+    pub always_on_top: bool,
+    /// Whether this Windows knows what a system backdrop is
+    /// (`bt_platform::system_backdrop_available`). `false` greys the Acrylic row
+    /// whole and turns its sentence into the reason.
+    pub acrylic_available: bool,
+    /// Whether this window's surface is composited with premultiplied alpha —
+    /// the thing a translucent ground is made of (`docs/DESIGN.md` §2.3 A2).
+    ///
+    /// Read from the renderer's own `alpha_report`, not assumed: the row's state
+    /// has to be a fact about the surface that was actually configured, and the
+    /// day a second window target appears is the day an assumption here would
+    /// draw a slider that moves and changes nothing.
+    pub translucency_available: bool,
 }
 
 #[cfg(test)]
@@ -1362,6 +1838,18 @@ impl SettingsValues {
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
             profile_available: [true; profiles::PROFILES.len()],
+            background_image: false,
+            background_fit: image_fit_index(BackgroundFitV1::default()),
+            background_image_opacity: bt_persist::DEFAULT_BACKGROUND_IMAGE_OPACITY,
+            background_opacity: bt_persist::DEFAULT_BACKGROUND_OPACITY,
+            acrylic: false,
+            always_on_top: false,
+            // Both capabilities present, for `profile_available`'s reason: a
+            // geometry test must not quietly become a test of which Windows the
+            // suite is running on. The tests that are *about* the greying inject
+            // `false` themselves.
+            acrylic_available: true,
+            translucency_available: true,
         }
     }
 }
@@ -1637,6 +2125,7 @@ impl SettingsPanel {
         match target {
             SettingsTarget::Close
             | SettingsTarget::Combo(_)
+            | SettingsTarget::Slider(_)
             | SettingsTarget::Nav(_)
             | SettingsTarget::Record(_)
             | SettingsTarget::RestoreRow(_)
@@ -1738,6 +2227,16 @@ pub enum SettingsKey {
     Other,
 }
 
+/// Which of a slider's four keys was pressed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SliderKey {
+    /// `←` or `→`, one [`SLIDER_STEP_PERCENT`] in that direction.
+    Step(i16),
+    /// `End` (`true`) or `Home` (`false`) — the ends of the range, which for the
+    /// ground's slider is its floor and not zero.
+    End(bool),
+}
+
 /// What a key press did, for a runtime that has to repaint, scroll or persist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsKeyVerdict {
@@ -1754,6 +2253,16 @@ pub enum SettingsKeyVerdict {
     Chose(SettingsTarget),
     /// The last layer unwound and the dialog is now shut.
     Closed,
+    /// A slider was driven from the keyboard to a new whole percentage
+    /// (§7.1.6c-4b).
+    ///
+    /// Its own verdict rather than `Chose`, because the two are different
+    /// events: `Chose` names a *target* the runtime presses, and this names a
+    /// *value* the runtime stores. Folding a slider into `Chose(Choice(row, n))`
+    /// would mean inventing an option index for a control that has no options,
+    /// and every reader of that index would then have to know it was a
+    /// percentage in disguise.
+    Adjusted(SettingsRow, u8),
 }
 
 impl SettingsKeyVerdict {
@@ -1811,12 +2320,33 @@ impl SettingsPanel {
                 self.close_menu();
                 self.step_focus(content, if backwards { -1 } else { 1 })
             }
+            // **A focused slider owns `←`/`→` and `Home`/`End`.** Everywhere
+            // else in this dialog `←` means "back to the rail" and `→` means
+            // "into the page", and that stays true — but a track under the ring
+            // is a control whose whole vocabulary is those four keys, and a
+            // slider that could only be dragged would be the one control here
+            // the keyboard cannot reach. It is the same shape the open picker
+            // already has: while you are *inside* a control, the arrows are the
+            // control's. Tab and Shift+Tab still leave, which is why nothing
+            // becomes unreachable.
+            SettingsKey::Left => match self.slider_key(values, SliderKey::Step(-1)) {
+                Some(verdict) => return verdict,
+                None => self.step_out_of_page(content),
+            },
+            SettingsKey::Right => match self.slider_key(values, SliderKey::Step(1)) {
+                Some(verdict) => return verdict,
+                None => self.step_into_page(content),
+            },
+            SettingsKey::Home => match self.slider_key(values, SliderKey::End(false)) {
+                Some(verdict) => return verdict,
+                None => self.jump(content, values, false),
+            },
+            SettingsKey::End => match self.slider_key(values, SliderKey::End(true)) {
+                Some(verdict) => return verdict,
+                None => self.jump(content, values, true),
+            },
             SettingsKey::Down => self.step(content, values, 1),
             SettingsKey::Up => self.step(content, values, -1),
-            SettingsKey::Left => self.step_out_of_page(content),
-            SettingsKey::Right => self.step_into_page(content),
-            SettingsKey::Home => self.jump(content, values, false),
-            SettingsKey::End => self.jump(content, values, true),
             SettingsKey::Other => false,
         };
         if moved || ring_appeared {
@@ -1829,6 +2359,37 @@ impl SettingsPanel {
     /// Whether the ring is standing on a rail item.
     fn on_nav(&self) -> bool {
         matches!(self.focus, Some(SettingsTarget::Nav(_)))
+    }
+
+    /// One of the four keys a focused slider owns, or `None` when the ring is
+    /// not on a slider and the key means what it always meant.
+    ///
+    /// `Some(Inert)` and not `None` for a value that did not move: the key was
+    /// the slider's, it simply had nowhere further to go, and letting it fall
+    /// through would tip the focus out of a control the user is still driving
+    /// the moment they reached its end.
+    fn slider_key(&self, values: SettingsValues, key: SliderKey) -> Option<SettingsKeyVerdict> {
+        if self.menu.is_some() {
+            return None;
+        }
+        let Some(SettingsTarget::Slider(row)) = self.focus else {
+            return None;
+        };
+        let range = row.control().range()?;
+        if !row.available(values) {
+            return Some(SettingsKeyVerdict::Inert);
+        }
+        let current = row.slider_value(values)?;
+        let next = match key {
+            SliderKey::Step(delta) => range.stepped(current, delta),
+            SliderKey::End(true) => range.max,
+            SliderKey::End(false) => range.min,
+        };
+        Some(if next == current {
+            SettingsKeyVerdict::Inert
+        } else {
+            SettingsKeyVerdict::Adjusted(row, next)
+        })
     }
 
     /// `→` from the rail: into the page, onto its first control.
@@ -1883,6 +2444,18 @@ impl SettingsPanel {
             Some(SettingsTarget::Nav(_)) => {
                 SettingsKeyVerdict::from_moved(self.step_into_page(content))
             }
+            // A row this machine cannot honour refuses Enter, exactly as a
+            // greyed picker item does — the ring may stand on it and read its
+            // reason, and nothing more.
+            Some(SettingsTarget::Combo(row) | SettingsTarget::Slider(row))
+                if !row.available(values) =>
+            {
+                SettingsKeyVerdict::Inert
+            }
+            // Enter on a slider has nothing to open and nothing to choose: the
+            // value is already what the arrows have made it. Inert rather than
+            // a no-op fallthrough, so that the reason is written down.
+            Some(SettingsTarget::Slider(_)) => SettingsKeyVerdict::Inert,
             Some(SettingsTarget::Combo(row)) => {
                 // "Opens its menu with the current value focused": the picker
                 // opens where the user already is, not at its top, so the first
@@ -2230,7 +2803,7 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
     content
         .page_rows(category)
         .into_iter()
-        .map(SettingsTarget::Combo)
+        .map(SettingsRow::control_target)
         .collect()
 }
 
@@ -2266,6 +2839,13 @@ pub enum SettingsTarget {
     Nav(SettingsCategory),
     /// A row's picker button.
     Combo(SettingsRow),
+    /// A slider row's control column — the track, its thumb and the number
+    /// beside them, which are one target because they are one control (§7.1.6c-4b).
+    ///
+    /// The whole column and not the thumb alone: a 12px disc is not a thing to
+    /// ask somebody to hit, and every slider anybody has used jumps to a press
+    /// on its track.
+    Slider(SettingsRow),
     /// The open menu's own body, between or around its items.
     Menu(SettingsRow),
     /// One item of a row's open picker, by its index in that row's options.
@@ -2403,6 +2983,24 @@ impl SettingsLayout {
         self.rows.iter().find(|placed| placed.row == row)
     }
 
+    /// What a press or a drag at `x` is asking a slider row for (§7.1.6c-4b).
+    ///
+    /// **The one door for both**, which is what makes a drag the same gesture as
+    /// the press that began it: a press jumps the thumb to the pointer, and every
+    /// motion afterwards asks this again with a new `x`. `None` for a row that is
+    /// not on this page or is not a slider.
+    ///
+    /// `y` is deliberately not a parameter. Once a drag has begun, the pointer is
+    /// allowed to wander off the track vertically — every slider ever built keeps
+    /// following it — and the press that starts one has already been hit-tested
+    /// against the row's band.
+    #[must_use]
+    pub fn slider_at(&self, row: SettingsRow, x: f64) -> Option<u8> {
+        let placed = self.row(row)?;
+        let range = row.control().range()?;
+        Some(slider_value_at(placed.combo, self.scale, range, x as f32))
+    }
+
     /// The furthest this dialog may be scrolled; `0.0` when nothing overflows.
     #[must_use]
     pub fn max_scroll(&self) -> f32 {
@@ -2434,9 +3032,9 @@ impl SettingsLayout {
         // anything: `Nav` is the second target in this dialog whose answer is
         // "nowhere", and it is the first one that is a control.
         let band = match target {
-            SettingsTarget::Combo(row) | SettingsTarget::Menu(row) => {
-                self.row(row).map(|placed| placed.band)
-            }
+            SettingsTarget::Combo(row)
+            | SettingsTarget::Slider(row)
+            | SettingsTarget::Menu(row) => self.row(row).map(|placed| placed.band),
             SettingsTarget::Choice(row, _) => self.row(row).map(|placed| placed.band),
             SettingsTarget::Record(index) | SettingsTarget::RestoreRow(index) => self
                 .shortcuts
@@ -2613,6 +3211,51 @@ pub fn dark_scheme_requested(target: SettingsTarget) -> Option<&'static str> {
 pub fn psreadline_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::PsReadLine, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// What a press on the Background image row's picker asks for (§7.1.6c-4b).
+///
+/// [`ImageSource::Choose`] is a **verb** and not a value: the caller opens the
+/// system's chooser and may come back with nothing, so nothing is stored here.
+#[must_use]
+pub fn background_image_requested(target: SettingsTarget) -> Option<ImageSource> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::BackgroundImage, index) => {
+            IMAGE_SOURCE_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// How the picture meets the window, as a press on its picker.
+#[must_use]
+pub fn image_fit_requested(target: SettingsTarget) -> Option<BackgroundFitV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::ImageFit, index) => {
+            IMAGE_FIT_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The system backdrop, as a press on its picker.
+#[must_use]
+pub fn acrylic_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::Acrylic, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+/// The window's z-order posture, as a press on its picker.
+#[must_use]
+pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::AlwaysOnTop, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -3326,7 +3969,15 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
     }
     for placed in &layout.rows {
         if layout.shows(placed.combo) && contains(placed.combo, x, y) {
-            return SettingsTarget::Combo(placed.row);
+            // **A row this machine cannot honour is dialog body**, which is
+            // `option_enabled`'s ruling one level up and enforced in the same
+            // one place: a rule spelled only at the draw leaves a greyed row
+            // that still opens its picker under the pointer.
+            return if placed.row.available(values) {
+                placed.row.control_target()
+            } else {
+                SettingsTarget::Panel
+            };
         }
     }
     for line in &layout.shortcuts {
@@ -3370,12 +4021,23 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
 /// reached by pointer. Passing the focus itself would draw a ring round whatever
 /// the user just clicked, which is the thing `:focus-visible` exists to stop.
 #[must_use]
+// Eight, and every one of them is a different question the draw has to be able
+// to answer: where, what is under the pointer, what is under the ring, what the
+// rows read, what the shortcut table holds, what the picture is called, what is
+// being recorded, and how wide a string is. Bundling any of them into a struct
+// would be a struct whose only reader is this call.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
     focus: Option<SettingsTarget>,
     values: SettingsValues,
     shortcuts: &[crate::shortcuts::ShortcutRow],
+    // The chosen picture's file name, or empty when there is none — the one
+    // caption in this dialog that is a runtime string rather than a table
+    // lookup. It arrives here beside `shortcuts` and not inside
+    // [`SettingsValues`] for the reason that struct is `Copy`: a path is not.
+    background_image: &str,
     recording: Option<(usize, &[String], Option<&str>)>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
@@ -3538,11 +4200,21 @@ pub fn build(
         });
     }
     for placed in &layout.rows {
+        // A row the machine cannot honour is greyed WHOLE — title, sentence and
+        // control — and its sentence has already become the reason (see
+        // `SettingsRow::description`). Same ink and same rule as the Shortcuts
+        // page's reserved lines and the greyed items in an open picker: this is
+        // a thing you are being shown and cannot have.
+        let available = placed.row.available(values);
         content_stack.labels.push(ChromeLabel {
             text: placed.row.title().to_owned(),
             rect: placed.title,
             font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
-            color: palette.dialog_title_text,
+            color: if available {
+                palette.dialog_title_text
+            } else {
+                palette.menu_item_hint_text
+            },
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
@@ -3567,26 +4239,58 @@ pub fn build(
     // covered by the *fill* of a later row's — the same channel ordering the
     // popup's layer exists for, one scale down.
     for placed in &layout.rows {
-        let value = placed
-            .row
-            .selected_index(values)
-            .and_then(|index| placed.row.option_label(index))
-            .unwrap_or_default();
-        push_combo(
-            &mut content_stack.quads,
-            &mut content_stack.labels,
-            placed.combo,
-            hover == Some(SettingsTarget::Combo(placed.row)),
-            value,
-            scale,
-            border,
-            palette,
-            measure,
-        );
-        // After the button it names, because a ring is a fill and a layer draws
-        // its fills in order — pushed before, the button's own face would cover
+        let available = placed.row.available(values);
+        match placed.row.control() {
+            SettingsControl::Combo => {
+                // The Background image row's button carries the chosen file's
+                // NAME, because that is the row's value; its two items are the
+                // two things you do to it, and neither of them is what is
+                // currently set. Every other picker's button is its ticked item.
+                let value =
+                    if placed.row == SettingsRow::BackgroundImage && !background_image.is_empty() {
+                        background_image
+                    } else {
+                        placed
+                            .row
+                            .selected_index(values)
+                            .and_then(|index| placed.row.option_label(index))
+                            .unwrap_or_default()
+                    };
+                push_combo(
+                    &mut content_stack.quads,
+                    &mut content_stack.labels,
+                    placed.combo,
+                    available && hover == Some(SettingsTarget::Combo(placed.row)),
+                    value,
+                    available,
+                    scale,
+                    border,
+                    palette,
+                    measure,
+                );
+            }
+            SettingsControl::Slider(range) => {
+                push_slider(
+                    &mut content_stack.quads,
+                    &mut content_stack.labels,
+                    slider_geometry(
+                        placed.combo,
+                        scale,
+                        range,
+                        placed.row.slider_value(values).unwrap_or(range.min),
+                    ),
+                    placed.row.slider_value(values).unwrap_or(range.min),
+                    available && hover == Some(SettingsTarget::Slider(placed.row)),
+                    available,
+                    scale,
+                    palette,
+                );
+            }
+        }
+        // After the control it names, because a ring is a fill and a layer draws
+        // its fills in order — pushed before, the control's own face would cover
         // the inner edge of it.
-        if focus == Some(SettingsTarget::Combo(placed.row)) {
+        if focus == Some(placed.row.control_target()) {
             content_stack
                 .quads
                 .extend(focus_ring(placed.combo, scale, palette.accent));
@@ -4113,6 +4817,10 @@ fn push_combo(
     rect: [f32; 4],
     hovered: bool,
     value: &str,
+    // `available`: whether this row can act. A greyed button keeps its border
+    // and its face — it stays where it is, exactly as a disabled `.btn` does —
+    // and only its ink steps back.
+    available: bool,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
@@ -4159,7 +4867,11 @@ fn push_combo(
         text: ellipsized(value, value_box[2] - value_box[0], font_size_px, measure),
         rect: value_box,
         font_size_px,
-        color: palette.dialog_title_text,
+        color: if available {
+            palette.dialog_title_text
+        } else {
+            palette.menu_item_hint_text
+        },
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,
@@ -4182,6 +4894,90 @@ fn push_combo(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
+    });
+}
+
+/// The dialog's other control: a track, the part of it that is filled, a thumb
+/// and the number (§7.1.6c-4b).
+///
+/// Painted from [`SliderGeometry`] and nothing else, which is the same rectangle
+/// the hit test and the drag measure against — a track drawn from one derivation
+/// and hit from another is a thumb that does not land where the pointer is.
+///
+/// **The thumb is the accent and so is the filled half**, because they are one
+/// statement read two ways: the fill says how much, the thumb says where you
+/// would take hold. The empty half is the border colour and not a tint of the
+/// accent — an accent at low opacity reads as a *disabled* accent, and there is
+/// nothing disabled about the part of the range you have not chosen.
+#[allow(clippy::too_many_arguments)]
+fn push_slider(
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+    geometry: SliderGeometry,
+    value: u8,
+    hovered: bool,
+    available: bool,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+) {
+    let px = |logical: f32| logical * scale;
+    let radius = px(SLIDER_TRACK_RADIUS_LOGICAL_PX);
+    let lit = if available {
+        palette.accent
+    } else {
+        palette.menu_item_hint_text
+    };
+    quads.extend(rounded_overlay_fill(
+        geometry.track,
+        radius,
+        palette.menu_border,
+        f32::from(palette.menu_border_alpha) / 255.0,
+    ));
+    // Only when there is something to fill: a zero-width rounded rectangle is
+    // two half-circles overlapping, which draws as a dot at the left-hand end of
+    // a track whose value is its minimum.
+    if geometry.fill[2] > geometry.fill[0] + radius {
+        quads.extend(rounded_overlay_fill(geometry.fill, radius, lit, 1.0));
+    }
+    // The thumb grows under the pointer rather than changing colour, which is
+    // the mock-up's own `transform: scale(1.15)` — a hover that recoloured the
+    // one accent shape on the row would read as a state change rather than as
+    // "this is the part you can grab".
+    let thumb = if hovered {
+        let grow = (geometry.thumb[2] - geometry.thumb[0]) * (SLIDER_THUMB_HOVER_SCALE - 1.0) / 2.0;
+        [
+            geometry.thumb[0] - grow,
+            geometry.thumb[1] - grow,
+            geometry.thumb[2] + grow,
+            geometry.thumb[3] + grow,
+        ]
+    } else {
+        geometry.thumb
+    };
+    quads.extend(rounded_overlay_fill(
+        thumb,
+        (thumb[3] - thumb[1]) / 2.0,
+        lit,
+        1.0,
+    ));
+    labels.push(ChromeLabel {
+        text: format!("{value}%"),
+        rect: geometry.value,
+        font_size_px: px(SLIDER_VALUE_FONT_LOGICAL_PX),
+        color: if available {
+            palette.dialog_muted_text
+        } else {
+            palette.menu_item_hint_text
+        },
+        align_right: true,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        // Tabular, because the number changes while you drag and a proportional
+        // 8 is narrower than a proportional 0 — without this the track would
+        // breathe in and out under the thumb.
+        tabular_numerals: true,
         clip: None,
     });
 }
@@ -4244,7 +5040,16 @@ mod tests {
 
     /// A window big enough that nothing is clamped: the shape every geometry
     /// claim below is stated against.
-    const SURFACE: (f32, f32) = (1280.0, 800.0);
+    /// The window every geometry claim below is stated against.
+    ///
+    /// **1100 and not 800 since §7.1.6c-4b.** The Appearance page took six more
+    /// rows that day and 103 + 15×54 = 913 no longer fits under 800's
+    /// `max-height: calc(100% - 72px)` — so every "the page decides the height"
+    /// pin would have been measuring the *clamp* instead. The clamp has pins of
+    /// its own (`a_row_at_the_content_edge_is_cut_and_never_compressed`,
+    /// `a_stack_taller_than_the_dialog_scrolls`), and they say what window they
+    /// want rather than relying on this one being too small.
+    const SURFACE: (f32, f32) = (1280.0, 1100.0);
 
     /// `.row`'s own height at scale 1: `2 * 11` of padding around the taller of
     /// the two-line text column (16.5 + 1 + 14.5) and the 27.5 control.
@@ -4512,8 +5317,8 @@ mod tests {
         assert_eq!(height(cursor.combo), height(theme.combo));
         assert_eq!(
             cursor.combo[1] - theme.combo[1],
-            3.0 * ROW_HEIGHT,
-            "Cursor is three identical rows under Theme — the two scheme rows sit between them"
+            9.0 * ROW_HEIGHT,
+            "Cursor is nine identical rows under Theme — the two scheme rows              (§7.1.6c-4a) and the six the window's ground took (§7.1.6c-4b) sit              between them, and every one of them is the same height"
         );
     }
 
@@ -4650,8 +5455,8 @@ mod tests {
             let (x, y) = centre(placed_row.combo);
             assert_eq!(
                 hit(&shut, values(), x, y),
-                SettingsTarget::Combo(placed_row.row),
-                "{:?}'s button must answer for its own row",
+                placed_row.row.control_target(),
+                "{:?}'s control must answer for its own row",
                 placed_row.row
             );
         }
@@ -4751,9 +5556,10 @@ mod tests {
         assert_eq!(width(cursor), width(theme));
         assert_eq!(height(cursor), height(theme));
         // Measured against the row immediately above it rather than against
-        // Theme: the two scheme rows moved in between (§7.1.6c-4a), and what
-        // this pins is the stacking step, not which row happens to be second.
-        let above = combo_of(&placed, SettingsRow::DarkScheme);
+        // Theme: the two scheme rows moved in between (§7.1.6c-4a) and the
+        // window's ground took six more (§7.1.6c-4b), and what this pins is the
+        // stacking step, not which row happens to be second.
+        let above = combo_of(&placed, SettingsRow::AlwaysOnTop);
         assert_eq!(
             cursor[1] - above[1],
             ROW_HEIGHT,
@@ -4924,7 +5730,7 @@ mod tests {
             let (x, y) = centre(combo);
             assert_eq!(
                 hit(&placed, values(), x, y),
-                SettingsTarget::Combo(rows[index]),
+                rows[index].control_target(),
                 "row {index} ({:?}) is visible but does not answer a press",
                 rows[index]
             );
@@ -5018,11 +5824,21 @@ mod tests {
     }
 
     /// The value a row's button shows for [`values`], which is the string the
-    /// button has to fit.
-    fn shown_value(row: SettingsRow) -> &'static str {
-        row.selected_index(values())
-            .and_then(|index| row.option_label(index))
-            .expect("every row this dialog holds reads something")
+    /// button has to fit — `None` for a row that has no button.
+    ///
+    /// A slider has no ticked item and no ellipsis to get wrong: its caption is
+    /// three characters of tabular digits in a column measured for four, so the
+    /// two pins that read a drawn value skip it rather than inventing a claim
+    /// about a control that cannot overflow.
+    fn shown_value(row: SettingsRow) -> Option<&'static str> {
+        if row.control().range().is_some() {
+            return None;
+        }
+        Some(
+            row.selected_index(values())
+                .and_then(|index| row.option_label(index))
+                .expect("every picker row this dialog holds reads something"),
+        )
     }
 
     /// The box a button's value is laid out in at 1x — the button less its two
@@ -5118,6 +5934,16 @@ mod tests {
                 // Fills: the whole button's fills, with the outside dropped. Built
                 // here from the row's *full* combo so the comparison is against
                 // the shape the button is, not against the shape the cut left.
+                // A slider is not a button and has no fills to compare against
+                // a button's; the clipping it owes is the same clipping every
+                // other quad in the content stack owes, which the sweep below
+                // already covers.
+                let Some(button_value) = shown_value(row.row) else {
+                    if clipped(row.combo, content).is_some_and(|seen| seen != row.combo) {
+                        rows_cut += 1;
+                    }
+                    continue;
+                };
                 let mut whole_quads = Vec::new();
                 let mut whole_labels = Vec::new();
                 push_combo(
@@ -5125,7 +5951,8 @@ mod tests {
                     &mut whole_labels,
                     row.combo,
                     false,
-                    shown_value(row.row),
+                    button_value,
+                    true,
                     1.0,
                     border,
                     palette,
@@ -5227,7 +6054,10 @@ mod tests {
         }
         for (placed, row) in &placed_rows {
             let labels = labels_of(placed, None, values());
-            let whole = shown_value(row.row);
+            // Sliders have no value box and nothing that can outgrow one.
+            let Some(whole) = shown_value(row.row) else {
+                continue;
+            };
             let box_of = combo_value_box(row.combo);
             let drawn = labels
                 .iter()
@@ -5496,6 +6326,7 @@ mod tests {
             focus,
             values,
             &lines,
+            "",
             recording,
             &mut measure,
         )
@@ -6021,8 +6852,8 @@ mod tests {
                     );
                     assert_eq!(
                         hit(&placed, values(), centre.0, centre.1),
-                        SettingsTarget::Combo(row),
-                        "{tab_layout:?} at {scale}: {row:?}'s picker must answer \
+                        row.control_target(),
+                        "{tab_layout:?} at {scale}: {row:?}'s control must answer \
                          where it is drawn"
                     );
                 }
@@ -6702,6 +7533,548 @@ mod tests {
         );
     }
 
+    // ── the window's ground (§7.1.6c-4b) ───────────────────────────────────
+
+    /// PIN — the slider occupies the picker's column exactly, so the right edge
+    /// of every control in the dialog is still one line.
+    ///
+    /// Held as a *sum* and not as three literals: the day somebody widens the
+    /// number to fit four digits is the day the track has to give back eight
+    /// pixels, and three constants that each look reasonable on their own are
+    /// how a column comes to be 126 wide in one row and 118 in the next.
+    #[test]
+    fn the_slider_occupies_the_combos_column() {
+        assert_eq!(
+            SLIDER_TRACK_WIDTH_LOGICAL_PX + SLIDER_GAP_LOGICAL_PX + SLIDER_VALUE_WIDTH_LOGICAL_PX,
+            COMBO_MIN_WIDTH_LOGICAL_PX
+        );
+        let placed = open(1.0, false);
+        let picker = combo_of(&placed, SettingsRow::Theme);
+        for row in [SettingsRow::ImageOpacity, SettingsRow::BackgroundOpacity] {
+            let control = combo_of(&placed, row);
+            assert_eq!(control[0], picker[0], "{row:?} starts in the same column");
+            assert_eq!(control[2], picker[2], "{row:?} ends in the same column");
+        }
+    }
+
+    /// PIN — a slider's parts come out of one derivation, and the thumb travels
+    /// the **track's** full length rather than its own.
+    ///
+    /// Red gate: measure the travel against `track_width - thumb_width` — the
+    /// naive reading — and 100% lands six pixels short of the right-hand end at
+    /// scale 1. Far enough to be unreachable by drag, not far enough to look
+    /// like a bug.
+    #[test]
+    fn a_sliders_thumb_travels_the_whole_track_and_its_parts_share_one_derivation() {
+        let placed = open(1.0, false);
+        let control = combo_of(&placed, SettingsRow::ImageOpacity);
+        let range = SliderRange { min: 0, max: 100 };
+
+        let floor = slider_geometry(control, 1.0, range, 0);
+        assert_eq!(floor.track[0], control[0]);
+        assert_eq!(
+            width(floor.track),
+            SLIDER_TRACK_WIDTH_LOGICAL_PX,
+            "the track is the track's width and not the control's"
+        );
+        assert_eq!(
+            (floor.thumb[0] + floor.thumb[2]) / 2.0,
+            floor.track[0],
+            "at the floor the thumb is centred on the track's left end"
+        );
+        assert_eq!(
+            floor.fill[2], floor.fill[0],
+            "nothing is filled at the floor"
+        );
+
+        let ceiling = slider_geometry(control, 1.0, range, 100);
+        assert_eq!(
+            (ceiling.thumb[0] + ceiling.thumb[2]) / 2.0,
+            ceiling.track[2],
+            "at the ceiling it is centred on the right end, not a thumb short of it"
+        );
+        assert_eq!(width(ceiling.fill), width(ceiling.track));
+
+        let half = slider_geometry(control, 1.0, range, 50);
+        assert!(
+            ((half.thumb[0] + half.thumb[2]) / 2.0 - (half.track[0] + half.track[2]) / 2.0).abs()
+                < 0.01
+        );
+        // The thumb is round and centred on the track's own middle at every
+        // value, which is what keeps it from riding up as the row's text column
+        // changes height.
+        for value in [0, 25, 50, 75, 100] {
+            let geometry = slider_geometry(control, 1.0, range, value);
+            assert_eq!(
+                width(geometry.thumb),
+                SLIDER_THUMB_LOGICAL_PX,
+                "{value}%: the thumb is one size"
+            );
+            assert!(
+                ((geometry.thumb[1] + geometry.thumb[3]) / 2.0
+                    - (geometry.track[1] + geometry.track[3]) / 2.0)
+                    .abs()
+                    < 0.01,
+                "{value}%: the thumb sits on the track's middle"
+            );
+        }
+        // And the number lives to the right of the track, one gap away, ending
+        // where the control does.
+        assert_eq!(floor.value[0], floor.track[2] + SLIDER_GAP_LOGICAL_PX);
+        assert_eq!(floor.value[2], control[2]);
+    }
+
+    /// PIN — the hit test reads the same derivation the paint does, at every
+    /// scale, and both ends of the track are reachable.
+    ///
+    /// The DPI sweep is the half with teeth: a `slider_value_at` that forgot to
+    /// scale the track would answer 100% a third of the way along at 2x, and the
+    /// dialog would look right in every screenshot taken at 1x.
+    #[test]
+    fn a_press_anywhere_on_a_track_asks_for_the_value_drawn_there() {
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let placed = open_page(scale, None, TabLayoutMode::Horizontal, PAGE, 0.0);
+            let control = combo_of(&placed, SettingsRow::ImageOpacity);
+            let range = SliderRange { min: 0, max: 100 };
+            let geometry = slider_geometry(control, scale, range, 0);
+
+            assert_eq!(
+                placed.slider_at(SettingsRow::ImageOpacity, f64::from(geometry.track[0])),
+                Some(0)
+            );
+            assert_eq!(
+                placed.slider_at(SettingsRow::ImageOpacity, f64::from(geometry.track[2])),
+                Some(100),
+                "scale {scale}: the far end of the track is the top of the range"
+            );
+            let middle = f64::from((geometry.track[0] + geometry.track[2]) / 2.0);
+            assert_eq!(
+                placed.slider_at(SettingsRow::ImageOpacity, middle),
+                Some(50)
+            );
+
+            // A drag that ran off either end asks for the end, not for a value
+            // outside the range and not for whatever the arithmetic produced.
+            assert_eq!(
+                placed.slider_at(
+                    SettingsRow::ImageOpacity,
+                    f64::from(geometry.track[0]) - 4000.0
+                ),
+                Some(0)
+            );
+            assert_eq!(
+                placed.slider_at(
+                    SettingsRow::ImageOpacity,
+                    f64::from(geometry.track[2]) + 4000.0
+                ),
+                Some(100)
+            );
+
+            // The ground's own slider has a floor, and its left-hand end is that
+            // floor rather than zero — the one place the two sliders differ.
+            let ground = combo_of(&placed, SettingsRow::BackgroundOpacity);
+            assert_eq!(
+                placed.slider_at(SettingsRow::BackgroundOpacity, f64::from(ground[0])),
+                Some(bt_persist::MINIMUM_BACKGROUND_OPACITY),
+                "scale {scale}: there is no setting from which this window can be \
+                 made unreadable"
+            );
+            // And a row that is not a slider has no value to ask for.
+            assert_eq!(placed.slider_at(SettingsRow::Theme, middle), None);
+        }
+    }
+
+    /// PIN — a press on a track answers `Slider(row)`, and the two forms live in
+    /// one column without confusing the hit test.
+    #[test]
+    fn a_slider_row_answers_the_pointer_as_a_slider_and_a_picker_row_as_a_picker() {
+        let placed = open(1.0, false);
+        for row in [SettingsRow::ImageOpacity, SettingsRow::BackgroundOpacity] {
+            let (x, y) = centre(combo_of(&placed, row));
+            assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Slider(row));
+            assert!(row.control().range().is_some());
+            assert_eq!(row.option_count(), 0, "a slider has no items to open");
+        }
+        for row in [
+            SettingsRow::BackgroundImage,
+            SettingsRow::ImageFit,
+            SettingsRow::Acrylic,
+            SettingsRow::AlwaysOnTop,
+        ] {
+            let (x, y) = centre(combo_of(&placed, row));
+            assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Combo(row));
+            assert!(row.control().range().is_none());
+        }
+    }
+
+    /// PIN — the four keys a focused slider owns, and the fact that they are
+    /// still the page's keys everywhere else.
+    ///
+    /// Red gate: let `←` fall through to `step_out_of_page` while a slider has
+    /// the ring, and the one control in this dialog that cannot be operated
+    /// without a mouse is the one whose whole vocabulary is the arrow keys.
+    #[test]
+    fn a_focused_slider_owns_the_arrows_and_the_ends_and_nothing_else_does() {
+        let mut panel = keyboarded();
+        // Walk down to the picture's opacity row.
+        let mut guard = 0;
+        while panel.focus() != Some(SettingsTarget::Slider(SettingsRow::ImageOpacity)) {
+            keyed(&mut panel, SettingsKey::Down);
+            guard += 1;
+            assert!(guard < 64, "the slider is somewhere in the Tab order");
+        }
+
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::Right),
+            SettingsKeyVerdict::Inert,
+            "the picture starts at 100%, and its ceiling has nowhere further to go"
+        );
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::Left),
+            SettingsKeyVerdict::Adjusted(SettingsRow::ImageOpacity, 95),
+            "one press is one step of five, from where the value actually is"
+        );
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::Home),
+            SettingsKeyVerdict::Adjusted(SettingsRow::ImageOpacity, 0)
+        );
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::End),
+            SettingsKeyVerdict::Inert,
+            "already at the top, because `values()` reads 100 whatever the keys did"
+        );
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Slider(SettingsRow::ImageOpacity)),
+            "none of the four moved the ring out of the control"
+        );
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::Activate),
+            SettingsKeyVerdict::Inert,
+            "Enter on a slider has nothing to open and nothing to choose"
+        );
+
+        // Shift+Tab still leaves, which is what stops the slider from being a
+        // place the keyboard cannot get out of.
+        assert_eq!(
+            keyed(&mut panel, SettingsKey::Tab { backwards: true }),
+            SettingsKeyVerdict::Moved
+        );
+        assert_ne!(
+            panel.focus(),
+            Some(SettingsTarget::Slider(SettingsRow::ImageOpacity))
+        );
+
+        // And on a picker row the four keys mean exactly what they always meant.
+        let mut picker = keyboarded();
+        assert_eq!(
+            picker.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Theme))
+        );
+        keyed(&mut picker, SettingsKey::Left);
+        assert_eq!(
+            picker.focus(),
+            Some(SettingsTarget::Nav(PAGE)),
+            "`←` off a picker is still `back to the rail`"
+        );
+    }
+
+    /// PIN — a step is taken from the value that is there, never snapped to a
+    /// grid, and it stops at both ends.
+    ///
+    /// A file may say 63 because somebody typed it; the first arrow press is
+    /// exactly the moment they are not looking, and a snap to 65 would be this
+    /// program quietly rewriting a number it was given.
+    #[test]
+    fn an_arrow_steps_from_where_the_value_is_and_stops_at_the_ends() {
+        let range = SliderRange { min: 30, max: 100 };
+        assert_eq!(range.stepped(63, 1), 68);
+        assert_eq!(range.stepped(63, -1), 58);
+        assert_eq!(range.stepped(100, 1), 100);
+        assert_eq!(range.stepped(32, -1), 30, "the floor holds");
+        assert_eq!(
+            range.stepped(7, 1),
+            35,
+            "a value under the floor is lifted first"
+        );
+        assert_eq!(range.stepped(240, -1), 95);
+        assert_eq!(
+            i16::from(SLIDER_STEP_PERCENT),
+            5,
+            "twenty presses across the range, and one percent of a picture's \
+             presence is not a thing anybody can see"
+        );
+
+        // The fraction and the value are each other's inverse at the ends and at
+        // the middle, which is what makes a press and the thumb it moves agree.
+        assert_eq!(range.fraction(30), 0.0);
+        assert_eq!(range.fraction(100), 1.0);
+        assert_eq!(range.value_at(0.0), 30);
+        assert_eq!(range.value_at(1.0), 100);
+        assert_eq!(range.value_at(0.5), 65);
+        // Rounded and not truncated: a drag that truncated would leave the thumb
+        // a whole step behind the pointer on the way up.
+        assert_eq!(range.value_at(0.499), 65);
+        assert_eq!(range.clamp(7), 30);
+        assert_eq!(range.clamp(200), 100);
+    }
+
+    /// PIN — a row this machine cannot honour is greyed WHOLE, says why on its
+    /// own line, and refuses both the pointer and Enter.
+    ///
+    /// The capability is injected rather than read off the machine running the
+    /// suite, which is `profile_available`'s ruling: a test about greying that
+    /// depended on which Windows CI happened to be on would be green for the
+    /// wrong reason on one of them.
+    #[test]
+    fn a_row_this_machine_cannot_honour_is_greyed_whole_and_says_why() {
+        let palette = chrome_palette();
+        let placed = open(1.0, false);
+
+        let mut lacking = values();
+        lacking.acrylic_available = false;
+        lacking.translucency_available = false;
+
+        for row in [SettingsRow::Acrylic, SettingsRow::BackgroundOpacity] {
+            assert!(
+                row.available(values()),
+                "{row:?} is live on a capable machine"
+            );
+            assert!(!row.available(lacking));
+            assert_ne!(
+                row.description(lacking),
+                row.description(values()),
+                "{row:?}'s muted line becomes the reason it cannot act"
+            );
+            assert!(
+                !row.description(lacking).trim().is_empty(),
+                "{row:?} greyed without a reason is a dead control"
+            );
+
+            // The pointer lands on the dialog's body and never on the control:
+            // the picker must not open and the track must not move.
+            let (x, y) = centre(combo_of(&placed, row));
+            assert_eq!(
+                hit(&placed, lacking, x, y),
+                SettingsTarget::Panel,
+                "{row:?} must not answer a press while it cannot act"
+            );
+            assert_eq!(hit(&placed, values(), x, y), row.control_target());
+        }
+
+        // Every one of the row's three parts steps back to the hint ink, and
+        // nothing on a live row does.
+        let greyed = labels_of(&placed, None, lacking);
+        let live = labels_of(&placed, None, values());
+        for row in [SettingsRow::Acrylic, SettingsRow::BackgroundOpacity] {
+            let title = row_of(&placed, row).title;
+            let drawn = greyed
+                .iter()
+                .find(|label| label.rect == title)
+                .expect("a greyed row still draws its title");
+            assert_eq!(
+                drawn.color, palette.menu_item_hint_text,
+                "{row:?}'s title wears the ink this house says `cannot` in"
+            );
+            let lit = live
+                .iter()
+                .find(|label| label.rect == title)
+                .expect("a live row draws its title");
+            assert_eq!(lit.color, palette.dialog_title_text);
+        }
+
+        // The ring may still stand on it — a ring is not an action — and Enter
+        // is refused there, which is what "no dead controls" actually forbids.
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content(&rows, &lines));
+        panel.select_category(PAGE);
+        panel.press(SettingsTarget::Combo(SettingsRow::Acrylic));
+        assert_eq!(
+            panel.key(SettingsKey::Activate, content(&rows, &lines), lacking),
+            SettingsKeyVerdict::Inert,
+            "Enter on a row that cannot act does nothing and says nothing"
+        );
+    }
+
+    /// PIN — the Background image row's button carries the chosen file's NAME,
+    /// and `None` while there is none.
+    ///
+    /// The name and not the path, because 118px of picker cannot hold a path and
+    /// one ellipsised from the right shows the half nobody needs.
+    #[test]
+    fn the_background_image_button_carries_the_pictures_name() {
+        let placed = open(1.0, false);
+        let box_of = combo_value_box(combo_of(&placed, SettingsRow::BackgroundImage));
+
+        let empty = labels_of(&placed, None, values());
+        let drawn = empty
+            .iter()
+            .find(|label| label.rect == box_of)
+            .expect("the row draws a value");
+        assert_eq!(drawn.text, Text::OptionImageNone.text());
+
+        let mut chosen = values();
+        chosen.background_image = true;
+        let lines = shortcut_lines();
+        let mut measure = measure;
+        let named: Vec<ChromeLabel> = build(
+            &placed,
+            None,
+            None,
+            chosen,
+            &lines,
+            "ridge.jpg",
+            None,
+            &mut measure,
+        )
+        .into_iter()
+        .flat_map(|layer| layer.labels)
+        .collect();
+        let drawn = named
+            .iter()
+            .find(|label| label.rect == box_of)
+            .expect("the row draws a value");
+        assert_eq!(drawn.text, "ridge.jpg");
+
+        // Neither item is ticked once a picture is named: the answer is the file,
+        // and `None` is a verb that would clear it.
+        assert_eq!(SettingsRow::BackgroundImage.selected_index(chosen), None);
+        assert_eq!(
+            SettingsRow::BackgroundImage.selected_index(values()),
+            Some(0)
+        );
+        assert_eq!(
+            background_image_requested(SettingsTarget::Choice(SettingsRow::BackgroundImage, 1)),
+            Some(ImageSource::Choose)
+        );
+        assert_eq!(
+            background_image_requested(SettingsTarget::Choice(SettingsRow::BackgroundImage, 0)),
+            Some(ImageSource::None)
+        );
+        assert_eq!(
+            background_image_requested(SettingsTarget::Combo(SettingsRow::BackgroundImage)),
+            None
+        );
+    }
+
+    /// PIN — every one of the six rows maps its picker items to exactly its own
+    /// setting, and to nobody else's.
+    #[test]
+    fn each_ground_picker_item_maps_to_its_own_setting_and_no_other() {
+        for (index, fit) in IMAGE_FIT_OPTIONS.iter().enumerate() {
+            let target = SettingsTarget::Choice(SettingsRow::ImageFit, index);
+            assert_eq!(image_fit_requested(target), Some(*fit));
+            assert_eq!(image_fit_index(*fit), index, "the tick round-trips");
+            assert_eq!(acrylic_requested(target), None);
+            assert_eq!(always_on_top_requested(target), None);
+            assert_eq!(background_image_requested(target), None);
+        }
+        for (index, on) in FORMULA_OPTIONS.iter().enumerate() {
+            let acrylic = SettingsTarget::Choice(SettingsRow::Acrylic, index);
+            assert_eq!(acrylic_requested(acrylic), Some(*on));
+            assert_eq!(always_on_top_requested(acrylic), None);
+            assert_eq!(git_panel_requested(acrylic), None);
+            let on_top = SettingsTarget::Choice(SettingsRow::AlwaysOnTop, index);
+            assert_eq!(always_on_top_requested(on_top), Some(*on));
+            assert_eq!(acrylic_requested(on_top), None);
+        }
+        // The two rows read what the window is doing, not what was stored about
+        // whether it was asked.
+        let mut on = values();
+        on.acrylic = true;
+        on.always_on_top = true;
+        assert_eq!(SettingsRow::Acrylic.selected_index(on), Some(0));
+        assert_eq!(SettingsRow::AlwaysOnTop.selected_index(on), Some(0));
+        assert_eq!(SettingsRow::Acrylic.selected_index(values()), Some(1));
+    }
+
+    /// PIN — `sample()` is the settings a fresh install reads, so a geometry
+    /// test is never quietly a test of somebody's `settings.json`.
+    ///
+    /// It is checked against `bt_persist`'s own defaults rather than against
+    /// literals, which is what stops the two drifting: the day the floor moves,
+    /// this fails here instead of in whichever geometry pin happened to notice.
+    #[test]
+    fn the_sample_reading_is_a_fresh_installs_ground() {
+        let sample = values();
+        assert!(!sample.background_image);
+        assert_eq!(
+            sample.background_fit,
+            image_fit_index(bt_persist::BackgroundFitV1::default())
+        );
+        assert_eq!(
+            sample.background_image_opacity,
+            bt_persist::DEFAULT_BACKGROUND_IMAGE_OPACITY
+        );
+        assert_eq!(
+            sample.background_opacity,
+            bt_persist::DEFAULT_BACKGROUND_OPACITY
+        );
+        assert!(!sample.acrylic);
+        assert!(!sample.always_on_top);
+        assert!(sample.acrylic_available && sample.translucency_available);
+        assert_eq!(
+            SettingsRow::ImageOpacity.slider_value(sample),
+            Some(bt_persist::DEFAULT_BACKGROUND_IMAGE_OPACITY)
+        );
+        assert_eq!(
+            SettingsRow::BackgroundOpacity.slider_value(sample),
+            Some(bt_persist::DEFAULT_BACKGROUND_OPACITY)
+        );
+        assert_eq!(SettingsRow::Theme.slider_value(sample), None);
+
+        // A stored value under the floor is lifted where it is read, because
+        // `bt_persist` deliberately stores what it was given and a thumb outside
+        // its own track is a thumb somewhere else entirely.
+        let mut hand_edited = sample;
+        hand_edited.background_opacity = 7;
+        assert_eq!(
+            SettingsRow::BackgroundOpacity.slider_value(hand_edited),
+            Some(bt_persist::MINIMUM_BACKGROUND_OPACITY)
+        );
+    }
+
+    /// PIN — the six rows are in the Appearance page, in the order the ruling
+    /// gave them, immediately after the pair that says what colour the ground is.
+    #[test]
+    fn the_ground_rows_follow_the_schemes_in_the_order_they_are_decided() {
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let ground = [
+            SettingsRow::BackgroundImage,
+            SettingsRow::ImageFit,
+            SettingsRow::ImageOpacity,
+            SettingsRow::BackgroundOpacity,
+            SettingsRow::Acrylic,
+            SettingsRow::AlwaysOnTop,
+        ];
+        let start = rows
+            .iter()
+            .position(|row| *row == SettingsRow::BackgroundImage)
+            .expect("the ground is in the dialog");
+        assert_eq!(&rows[start..start + ground.len()], &ground);
+        for row in ground {
+            assert_eq!(row.category(), SettingsCategory::Appearance);
+        }
+        // On the page they are contiguous too, which is what puts them under one
+        // heading rather than splitting the Appearance group in two.
+        let page: Vec<SettingsRow> = rows
+            .into_iter()
+            .filter(|row| row.category() == SettingsCategory::Appearance)
+            .collect();
+        let start = page
+            .iter()
+            .position(|row| *row == SettingsRow::BackgroundImage)
+            .expect("the ground is on the page");
+        assert_eq!(&page[start..start + ground.len()], &ground);
+        assert_eq!(
+            page[start - 1],
+            SettingsRow::DarkScheme,
+            "the ground follows the pair that says what colour it is"
+        );
+    }
+
     /// PIN (Q191, mock-up 5644): `$("row-railmode").style.display =
     /// state.layoutMode === "vertical" ? "" : "none"` — Sidebar is a dependent
     /// of Tab layout and is not in the dialog at all while the tabs run across
@@ -6714,6 +8087,12 @@ mod tests {
                 SettingsRow::Theme,
                 SettingsRow::LightScheme,
                 SettingsRow::DarkScheme,
+                SettingsRow::BackgroundImage,
+                SettingsRow::ImageFit,
+                SettingsRow::ImageOpacity,
+                SettingsRow::BackgroundOpacity,
+                SettingsRow::Acrylic,
+                SettingsRow::AlwaysOnTop,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::SplitDirection,
@@ -6733,6 +8112,12 @@ mod tests {
                 SettingsRow::Theme,
                 SettingsRow::LightScheme,
                 SettingsRow::DarkScheme,
+                SettingsRow::BackgroundImage,
+                SettingsRow::ImageFit,
+                SettingsRow::ImageOpacity,
+                SettingsRow::BackgroundOpacity,
+                SettingsRow::Acrylic,
+                SettingsRow::AlwaysOnTop,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::Sidebar,
@@ -7016,7 +8401,10 @@ mod tests {
             .chain(
                 flat.iter()
                     .filter(|row| row.category() == PAGE)
-                    .map(|row| SettingsTarget::Combo(*row)),
+                    // Each row's OWN control, which is a picker for all but the
+                    // two sliders — derived rather than assumed, for the reason
+                    // the order itself is derived from the rows (§7.1.6c-4b).
+                    .map(|row| row.control_target()),
             )
             .collect();
         assert_eq!(focus_order(content(&flat, &lines), PAGE), expected);
@@ -7464,10 +8852,24 @@ mod tests {
         // bar as its standing mark and that is a selection, not a ring. This
         // test is about `:focus-visible`; the bar has its own pin.
         let nav = placed.nav;
+        // **Outside every control**, which is what a ring is: `FOCUS_RING_OFFSET`
+        // puts it beyond the box it names, while the two sliders' own fill and
+        // thumb are the accent *inside* theirs (§7.1.6c-4b). Filtering by colour
+        // alone would count a track as a ring on a dialog nobody is touching.
+        let controls: Vec<[f32; 4]> = placed.rows.iter().map(|row| row.combo).collect();
+        let inside_a_control = |quad: &OverlayQuad| {
+            controls.iter().any(|control| {
+                quad.rect[0] >= control[0] - 0.5
+                    && quad.rect[2] <= control[2] + 0.5
+                    && quad.rect[1] >= control[1] - 0.5
+                    && quad.rect[3] <= control[3] + 0.5
+            })
+        };
         let unfocused: Vec<OverlayQuad> = quads_of(&placed, None, values())
             .into_iter()
             .filter(|quad| quad.color == accent)
             .filter(|quad| quad.rect[0] >= nav[2])
+            .filter(|quad| !inside_a_control(quad))
             .collect();
         assert!(
             unfocused.is_empty(),
@@ -7479,6 +8881,7 @@ mod tests {
             .flat_map(|layer| layer.quads)
             .filter(|quad| quad.color == accent)
             .filter(|quad| quad.rect[0] >= nav[2])
+            .filter(|quad| !inside_a_control(quad))
             .collect();
         assert!(!ring.is_empty(), "the focused control wears one");
 
@@ -8206,7 +9609,16 @@ mod tests {
             UNSCROLLED,
         )
         .expect("a tall window hosts the whole table");
-        let drawn = build(&placed, None, None, values(), &lines, None, &mut measure);
+        let drawn = build(
+            &placed,
+            None,
+            None,
+            values(),
+            &lines,
+            "",
+            None,
+            &mut measure,
+        );
         let labels: Vec<ChromeLabel> = drawn
             .iter()
             .flat_map(|layer| layer.labels.clone())
@@ -8415,6 +9827,7 @@ mod tests {
             focus,
             values(),
             &lines,
+            "",
             Some((0, &waiting, None)),
             &mut measure,
         );
@@ -8453,6 +9866,7 @@ mod tests {
             focus,
             values(),
             &lines,
+            "",
             Some((0, &waiting, Some(crate::shortcuts::HINT_ALTGR_ZONE))),
             &mut measure,
         );
@@ -8473,6 +9887,7 @@ mod tests {
             None,
             values(),
             &lines,
+            "",
             Some((0, &waiting, None)),
             &mut measure,
         );

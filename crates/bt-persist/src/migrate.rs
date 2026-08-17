@@ -44,6 +44,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (6, migrate_settings_v6_to_v7),
     (7, migrate_settings_v7_to_v8),
     (8, migrate_settings_v8_to_v9),
+    (9, migrate_settings_v9_to_v10),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -204,6 +205,53 @@ fn migrate_settings_v8_to_v9(mut value: Value) -> Value {
             "dark_scheme".to_owned(),
             Value::from(crate::settings::DEFAULT_DARK_SCHEME),
         );
+    }
+    value
+}
+
+/// v9 -> v10: the window's ground (a picture, its fit, two percentages) and two
+/// window postures, every one of them writing down **what a v9 build already
+/// did**.
+///
+/// This is `v5_to_v6`'s kind of step and not `v3_to_v4`'s, and the difference is
+/// worth stating because six keys appearing at once looks like the other kind. A
+/// v9 build drew no picture, at an opaque ground, with no system backdrop and no
+/// topmost bit — not because nobody had been asked, but because those were the
+/// only behaviours it had. So the values written here are not defaults chosen on
+/// the user's behalf; they are the behaviour already in force, recorded. The
+/// test of that distinction is the one `v3_to_v4` fails: a user who never opens
+/// this page must see no change whatsoever after the migration, and here they
+/// do not.
+///
+/// Six keys in one step for [`crate::SETTINGS_SCHEMA_VERSION`]'s reason. The
+/// four ground keys in particular cannot be split: `background_fit` and the two
+/// percentages are meaningless without `background_image`, and a file carrying
+/// one of them and not the others would describe a picture nobody chose.
+fn migrate_settings_v9_to_v10(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(10));
+        object.insert(
+            "background_image".to_owned(),
+            Value::from(crate::settings::DEFAULT_BACKGROUND_IMAGE),
+        );
+        // Serialised through the enum rather than as a bare `"Fill"` literal, so
+        // that renaming the variant is a compile error here instead of a silent
+        // migration onto a value no reader answers to.
+        object.insert(
+            "background_fit".to_owned(),
+            serde_json::to_value(crate::settings::BackgroundFitV1::default())
+                .expect("a fieldless enum serialises to a JSON string"),
+        );
+        object.insert(
+            "background_image_opacity".to_owned(),
+            Value::from(crate::settings::DEFAULT_BACKGROUND_IMAGE_OPACITY),
+        );
+        object.insert(
+            "background_opacity".to_owned(),
+            Value::from(crate::settings::DEFAULT_BACKGROUND_OPACITY),
+        );
+        object.insert("acrylic".to_owned(), Value::from(false));
+        object.insert("always_on_top".to_owned(), Value::from(false));
     }
     value
 }
@@ -825,6 +873,74 @@ mod tests {
         assert_eq!(migrated["terminal_font_family"], json!("Cascadia Mono"));
         assert_eq!(migrated["terminal_font_size"], json!(20));
         assert_eq!(migrated["psreadline_invite"], json!("Installed"));
+    }
+
+    /// PIN — v9 -> v10 writes down the ground a v9 build already drew, and
+    /// leaves every one of the twelve older fields exactly as it found them.
+    ///
+    /// The six values are asserted as literals rather than against the
+    /// constants they came from, and that is the whole point of this test: a
+    /// constant compared against itself proves nothing, while `100`, `100`,
+    /// `false`, `false`, `""` and `"Fill"` written out here are a second,
+    /// independent statement of what "no visible change for a user who never
+    /// opens the page" means. Change any default and this test says so.
+    ///
+    /// `"Fill"` is the one value here that is a *choice* rather than a record,
+    /// because a v9 build had no fit at all. It is safe to choose because it is
+    /// unreachable until a picture is named: the migration is not answering a
+    /// question the user was asked, it is filling the field that the next
+    /// question will need.
+    #[test]
+    fn real_settings_v9_to_v10_migration_writes_down_the_ground_v9_already_drew() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 9,
+                "theme_mode": "Light",
+                "display_formulas": false,
+                "inline_formulas": true,
+                "default_profile": "gitbash",
+                "git_panel": false,
+                "split_direction": "Down",
+                "language": "Chinese",
+                "terminal_font_family": "Cascadia Mono",
+                "terminal_font_size": 20,
+                "psreadline_invite": "Installed",
+                "light_scheme": "Solarized Light",
+                "dark_scheme": "Nord"
+            }),
+            9,
+            10,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(10));
+        assert_eq!(
+            migrated["background_image"],
+            json!(""),
+            "no build before this one drew a picture, so there is none to name"
+        );
+        assert_eq!(migrated["background_fit"], json!("Fill"));
+        assert_eq!(migrated["background_image_opacity"], json!(100));
+        assert_eq!(
+            migrated["background_opacity"],
+            json!(100),
+            "an opaque window is what v9 drew; the migration records it rather \
+             than making somebody's terminal see-through overnight"
+        );
+        assert_eq!(migrated["acrylic"], json!(false));
+        assert_eq!(migrated["always_on_top"], json!(false));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(migrated["inline_formulas"], json!(true));
+        assert_eq!(migrated["default_profile"], json!("gitbash"));
+        assert_eq!(migrated["git_panel"], json!(false));
+        assert_eq!(migrated["split_direction"], json!("Down"));
+        assert_eq!(migrated["language"], json!("Chinese"));
+        assert_eq!(migrated["terminal_font_family"], json!("Cascadia Mono"));
+        assert_eq!(migrated["terminal_font_size"], json!(20));
+        assert_eq!(migrated["psreadline_invite"], json!("Installed"));
+        assert_eq!(migrated["light_scheme"], json!("Solarized Light"));
+        assert_eq!(migrated["dark_scheme"], json!("Nord"));
     }
 
     #[test]

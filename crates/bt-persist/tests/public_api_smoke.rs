@@ -8,9 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    Debouncer, ExitState, LanguageV1, PsReadLineInviteV1, ReadReport, SETTINGS_SCHEMA_VERSION,
-    SettingsV1, SplitDirectionV1, ThemeModeV1, WriteAlertAction, WriteFailureTracker,
-    create_sentinel, probe_sentinel, read_settings, remove_sentinel, write_settings_atomic,
+    BackgroundFitV1, Debouncer, ExitState, LanguageV1, PsReadLineInviteV1, ReadReport,
+    SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1, ThemeModeV1, WriteAlertAction,
+    WriteFailureTracker, create_sentinel, probe_sentinel, read_settings, remove_sentinel,
+    write_settings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -43,6 +44,12 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         psreadline_invite: PsReadLineInviteV1::Installed,
         light_scheme: "Solarized Light".to_owned(),
         dark_scheme: "Nord".to_owned(),
+        background_image: r"D:\pictures\ridge.jpg".to_owned(),
+        background_fit: BackgroundFitV1::Stretch,
+        background_image_opacity: 45,
+        background_opacity: 65,
+        acrylic: true,
+        always_on_top: true,
     };
     write_settings_atomic(&path, &settings).unwrap();
 

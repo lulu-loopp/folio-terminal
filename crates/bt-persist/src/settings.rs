@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 /// v2 adds `display_formulas`, v3 adds `inline_formulas`, v4 adds
 /// `default_profile`, v5 adds `git_panel`, v6 adds `split_direction`, v7 adds
 /// `language`, v8 adds `terminal_font_family`, `terminal_font_size` and
-/// `psreadline_invite`, v9 adds `light_scheme` and `dark_scheme`. §2's
+/// `psreadline_invite`, v9 adds `light_scheme` and `dark_scheme`, v10 adds
+/// `background_image`, `background_fit`, `background_image_opacity`,
+/// `background_opacity`, `acrylic` and `always_on_top`. §2's
 /// "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is satisfied the way §1.3
 /// intends it to be: each field arrives in the same change that gives it a
 /// reader, not ahead of one.
@@ -34,7 +36,19 @@ use serde::{Deserialize, Serialize};
 /// every machine whose Windows is set to light. Both arrive with their reader in
 /// the same change — the Appearance block's scheme row, which offers the pair
 /// and writes the pair.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 9;
+///
+/// **v10 carries six fields and it is one bump**, v8's reason again and at its
+/// widest: the six are the whole of one page's new block and they all arrive
+/// with their readers in the same change. Four of them are one subject read
+/// downwards — whether there is a picture, how it meets the window, how much of
+/// it comes through, and how much of the desktop comes through behind it — and
+/// a file that recorded three of the four would leave the fourth to be guessed
+/// at on the first launch that read it. The other two (`acrylic`,
+/// `always_on_top`) are window postures rather than ground, and they are here
+/// rather than in a v11 because a schema version is a **file format** and not a
+/// changelog: bumping twice for one afternoon's rows would cost every reader a
+/// second migration step to express the same one-day difference.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 10;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -93,10 +107,50 @@ pub const DEFAULT_LIGHT_SCHEME: &str = "";
 /// thing a light-and-dark product must not make them do.
 pub const DEFAULT_DARK_SCHEME: &str = "";
 
-/// `settings.json` v9 — docs/M2-persistence-schema-v1.md §2:
+/// The picture drawn behind the window when the file has never named one.
+///
+/// The empty string, and here it is not [`DEFAULT_PROFILE_UNSET`]'s deferral but
+/// a plain absence: there is no picture this build could have meant, so "" is
+/// the value itself and not a stand-in for one. A **path** and not a copied
+/// file, because a wallpaper is a file the user already owns and already
+/// organises; copying it into the settings folder would leave two of it, and the
+/// one they later edit would be the wrong one. The path is not validated here —
+/// a file that has since been moved, renamed or unplugged is the ordinary case,
+/// and the reader's answer is §5.4 逐叶降级: draw no picture and keep the name,
+/// so that plugging the drive back in restores it without a second trip through
+/// the chooser.
+pub const DEFAULT_BACKGROUND_IMAGE: &str = "";
+
+/// How much of the picture reaches the window, as a whole percentage.
+///
+/// 100 because a person who has just chosen a picture wants to see whether they
+/// chose the right one; fading it is the second decision, and a row that
+/// arrived pre-faded would make the first one impossible to judge.
+pub const DEFAULT_BACKGROUND_IMAGE_OPACITY: u8 = 100;
+
+/// How much of the window's ground is there at all, as a whole percentage.
+///
+/// 100 — an opaque window, which is what every build before this one drew. The
+/// migration writes this same number for the same reason `v5_to_v6` wrote
+/// `Auto`: it records the behaviour that was already in force rather than
+/// choosing a new one.
+pub const DEFAULT_BACKGROUND_OPACITY: u8 = 100;
+
+/// The floor under [`DEFAULT_BACKGROUND_OPACITY`] (user ruling 2026-08-17).
+///
+/// Thirty percent and not zero. Below roughly a third the ground stops being a
+/// surface and becomes a hole: the desktop behind it competes with the grid for
+/// every pixel that is not a glyph, panes stop reading as panes because their
+/// own fills vanish with the clear, and the window's edges are the only thing
+/// left saying where it is. A floor is also what makes "text stays opaque" a
+/// promise worth making — there is no setting from which this window can be
+/// made unreadable.
+pub const MINIMUM_BACKGROUND_OPACITY: u8 = 30;
+
+/// `settings.json` v10 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 9,
+///   "schema_version": 10,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -108,7 +162,13 @@ pub const DEFAULT_DARK_SCHEME: &str = "";
 ///   "terminal_font_size": 10..=24,
 ///   "psreadline_invite": "NotAsked" | "Declined" | "Installed" | "Dismissed",
 ///   "light_scheme": "Solarized Light" | … | "",
-///   "dark_scheme": "Nord" | … | ""
+///   "dark_scheme": "Nord" | … | "",
+///   "background_image": "C:\\Users\\me\\Pictures\\ridge.jpg" | "",
+///   "background_fit": "Stretch" | "Fill" | "Tile",
+///   "background_image_opacity": 0..=100,
+///   "background_opacity": 30..=100,
+///   "acrylic": true | false,
+///   "always_on_top": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +343,52 @@ pub struct SettingsV1 {
     /// Windows on a light-at-noon schedule does not get one palette forced on
     /// them at both ends of the day.
     pub dark_scheme: String,
+    /// The file a picture is drawn from, behind the whole window and beneath
+    /// every pane — [`DEFAULT_BACKGROUND_IMAGE`] when there is none.
+    ///
+    /// One path and not one per pane, because a split is two views of one place
+    /// and a picture cut in half at every divider would move every time a
+    /// divider did. It is also one path and not one per theme: a picture is not
+    /// a colour, nothing about it is derived from the canvas, and a reader who
+    /// wanted a different picture at night has said nothing that this file could
+    /// have inferred from the two scheme rows above.
+    pub background_image: String,
+    /// How that picture meets a window that is not its shape.
+    pub background_fit: BackgroundFitV1,
+    /// How much of the picture reaches the window, 0–100 whole percent.
+    ///
+    /// A whole percentage and not a float, for two reasons that agree: the row
+    /// that writes it is a slider stepping in fives, so no value between two
+    /// integers can ever be produced; and a `f32` in this struct would cost
+    /// [`SettingsV1`]'s `Eq`, which is what lets a settings write compare itself
+    /// against what is already loaded and cost nothing when nothing moved.
+    ///
+    /// Out-of-range values are the reader's problem and not this crate's — a
+    /// file written by hand may say 400, and the answer is the same one a
+    /// missing scheme gets: clamp at the surface that has to draw it.
+    pub background_image_opacity: u8,
+    /// How much of the window's ground is there at all, 30–100 whole percent —
+    /// [`MINIMUM_BACKGROUND_OPACITY`] is the floor and the reason it exists.
+    ///
+    /// The ground is the clear plus the panes' own fills. Everything drawn on
+    /// top of it — every glyph, every menu, every dialog and float — stays
+    /// opaque at every setting, which is not a policy this crate enforces but
+    /// the shape of the renderer that reads it: only the clear carries this
+    /// alpha, and every later draw blends over it.
+    pub background_opacity: u8,
+    /// Whether Windows blurs whatever is behind the window
+    /// (`DWMWA_SYSTEMBACKDROP_TYPE` = `DWMSBT_TRANSIENTWINDOW`).
+    ///
+    /// Stored even where the running Windows has never heard of the attribute,
+    /// because a settings file outlives the machine it was written on: a user
+    /// who turns it on, copies their profile to a newer laptop and finds it off
+    /// has been silently overruled by a build that had no right to an opinion.
+    pub acrylic: bool,
+    /// Whether the window sits above other windows (`HWND_TOPMOST`).
+    ///
+    /// A window posture and not a ground colour, and the one field in this block
+    /// that is visible with a picture, a blur and an opacity all switched off.
+    pub always_on_top: bool,
 }
 
 impl Default for SettingsV1 {
@@ -301,8 +407,38 @@ impl Default for SettingsV1 {
             psreadline_invite: PsReadLineInviteV1::default(),
             light_scheme: DEFAULT_LIGHT_SCHEME.to_owned(),
             dark_scheme: DEFAULT_DARK_SCHEME.to_owned(),
+            background_image: DEFAULT_BACKGROUND_IMAGE.to_owned(),
+            background_fit: BackgroundFitV1::default(),
+            background_image_opacity: DEFAULT_BACKGROUND_IMAGE_OPACITY,
+            background_opacity: DEFAULT_BACKGROUND_OPACITY,
+            acrylic: false,
+            always_on_top: false,
         }
     }
+}
+
+/// How a background picture meets a window that is not its shape —
+/// `docs/DESIGN.md` §7.1.6c-4b.
+///
+/// Three values and not a scale factor, because each one is a different
+/// sentence about what may be lost, and there is no number that interpolates
+/// between "the aspect ratio" and "the edges".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BackgroundFitV1 {
+    /// The picture takes the window's shape. Nothing is cropped and the aspect
+    /// ratio is whatever the window's is.
+    Stretch,
+    /// The picture keeps its own shape and covers the window, the overflowing
+    /// edge cropped evenly on both sides. The default: it is the only one of the
+    /// three that both fills the window and leaves the picture looking like
+    /// itself, and it is what every desktop in this product's world calls
+    /// "fill".
+    #[default]
+    Fill,
+    /// The picture repeats at its own pixel size from the window's top-left.
+    /// Nothing is scaled and nothing is cropped except by the window's edge —
+    /// the answer for a texture rather than a photograph.
+    Tile,
 }
 
 /// How far the PSReadLine invitation has got with this user — `docs/DESIGN.md`
@@ -642,5 +778,105 @@ mod tests {
             serde_json::to_string(&ThemeModeV1::Dark).unwrap(),
             "\"Dark\""
         );
+        assert_eq!(
+            serde_json::to_string(&BackgroundFitV1::Stretch).unwrap(),
+            "\"Stretch\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BackgroundFitV1::Fill).unwrap(),
+            "\"Fill\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BackgroundFitV1::Tile).unwrap(),
+            "\"Tile\""
+        );
+    }
+
+    /// PIN — a file that has never been asked about its ground reads as the
+    /// ground every build before v10 drew.
+    ///
+    /// Five of the six are that behaviour recorded. The sixth, `background_fit`,
+    /// is the one genuine choice, and it is unreachable until a picture is
+    /// named — which is why it is allowed to be a real answer rather than an
+    /// empty one, unlike the scheme and family fields above.
+    #[test]
+    fn a_settings_file_that_was_never_asked_draws_no_picture_on_an_opaque_ground() {
+        let defaults = SettingsV1::default();
+        assert_eq!(defaults.background_image, DEFAULT_BACKGROUND_IMAGE);
+        assert_eq!(
+            defaults.background_image, "",
+            "an unnamed picture, for the reason a wallpaper differs from a \
+             palette: there is no built-in one to fall back to"
+        );
+        assert_eq!(defaults.background_fit, BackgroundFitV1::Fill);
+        assert_eq!(defaults.background_image_opacity, 100);
+        assert_eq!(defaults.background_opacity, 100);
+        assert!(!defaults.acrylic);
+        assert!(!defaults.always_on_top);
+        const {
+            assert!(
+                MINIMUM_BACKGROUND_OPACITY < DEFAULT_BACKGROUND_OPACITY,
+                "the floor has to be under the default or the default is the floor"
+            );
+        }
+    }
+
+    /// PIN — every fit survives a round trip, and so does a ground whose four
+    /// numbers are all off their defaults.
+    ///
+    /// The percentages are `u8` rather than `f32` and this is where that is
+    /// worth something: `65` written is `65` read, on every machine, with no
+    /// question about which of two neighbouring floats the file happened to
+    /// carry. It is also what keeps [`SettingsV1`]'s `Eq`, which is how a
+    /// settings write that moved nothing costs nothing.
+    #[test]
+    fn every_background_fit_survives_a_round_trip_with_its_ground() {
+        for fit in [
+            BackgroundFitV1::Stretch,
+            BackgroundFitV1::Fill,
+            BackgroundFitV1::Tile,
+        ] {
+            let settings = SettingsV1 {
+                background_image: r"C:\Users\me\Pictures\ridge line.jpg".to_owned(),
+                background_fit: fit,
+                background_image_opacity: 45,
+                background_opacity: 65,
+                acrylic: true,
+                always_on_top: true,
+                ..SettingsV1::default()
+            };
+            let text = serde_json::to_string(&settings).unwrap();
+            let read: SettingsV1 = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.background_fit, fit);
+            assert_eq!(
+                read.background_image,
+                r"C:\Users\me\Pictures\ridge line.jpg"
+            );
+            assert_eq!(read.background_image_opacity, 45);
+            assert_eq!(read.background_opacity, 65);
+            assert!(read.acrylic);
+            assert!(read.always_on_top);
+            assert_eq!(read, settings);
+        }
+    }
+
+    /// PIN — a percentage this crate cannot vouch for still round-trips.
+    ///
+    /// A hand-edited file may say 7 where the floor is 30, and this crate is not
+    /// the place that argues with it: the same ruling `light_scheme` gets for a
+    /// palette name nothing answers to (§5.4 逐叶降级). Clamping here would mean
+    /// a file quietly rewritten on the first launch that read it, and the person
+    /// who typed 7 would never learn that anything had happened.
+    #[test]
+    fn a_ground_opacity_under_the_floor_is_stored_as_written_and_argued_with_elsewhere() {
+        let settings = SettingsV1 {
+            background_opacity: 7,
+            background_image_opacity: 200,
+            ..SettingsV1::default()
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        let read: SettingsV1 = serde_json::from_str(&text).unwrap();
+        assert_eq!(read.background_opacity, 7);
+        assert_eq!(read.background_image_opacity, 200);
     }
 }
