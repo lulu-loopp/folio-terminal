@@ -241,6 +241,8 @@ let frame = bt_platform::CustomWindowFrame::install(hwnd)?;
 
 单窗行为不变，测试全绿。
 
+**状态：片 A1 落地 2ea208f**（2026-08-16；`GpuContext` / `WindowRenderer` / `Renderer` 门面 / `HeadlessRenderProbe` 折回两层 / 标题栏几何收成一处；设计记于 `docs/DESIGN.md` §2.2）。Q5 第 3 条（新窗必须走 `set_window_outer_rect`）只留了注，实现归开第二个窗的那一片。
+
 **片 B —— `Runtime` 切成 App 层和 Window 层**
 
 `App { session_store, settings_store, recent, profile_programs, 主题/光标样式, workers(裁决后) }` + `WindowRuntime { window, renderer(WindowRenderer), custom_window_frame, math_context_menu, folder_picker, ime_system_caret, tabs, active_tab, 输入现场, 悬停, 手势, 窗级 UI, 几何 }`。
