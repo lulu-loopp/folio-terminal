@@ -47836,9 +47836,13 @@ mod tests {
             input::keyboard_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
             Some(vec![0x03])
         );
+        // Every bare `Ctrl+letter` is the shell's and is sent as its control
+        // code (2026-08-17: `^X` used to be swallowed here, and with it `^B`,
+        // `^L`, `^R` — the whole readline alphabet the shortcut table promised
+        // to leave alone).
         assert_eq!(
             input::keyboard_bytes(&Key::Character("x".into()), ModifiersState::CONTROL, false),
-            None
+            Some(vec![0x18])
         );
         assert_eq!(
             input::keyboard_bytes(&Key::Character("中".into()), ModifiersState::empty(), false),

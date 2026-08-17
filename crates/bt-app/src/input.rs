@@ -160,6 +160,25 @@ pub(crate) fn keyboard_bytes(
     {
         return Some(vec![0x03]);
     }
+    // **The rest of the control alphabet** (user report, 2026-08-17: Claude
+    // Code's `Ctrl+B` never arrived). Every `Ctrl+<letter>` the shortcut table
+    // leaves alone is the shell's — that is the whole of discipline ①, and it
+    // was true of the *table* while the encoder here knew only `^C`: `^B`,
+    // `^D`, `^L`, `^R`, `^U`, `^W`, `^Z` all fell to `None` and were dropped on
+    // the floor. A terminal that swallows readline's alphabet is not leaving
+    // it to the shell. The byte is the ASCII control code (`letter & 0x1f`),
+    // the same for upper and lower case as every terminal since the VT100;
+    // `Ctrl+@`/`Ctrl+Space` is NUL and `[ \ ] ^ _` give 0x1b–0x1f, and Alt on
+    // top prefixes ESC as it does for a plain character. winit may report the
+    // key either as the letter or as the control character it produces
+    // (`"\u{2}"`), depending on layout and Ctrl handling — both spellings are
+    // read here so the answer does not depend on which one arrived.
+    if modifiers.control_key()
+        && let Key::Character(text) = key
+        && let Some(byte) = control_byte(text)
+    {
+        return Some(meta_prefix(&[byte], modifiers.alt_key()));
+    }
 
     let modifier = xterm_modifier(modifiers);
     match key {
@@ -225,6 +244,32 @@ fn tilde_key(number: u8, modifier: u8) -> Vec<u8> {
     } else {
         format!("\x1b[{number};{modifier}~").into_bytes()
     }
+}
+
+/// The control byte a `Ctrl`-held character key produces, or `None` for a key
+/// that has no VT control code (a digit, punctuation outside `[\\]^_@`, a
+/// non-ASCII character — those keep falling through, which for the digits is
+/// what xterm does too without `modifyOtherKeys`).
+fn control_byte(text: &str) -> Option<u8> {
+    let mut chars = text.chars();
+    let character = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    let byte = match character {
+        // Already the control character — some layouts hand the produced code.
+        c if (c as u32) < 0x20 => c as u8,
+        'a'..='z' | 'A'..='Z' => (character.to_ascii_uppercase() as u8) & 0x1f,
+        '@' | ' ' => 0x00,
+        '[' => 0x1b,
+        '\\' => 0x1c,
+        ']' => 0x1d,
+        '^' => 0x1e,
+        '_' => 0x1f,
+        '?' => 0x7f,
+        _ => return None,
+    };
+    Some(byte)
 }
 
 fn meta_prefix(bytes: &[u8], alt: bool) -> Vec<u8> {
@@ -377,6 +422,71 @@ mod tests {
         assert_eq!(
             keyboard_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
             Some(vec![0x03])
+        );
+    }
+
+    /// PIN (user report, 2026-08-17) — **the whole control alphabet reaches
+    /// the shell, not only `^C`.** `Ctrl+B` is Claude Code's "run in
+    /// background", `Ctrl+L` clears, `Ctrl+R` searches history, `Ctrl+D` ends
+    /// input; the shortcut table leaves every bare `Ctrl+letter` to the shell,
+    /// and the encoder must then actually send it. Both spellings winit may
+    /// use are read; case does not matter; Alt prefixes ESC.
+    #[test]
+    fn every_bare_control_letter_is_sent_as_its_control_code() {
+        for (letter, code) in [
+            ("b", 0x02u8),
+            ("B", 0x02),
+            ("d", 0x04),
+            ("l", 0x0c),
+            ("r", 0x12),
+            ("z", 0x1a),
+            ("a", 0x01),
+        ] {
+            assert_eq!(
+                keyboard_bytes(
+                    &Key::Character(letter.into()),
+                    ModifiersState::CONTROL,
+                    false
+                ),
+                Some(vec![code]),
+                "Ctrl+{letter}"
+            );
+        }
+        // The layout that reports the produced control character.
+        assert_eq!(
+            keyboard_bytes(
+                &Key::Character("\u{2}".into()),
+                ModifiersState::CONTROL,
+                false
+            ),
+            Some(vec![0x02])
+        );
+        // The punctuation with a code, and one without.
+        assert_eq!(
+            keyboard_bytes(&Key::Character("[".into()), ModifiersState::CONTROL, false),
+            Some(vec![0x1b])
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Character("_".into()), ModifiersState::CONTROL, false),
+            Some(vec![0x1f])
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Character("1".into()), ModifiersState::CONTROL, false),
+            None
+        );
+        // Alt on top prefixes ESC.
+        assert_eq!(
+            keyboard_bytes(
+                &Key::Character("b".into()),
+                ModifiersState::CONTROL | ModifiersState::ALT,
+                false
+            ),
+            Some(vec![0x1b, 0x02])
+        );
+        // Ctrl+V stays the paste door and is not encoded here.
+        assert_eq!(
+            keyboard_bytes(&Key::Character("v".into()), ModifiersState::CONTROL, false),
+            None
         );
     }
 
