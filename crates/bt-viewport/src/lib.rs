@@ -106,6 +106,121 @@ pub struct SelectionSpan {
     pub end_column: u32,
 }
 
+/// Which line of which plane one search hit sits on (§7.1.5d, S3).
+///
+/// Three arms because the three planes address their text three different ways, and a hit has to
+/// be able to name a place in any of them: frozen history and the staged rows that have scrolled
+/// out but not yet been finalized both count **graphemes inside one line**, while the live grid
+/// counts **columns inside one row** — which is exactly what their [`ContentAnchor`]s carry. R7 in
+/// the search-block inventory is the reason all three are here rather than only the first: "the
+/// word is on my screen and search cannot find it" is the failure this vocabulary exists to
+/// prevent, and two thirds of what is on the screen at any moment is not in the transcript yet.
+///
+/// The alternate screen is deliberately absent. §3.2 keeps its anchors in an isolated namespace
+/// with no ordering against the primary document, so a hit there could not be placed in the same
+/// list as the rest; the capsule does not open over it at all (D-5).
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SearchLine {
+    History(TranscriptId),
+    Staging(StagingId),
+    /// One row of the primary live grid, by its grid row index.
+    Live {
+        row: u32,
+    },
+}
+
+/// One hit: a line, and a half-open offset range in **that line's own unit** — graphemes for the
+/// two transcript planes, columns for the live grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SearchHit {
+    pub line: SearchLine,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Every hit the capsule is showing, in the shape a frame can be painted from.
+///
+/// # Why this is grouped and sorted rather than a flat list
+///
+/// The projection has to answer, for each of a few thousand cells, "is this cell inside a hit" —
+/// once per frame, while the transcript underneath may hold a hundred thousand of them. A flat
+/// scan would make that product; grouping by line and sorting both levels makes it two binary
+/// searches per cell, which is a cost in the *frame's* size and not in the transcript's. The
+/// grouping is paid once, where the matches are found, and travels here by [`Arc`] so that a frame
+/// which changed nothing about the search re-uses it untouched.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchHighlights {
+    /// `(line, ranges)` with lines ascending and ranges ascending inside a line.
+    lines: Vec<(SearchLine, Vec<(u32, u32)>)>,
+    /// Which hit wears the current ground, if the capsule has one.
+    current: Option<SearchHit>,
+}
+
+impl SearchHighlights {
+    /// Group and sort a hit list. Ranges that arrive out of order are sorted; the engine produces
+    /// them left to right per line already, so this is a guarantee rather than work.
+    #[must_use]
+    pub fn new(hits: impl IntoIterator<Item = SearchHit>, current: Option<SearchHit>) -> Self {
+        let mut lines: Vec<(SearchLine, Vec<(u32, u32)>)> = Vec::new();
+        for hit in hits {
+            match lines.last_mut() {
+                Some((line, ranges)) if *line == hit.line => ranges.push((hit.start, hit.end)),
+                _ => lines.push((hit.line, vec![(hit.start, hit.end)])),
+            }
+        }
+        lines.sort_by_key(|(line, _)| *line);
+        for (_, ranges) in &mut lines {
+            ranges.sort_unstable();
+        }
+        Self { lines, current }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Whether any hit covers this offset on this line.
+    fn covers(&self, line: SearchLine, offset: u32) -> bool {
+        let Ok(index) = self.lines.binary_search_by_key(&line, |(line, _)| *line) else {
+            return false;
+        };
+        let ranges = &self.lines[index].1;
+        // The last range that starts at or before `offset`; a hit covers `offset` only if that one
+        // does, because the ranges do not overlap (the engine's own non-overlapping semantics).
+        let at = ranges.partition_point(|(start, _)| *start <= offset);
+        at > 0 && offset < ranges[at - 1].1
+    }
+
+    /// Whether the **current** hit covers this offset on this line.
+    fn current_covers(&self, line: SearchLine, offset: u32) -> bool {
+        self.current
+            .is_some_and(|hit| hit.line == line && hit.start <= offset && offset < hit.end)
+    }
+}
+
+/// Where a cell anchor stands, in the vocabulary a hit is written in.
+///
+/// The generation is deliberately dropped, exactly as [`compare_visible_anchors`] drops it for the
+/// selection: a hit set is rebuilt on every transcript change, so an anchor whose line has been
+/// rewritten under it is at most one frame old, and comparing generations here would blank the
+/// highlight for that frame rather than repaint it.
+fn search_address(anchor: &ContentAnchor) -> Option<(SearchLine, u32)> {
+    match anchor {
+        ContentAnchor::History { id, offset, .. } => Some((SearchLine::History(*id), offset.0)),
+        ContentAnchor::Staging { id, offset, .. } => Some((SearchLine::Staging(*id), offset.0)),
+        ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point,
+            ..
+        } => Some((SearchLine::Live { row: point.row }, point.column)),
+        ContentAnchor::Live {
+            screen: ScreenId::Alternate,
+            ..
+        } => None,
+    }
+}
+
 /// Geometry and input identity for one row in the last presented frame. Pixel consumers use the
 /// prefix position here instead of independently multiplying the frame row by cell height.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -328,6 +443,20 @@ pub struct ViewportFrame {
     pub cell_anchors: Vec<CellAnchor>,
     pub row_map: Vec<FrameVisualRow>,
     pub selection_spans: Vec<SelectionSpan>,
+    /// Every search hit on screen **except** the current one — the `mark.srch` ground (mock 1530).
+    ///
+    /// A second list beside the selection's rather than a flag on the first, because they are two
+    /// different marks that can cover the same cell at the same time: a reader can select text
+    /// that a search has also found, and one list with a colour on it could only say one of the
+    /// two. They are painted in the order they are declared here.
+    pub search_spans: Vec<SelectionSpan>,
+    /// The current hit — `mark.srch.cur` (mock 1532), which wears the solid accent and takes the
+    /// terminal's own background as its ink.
+    ///
+    /// A list and not one span, because a hit lives in a logical line and a logical line wraps: the
+    /// current match can straddle two presentation rows, and the second half of it is as current as
+    /// the first.
+    pub current_search_spans: Vec<SelectionSpan>,
     pub math_blocks: Vec<MathBlockPlacement>,
     pub math_failures: Vec<MathFailurePlacement>,
     pub status_text: Option<String>,
@@ -395,7 +524,12 @@ impl ViewportFrame {
                 actual: self.row_map.len(),
             });
         }
-        for span in &self.selection_spans {
+        for span in self
+            .selection_spans
+            .iter()
+            .chain(&self.search_spans)
+            .chain(&self.current_search_spans)
+        {
             self.selection_span_vertical_interval(span)?;
         }
         for block in &self.math_blocks {
@@ -1060,6 +1194,18 @@ pub struct ViewportProjection {
     heights: HeightTree,
     scroll_state: ViewportScrollState,
     selection: Option<ViewSelection>,
+    /// What the search capsule has found in **this** pane (§7.1.5d, S3).
+    ///
+    /// Beside [`Self::selection`] and set the same way — the projection is told, and every frame it
+    /// builds afterwards carries the spans. It is not beside it in *who writes it*: the selection
+    /// is pushed in by the session every frame (`sync_projection_state`), because a selection is a
+    /// property of the shell, while a search is a property of the window and there is only one of
+    /// them for the whole window (mock 8515's singleton). So the window writes this once when the
+    /// hit set changes, and it survives every frame in between untouched.
+    ///
+    /// Shared by [`Arc`] because the same list is handed to a projection on every keystroke and
+    /// nothing ever mutates it in place.
+    search: Option<Arc<SearchHighlights>>,
     view_generation: ViewGeneration,
     live_rows: NonZeroU32,
     cell_height_subpixels: NonZeroI64,
@@ -1131,6 +1277,7 @@ impl ViewportProjection {
             heights: HeightTree::default(),
             scroll_state: ViewportScrollState::Bottom,
             selection: None,
+            search: None,
             view_generation: ViewGeneration(1),
             live_rows,
             cell_height_subpixels,
@@ -1422,6 +1569,10 @@ impl ViewportProjection {
             cell_anchors,
             row_map,
             selection_spans: Vec::new(),
+            // The bare live frame carries no marks of any kind — neither a selection nor a search
+            // — because it is the grid alone, with no history behind it to have found anything in.
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -2324,6 +2475,22 @@ impl ViewportProjection {
             })
             .transpose()?
             .unwrap_or_default();
+        let (search_spans, current_search_spans) = self.search.as_deref().map_or_else(
+            <(Vec<SelectionSpan>, Vec<SelectionSpan>)>::default,
+            |highlights| {
+                search_spans(
+                    &cell_anchors,
+                    &row_map,
+                    column_count,
+                    if presentation_offset_subpixels == 0 {
+                        expected_rows
+                    } else {
+                        presentation_rows
+                    },
+                    highlights,
+                )
+            },
+        );
         let projected_cursor_row = row_map
             .iter()
             .position(|row| row.live_grid_row == Some(cursor.row))
@@ -2367,6 +2534,8 @@ impl ViewportProjection {
             cell_anchors,
             row_map,
             selection_spans,
+            search_spans,
+            current_search_spans,
             math_blocks,
             math_failures: Vec::new(),
             status_text: if rows_above != 0 {
@@ -2648,6 +2817,18 @@ impl ViewportProjection {
 
     pub fn set_selection(&mut self, selection: Option<ViewSelection>) {
         self.selection = selection;
+    }
+    /// Hand this pane the hits its capsule found, or `None` when it has no capsule.
+    ///
+    /// The one door — a pane that stops being the searched one is told `None` through it, which is
+    /// what makes "close the search and no highlight is left anywhere" a single call rather than a
+    /// sweep over the frames that happen to be on screen.
+    pub fn set_search_highlights(&mut self, search: Option<Arc<SearchHighlights>>) {
+        self.search = search;
+    }
+    #[must_use]
+    pub fn search_highlights(&self) -> Option<&Arc<SearchHighlights>> {
+        self.search.as_ref()
     }
     pub fn set_scroll_anchor(&mut self, anchor: Option<ScrollAnchor>) {
         self.pending_scroll_offset_subpixels = None;
@@ -3577,6 +3758,73 @@ fn selection_spans(
         }
     }
     Ok(spans)
+}
+
+/// The two span lists a hit set makes over one frame's cells: the plain hits, and the current one.
+///
+/// # Why this is a second function and not [`selection_spans`] called twice
+///
+/// The selection is **one** interval and is decided by comparing each cell against its two ends,
+/// which is what `compare_visible_anchors` is for. A hit set is thousands of intervals, and the
+/// same road would be thousands of comparisons per cell. So the question is turned around: each
+/// cell says *where it is* ([`search_address`]) and the hit set answers whether anything is there,
+/// in two binary searches. The result is identical in shape — runs of adjacent covered cells,
+/// coalesced per row — and its cost is a property of the frame rather than of the transcript.
+///
+/// **A live hit is admitted only on the presentation row that is showing that grid row.** The
+/// blank overscan row at the bottom of a live projection carries the *last* grid row's coordinates
+/// with `live_grid_row: None` (it is a placeholder, not a row of the grid), so without this a hit
+/// on the last line of the screen would paint a ghost of itself in the empty strip beneath it.
+fn search_spans(
+    anchors: &[CellAnchor],
+    row_map: &[FrameVisualRow],
+    columns: usize,
+    rows: usize,
+    highlights: &SearchHighlights,
+) -> (Vec<SelectionSpan>, Vec<SelectionSpan>) {
+    let mut plain = Vec::new();
+    let mut current = Vec::new();
+    if highlights.is_empty() || columns == 0 {
+        return (plain, current);
+    }
+    let expected = columns.saturating_mul(rows);
+    let Some(anchors) = anchors.get(..expected) else {
+        return (plain, current);
+    };
+    // Which class a cell belongs to, so a run breaks where the ink changes rather than where the
+    // coverage does: the current hit standing next to an ordinary one is two spans, not one.
+    let class = |row: usize, anchor: &CellAnchor| -> Option<bool> {
+        let (line, offset) = search_address(&anchor.start)?;
+        if let SearchLine::Live { row: grid_row } = line
+            && row_map.get(row).and_then(|mapped| mapped.live_grid_row) != Some(grid_row)
+        {
+            return None;
+        }
+        if highlights.current_covers(line, offset) {
+            return Some(true);
+        }
+        highlights.covers(line, offset).then_some(false)
+    };
+    for (row, row_anchors) in anchors.chunks(columns).enumerate() {
+        let mut column = 0usize;
+        while column < columns {
+            let Some(is_current) = class(row, &row_anchors[column]) else {
+                column += 1;
+                continue;
+            };
+            let start_column = column;
+            while column < columns && class(row, &row_anchors[column]) == Some(is_current) {
+                column += 1;
+            }
+            let span = SelectionSpan {
+                row: row as u32,
+                start_column: start_column as u32,
+                end_column: column as u32,
+            };
+            if is_current { &mut current } else { &mut plain }.push(span);
+        }
+    }
+    (plain, current)
 }
 
 fn compare_visible_anchors(
@@ -5158,6 +5406,213 @@ mod tests {
         );
         // Mutations that omit the clipped-top slice cap the allowance at three rows; retaining
         // `centered - hidden_top` makes the final content offset negative.
+    }
+
+    /// One projection over one eight-character logical line, two columns wide — so the line wraps
+    /// across four presentation rows and a hit can be made to straddle a wrap.
+    fn wrapped_projection() -> (ViewportProjection, HistoryDocument) {
+        let mut projection = ViewportProjection::new(
+            key(2),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let document = history();
+        // The frozen plane has to be laid out before a frame can window it, and the *review*
+        // offset is only knowable once one frame has measured the whole thing — so the warm-up
+        // frame here is not ceremony, it is what tells  how tall the content is.
+        projection.project(&document);
+        let _ = wrapped_frame(&mut projection, &document);
+        projection.scroll_to_top();
+        (projection, document)
+    }
+
+    fn wrapped_frame(
+        projection: &mut ViewportProjection,
+        document: &HistoryDocument,
+    ) -> ViewportFrame {
+        projection
+            .continuous_frame(
+                document,
+                &[],
+                vec![
+                    CapturedRow::plain("xy", false),
+                    CapturedRow::plain("zw", false),
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .expect("a rectangular frame")
+    }
+
+    /// PIN (§7.1.5d) — **the two hit lists are two lists**, and the current one is not in the
+    /// other.
+    ///
+    /// They are painted in different inks — the ordinary hit keeps the text's own colour over a
+    /// 30% ground, the current one takes the terminal's background as its ink over a solid accent
+    /// — so a cell in both would be painted twice and read as neither.
+    ///
+    /// MUTATIONS:
+    /// (1) put the current hit in `search_spans` as well and its ground is drawn over by the plain
+    ///     one, which is the current match becoming invisible;
+    /// (2) coalesce runs by coverage instead of by class and a current hit adjacent to an ordinary
+    ///     one becomes a single span in one of the two inks.
+    #[test]
+    fn the_current_hit_is_its_own_span_list_and_never_in_the_other() {
+        let (mut projection, document) = wrapped_projection();
+        let line = *document.entries().keys().next().expect("one frozen line");
+        projection.set_search_highlights(Some(Arc::new(SearchHighlights::new(
+            [
+                SearchHit {
+                    line: SearchLine::History(line),
+                    start: 0,
+                    end: 2,
+                },
+                SearchHit {
+                    line: SearchLine::History(line),
+                    start: 2,
+                    end: 4,
+                },
+            ],
+            Some(SearchHit {
+                line: SearchLine::History(line),
+                start: 2,
+                end: 4,
+            }),
+        ))));
+        let frame = wrapped_frame(&mut projection, &document);
+        assert_eq!(
+            frame.search_spans,
+            vec![SelectionSpan {
+                row: 0,
+                start_column: 0,
+                end_column: 2,
+            }],
+        );
+        assert_eq!(
+            frame.current_search_spans,
+            vec![SelectionSpan {
+                row: 1,
+                start_column: 0,
+                end_column: 2,
+            }],
+            "the second hit is the current one and it is only in the current list"
+        );
+        frame.validate_shape().expect("both lists name real rows");
+    }
+
+    /// A hit that straddles a wrap is **two spans on two rows**, not one span that stops at the
+    /// edge — which is what makes `current_search_spans` a list rather than a single span.
+    #[test]
+    fn a_hit_across_a_wrap_lights_both_of_the_rows_it_lies_on() {
+        let (mut projection, document) = wrapped_projection();
+        let line = *document.entries().keys().next().expect("one frozen line");
+        projection.set_search_highlights(Some(Arc::new(SearchHighlights::new(
+            [SearchHit {
+                line: SearchLine::History(line),
+                start: 1,
+                end: 3,
+            }],
+            None,
+        ))));
+        let frame = wrapped_frame(&mut projection, &document);
+        assert_eq!(
+            frame.search_spans,
+            vec![
+                SelectionSpan {
+                    row: 0,
+                    start_column: 1,
+                    end_column: 2,
+                },
+                SelectionSpan {
+                    row: 1,
+                    start_column: 0,
+                    end_column: 1,
+                },
+            ],
+            "one hit, two rows, and each row lights only the part of it that is on that row"
+        );
+    }
+
+    /// PIN — **a hit on the last live row does not ghost into the blank overscan row beneath it.**
+    ///
+    /// The overscan row carries the last grid row's own coordinates with `live_grid_row: None`; it
+    /// is a placeholder, not a row of the grid. Without the guard in `search_spans` a match on the
+    /// bottom line of the screen would paint a second copy of itself in the empty strip below.
+    #[test]
+    fn a_live_hit_is_drawn_on_its_grid_row_and_not_on_the_blank_row_under_it() {
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.set_search_highlights(Some(Arc::new(SearchHighlights::new(
+            [SearchHit {
+                line: SearchLine::Live { row: 1 },
+                start: 0,
+                end: 4,
+            }],
+            None,
+        ))));
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                vec![
+                    CapturedRow::plain("aaaa", false),
+                    CapturedRow::plain("bbbb", false),
+                ],
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .expect("a rectangular frame");
+        assert_eq!(
+            frame.search_spans,
+            vec![SelectionSpan {
+                row: 1,
+                start_column: 0,
+                end_column: 4,
+            }],
+            "exactly one row, and it is the one whose `live_grid_row` says so"
+        );
+    }
+
+    /// Handing the projection `None` takes every highlight off it — the one door
+    /// [`ViewportProjection::set_search_highlights`] exists to be.
+    #[test]
+    fn closing_the_search_leaves_no_span_behind() {
+        let (mut projection, document) = wrapped_projection();
+        let line = *document.entries().keys().next().expect("one frozen line");
+        projection.set_search_highlights(Some(Arc::new(SearchHighlights::new(
+            [SearchHit {
+                line: SearchLine::History(line),
+                start: 0,
+                end: 2,
+            }],
+            None,
+        ))));
+        assert!(
+            !wrapped_frame(&mut projection, &document)
+                .search_spans
+                .is_empty()
+        );
+        projection.set_search_highlights(None);
+        let frame = wrapped_frame(&mut projection, &document);
+        assert!(frame.search_spans.is_empty());
+        assert!(frame.current_search_spans.is_empty());
     }
 
     #[test]

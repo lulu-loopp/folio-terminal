@@ -245,6 +245,87 @@ pub(crate) fn selection_background_for_background(background: [u8; 3]) -> [u8; 3
 pub(crate) fn selection_background_rgb() -> [u8; 3] {
     selection_background_for_background(background_rgb())
 }
+
+// ── in-pane search: the two grounds a hit can wear (§7.1.5d, S3) ─────────────
+//
+// `mark.srch { background: color-mix(in srgb, var(--accent) 30%, transparent) }`
+// and `mark.srch.cur { background: var(--accent); color: var(--termbg) }`
+// (mock-up 1530-1532). Two grounds and one ink, and the ink is the whole of the
+// ruling the stylesheet wrote a paragraph about at 1526-1529:
+//
+// > "hits stay readable in place; the CURRENT one is unmistakable. **`--termbg`
+// > as the current hit's ink works in both themes**: dark text on the
+// > light-theme indigo would fail, white text on the dark-theme periwinkle would
+// > fail — each theme's terminal background is exactly the ink that contrasts."
+//
+// So there is no new colour here at all in the sense a palette usually means
+// one: the current hit's ground is the accent this window already has and its
+// ink is the canvas it is standing on. What *is* new is the 30% ground, and it
+// is pre-composited over the canvas for [`ChromePalette`]'s reason — this
+// pipeline composites in linear light, so handing the blender an sRGB alpha does
+// not reproduce the design's own value, and the surface under a hit is known.
+
+/// `--accent` over a dark canvas.
+const DARK_ACCENT_RGB: [u8; 3] = [0x7a, 0x99, 0xff];
+/// `--accent` over a light one.
+const LIGHT_ACCENT_RGB: [u8; 3] = [0x30, 0x59, 0xd8];
+
+/// `--accent #7A99FF` at 30% over `--termbg #1B1B1B`: 27 + (122 − 27)×.3 = 55.5,
+/// 27 + (153 − 27)×.3 = 64.8, 27 + (255 − 27)×.3 = 95.4 → #38415F.
+pub(crate) const DEFAULT_SEARCH_MATCH_RGB: [u8; 3] =
+    ink_over(DEFAULT_BACKGROUND_RGB, DARK_ACCENT_RGB, 300);
+/// The same over `--termbg #FFFFFF` → #C1CDF3.
+///
+/// It comes out identical to [`LIGHT_SELECTION_BACKGROUND_RGB`], and that is not
+/// a coincidence to be broken: that constant's own note records that it *was
+/// derived from this rule* — "the one in-terminal highlight the mock-up does
+/// draw, `mark.srch`, is that accent at 30% over `--termbg`". They are two marks
+/// of the same weight and the light canvas gives them the same answer. It is
+/// written out again here rather than aliased because the two are free to move
+/// apart the day either ruling does, and because the dark canvas already has
+/// them apart (`#264F78` against `#38415F`).
+pub(crate) const LIGHT_SEARCH_MATCH_RGB: [u8; 3] =
+    ink_over(LIGHT_BACKGROUND_RGB, LIGHT_ACCENT_RGB, 300);
+
+/// The ordinary hit's ground, paired with the canvas it lies on.
+///
+/// Takes the ink's dark/light decision — the background-luma threshold — and not
+/// [`current_theme`]'s, for exactly [`selection_background_for_background`]'s
+/// reason: under a `BT_BG` override the two disagree on purpose, and a hit that
+/// followed the theme instead would be the one mark on that screen still dressed
+/// for the other canvas.
+pub(crate) fn search_match_for_background(background: [u8; 3]) -> [u8; 3] {
+    if background_is_light(background) {
+        LIGHT_SEARCH_MATCH_RGB
+    } else {
+        DEFAULT_SEARCH_MATCH_RGB
+    }
+}
+
+/// The current hit's ground: the accent, solid.
+pub(crate) fn search_current_for_background(background: [u8; 3]) -> [u8; 3] {
+    if background_is_light(background) {
+        LIGHT_ACCENT_RGB
+    } else {
+        DARK_ACCENT_RGB
+    }
+}
+
+/// The ordinary hit's ground in force, from the same atomic snapshot as its canvas.
+pub(crate) fn search_match_rgb() -> [u8; 3] {
+    search_match_for_background(background_rgb())
+}
+
+/// The current hit's ground in force.
+pub(crate) fn search_current_rgb() -> [u8; 3] {
+    search_current_for_background(background_rgb())
+}
+
+/// The current hit's **ink** — `var(--termbg)`, which is to say the canvas
+/// itself, whatever a `BT_BG` override has made it.
+pub(crate) fn search_current_ink_rgb() -> [u8; 3] {
+    background_rgb()
+}
 pub(crate) const DEFAULT_STATUS_BACKGROUND_RGB: [u8; 3] = [0x33, 0x33, 0x33];
 
 // ---------------------------------------------------------------------------
@@ -2543,6 +2624,72 @@ mod tests {
     /// #3059D8 at the 30% its own in-terminal highlight (`mark.srch`) uses,
     /// composited over the light `--termbg` #FFFFFF in sRGB the way every other
     /// translucent-over-known-surface colour in this file is pre-composited.
+    /// PIN (A38-A40, §7.1.5d) — **a search hit wears two grounds and one borrowed ink**, and the
+    /// ink is the terminal's own background on both canvases.
+    ///
+    /// The stylesheet spends a paragraph on why (mock 1526-1529): *"dark text on the light-theme
+    /// indigo would fail, white text on the dark-theme periwinkle would fail — each theme's
+    /// terminal background is exactly the ink that contrasts."* So there is no new ink at all —
+    /// the current hit takes `--termbg` — and the two grounds are the accent, once at 30% and once
+    /// solid.
+    ///
+    /// MUTATIONS:
+    /// (1) make the current hit's ink a fixed white or black — one of the two canvases loses its
+    ///     contrast, which is the ruling's own argument run backwards;
+    /// (2) give the ordinary hit the solid accent — the current one stops being distinguishable,
+    ///     which is what the two grounds exist to make it.
+    #[test]
+    fn a_search_hit_is_the_accent_twice_over_and_takes_the_canvas_as_its_ink() {
+        // `--accent #7A99FF` at 30% over `--termbg #1B1B1B`: 27 + (122-27)x.3 = 55.5,
+        // 27 + (153-27)x.3 = 64.8, 27 + (255-27)x.3 = 95.4 -> #38415F.
+        assert_eq!(
+            search_match_for_background(DEFAULT_BACKGROUND_RGB),
+            [0x38, 0x41, 0x5f],
+        );
+        // 255 - (255 - 48) * .3 and its companions, over `--termbg #FFFFFF`.
+        assert_eq!(
+            search_match_for_background(LIGHT_BACKGROUND_RGB),
+            [0xc1, 0xcd, 0xf3],
+        );
+        // The current hit is the accent itself, which is what makes it unmistakable beside the
+        // shadow of it the others wear.
+        assert_eq!(
+            search_current_for_background(DEFAULT_BACKGROUND_RGB),
+            [0x7a, 0x99, 0xff],
+        );
+        assert_eq!(
+            search_current_for_background(LIGHT_BACKGROUND_RGB),
+            [0x30, 0x59, 0xd8],
+        );
+        // The ordinary ground is pale enough to leave the text on it alone, on either canvas —
+        // which is the whole of "hits stay readable in place".
+        assert!(!background_is_light(search_match_for_background(
+            DEFAULT_BACKGROUND_RGB
+        )));
+        assert!(background_is_light(search_match_for_background(
+            LIGHT_BACKGROUND_RGB
+        )));
+        // And the current hit's ground is the *other* side of the threshold from its own ink on
+        // both canvases, which is the ruling stated as an inequality rather than as a paragraph.
+        for canvas in [DEFAULT_BACKGROUND_RGB, LIGHT_BACKGROUND_RGB] {
+            assert_ne!(
+                background_is_light(search_current_for_background(canvas)),
+                background_is_light(canvas),
+                "`--termbg` as the current hit's ink only works if the accent is on the other                  side of the threshold from it",
+            );
+        }
+        // The switch is the terminal ink's switch, taken at the same threshold as the selection's
+        // beside it — so a `BT_BG` override moves both together.
+        assert_eq!(
+            search_match_for_background([0x0c; 3]),
+            DEFAULT_SEARCH_MATCH_RGB
+        );
+        assert_eq!(
+            search_match_for_background([0xf5; 3]),
+            LIGHT_SEARCH_MATCH_RGB
+        );
+    }
+
     #[test]
     fn selection_background_follows_the_same_luma_threshold_as_the_terminal_ink() {
         assert_eq!(

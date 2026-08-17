@@ -256,6 +256,16 @@ pub enum TooltipAnchorId {
     /// command" would be a second box explaining a first one; the card *is* the
     /// tip, and what it says is the command.
     CommandTick(bt_layout::SeatId, bt_term::CommandMarkId),
+    /// One control of the in-pane search capsule (§7.1.5d, B66).
+    ///
+    /// It carries the *element* and not a seat, because there is one capsule in
+    /// the window: the singleton the prototype's own state and lookup both
+    /// declare (mock 8515-8519) means a second identifier would have exactly one
+    /// value. Six of the capsule's nine children register — the three
+    /// two-letter toggles, the two chevrons and the cross — and the field does
+    /// not, because a box you type into has its own placeholder to say what it
+    /// is for.
+    SearchControl(crate::search::SearchElement),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.

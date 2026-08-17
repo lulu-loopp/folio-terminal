@@ -102,7 +102,15 @@ use theme::{
     CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb, cursor_rgb,
     unfocused_cursor_rgb,
 };
-use theme::{DEFAULT_STATUS_BACKGROUND_RGB, selection_background_rgb};
+use theme::{
+    DEFAULT_STATUS_BACKGROUND_RGB, search_current_ink_rgb, search_current_rgb, search_match_rgb,
+    selection_background_rgb,
+};
+
+/// `mark.srch { border-radius: 3px }` (mock-up 1530) — the corner a found word
+/// wears, and the one thing that tells it apart from a dragged selection at a
+/// glance.
+pub const SEARCH_MATCH_RADIUS_LOGICAL_PX: f32 = 3.0;
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
@@ -5162,6 +5170,45 @@ impl Renderer {
                 ));
             }
         }
+        // The search's two grounds, over the selection and under everything else
+        // — `mark.srch` is an inline element inside the text, so a hit inside a
+        // selection reads as a hit rather than disappearing into it.
+        //
+        // **Rounded, unlike the selection** (D-16, mock 1530-1532's `3px`): a
+        // selection is a continuous sweep the reader dragged and a hit is a word
+        // the machine found, and the corner is the whole of what says so. One
+        // rounded box per *span*, not per cell, which is why the run coalescing
+        // happens in the projection — `rounded_rect_coverage` on a five-cell run
+        // rounds the run's own two ends, and rounding every cell would draw four
+        // beads with pinched joins between them.
+        let match_radius =
+            (SEARCH_MATCH_RADIUS_LOGICAL_PX * self.metrics.scale_factor as f32).max(0.0);
+        for (spans, ground) in [
+            (&frame.search_spans, search_match_rgb()),
+            (&frame.current_search_spans, search_current_rgb()),
+        ] {
+            for span in spans {
+                let start = span.start_column.min(frame.columns.get()) as usize;
+                let end = span.end_column.min(frame.columns.get()) as usize;
+                if end <= start || (span.row as usize) >= drawable_rows {
+                    continue;
+                }
+                let bounds =
+                    selection_span_bounds_px(self.metrics, frame, span, start, end - start);
+                rects.extend(rounded_rect_coverage(bounds, match_radius).into_iter().map(
+                    |entry| {
+                        self.pixel_rect_with_coverage(
+                            entry.rect[0],
+                            entry.rect[1],
+                            entry.rect[2],
+                            entry.rect[3],
+                            ground,
+                            entry.coverage,
+                        )
+                    },
+                ));
+            }
+        }
         for (index, placement) in frame.math_blocks.iter().enumerate() {
             if math_block_dim_is_drawn(placement, drawn_math_blocks.contains(&index))
                 && let Some(geometry) = self.math_block_geometry(frame, placement)
@@ -6052,6 +6099,30 @@ fn prepare_text_atlas(
 ) -> Result<(), PrepareError> {
     let padding = metrics.padding_px;
     let text_right = (padding + frame.columns.get() as f32 * metrics.cell_width_px).ceil() as i32;
+    // **The current hit's ink, applied here and not in the shaping** (§7.1.5d).
+    //
+    // A composed row is cached on its cells, and its cells are what the shell
+    // wrote; folding a search into that key would mean reshaping every visible
+    // row on every keystroke of a query, for a change that is one colour deep.
+    // So the recolour happens at the draw, exactly where the selection's ground
+    // is decided, and both marks stay properties of the *frame* rather than of
+    // the text. `--termbg` is the ruled ink (mock 1526-1529) and the ground
+    // under it is the solid accent, which is the pair that contrasts on either
+    // canvas.
+    let current_ink = (!frame.current_search_spans.is_empty()).then(|| {
+        let ink = search_current_ink_rgb();
+        Color::rgb(ink[0], ink[1], ink[2])
+    });
+    let recoloured = |row: usize, column: usize, resting: Color| {
+        current_ink
+            .filter(|_| {
+                frame.current_search_spans.iter().any(|span| {
+                    span.row as usize == row
+                        && (span.start_column as usize..span.end_column as usize).contains(&column)
+                })
+            })
+            .unwrap_or(resting)
+    };
     let narrow_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
         text_row.narrow_glyphs.iter().map(move |glyph| {
             let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, glyph.column);
@@ -6068,7 +6139,7 @@ fn prepare_text_atlas(
                     right: text_right,
                     bottom: bottom.ceil() as i32,
                 },
-                default_color: glyph.color,
+                default_color: recoloured(row, glyph.column, glyph.color),
                 custom_glyphs: &[],
             }
         })
@@ -6087,7 +6158,7 @@ fn prepare_text_atlas(
                     right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
                     bottom: bottom.ceil() as i32,
                 },
-                default_color: wide.color,
+                default_color: recoloured(row, wide.column, wide.color),
                 custom_glyphs: &[],
             }
         })
@@ -8362,6 +8433,8 @@ mod tests {
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: Some("7 rows above · Shift+wheel".to_owned()),
@@ -8986,6 +9059,8 @@ mod tests {
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -9103,6 +9178,8 @@ mod tests {
                 cell_anchors: test_cell_anchors(12),
                 row_map: test_row_map_for_metrics(3, metrics),
                 selection_spans: Vec::new(),
+                search_spans: Vec::new(),
+                current_search_spans: Vec::new(),
                 math_blocks: Vec::new(),
                 math_failures: Vec::new(),
                 status_text: None,
@@ -9173,6 +9250,8 @@ mod tests {
                 start_column: 0,
                 end_column: 2,
             }],
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -9244,6 +9323,8 @@ mod tests {
             cell_anchors: test_cell_anchors(6),
             row_map: test_row_map_for_metrics(2, metrics),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -9342,6 +9423,8 @@ mod tests {
                 },
             ],
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -9519,6 +9602,8 @@ mod tests {
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -9557,6 +9642,8 @@ mod tests {
                 visible: true,
             },
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -9672,6 +9759,8 @@ mod tests {
                 visible: true,
             },
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: vec![
                 test_math_placement("onscreen", 0, cell, block_bytes),
                 // Two full grid heights above the pane: scrolled away, nothing of it is drawable.
@@ -9761,6 +9850,8 @@ mod tests {
                 start_column: 0,
                 end_column: 2,
             }],
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -9865,6 +9956,8 @@ mod tests {
             cell_anchors: test_cell_anchors(4),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -10197,6 +10290,8 @@ mod tests {
             cell_anchors: test_cell_anchors(6),
             row_map: test_row_map(3),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -10433,6 +10528,8 @@ mod tests {
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -10542,6 +10639,8 @@ mod tests {
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -10590,6 +10689,8 @@ mod tests {
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -10730,6 +10831,8 @@ mod tests {
                 cell_anchors: test_cell_anchors(1),
                 row_map: test_row_map_for_metrics(1, metrics),
                 selection_spans: Vec::new(),
+                search_spans: Vec::new(),
+                current_search_spans: Vec::new(),
                 math_blocks: Vec::new(),
                 math_failures: Vec::new(),
                 status_text: None,
@@ -10796,6 +10899,8 @@ mod tests {
             cell_anchors: test_cell_anchors(3),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
@@ -10850,6 +10955,8 @@ mod tests {
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map_for_metrics(1, metrics),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,

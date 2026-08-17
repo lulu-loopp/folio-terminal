@@ -53,6 +53,17 @@ pub(crate) enum Action {
     PrevCommandMark,
     /// The same, forwards.
     NextCommandMark,
+    /// Raise the in-pane search capsule on the focused terminal, or — when it is already up —
+    /// put the caret back in it with the last query selected (§7.1.5d, B80).
+    OpenSearch,
+    /// Walk to the next match while the **terminal** still holds the keyboard (B81).
+    ///
+    /// `Enter` cannot do this and that is the whole reason the function key is in the table: Enter
+    /// belongs to the shell the moment the caret leaves the capsule, so `F3` is what covers the
+    /// second of the two stances a reader can be in — search open, hands back on the terminal.
+    NextMatch,
+    /// The same, backwards.
+    PrevMatch,
 }
 
 /// Where a row is in force.
@@ -97,6 +108,20 @@ pub(crate) enum Scope {
     /// describe by guessing. They are not moved here in this slice, but this is
     /// the column they would move into.
     TerminalPrimary,
+    /// Only while the in-pane search capsule is up (§7.1.5d, B81).
+    ///
+    /// `F3` is a key shells and full-screen programs use — `cmd.exe` recalls its
+    /// history with it — so it may only be claimed while there is a search to
+    /// walk. Expressed as a scope rather than as a guard inside the handler for
+    /// [`Self::TerminalPrimary`]'s reason: out of scope the row is simply not in
+    /// the table, so the key reaches the child exactly as an unbound one does,
+    /// and the shortcut-editing panel can *show* the condition instead of
+    /// guessing at it.
+    ///
+    /// The capsule only ever opens on a terminal showing its primary screen and
+    /// is closed the moment that stops being true, so this scope implies the one
+    /// above rather than having to repeat it.
+    SearchOpen,
 }
 
 /// What the window's focus looks like to the table.
@@ -116,6 +141,14 @@ pub(crate) struct Focus {
     /// not showing its scrollback, and a row in that scope is out of force for
     /// either reason.
     pub(crate) terminal_primary: bool,
+    /// Whether the in-pane search capsule is up — anywhere, on any pane.
+    ///
+    /// Not "and the caret is in it". The capsule holding the keyboard is a
+    /// *different* state, and it is the one this bool is deliberately not about:
+    /// `F3` exists precisely for the stance where the search is open and the
+    /// hands are back on the shell (B81), so a flag that meant "the field is
+    /// focused" would switch the row off exactly when it is wanted.
+    pub(crate) search_open: bool,
 }
 
 impl Scope {
@@ -125,6 +158,7 @@ impl Scope {
             Self::Window => true,
             Self::Preview => focus.preview,
             Self::TerminalPrimary => focus.terminal_primary,
+            Self::SearchOpen => focus.search_open,
         }
     }
 }
@@ -190,6 +224,15 @@ impl Binding {
             action,
             chord,
             scope: Scope::TerminalPrimary,
+        }
+    }
+
+    /// A row in force only while the search capsule is up.
+    const fn search_open(action: Action, chord: Chord) -> Self {
+        Self {
+            action,
+            chord,
+            scope: Scope::SearchOpen,
         }
     }
 }
@@ -303,6 +346,46 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::NextCommandMark,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::ArrowDown)),
     ),
+    // **`Ctrl+F`, and it is an exception to discipline ① written down as one**
+    // (user ruling, 2026-08-16, inventory D-2).
+    //
+    // Discipline ① — bare `Ctrl+letter` is the shell's control-code alphabet and
+    // is never taken — is the reason every window row above wears Shift, and it
+    // is why the same audit moved `Ctrl+B` to `Ctrl+Shift+B` two months ago. The
+    // ruling that overturns it here is narrow and gives its reasons: what ①
+    // protects is a control code with an *owner*, and `^F` has none on Windows
+    // that a terminal user meets — readline's forward-one-character is the same
+    // key as `→` and nobody presses it; the reference product for this surface
+    // (VS Code's integrated terminal) takes `Ctrl+F` for exactly this box; and
+    // the row is scoped, so the moment a full-screen program is on the glass the
+    // chord is not in the table at all and `less` keeps its page-forward.
+    //
+    // That last clause is doing the real work. This is the same shape as
+    // `Ctrl+S` in a preview (ruling 9): the discipline forbids taking a bare
+    // control letter *from a terminal*, and here it is taken only where the
+    // scrollback the search reads actually exists.
+    Binding::terminal_primary(Action::OpenSearch, Chord::new(CTRL, character("f"))),
+    // **The alias**, bound in the same breath by the same ruling.
+    //
+    // Two rows and not a special case in the matcher, because two rows is what
+    // the shortcut-editing panel can show and edit: a reader whose muscles know
+    // `Ctrl+Shift+F` from another product finds the box, and a reader who wants
+    // `^F` back for their shell can take this row's chord and delete the other's
+    // without the panel having to explain that one of them was a hidden twin.
+    Binding::terminal_primary(Action::OpenSearch, Chord::new(CTRL_SHIFT, character("f"))),
+    // `F3` / `Shift+F3` (B81) — the walk that works while the terminal still has
+    // the keyboard. Bare, because a function key is not a control code and the
+    // discipline has nothing to say about it, and scoped so that a shell which
+    // uses `F3` (`cmd.exe` recalls its last command with it) keeps the key
+    // whenever there is no search to walk.
+    Binding::search_open(
+        Action::NextMatch,
+        Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F3)),
+    ),
+    Binding::search_open(
+        Action::PrevMatch,
+        Chord::new(ModifiersState::SHIFT, ChordKey::Named(NamedKey::F3)),
+    ),
 ];
 
 const fn character(text: &'static str) -> ChordKey {
@@ -380,6 +463,7 @@ mod tests {
             Focus {
                 preview: true,
                 terminal_primary: false,
+                search_open: false,
             },
         )
     }
@@ -393,6 +477,22 @@ mod tests {
             Focus {
                 preview: false,
                 terminal_primary: true,
+                search_open: false,
+            },
+        )
+    }
+
+    /// The same press with the search capsule up and the keyboard back on the shell — B81's
+    /// second stance, which is the only one `F3` is about.
+    fn press_with_search_open(key: Key, modifiers: ModifiersState) -> Option<Action> {
+        lookup_action(
+            &key,
+            &key,
+            modifiers,
+            Focus {
+                preview: false,
+                terminal_primary: true,
+                search_open: true,
             },
         )
     }
@@ -468,6 +568,109 @@ mod tests {
         assert_eq!(
             press_on_primary_screen(Key::Named(NamedKey::ArrowDown), CTRL_SHIFT),
             Some(Action::NextCommandMark)
+        );
+        assert_eq!(
+            press_on_primary_screen(character("f"), CTRL),
+            Some(Action::OpenSearch)
+        );
+        assert_eq!(
+            press_on_primary_screen(character("f"), CTRL_SHIFT),
+            Some(Action::OpenSearch),
+            "the alias reaches the same verb"
+        );
+        assert_eq!(
+            press_with_search_open(Key::Named(NamedKey::F3), ModifiersState::empty()),
+            Some(Action::NextMatch)
+        );
+        assert_eq!(
+            press_with_search_open(Key::Named(NamedKey::F3), ModifiersState::SHIFT),
+            Some(Action::PrevMatch)
+        );
+    }
+
+    /// PIN (user ruling 2026-08-16, inventory D-2) — **`Ctrl+F` is the one bare
+    /// control letter this table takes from a terminal, and it hands it straight
+    /// back the moment there is a full-screen program on the glass.**
+    ///
+    /// Five promises, one assertion each: the chord opens the capsule on a
+    /// scrollback; the alias reaches the same verb; the alternate screen keeps
+    /// both, so `less` still pages forward; and a document is not a scrollback.
+    ///
+    /// MUTATIONS:
+    /// (1) give the rows `Scope::Window` — the alternate-screen assertions go
+    ///     red, and so does `bare_control_letters_stay_with_the_terminal`, which
+    ///     is discipline (1) noticing;
+    /// (2) drop the alias row — the second assertion goes red;
+    /// (3) move the row to `CTRL_SHIFT` alone — the first goes red, which is the
+    ///     ruling refusing to be renegotiated by a later tidy-up.
+    #[test]
+    fn control_f_opens_the_search_on_a_scrollback_and_passes_through_on_the_alternate_screen() {
+        assert_eq!(
+            press_on_primary_screen(character("f"), CTRL),
+            Some(Action::OpenSearch)
+        );
+        assert_eq!(
+            press_on_primary_screen(character("f"), CTRL_SHIFT),
+            Some(Action::OpenSearch)
+        );
+        assert_eq!(
+            press(character("f"), CTRL),
+            None,
+            "on the alternate screen ^F is the program's page-forward and reaches it untouched"
+        );
+        assert_eq!(
+            press(character("f"), CTRL_SHIFT),
+            None,
+            "and so is the alias - the whole row is out of the table there"
+        );
+        assert_eq!(
+            press_in_preview(character("f"), CTRL),
+            None,
+            "a document is not a scrollback"
+        );
+    }
+
+    /// PIN (B81) — **the function key walks the matches, and only while there
+    /// are matches to walk.**
+    ///
+    /// `F3` is `cmd.exe`'s history recall and a dozen programs' help key. The
+    /// scope is what keeps it theirs whenever the capsule is down, which is
+    /// nearly always.
+    ///
+    /// MUTATIONS:
+    /// (1) give the rows `Scope::TerminalPrimary` — the "no search" assertions
+    ///     go red and every shell loses `F3` for good;
+    /// (2) drop the Shift from the second row — the two chords collide and
+    ///     `the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice`
+    ///     goes red.
+    #[test]
+    fn the_function_key_walk_answers_only_while_a_search_is_open() {
+        assert_eq!(
+            press_with_search_open(Key::Named(NamedKey::F3), ModifiersState::empty()),
+            Some(Action::NextMatch)
+        );
+        assert_eq!(
+            press_with_search_open(Key::Named(NamedKey::F3), ModifiersState::SHIFT),
+            Some(Action::PrevMatch)
+        );
+        assert_eq!(
+            press_on_primary_screen(Key::Named(NamedKey::F3), ModifiersState::empty()),
+            None,
+            "with no capsule up F3 is the shell's"
+        );
+        assert_eq!(
+            press_on_primary_screen(Key::Named(NamedKey::F3), ModifiersState::SHIFT),
+            None
+        );
+        assert_eq!(
+            press(Key::Named(NamedKey::F3), ModifiersState::empty()),
+            None
+        );
+        // The capsule's own chord still answers while it is open - reopening
+        // refocuses it and reselects the query (B80).
+        assert_eq!(
+            press_with_search_open(character("f"), CTRL),
+            Some(Action::OpenSearch)
         );
     }
 
@@ -590,6 +793,7 @@ mod tests {
         let terminal = Focus {
             preview: false,
             terminal_primary: true,
+            search_open: false,
         };
         // US layout: Shift+1 produces "!", the bare key is "1".
         assert_eq!(
@@ -649,7 +853,7 @@ mod tests {
         let ctrl_alt = ModifiersState::CONTROL.union(ModifiersState::ALT);
         let ctrl_alt_shift = ctrl_alt.union(ModifiersState::SHIFT);
         for text in [
-            "a", "b", "d", "e", "g", "n", "p", "s", "t", "w", "-", "=", ",", "1", "9",
+            "a", "b", "d", "e", "f", "g", "n", "p", "s", "t", "w", "-", "=", ",", "1", "9",
         ] {
             assert_eq!(press(character(text), ctrl_alt), None, "AltGr+{text}");
             assert_eq!(
@@ -663,6 +867,13 @@ mod tests {
                 press_in_preview(character(text), ctrl_alt),
                 None,
                 "AltGr+{text} in a preview"
+            );
+            // And on the screen where the one bare letter in this table *is*
+            // claimed: AltGr must not reach `Ctrl+F` either.
+            assert_eq!(
+                press_on_primary_screen(character(text), ctrl_alt),
+                None,
+                "AltGr+{text} on a scrollback"
             );
         }
         // The named keys the table claims are held to the same discipline, on
@@ -698,7 +909,7 @@ mod tests {
     #[test]
     fn unmodified_typing_is_never_intercepted() {
         for text in [
-            "a", "b", "g", "n", "w", "t", "d", "p", "s", "-", "=", ",", "1", "9",
+            "a", "b", "f", "g", "n", "w", "t", "d", "p", "s", "-", "=", ",", "1", "9",
         ] {
             assert_eq!(press(character(text), ModifiersState::empty()), None);
             assert_eq!(press(character(text), ModifiersState::SHIFT), None);
@@ -734,12 +945,31 @@ mod tests {
                 "Ctrl+{letter} belongs to the terminal"
             );
         }
+        // The sweep above is taken on the alternate screen, where every scoped
+        // row is out of force - so it would stay green even if `Ctrl+F` had been
+        // given `Scope::Window` by mistake. This is the half that would not:
+        // twenty-five of the twenty-six are still the shell's on a scrollback,
+        // and the twenty-sixth is named out loud.
+        for letter in 'a'..='z' {
+            let expected = if letter == 'f' {
+                Some(Action::OpenSearch)
+            } else {
+                None
+            };
+            assert_eq!(
+                press_on_primary_screen(character(&letter.to_string()), CTRL),
+                expected,
+                "Ctrl+{letter} on a scrollback"
+            );
+        }
     }
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 16 single actions plus GotoTab(1..=9).
-        assert_eq!(BINDINGS.len(), 25);
+        // 19 single actions plus GotoTab(1..=9), plus one alias row: `Ctrl+Shift+F`
+        // is a second chord for `OpenSearch` and is the only place in this table
+        // where two rows name one verb (user ruling 2026-08-16).
+        assert_eq!(BINDINGS.len(), 29);
 
         // Two rows may share a chord only if no focus state has both in force —
         // which is what a scope is *for*, and also the one way scopes could
@@ -755,14 +985,25 @@ mod tests {
                     Focus {
                         preview: false,
                         terminal_primary: false,
+                        search_open: false,
                     },
                     Focus {
                         preview: true,
                         terminal_primary: false,
+                        search_open: false,
                     },
                     Focus {
                         preview: false,
                         terminal_primary: true,
+                        search_open: false,
+                    },
+                    // The capsule is only ever up over a terminal on its primary
+                    // screen, so this is the fourth state and not a fifth: there
+                    // is no "search open over a preview".
+                    Focus {
+                        preview: false,
+                        terminal_primary: true,
+                        search_open: true,
                     },
                 ]
                 .into_iter()
@@ -803,6 +1044,9 @@ mod tests {
             Action::SavePreview,
             Action::PrevCommandMark,
             Action::NextCommandMark,
+            Action::OpenSearch,
+            Action::NextMatch,
+            Action::PrevMatch,
         ];
         expected.extend((1..=9u8).map(Action::GotoTab));
 
@@ -829,10 +1073,17 @@ mod tests {
                 Scope::Preview => Focus {
                     preview: true,
                     terminal_primary: false,
+                    search_open: false,
                 },
                 Scope::TerminalPrimary => Focus {
                     preview: false,
                     terminal_primary: true,
+                    search_open: false,
+                },
+                Scope::SearchOpen => Focus {
+                    preview: false,
+                    terminal_primary: true,
+                    search_open: true,
                 },
             };
             assert_eq!(

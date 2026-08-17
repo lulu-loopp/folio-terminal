@@ -9503,6 +9503,41 @@ pub fn files_pane_rect(layout: &SeatLayout, seat: SeatId) -> Option<[f32; 4]> {
     ])
 }
 
+/// What the in-pane search capsule hangs off: one seat's whole rectangle, and — when it wears a
+/// head — that head's own content bottom (§7.1.5d, A26).
+///
+/// **The whole rectangle and not the body.** `.srchbar`'s containing block in the stylesheet is
+/// `.pane-inner`, which includes the head, and its two tops (`10px` bare, `38px` `.with-head`) are
+/// measured from the same origin. [`pane_body_viewport`] has already subtracted the head, so a
+/// capsule placed against *it* would be measuring from two different origins depending on whether
+/// there was a head — and would be eight pixels adrift in one of the two cases.
+///
+/// The head's `content_bottom` rather than the mock-up's literal `38`: thirty-eight is thirty plus
+/// eight, thirty is [`SEAT_TITLE_BAR_LOGICAL_PX`], and a head that changed height would leave a
+/// hard-coded capsule sitting on top of it.
+#[must_use]
+pub fn search_capsule_host(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<([f32; 4], Option<f32>)> {
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    let head = seats
+        .seat_wears_head(placement.kind)
+        .then(|| pane_head_geometry(rect, placement.kind, scale).content_bottom);
+    Some((rect, head))
+}
+
 /// One pane head's `⌄` box, in physical pixels, or `None` when that seat has no
 /// head, is collapsed, or is too narrow to seat the control.
 ///

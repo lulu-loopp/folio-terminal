@@ -1212,6 +1212,24 @@ impl DualPlaneSession {
         &self.transcript
     }
 
+    /// The live grid's rows, top to bottom — **the plane the transcript does not hold**.
+    ///
+    /// It exists for the in-pane search (§7.1.5d, inventory R7). A terminal's text lives in three
+    /// places at once — frozen history, the staged rows on their way into it, and the screen — and
+    /// two of the three are already public here (`transcript()` gives both). Without the third, a
+    /// reader who searched for a word that is plainly on their screen would be told there are no
+    /// results, because the line holding it has not scrolled out yet.
+    ///
+    /// The same rows `viewport_frame` projects, asked the same way: `visible_row` is memoized on a
+    /// per-row fingerprint, so a caller that asks every frame pays a hash per row rather than a
+    /// capture.
+    pub fn live_rows(&self) -> Vec<CapturedRow> {
+        let (_, rows) = self.terminal.dimensions();
+        (0..rows.get())
+            .filter_map(|row| self.terminal.visible_row(row))
+            .collect()
+    }
+
     pub fn decoration(&self, id: TranscriptId) -> Option<&DecorationRecord> {
         self.decorations.get(&id)
     }

@@ -28,6 +28,7 @@ mod preview;
 mod preview_edit;
 mod profiles;
 mod restore;
+mod search;
 mod seats;
 mod seed;
 mod settings;
@@ -67,7 +68,7 @@ use bt_term::{
     SessionDecorationTask, SessionMathTask, SessionStatus, TerminalModes,
     normalized_local_image_path_key, render_detection_task, render_live_detection_task,
 };
-use bt_transcript::DEFAULT_STAGING_QUOTA;
+use bt_transcript::{DEFAULT_STAGING_QUOTA, SourceGeneration, TranscriptId};
 use bt_viewport::{
     HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
 };
@@ -3905,6 +3906,29 @@ struct Runtime {
     command_rail_hover: Option<(SeatId, usize)>,
     /// A jump's 950 ms row flash, while one is running.
     command_flash: Option<CommandFlash>,
+    /// **The window's one in-pane search** (§7.1.5d, S3).
+    ///
+    /// One, not one per pane: the prototype's own state is a singleton and its
+    /// element lookup is a document-wide `querySelector` (mock 8515-8519), which
+    /// is the design rather than a shortcut in it. See [`search::SearchState`].
+    search: search::SearchState,
+    /// Where the capsule was drawn last frame — what a press is tested against.
+    ///
+    /// Beside the state and not inside it for [`Self::command_rails`]'s reason:
+    /// this is a function of the *rectangle*, and the rectangle belongs to the
+    /// solve. It is `None` whenever the capsule is down or its pane has gone.
+    search_layout: Option<search::Capsule>,
+    /// Which of the capsule's controls the pointer is on.
+    search_hover: Option<search::SearchElement>,
+    /// What the last scan was of, so the next one can skip the part that has not
+    /// moved. See [`SearchScanCache`].
+    search_scan: Option<SearchScanCache>,
+    /// Bumped by every edit to the query and every flip of a toggle.
+    ///
+    /// The scan cache is keyed on it, which is what makes "a keystroke's result
+    /// is on the next frame" (no debounce, ticket item 6) cost one comparison
+    /// rather than a string compare against a query that may be long.
+    search_revision: u64,
     /// Rasterized chrome marks, held across frames so a hover repaint costs a
     /// hash lookup rather than eight SVG renders.
     chrome_marks: marks::ChromeMarkRasters,
@@ -5469,6 +5493,19 @@ struct KeyboardOwner {
     /// surface — or, on a read-only body, be swallowed — while the reader was
     /// looking at a caret in the toolbar.
     graph_search: bool,
+    /// **The in-pane search capsule's field** holds it (§7.1.5d, D-7).
+    ///
+    /// A rung of its own for `graph_search`'s reason turned around: the capsule
+    /// lives *on a terminal seat*, so a composition routed by nothing at all
+    /// would fall to `Shell` and appear at the prompt while the reader watched a
+    /// candidate window floating over a caret in the capsule — which is the
+    /// 2026-08-12 preview bug, one surface along.
+    ///
+    /// **Only when the caret is actually in it.** A capsule that is up with the
+    /// hands back on the terminal (B81) owns nothing: the shell keeps the
+    /// keyboard, its caret keeps blinking, and `F3` is the one key the search
+    /// takes.
+    search: bool,
     /// A preview holds it — editing, or browsing a read-only body.
     preview: bool,
 }
@@ -5517,6 +5554,19 @@ enum ImeOwner {
     /// A preview seat. The edit surface takes the text; a read-only body has
     /// none to take and swallows it, which is what its keys already do.
     Preview,
+    /// The in-pane search capsule's field (§7.1.5d, D-7) — the one text field in
+    /// this window that stands *over a terminal*.
+    ///
+    /// **Below `Preview` and above `Shell`**, which is the only place it can go:
+    /// a capsule can only be open on a terminal seat, so it can never be up at
+    /// the same time as a preview owns the keyboard, and the rung under it is
+    /// the shell it is standing on — which is exactly the destination a
+    /// composition must not reach while there is a caret in the box.
+    ///
+    /// Searching in Chinese is the whole reason this exists rather than the
+    /// swallow-everything `Modal` treatment: a query you cannot compose is a
+    /// query you cannot type.
+    Search,
     /// The shell — the only owner that has a PTY, and the only one that gets it.
     Shell,
 }
@@ -5536,6 +5586,8 @@ fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
         ImeOwner::GraphSearch
     } else if owner.preview {
         ImeOwner::Preview
+    } else if owner.search {
+        ImeOwner::Search
     } else {
         ImeOwner::Shell
     }
@@ -6623,6 +6675,42 @@ struct CommandFlash {
     seat: SeatId,
     anchor: bt_doc::ContentAnchor,
     started: Instant,
+}
+
+/// What a search scan was of, so the next one can skip the half that has not moved.
+///
+/// # The incremental rule, and why it is drawn here rather than inside the engine
+///
+/// A hundred thousand frozen lines take about twelve milliseconds to scan (S1-data measured it),
+/// and the ticket's own instruction is that a keystroke's result must be on the *next* frame — no
+/// debounce, no timer. Both are affordable at once because the two things that change do not change
+/// together: **history grows at the bottom and is otherwise immutable**, while the live grid and
+/// the staged rows change with every character the shell echoes and are fifty rows between them.
+///
+/// So the scan is split by plane. History is re-scanned only when [`Self::history`] moves — which
+/// it does when a line freezes, when a line is evicted, or when ED3 empties the whole thing — and
+/// the two volatile planes are re-scanned every time the search is asked, because doing so costs
+/// microseconds. What makes that *correct* rather than merely fast is that the frozen plane is
+/// append-and-evict-only: no line already in it can change its text without the transcript's own
+/// generation moving, which is one of the four numbers below.
+#[derive(Clone, Debug, PartialEq)]
+struct SearchScanCache {
+    seat: SeatId,
+    /// [`Runtime::search_revision`] — what was typed and how it was switched.
+    revision: u64,
+    /// The frozen plane's identity: how many lines, which ones the ends are, and the generation
+    /// their text belongs to. Any edit history can undergo moves at least one of the four.
+    history: (
+        usize,
+        Option<TranscriptId>,
+        Option<TranscriptId>,
+        SourceGeneration,
+    ),
+    /// The hits history held at that identity, kept so a volatile-only rescan can re-use them.
+    history_hits: Vec<search::Hit>,
+    /// The hits the two volatile planes held, kept so a rescan that found the same ones can decide
+    /// that nothing happened and leave the current match — and the highlight buffers — alone.
+    volatile_hits: Vec<search::Hit>,
 }
 
 /// Which way a keyboard walk of the command marks goes.
@@ -9611,6 +9699,20 @@ struct OverlayStack {
     /// `#dock-preview` 25) — drawings *on* the layout rather than surfaces over
     /// the window. See [`ground_overlay_layers`].
     ground: Vec<marks::OverlayLayer>,
+    /// `.srchbar { z-index: 30 }` — **the in-pane search capsule** (§7.1.5d).
+    ///
+    /// Between the ground drawings (24/25) and the split schematic (35), which
+    /// is the mock-up's own number read literally — and the number says
+    /// something true about the surface: it is above the panes, above the
+    /// command rail it shares a corner with, and above the dock's drawings,
+    /// because it is a *control* and those are pictures; while every menu,
+    /// dialog and tip is entitled to cover it, because it is a control that
+    /// lives inside a pane rather than one that floats over the window.
+    ///
+    /// One layer, and there is at most one of it — the singleton (mock 8515)
+    /// showing up in the z-order. Two capsules would need an order between them,
+    /// and there is no order because there is one search.
+    search: Vec<marks::OverlayLayer>,
     /// `.layout-peek { z-index: 35 }` — the split schematic.
     layout_peek: Vec<marks::OverlayLayer>,
     /// `#files-flyout` — a floating window. It covers the panes, the rail and
@@ -9700,6 +9802,7 @@ impl OverlayStack {
             command_rail,
             rail,
             ground,
+            search,
             layout_peek,
             float,
             modal,
@@ -9716,6 +9819,7 @@ impl OverlayStack {
             command_rail,
             rail,
             ground,
+            search,
             layout_peek,
             float,
             modal,
@@ -13660,6 +13764,11 @@ impl Runtime {
             command_rails: BTreeMap::new(),
             command_rail_hover: None,
             command_flash: None,
+            search: search::SearchState::default(),
+            search_layout: None,
+            search_hover: None,
+            search_scan: None,
+            search_revision: 0,
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
             settings_scroll: 0.0,
@@ -13950,6 +14059,19 @@ impl Runtime {
         self.renderer.set_peek_overlay(None);
         self.hover_pane = None;
         self.underlined_image_reference = None;
+        // **A tab switch closes the capsule and keeps what was typed** (D-8,
+        // user ruling 2026-08-16, which is the prototype's behaviour said out
+        // loud rather than a change to it).
+        //
+        // Closes, because "one search, one pane" cannot survive a capsule left
+        // standing on a pane that is no longer on screen: its hits would go on
+        // being rebuilt against a transcript nobody is looking at, and coming
+        // back to the tab would find a count that had moved for reasons the
+        // reader never saw. Keeps the query, because `close` does not touch the
+        // field — so `Ctrl+F` on the way back is a continuation and not a fresh
+        // start, which is exactly what a "staying state" owes a reader who
+        // stepped away for a moment.
+        let _ = self.close_search();
         // **U8 — you do not glide a layout you were not looking at.**
         //
         // A FLIP is the difference between where a pane *was drawn* and where it
@@ -15024,6 +15146,11 @@ impl Runtime {
                     PANE_CHEVRON_TIP,
                 );
             }
+            // The search capsule's own controls, pushed after the heads and
+            // before the Git page's rows for this list's own innermost-first
+            // rule: the capsule stands over one pane's body, so it is inside
+            // everything the strip and the heads register and outside nothing.
+            self.search_tip_anchors(&mut anchors);
         }
         // The Git page's own tips, from the page that was drawn (R5, and the
         // three teaching headings the mock-up wrote at 4950-4952). Pushed last of
@@ -15627,6 +15754,57 @@ impl Runtime {
     /// the cooling loop below, and it is also the whole of `pointerleave` — a
     /// `None` position cools everything, which is what [`Self::pointer_left`]
     /// calls it with.
+    /// Which of the capsule's controls the pointer is on, and whether it is on the capsule at all.
+    ///
+    /// The `bool` is what the routing below it reads: a pointer standing on the capsule is not
+    /// standing on the rail, on a hyperlink or on a cell, and the pane must not be told about it
+    /// (R5 — the two surfaces share the pane's top-right corner and a short pane puts the rail's
+    /// own block under the capsule's box).
+    fn drive_search_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<bool> {
+        let hover = position
+            .zip(self.search_layout)
+            .and_then(|(at, capsule)| search::hit(&capsule, at.x as f32, at.y as f32));
+        if self.search_hover != hover {
+            self.search_hover = hover;
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(hover.is_some())
+    }
+
+    /// The tip anchors the capsule's own controls register (B66's `title=` texts).
+    ///
+    /// The field and the capsule's padding register nothing: a box you are typing into does not
+    /// need a sentence about what it is, and the placeholder already says `Find`. The six that do
+    /// are marks and two-letter labels — `Aa`, `ab`, `.*`, a chevron each way and a cross — which
+    /// is exactly the case a tip exists for: an idiom is a guess until something says what it does.
+    fn search_tip_anchors(&self, anchors: &mut tooltip::TooltipAnchors) {
+        let Some(capsule) = self.search_layout else {
+            return;
+        };
+        for element in [
+            search::SearchElement::Toggle(search::SearchFlag::Case),
+            search::SearchElement::Toggle(search::SearchFlag::Word),
+            search::SearchElement::Toggle(search::SearchFlag::Regex),
+            search::SearchElement::Previous,
+            search::SearchElement::Next,
+            search::SearchElement::Close,
+        ] {
+            let rect = match element {
+                search::SearchElement::Toggle(flag) => capsule.toggle(flag),
+                search::SearchElement::Previous => capsule.previous,
+                search::SearchElement::Next => capsule.next,
+                _ => capsule.close,
+            };
+            anchors.push(
+                tooltip::TooltipAnchorId::SearchControl(element),
+                rect,
+                search::tip_text(element),
+            );
+        }
+    }
+
     fn drive_command_rail_hover(
         &mut self,
         position: Option<PhysicalPosition<f64>>,
@@ -15888,6 +16066,509 @@ impl Runtime {
             return Ok(());
         };
         self.jump_to_command_mark(seat, target)
+    }
+
+    // ────────────────────────── in-pane search (§7.1.5d) ──────────────────────────
+
+    /// Where the capsule stands this frame, or `None` when there is nothing to stand on.
+    ///
+    /// Re-laid every frame rather than cached, and the reason is the counter: `1/17` and `10/17`
+    /// are different widths, so the capsule's own width is a function of what it is saying. It is
+    /// four `max`es and one row of additions — cheaper than deciding whether it is stale.
+    fn search_capsule(&mut self) -> Option<search::Capsule> {
+        let seat = self.search.seat()?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (rect, head) = seats::search_capsule_host(&self.seats, &self.seat_layout, seat, scale)?;
+        let counter = self.search.counter();
+        let width = self
+            .renderer
+            .measure_chrome_text(&counter, search::COUNTER_FONT_LOGICAL_PX * scale)
+            + 2.0 * search::COUNTER_PADDING_X_LOGICAL_PX * scale;
+        Some(search::lay_out(rect, head, scale, width))
+    }
+
+    /// Whether a seat can hold a capsule at all: a terminal, on its primary screen.
+    ///
+    /// **The alternate screen is the whole of the second half** (D-5). §3.2 keeps the two screens
+    /// in isolated anchor namespaces with no ordering between them, so a search over the primary
+    /// history could not place its hits against what `vim` is drawing; and a capsule that stayed up
+    /// over a full-screen program would sit there reading `0/0` for as long as the program ran,
+    /// which is R3's named failure. `Ctrl+F` is not in the table there either, so the key reaches
+    /// the program and means whatever the program says it means.
+    fn seat_can_search(&self, seat: SeatId) -> bool {
+        self.sessions
+            .get(&seat)
+            .is_some_and(|leaf| !leaf.session.terminal_modes().alternate_screen)
+    }
+
+    /// `Ctrl+F` / `Ctrl+Shift+F`, and the `Find…` a menu row will send here.
+    ///
+    /// *"Reopening refocuses the capsule and keeps the last query: search is a staying state, not a
+    /// popup"* (B80). So this is one verb for both cases — a fresh capsule and a re-focus — and the
+    /// difference between them is entirely inside [`search::SearchState::open`].
+    fn open_search(&mut self, seat: SeatId) -> Result<()> {
+        if !self.seat_can_search(seat) {
+            return Ok(());
+        }
+        // Opening on a second pane closes the first, which is what "one search, one pane" means at
+        // the point it is enforced: the old pane's highlights have to go before the new pane's
+        // arrive, or a window with two panes would end up wearing two sets.
+        if let Some(previous) = self.search.seat().filter(|previous| *previous != seat) {
+            self.clear_search_highlights(previous);
+        }
+        self.search.open(seat);
+        self.refresh_search(true)?;
+        self.after_search_change()
+    }
+
+    /// Put the capsule away. Returns whether there was one, so Esc's ladder can tell whether this
+    /// rung answered.
+    ///
+    /// **Nothing scrolls** (B63) and **the query stays** (B62, D-8): what is emptied is the hit
+    /// set, the current match and the seat, and what survives is every character typed and every
+    /// toggle switched. That is what makes `Ctrl+F` after a tab switch a continuation rather than a
+    /// fresh start.
+    fn close_search(&mut self) -> Result<bool> {
+        let Some(seat) = self.search.seat() else {
+            return Ok(false);
+        };
+        self.clear_search_highlights(seat);
+        self.search.close();
+        self.search_layout = None;
+        self.search_hover = None;
+        self.search_scan = None;
+        self.after_search_change()?;
+        Ok(true)
+    }
+
+    /// Take the highlights off one pane and repaint it.
+    fn clear_search_highlights(&mut self, seat: SeatId) {
+        if let Some(leaf) = self.sessions.get_mut(&seat) {
+            leaf.projection.set_search_highlights(None);
+        }
+    }
+
+    /// One frame's worth of everything a **reader-caused** change to the search owes the window:
+    /// the searched pane is repainted, and the chrome is rebuilt around the new count.
+    ///
+    /// **Only ever called for a change the reader made.** The rebuilds that *output* causes go
+    /// through [`Self::refresh_search`]'s quiet path instead, and the difference is not a
+    /// preference: that path runs at the top of [`Self::publish_frame_inner`], with a frame already
+    /// being composed, so asking for another one from inside it would be the publish re-entering
+    /// itself once per line the shell prints.
+    fn after_search_change(&mut self) -> Result<()> {
+        if let Some(seat) = self.search.seat() {
+            self.repaint_pane_change(seat)?;
+        } else {
+            self.publish_interaction_frame()?;
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The same, for a rebuild that arrived under a frame already being built.
+    ///
+    /// The pane needs nothing: the highlights were installed on its projection a moment ago and the
+    /// frame about to be projected will carry them. The *chrome* does need rebuilding, because the
+    /// counter is part of it and a line freezing can change `3/17` to `3/18` — but it is rebuilt
+    /// without asking for a present, since the present is already on its way.
+    fn after_quiet_search_change(&mut self) {
+        let _ = self.refresh_overlay();
+    }
+
+    /// Re-scan, if anything the answer depends on has moved.
+    ///
+    /// `forced` says the reader did something — typed, flipped a toggle, opened the capsule — and
+    /// suspends the "nothing changed, leave it alone" shortcut. Its other half is B58's rule about
+    /// *which* match becomes current: a rebuild the reader caused starts from where the eye is,
+    /// while one that output caused keeps the match the eye is on.
+    ///
+    /// **No debounce anywhere.** A keystroke's result is on the next frame; the thing that makes
+    /// that affordable is [`SearchScanCache`]'s split by plane, not a timer.
+    fn refresh_search(&mut self, forced: bool) -> Result<()> {
+        let Some(seat) = self.search.seat() else {
+            self.search_scan = None;
+            return Ok(());
+        };
+        // A pane that has gone — closed, torn into another tab, turned into a preview — ends the
+        // search silently (B64/B77). There is nothing to search and nothing to draw on.
+        if !self.sessions.contains_key(&seat) {
+            self.close_search()?;
+            return Ok(());
+        }
+        // A program that took the alternate screen while the capsule was up takes the capsule with
+        // it (D-5, R3). The query survives, exactly as a tab switch leaves it.
+        if !self.seat_can_search(seat) {
+            self.close_search()?;
+            return Ok(());
+        }
+        let compiled = match search::engine(self.search.flags(), self.search.query()) {
+            Ok(compiled) => Some(compiled),
+            // An empty query is the state the capsule opens in, not a fault: no hits, no count, no
+            // red. A pattern the engine refused is the red one, and its own message is the tip.
+            Err(bt_transcript::search::SearchError::Empty) => None,
+            Err(bt_transcript::search::SearchError::Pattern(message)) => {
+                let changed = !self.search.hits().is_empty() || self.search.error().is_none();
+                self.search.install(Vec::new(), Some(message), false, None);
+                self.search_scan = None;
+                if changed {
+                    self.install_search_highlights(seat);
+                    self.settle_search_change(forced)?;
+                }
+                return Ok(());
+            }
+        };
+        let Some(compiled) = compiled else {
+            let changed = !self.search.hits().is_empty() || self.search.error().is_some();
+            self.search.install(Vec::new(), None, false, None);
+            self.search_scan = None;
+            if changed {
+                self.install_search_highlights(seat);
+                self.settle_search_change(forced)?;
+            }
+            return Ok(());
+        };
+
+        let revision = self.search_revision;
+        let leaf = self.sessions.get(&seat).expect("the seat was just checked");
+        let transcript = leaf.session.transcript();
+        let frozen = transcript.frozen();
+        let history_key = (
+            frozen.len(),
+            frozen.front().map(|line| line.id),
+            frozen.back().map(|line| line.id),
+            transcript.source_generation(),
+        );
+        let reusable = self
+            .search_scan
+            .as_ref()
+            .filter(|cache| {
+                cache.seat == seat && cache.revision == revision && cache.history == history_key
+            })
+            .map(|cache| cache.history_hits.clone());
+        let history_hits = reusable.unwrap_or_else(|| search::scan_history(&compiled, transcript));
+        // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but
+        // not frozen. Their cost is a property of the screen, so re-scanning them unconditionally
+        // is what buys "the word you are typing is findable the instant it is echoed".
+        let live: Vec<search::LiveRow> = leaf
+            .session
+            .live_rows()
+            .iter()
+            .enumerate()
+            .map(|(row, captured)| search::live_row(row as u32, &captured.cells))
+            .collect();
+        let volatile_hits =
+            search::scan_volatile(&compiled, transcript, &live, leaf.session.grid_generation());
+        let unchanged = self.search_scan.as_ref().is_some_and(|cache| {
+            cache.seat == seat
+                && cache.revision == revision
+                && cache.history == history_key
+                && cache.volatile_hits == volatile_hits
+        });
+        if unchanged && !forced {
+            return Ok(());
+        }
+        // Where the eye is: the viewport's own anchor when the pane has been scrolled, and nothing
+        // when it is riding the live bottom — where "the first match at or below the top" is the
+        // first match of all.
+        let from = leaf
+            .projection
+            .scroll_anchor()
+            .map(|anchor| anchor.source.clone());
+        let mut hits = history_hits.clone();
+        hits.extend(volatile_hits.iter().cloned());
+        self.search.install(hits, None, !forced, from.as_ref());
+        self.search_scan = Some(SearchScanCache {
+            seat,
+            revision,
+            history: history_key,
+            history_hits,
+            volatile_hits,
+        });
+        self.install_search_highlights(seat);
+        self.settle_search_change(forced)
+    }
+
+    /// Which of the two roads a finished rebuild takes back to the glass.
+    fn settle_search_change(&mut self, forced: bool) -> Result<()> {
+        if forced {
+            self.after_search_change()
+        } else {
+            self.after_quiet_search_change();
+            Ok(())
+        }
+    }
+
+    /// Hand the searched pane's projection the hit set it paints from.
+    fn install_search_highlights(&mut self, seat: SeatId) {
+        let highlights = Arc::clone(self.search.highlights());
+        if let Some(leaf) = self.sessions.get_mut(&seat) {
+            leaf.projection.set_search_highlights(Some(highlights));
+        }
+    }
+
+    /// `Enter` / `F3` / the `▲▼` buttons — walk one match, wrapping at both ends.
+    fn step_search(&mut self, forwards: bool) -> Result<()> {
+        if self.search.step(forwards).is_none() {
+            return Ok(());
+        }
+        self.reveal_current_search_hit()?;
+        if let Some(seat) = self.search.seat() {
+            self.install_search_highlights(seat);
+        }
+        self.after_search_change()
+    }
+
+    /// Scroll to the current match — **but only if it is not already on screen** (B54).
+    ///
+    /// *"Typing toward a visible match must not yank the viewport."* So the question asked is about
+    /// the picture on the glass, not about the projection's arithmetic: the pane's last presented
+    /// frame is asked which row is showing this anchor, and a row that is wholly inside the pane is
+    /// a row the reader can already read.
+    ///
+    /// When it does scroll, the match lands **a third of the way down** rather than at the top,
+    /// which is the one place this differs from the command rail's jump: a command is the start of
+    /// output you read downwards, and a match is a point you read *around*.
+    fn reveal_current_search_hit(&mut self) -> Result<()> {
+        let Some(seat) = self.search.seat() else {
+            return Ok(());
+        };
+        let Some(anchor) = self.search.current().map(|hit| hit.anchor.clone()) else {
+            return Ok(());
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+        else {
+            return Ok(());
+        };
+        let pane_height = i64::from(body.height) * bt_viewport::SUBPIXELS_PER_PX;
+        let visible = self
+            .pane_frame(seat)
+            .and_then(|frame| frame_row_of_anchor(frame, &anchor))
+            .is_some_and(|row| {
+                search::row_is_wholly_visible(row.top_subpixels, row.height_subpixels, pane_height)
+            });
+        if visible {
+            return Ok(());
+        }
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        leaf.projection
+            .set_scroll_anchor(Some(bt_viewport::ScrollAnchor {
+                source: anchor,
+                local_offset: search::landing_offset_subpixels(pane_height),
+            }));
+        Ok(())
+    }
+
+    /// One key, with the capsule's field holding the keyboard.
+    ///
+    /// Returns whether the key was the field's at all — **everything is** (B69: *"search keys are
+    /// the search box's; the terminal must not hear them"*), which is why every branch below
+    /// returns `true` and why this rung sits beside the files column's and the preview's rather
+    /// than above the shortcut table: a field holding the keyboard is not a modal, so the window's
+    /// own chords still work over it, and only *typing* is claimed.
+    fn search_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
+        if !self.search.is_focused() {
+            return Ok(false);
+        }
+        use text_field::TextMove;
+        let shift = self.modifiers.shift_key();
+        let control = self.modifiers.control_key();
+        let mut edited = false;
+        match &event.logical_key {
+            // Enter walks the matches; `Shift+Enter` walks them backwards (B70). It is a walk and
+            // not a commit because there is nothing to commit — the search is already live.
+            // Repeats travel: holding Enter walks on through the matches, which
+            // is what a held arrow does in every list in this window and what a
+            // find bar does everywhere else. It is not a verb being repeated —
+            // it is one continuous "further".
+            Key::Named(NamedKey::Enter) => {
+                self.step_search(!shift)?;
+                return Ok(true);
+            }
+            // *"The box is single-line — vertical arrows are free to mean prev/next"* (B71, user
+            // ask 2026-07-18). There is no line below to move to, so the key that would have been
+            // wasted is given the verb the reader wants next.
+            Key::Named(NamedKey::ArrowDown) => {
+                self.step_search(true)?;
+                return Ok(true);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.step_search(false)?;
+                return Ok(true);
+            }
+            Key::Named(NamedKey::Backspace) => edited = self.search.field_mut().backspace(),
+            Key::Named(NamedKey::Delete) => edited = self.search.field_mut().delete(),
+            Key::Named(NamedKey::ArrowLeft) => self.search.field_mut().step(
+                if control {
+                    TextMove::WordLeft
+                } else {
+                    TextMove::Left
+                },
+                shift,
+            ),
+            Key::Named(NamedKey::ArrowRight) => self.search.field_mut().step(
+                if control {
+                    TextMove::WordRight
+                } else {
+                    TextMove::Right
+                },
+                shift,
+            ),
+            Key::Named(NamedKey::Home) => self.search.field_mut().step(TextMove::Home, shift),
+            Key::Named(NamedKey::End) => self.search.field_mut().step(TextMove::End, shift),
+            Key::Named(NamedKey::Space) => {
+                self.search.field_mut().insert(" ");
+                edited = true;
+            }
+            Key::Character(text) if control => {
+                match text.as_str() {
+                    "a" | "A" => self.search.field_mut().select_all(),
+                    // `Ctrl+F` with the caret already in the box selects what is there (B73), so
+                    // the chord means the same thing wherever it is pressed: "put me in the search,
+                    // ready to replace the query".
+                    "f" | "F" => self.search.field_mut().select_all(),
+                    _ => {}
+                }
+            }
+            // **`Alt+C` / `Alt+W` / `Alt+R` — the three toggles from the keyboard**, which is what
+            // VS Code's find bar binds and what a reader who never takes their hands off the keys
+            // needs: the mock-up gives the toggles a click and nothing else (B74), so there is no
+            // prototype rule to follow here and the reference product's is taken.
+            //
+            // **Not rows of `shortcuts::BINDINGS`**, and for `graph_key_of`'s stated reason: that
+            // table is the chord registry the future editing panel edits, and every row in it is a
+            // chord this window *claims* from the shell. These three are claimed from nothing —
+            // they exist only while the capsule's field holds the keyboard, at which point there
+            // is no shell listening — exactly as the graph's own six keys and the files column's
+            // arrows are out of the table. Putting one of the three families in and not the others
+            // would be the audit saying two things.
+            Key::Character(text) if self.modifiers.alt_key() && !control => {
+                if let Some(flag) = search::toggle_for_letter(text) {
+                    self.toggle_search_flag(flag)?;
+                }
+                return Ok(true);
+            }
+            Key::Character(text) => {
+                self.search.field_mut().insert(text);
+                edited = true;
+            }
+            // Everything else is swallowed. A key the field has no use for is still not the
+            // shell's while the caret is in the field.
+            _ => {}
+        }
+        if edited {
+            self.search_revision = self.search_revision.wrapping_add(1);
+            self.refresh_search(true)?;
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Flip one toggle and re-ask (`Aa` / `ab` / `.*`).
+    fn toggle_search_flag(&mut self, flag: search::SearchFlag) -> Result<()> {
+        self.search.flags_mut().toggle(flag);
+        self.search_revision = self.search_revision.wrapping_add(1);
+        // *"Any press hands the caret back"* (B74) — the capsule is one control, and a toggle you
+        // pressed with the mouse leaves you able to keep typing.
+        self.search.focus();
+        self.refresh_search(true)
+    }
+
+    /// A press on the capsule. Returns whether it landed there at all.
+    fn press_search(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(capsule) = self.search_layout else {
+            return Ok(false);
+        };
+        let Some(element) = search::hit(&capsule, position.x as f32, position.y as f32) else {
+            return Ok(false);
+        };
+        match element {
+            search::SearchElement::Close => {
+                self.close_search()?;
+                return Ok(true);
+            }
+            search::SearchElement::Toggle(flag) => self.toggle_search_flag(flag)?,
+            search::SearchElement::Previous => {
+                self.search.focus();
+                self.step_search(false)?;
+            }
+            search::SearchElement::Next => {
+                self.search.focus();
+                self.step_search(true)?;
+            }
+            search::SearchElement::Field | search::SearchElement::Body => {
+                self.search.focus();
+                self.after_search_change()?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// What the field is showing, and where its caret stands.
+    ///
+    /// The composition opens a space at the caret: what is drawn is the text with the pre-edit
+    /// spliced in where the next character would go, and the caret stands after it. A field that
+    /// painted the composition *over* the text would show both sharing cells neither can be read
+    /// in — the bug the terminal's own preedit path was fixed for on 2026-08-13, and the shape the
+    /// commit graph's field already answers.
+    fn search_field_look(&mut self) -> (String, bool, f32) {
+        let field = self.search.field();
+        let typed = field.text().to_owned();
+        let before = field.before_caret().to_owned();
+        let preedit = field.preedit().to_owned();
+        let shown = format!(
+            "{before}{preedit}{}",
+            &typed[before.len().min(typed.len())..]
+        );
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let font = search::FIELD_FONT_LOGICAL_PX * scale;
+        let caret_x = self
+            .renderer
+            .measure_chrome_text(&format!("{before}{preedit}"), font);
+        if shown.is_empty() {
+            (search::FIELD_PLACEHOLDER.to_owned(), false, caret_x)
+        } else {
+            (shown, true, caret_x)
+        }
+    }
+
+    /// The capsule's own level of the overlay stack, or nothing when it is down.
+    fn search_layers(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some(capsule) = self.search_capsule() else {
+            self.search_layout = None;
+            return Vec::new();
+        };
+        self.search_layout = Some(capsule);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let palette = bt_render::chrome_palette();
+        let counter = self.search.counter();
+        let flags = self.search.flags();
+        let broken = self.search.error().is_some();
+        let focused = self.search.is_focused();
+        let hover = self.search_hover;
+        let (text, typed, caret_x) = self.search_field_look();
+        vec![search::build(
+            &capsule,
+            &search::CapsuleLook {
+                text: &text,
+                typed,
+                caret_x,
+                focused,
+                broken,
+                counter: &counter,
+                flags,
+                hover,
+            },
+            &palette,
+            scale,
+        )]
     }
 
     /// Show a settled tip, and keep paying the fade's frames until it lands.
@@ -16546,6 +17227,10 @@ impl Runtime {
             command_rail: self.command_rail_layers(),
             rail: self.rail_overlay_layers(),
             ground: ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now)),
+            // `.srchbar { z-index: 30 }` — above the ground drawings, below the
+            // schematic. It also stores the capsule's rectangle for the press
+            // router, so the box you can press is the box you can see.
+            search: self.search_layers(),
             ..OverlayStack::default()
         };
         // **The gate is above the settings dialog**, and that is the one ordering
@@ -18015,6 +18700,15 @@ impl Runtime {
             // pane.
             shortcuts::Action::PrevCommandMark => self.step_command_mark(Step::Back),
             shortcuts::Action::NextCommandMark => self.step_command_mark(Step::Forward),
+            // §7.1.5d. Both chords of the row arrive here — the alias is a
+            // second chord, never a second verb — and so will the `Find…` a
+            // menu will one day carry.
+            shortcuts::Action::OpenSearch => self.open_search(self.focused_leaf),
+            // B81's second stance: the capsule is up, the hands are back on the
+            // shell, and the function key still walks. `Enter` cannot do this —
+            // it belongs to the shell the moment the caret leaves the box.
+            shortcuts::Action::NextMatch => self.step_search(true),
+            shortcuts::Action::PrevMatch => self.step_search(false),
         }
     }
 
@@ -19853,6 +20547,11 @@ impl Runtime {
             // program owns its canvas and there is no scrollback behind it.
             terminal_primary: self.keyboard_owner_is_a_shell()
                 && !self.session.terminal_modes().alternate_screen,
+            // **The capsule being up, and pointedly not the caret being in it**
+            // (B81). The stance `F3` exists for is "search open, hands back on
+            // the terminal", so a flag that meant "the field is focused" would
+            // switch the row off in exactly the state it is wanted.
+            search_open: self.search.is_open(),
         }
     }
 
@@ -19919,6 +20618,8 @@ impl Runtime {
             // same owner wearing its other state: the arrows scroll the document,
             // so they are not the shell's either.
             preview: self.preview_keyboard_surface().is_some(),
+            // The search capsule, and only while the caret is in it.
+            search: self.search.is_focused(),
         }
     }
 
@@ -21989,6 +22690,16 @@ impl Runtime {
         if matches!(trigger.source, FrameSource::Keyboard) {
             self.session.release_presentation_hold_for_user_input();
         }
+        // **The search re-asks itself here, before anything is projected** — so
+        // a line that has just frozen, or a character the shell has just echoed,
+        // is inside the hit set of the very frame that is about to draw it.
+        //
+        // Not forced: this is the rebuild *output* caused, so the match the
+        // reader is standing on keeps its place (B58's first half), and the two
+        // planes that did not move are not re-scanned at all (see
+        // [`SearchScanCache`]). A frame that changed nothing about the search
+        // costs one comparison of a fifty-row scan.
+        self.refresh_search(false)?;
         let active = self.active_tab;
         let tasks = self.math_worker.tasks.clone();
         let scale_tasks = self.math_worker.scale_tasks.clone();
@@ -27385,6 +28096,38 @@ impl Runtime {
         Ok(())
     }
 
+    /// A composition aimed at the search capsule (§7.1.5d, D-7).
+    ///
+    /// The pre-edit is *not* folded into the query, which is what makes Escape
+    /// during a composition un-type nothing: it is drawn at the caret, it pushes
+    /// the caret along, and it leaves through the commit — an ordinary insert.
+    /// So the search is re-asked on the commit and never on the pre-edit: a
+    /// half-composed `ni'hao` is not a query anybody asked for, and scanning a
+    /// hundred thousand lines for it on the way to the two characters it becomes
+    /// would be work done for a string the reader never typed.
+    fn search_ime(&mut self, event: Ime) -> Result<()> {
+        if !self.search.is_focused() {
+            return Ok(());
+        }
+        match event {
+            Ime::Preedit(text, _) => {
+                self.search.field_mut().set_preedit(&text);
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(());
+            }
+            Ime::Commit(text) => self.search.field_mut().insert(&text),
+            Ime::Enabled | Ime::Disabled => return Ok(()),
+        }
+        self.search_revision = self.search_revision.wrapping_add(1);
+        self.refresh_search(true)?;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Put what is in the field to git (T4).
     fn ask_graph_search(&mut self, seat: SeatId) -> Result<()> {
         let active = self.active_tab;
@@ -31762,6 +32505,10 @@ impl Runtime {
         // crest still lit after the pointer has left the window is a tick
         // claiming to be under a hand that is not there.
         self.drive_command_rail_hover(None)?;
+        // And the capsule's own controls, for the identical reason: a toggle
+        // still lit after the pointer has left the window is a button claiming
+        // to be under a hand that is not there.
+        self.drive_search_hover(None)?;
         // Deliberately *not* a drag cancel, and the reason is measurable rather
         // than stylistic: winit takes the Win32 mouse capture on button-down
         // (`capture_mouse`, its `WM_LBUTTONDOWN` arm), so a held drag keeps
@@ -32594,8 +33341,15 @@ impl Runtime {
         // settles. Asking the anchor list first would offer the pointer whatever
         // the *previous* frame's crest was, so a hand walking down a rail would
         // see a card one tick behind it.
-        let on_command_rail =
-            self.drive_command_rail_hover(self.mouse_route.is_none().then_some(position))?;
+        // **The capsule takes the pointer above the rail** — the order the two
+        // are drawn in, and the order R5 in the search-block inventory says they
+        // have to be answered in: they share the pane's top-right corner, and on
+        // a short pane the rail's own block reaches up under the capsule. A hand
+        // on a toggle must not also be lighting a tick behind it.
+        let on_search = self.drive_search_hover(self.mouse_route.is_none().then_some(position))?;
+        let on_command_rail = self.drive_command_rail_hover(
+            (self.mouse_route.is_none() && !on_search).then_some(position),
+        )?;
         // The glance card wins over anything the pane underneath it would say,
         // for the reason the rail takes the pointer at all: it is the surface on
         // top. `command_tick_anchor` answers only while a rail is hot, so
@@ -32616,7 +33370,7 @@ impl Runtime {
         // in one pane appear beside another.
         let now = Instant::now();
         let math_hit = self.update_math_hover(now)?;
-        let hit = self.frame_hit().filter(|_| !on_command_rail);
+        let hit = self.frame_hit().filter(|_| !on_command_rail && !on_search);
         let hyperlink = hit
             .filter(|_| {
                 math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
@@ -34782,6 +35536,29 @@ impl Runtime {
             // L135 sends the peek the same way and for the same reason: it is a
             // glance, and pressing is you saying you are done glancing.
             self.hide_layout_peek()?;
+            // **A press outside the capsule hands the keyboard back — and leaves
+            // the capsule up** (§7.1.5d). Those are two separate facts and both
+            // are ruled: the field losing focus is what every text box on this
+            // platform does when you click elsewhere, and the capsule *staying*
+            // is what makes search "a staying state, not a popup" (B80). What
+            // you get is B81's second stance, arrived at with the mouse instead
+            // of with `F3`.
+            //
+            // Here rather than beside the capsule's own press arm, because the
+            // router returns early for every surface above that arm: a click on
+            // the tab strip has to hand the caret back too, and it never reaches
+            // the level the capsule is answered at.
+            if self.search.is_focused()
+                && !self
+                    .search_layout
+                    .zip(self.pointer_position)
+                    .is_some_and(|(capsule, at)| {
+                        search::hit(&capsule, at.x as f32, at.y as f32).is_some()
+                    })
+            {
+                self.search.blur();
+                self.after_search_change()?;
+            }
         }
         // The gate first, and it is the strictest modal in the window: every
         // press is swallowed, including the ones that land on its own scrim,
@@ -35173,6 +35950,25 @@ impl Runtime {
         }
         if let Some(position) = self.pointer_position
             && self.chrome_mouse_input(state, button, position)?
+        {
+            return Ok(());
+        }
+        // **The capsule takes its own press** (§7.1.5d), above the rail it
+        // shares a corner with and below every surface that floats over the
+        // window — the order it is drawn in.
+        //
+        // *"The capsule is one control: any press hands the caret back"* (B74),
+        // which is why even a press on its bare padding is claimed rather than
+        // let through: a control you can click a hole in is a control that
+        // sometimes types into the shell behind it.
+        //
+        // The pane underneath has already taken the layout focus, exactly as it
+        // has for the rail below: D40 runs above this router and consumes
+        // nothing.
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some(position) = self.pointer_position
+            && self.press_search(position)?
         {
             return Ok(());
         }
@@ -36411,6 +37207,25 @@ impl Runtime {
         {
             return Ok(());
         }
+        // **The search capsule's rung of §7.1.5's ladder** (B83), and the
+        // mock-up's own chain puts it exactly here: `… pv-float, flyout, SEARCH,
+        // focus-mode`. Its comment gives the argument in one line — *"the search
+        // capsule sits inside a pane, so floats and flyouts above it close
+        // first"* — and below it there is nothing but the pane, which is why
+        // this is the last surface entitled to take an Escape before a running
+        // program does.
+        //
+        // It answers **whether or not the caret is in the field**. A capsule
+        // that could only be dismissed after clicking back into it would be a
+        // surface with a mode nobody can see; B81's second stance — search open,
+        // hands back on the terminal — still has an Escape that means "put it
+        // away".
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.close_search()?
+        {
+            return Ok(());
+        }
 
         // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
         // intentionally left to the IME here even if it also exposes a physical named key; no PTY
@@ -36573,6 +37388,18 @@ impl Runtime {
         if self.preview_key(event)? {
             return Ok(());
         }
+        // **The search capsule's field** (§7.1.5d), on the identical terms and
+        // in this family rather than up with the popups. B69 states the half it
+        // claims — *"search keys are the search box's; the terminal must not
+        // hear them"* — and the placement states the half it does not: a field
+        // holding the keyboard is not a modal, so `Ctrl+Shift+N` still opens a
+        // tab over the top of it and `Shift+PageUp` still scrolls the pane it is
+        // standing on. Only typing is taken.
+        //
+        // Its Escape was answered far above, at the ladder's own rung for it.
+        if self.search_field_key(event)? {
+            return Ok(());
+        }
         let application_cursor_mode = self.session.application_cursor_mode();
         let Some(bytes) =
             input::keyboard_bytes(&event.logical_key, self.modifiers, application_cursor_mode)
@@ -36698,6 +37525,14 @@ impl Runtime {
                 }
                 ImeOwner::Preview => {
                     self.preview_ime(event)?;
+                    return Ok(());
+                }
+                // The search capsule, through the same two doors: a pre-edit is
+                // drawn at its caret and is not in the text, a commit is an
+                // ordinary insert that replaces the selection — and a committed
+                // character re-asks the search, exactly as a typed one does.
+                ImeOwner::Search => {
+                    self.search_ime(event)?;
                     return Ok(());
                 }
                 ImeOwner::Shell => {}
@@ -39047,6 +39882,11 @@ fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bo
         && previous.cell_anchors == next.cell_anchors
         && previous.row_map == next.row_map
         && previous.selection_spans == next.selection_spans
+        // Without these two, a query typed at a still shell would find its
+        // matches and paint none of them: the cells did not change, and the skip
+        // this feeds would drop the very frame carrying the answer.
+        && previous.search_spans == next.search_spans
+        && previous.current_search_spans == next.current_search_spans
         && previous.math_blocks == next.math_blocks
         && previous.status_text == next.status_text
         && previous.viewport_origin == next.viewport_origin
@@ -39744,6 +40584,7 @@ mod tests {
             command_rail: mark(13),
             rail: mark(1),
             ground: mark(2),
+            search: mark(14),
             layout_peek: mark(3),
             float: mark(4),
             modal: mark(5),
@@ -39762,9 +40603,9 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 13, 1, 2, 3, 4, 5, 6, 7, 12, 8, 9, 10, 11],
-            "bottom to top: pane bars, command rails, rail, ground, schematic, float, modal, \
-             file menu, pane menu, git menu, notices, tip, glance, ghost"
+            vec![0, 13, 1, 2, 14, 3, 4, 5, 6, 7, 12, 8, 9, 10, 11],
+            "bottom to top: pane bars, command rails, rail, ground, search capsule, schematic, \
+             float, modal, file menu, pane menu, git menu, notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -47406,6 +48247,7 @@ mod tests {
                 shortcuts::Focus {
                     preview: false,
                     terminal_primary: true,
+                    search_open: false,
                 },
             )
         };
@@ -47417,6 +48259,7 @@ mod tests {
                 shortcuts::Focus {
                     preview: true,
                     terminal_primary: false,
+                    search_open: false,
                 },
             )
         };
@@ -54211,6 +55054,7 @@ mod tests {
             files_tree: false,
             graph_search: false,
             git_prompt: false,
+            search: false,
             preview: false,
             menu_or_dialog: false,
         }));
@@ -54302,6 +55146,7 @@ mod tests {
                 files_tree: true,
                 graph_search: true,
                 git_prompt: true,
+                search: true,
                 preview: true,
             }),
             ImeOwner::Rename,
@@ -54323,9 +55168,43 @@ mod tests {
             ImeOwner::GitPrompt,
             "the prompt inside a popup takes what is composed into it"
         );
+        // §7.1.5d — **the capsule's field is under every one of them and over
+        // the shell**, which is the only place it can be: it can only ever be
+        // open on a terminal seat, so it can never be up at the same time as any
+        // rung above it, and the rung below is the shell it stands on. That last
+        // half is the one the rung exists for: without it a query composed in
+        // Chinese would arrive at somebody's prompt.
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                search: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::Search,
+        );
+        assert_eq!(
+            ime_owner(KeyboardOwner {
+                search: true,
+                menu_or_dialog: true,
+                ..KeyboardOwner::default()
+            }),
+            ImeOwner::Modal,
+            "a dialog over the capsule takes everything, as it does over every surface"
+        );
+        // And a capsule that is up with the hands back on the terminal (B81)
+        // owns nothing at all: the bit is only set while the caret is in it.
+        assert_eq!(
+            ime_owner(KeyboardOwner::default()),
+            ImeOwner::Shell,
+            "an unfocused capsule is not an owner"
+        );
 
         // **The whole of "zero PTY writes", stated as a property.**
-        for bits in 0..64u8 {
+        //
+        // Seven bits since the search capsule joined the ladder (§7.1.5d): the
+        // sweep is over every combination there is, so a rung added without a
+        // matching arm in `keyboard_owner_is_a_shell` fails here rather than in
+        // a screenshot of a query appearing at somebody's prompt.
+        for bits in 0..128u8 {
             let owner = KeyboardOwner {
                 rename: bits & 1 != 0,
                 menu_or_dialog: bits & 2 != 0,
@@ -54333,6 +55212,7 @@ mod tests {
                 preview: bits & 8 != 0,
                 graph_search: bits & 16 != 0,
                 git_prompt: bits & 32 != 0,
+                search: bits & 64 != 0,
             };
             assert_eq!(
                 matches!(ime_owner(owner), ImeOwner::Shell),

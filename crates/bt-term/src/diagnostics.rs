@@ -290,6 +290,8 @@ mod tests {
             cell_anchors: Vec::new(),
             row_map: Vec::new(),
             selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
             status_text: None,
