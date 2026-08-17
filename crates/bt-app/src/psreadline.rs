@@ -283,12 +283,16 @@ pub fn begin_probe() {
     if PROBE.get().is_some() || probing_started() {
         return;
     }
-    std::thread::Builder::new()
-        .name("psreadline-probe".to_owned())
-        .spawn(|| {
+    // In the workers' band: this starts a PowerShell to ask a question about a
+    // module, and it must never be the reason a frame was late.
+    bt_platform::spawn_at_priority(
+        "psreadline-probe",
+        bt_platform::ThreadPriority::BelowNormal,
+        || {
             let _ = PROBE.set(run_probe());
-        })
-        .ok();
+        },
+    )
+    .ok();
 }
 
 static PROBE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

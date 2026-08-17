@@ -7,8 +7,11 @@ use std::{
     ops::{Deref, DerefMut},
     panic,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
-    thread,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -428,9 +431,10 @@ impl MathWorker {
         let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
         let scale_result_tx = result_tx.clone();
         let scale_proxy = proxy.clone();
-        thread::Builder::new()
-            .name("bt-image-scale-worker".to_owned())
-            .spawn(move || {
+        bt_platform::spawn_at_priority(
+            "bt-image-scale-worker",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
                 run_scale_worker(scale_rx, |request| {
                     let (leaf, completion) = request.completion();
                     if scale_result_tx
@@ -440,11 +444,13 @@ impl MathWorker {
                         let _ = scale_proxy.send_event(AppEvent::MathReady);
                     }
                 });
-            })
-            .context("spawn image resampling worker")?;
-        thread::Builder::new()
-            .name("bt-math-worker".to_owned())
-            .spawn(move || {
+            },
+        )
+        .context("spawn image resampling worker")?;
+        bt_platform::spawn_at_priority(
+            "bt-math-worker",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
                 let engine = MathEngine::new();
                 let mut image_decoder = InlineImageDecoder::default();
                 while let Ok(work) = task_rx.recv() {
@@ -503,8 +509,9 @@ impl MathWorker {
                     }
                     let _ = proxy.send_event(AppEvent::MathReady);
                 }
-            })
-            .context("spawn math rendering worker")?;
+            },
+        )
+        .context("spawn math rendering worker")?;
         Ok(Self {
             tasks: task_tx,
             scale_tasks: scale_tx,
@@ -3791,12 +3798,76 @@ struct TabState {
     last_drawn_landing: Option<u8>,
 }
 
+/// The PTY's wake-up, as a **signal** and not a queue.
+///
+/// A reader thread pushes a chunk into its ring and then nudges the loop, and
+/// the nudge used to be one `AppEvent::PtyOutput` per chunk. That is a queue —
+/// a thousand chunks are a thousand posted messages — and it has two costs that
+/// only show themselves when the loop is not being given the machine:
+///
+/// * **Each one is paid in full.** `user_event` answers `PtyOutput` by calling
+///   [`Runtime::drain_pty`], which composes and publishes a frame; the slot it
+///   publishes into holds one. So a backlog of nudges is a backlog of frames
+///   typeset and thrown away — measured under a 24-way `cargo` build at 1209 of
+///   1932 composed frames discarded, 63% of the window's typesetting spent on
+///   pictures nobody ever saw.
+/// * **Nothing else gets a turn.** On Win32 `WM_PAINT` is synthesised only when
+///   the queue is otherwise empty, so a reader that refills the queue faster
+///   than the loop drains it starves the *present* — the one thing the user is
+///   waiting for. Measured on the same run: a composed frame reached the glass
+///   6.1 seconds later.
+///
+/// The signal is one bit: raise it, and post exactly one message while it is
+/// down. The loop lowers it as it drains. Nothing is lost — a chunk that lands
+/// after the bit is lowered raises it again, and [`Runtime::drain_pty`] is in
+/// any case called from `about_to_wait` on *every* turn of the loop, so the
+/// posted message's only real job is to break a `Wait` that would otherwise
+/// sleep. What is lost is the backlog, which was never information: a hundred
+/// nudges and one nudge say the same sentence.
+#[derive(Clone)]
+struct PtyWakeSignal {
+    proxy: EventLoopProxy<AppEvent>,
+    raised: Arc<AtomicBool>,
+}
+
+impl PtyWakeSignal {
+    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+        Self {
+            proxy,
+            raised: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// One shell's wake-up. Every shell in this window shares the one bit,
+    /// because the loop's answer to any of them is the same: drain them all.
+    fn wake(&self) -> OutputWake {
+        let signal = self.clone();
+        Arc::new(move || signal.raise())
+    }
+
+    fn raise(&self) {
+        if !self.raised.swap(true, Ordering::AcqRel) {
+            let _ = self.proxy.send_event(AppEvent::PtyOutput);
+        }
+    }
+
+    /// Lower the bit. Called at the top of the drain rather than the bottom, so
+    /// that a chunk arriving *during* the drain raises it again and is answered
+    /// on the next turn instead of waiting for something else to happen.
+    fn accept(&self) {
+        self.raised.store(false, Ordering::Release);
+    }
+}
+
 struct Runtime {
     renderer: Renderer,
     tabs: Vec<TabState>,
     active_tab: usize,
     next_tab_id: u64,
     event_proxy: EventLoopProxy<AppEvent>,
+    /// The one bit every shell in this window nudges the loop through. See
+    /// [`PtyWakeSignal`].
+    pty_wake: PtyWakeSignal,
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
@@ -3988,6 +4059,22 @@ struct Runtime {
     /// How many terminal frames this window has composed, for the trace and for
     /// the tests that count them. Monotonic; never read by the app itself.
     composed_terminal_frames: u64,
+    /// How many `WM_MOUSEWHEEL` deltas the window has been handed, and how many
+    /// of them were actually routed. Monotonic, and equal to each other on a
+    /// loop the machine is letting run: the gap between them is the size of the
+    /// bursts [`WheelBurst`] is collapsing, which is a number that only grows
+    /// when the loop is being starved. Read by the trace and by
+    /// [`wheel_burst_collapses_a_run_of_notches`].
+    wheel_events: u64,
+    wheel_routings: u64,
+    /// The notches that have arrived since the loop last acted on one. See
+    /// [`WheelBurst`].
+    wheel_burst: Option<WheelBurst>,
+    /// When the last present happened, so the trace can report the *interval*
+    /// between two pictures rather than only the cost of making one. The cost of
+    /// a frame is what a profiler measures; the gap between frames is what a
+    /// hand feels, and under CPU starvation the two stop being the same number.
+    last_present_at: Option<Instant>,
     /// When [`Self::advance_strip_animation`] last ran, so
     /// [`STRIP_ANIMATION_FRAME`] can be the rate it claims to be rather than a
     /// floor nothing stands on. `None` until the first tick.
@@ -7873,6 +7960,80 @@ fn image_zoom_notch(
     ImageZoom {
         mode: ImageZoomMode::Scale(new),
         pan: zoom_about(point, old, new, zoom.pan),
+    }
+}
+
+/// The notches that have arrived since the loop last acted on one.
+///
+/// **Windows sends one `WM_MOUSEWHEEL` per detent, and nothing on this platform
+/// promises the loop gets to answer one before the next arrives.** A
+/// free-spinning wheel puts several in the queue; a machine whose cores are all
+/// busy puts *many* there, because the queue fills at the hand's rate while the
+/// loop drains it at whatever rate the scheduler is handing this process. Every
+/// one of them used to be routed on the spot, and the terminal route composes a
+/// whole [`ViewportFrame`] and publishes it into [`bt_render::LatestFrameSlot`]
+/// — a slot that holds exactly *one*. So a burst of N notches typeset N frames
+/// and threw away N−1 of them, and it did so precisely when the machine had
+/// least to spare. Measured under a 24-way `cargo` build: see §1.4 of
+/// `docs/DESIGN.md`.
+///
+/// So a notch is *accumulated* here and the burst is routed once, at the next
+/// point the loop would have acted anyway — the top of [`Runtime::flush_wheel`]'s
+/// callers, which are every other window event and `about_to_wait`. Nothing is
+/// reordered: a burst is spent before whatever event follows it is answered, so
+/// the pointer move, the keystroke or the present that comes after a run of
+/// notches still sees the window those notches left behind.
+///
+/// **Summing is exact, not an approximation.** Every route a notch can take is
+/// linear in the delta — the local subpixel scroll, the two forwarding
+/// accumulators, [`Runtime::vertical_wheel_travel`] — and the one that is not,
+/// the picture's zoom, is `powf` over the notch count, for which
+/// `s^a · s^b = s^(a+b)`. The only case where a sum and a sequence part company
+/// is a burst that reverses direction *across a clamp* inside a single turn of
+/// the loop, which is a hand that changed its mind inside one frame; the sum is
+/// the better answer there anyway.
+///
+/// The two currencies are not addable and the route reads which one it was
+/// given, so a burst holds one of them; a device that changed its mind spends
+/// what is held before starting the new one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WheelBurst {
+    Lines { x: f32, y: f32 },
+    Pixels { x: f64, y: f64 },
+}
+
+impl WheelBurst {
+    fn of(delta: MouseScrollDelta) -> Self {
+        match delta {
+            MouseScrollDelta::LineDelta(x, y) => Self::Lines { x, y },
+            MouseScrollDelta::PixelDelta(position) => Self::Pixels {
+                x: position.x,
+                y: position.y,
+            },
+        }
+    }
+
+    /// The burst plus one more notch, or `None` if the notch is in the other
+    /// currency and the burst has to be spent first.
+    fn plus(self, delta: MouseScrollDelta) -> Option<Self> {
+        match (self, delta) {
+            (Self::Lines { x, y }, MouseScrollDelta::LineDelta(dx, dy)) => Some(Self::Lines {
+                x: x + dx,
+                y: y + dy,
+            }),
+            (Self::Pixels { x, y }, MouseScrollDelta::PixelDelta(position)) => Some(Self::Pixels {
+                x: x + position.x,
+                y: y + position.y,
+            }),
+            _ => None,
+        }
+    }
+
+    fn delta(self) -> MouseScrollDelta {
+        match self {
+            Self::Lines { x, y } => MouseScrollDelta::LineDelta(x, y),
+            Self::Pixels { x, y } => MouseScrollDelta::PixelDelta(PhysicalPosition::new(x, y)),
+        }
     }
 }
 
@@ -14212,10 +14373,8 @@ impl Runtime {
         // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
         // it produces here is computed fresh against this machine's DPI.
         let probe_input = load_probe_input()?;
-        let pty_proxy = proxy.clone();
-        let wake: OutputWake = Arc::new(move || {
-            let _ = pty_proxy.send_event(AppEvent::PtyOutput);
-        });
+        let pty_wake = PtyWakeSignal::new(proxy.clone());
+        let wake = pty_wake.wake();
         let phase_started = Instant::now();
         // Pinned tabs are an answer already given, so they simply open; the rest
         // become a question the prompt will ask over a window that already works.
@@ -14309,6 +14468,7 @@ impl Runtime {
             active_tab,
             next_tab_id: conpty_sources.len() as u64 + 1,
             event_proxy: proxy.clone(),
+            pty_wake,
             git_watch: git_watch::GitWatch::default(),
             math_worker,
             math_worker_running: true,
@@ -14357,6 +14517,10 @@ impl Runtime {
             chrome_present_pending: false,
             unpainted_pane_output: false,
             composed_terminal_frames: 0,
+            wheel_events: 0,
+            wheel_routings: 0,
+            wheel_burst: None,
+            last_present_at: None,
             strip_animation_ticked_at: None,
             preedit: None,
             ime_active: false,
@@ -14626,10 +14790,7 @@ impl Runtime {
     fn new_tab_with_profile(&mut self, profile: usize) -> Result<()> {
         debug_assert!(profile < profiles::PROFILES.len());
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
-        let proxy = self.event_proxy.clone();
-        let wake: OutputWake = Arc::new(move || {
-            let _ = proxy.send_event(AppEvent::PtyOutput);
-        });
+        let wake = self.pty_wake.wake();
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
         // Both facts are read off the *same* leaf — `self` derefs to the focused
@@ -14805,10 +14966,7 @@ impl Runtime {
             return Ok(());
         };
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
-        let proxy = self.event_proxy.clone();
-        let wake: OutputWake = Arc::new(move || {
-            let _ = proxy.send_event(AppEvent::PtyOutput);
-        });
+        let wake = self.pty_wake.wake();
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
         let mut seats = seats::Seats::lone_terminal();
@@ -14980,10 +15138,7 @@ impl Runtime {
         let first_revived = self.tabs.len();
         for tab in &pending {
             let (seats, seed, leaves, files, preview) = revive_plan(tab);
-            let proxy = self.event_proxy.clone();
-            let wake: OutputWake = Arc::new(move || {
-                let _ = proxy.send_event(AppEvent::PtyOutput);
-            });
+            let wake = self.pty_wake.wake();
             let id = TabId(self.next_tab_id);
             self.next_tab_id += 1;
             let (revived, _) = create_tab_state(
@@ -20682,10 +20837,7 @@ impl Runtime {
             .get(&source)
             .map(|leaf| seed.applied(leaf.profile, leaf.session.working_directory()))
             .unwrap_or_default();
-        let proxy = self.event_proxy.clone();
-        let wake: OutputWake = Arc::new(move || {
-            let _ = proxy.send_event(AppEvent::PtyOutput);
-        });
+        let wake = self.pty_wake.wake();
         let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
         let leaf = create_leaf_session(
             &self.renderer,
@@ -29984,10 +30136,7 @@ impl Runtime {
         else {
             return Ok(());
         };
-        let proxy = self.event_proxy.clone();
-        let wake: OutputWake = Arc::new(move || {
-            let _ = proxy.send_event(AppEvent::PtyOutput);
-        });
+        let wake = self.pty_wake.wake();
         let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
         self.restarting = Some(seat);
         let spawned = create_leaf_session(
@@ -33060,10 +33209,7 @@ impl Runtime {
                 *self.preview_panes.entry(surface) = pane;
                 return Ok(());
             };
-            let proxy = self.event_proxy.clone();
-            let wake: OutputWake = Arc::new(move || {
-                let _ = proxy.send_event(AppEvent::PtyOutput);
-            });
+            let wake = self.pty_wake.wake();
             let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
             // The **default** profile, which is what a stand-in is: it is not
             // inherited from anything, because the pane it replaces was never
@@ -33867,6 +34013,8 @@ impl Runtime {
     }
 
     fn drain_pty(&mut self) -> Result<()> {
+        // Lowered first: see [`PtyWakeSignal::accept`].
+        self.pty_wake.accept();
         let mut active_changed = false;
         let mut active_changed_off_focus = false;
         let mut chrome_changed = false;
@@ -39458,6 +39606,37 @@ impl Runtime {
         Ok(())
     }
 
+    /// Take one notch from the platform. See [`WheelBurst`] for why this is not
+    /// [`Self::mouse_wheel`].
+    fn queue_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        self.wheel_events = self.wheel_events.saturating_add(1);
+        match self.wheel_burst {
+            Some(burst) => match burst.plus(delta) {
+                Some(merged) => self.wheel_burst = Some(merged),
+                None => {
+                    self.flush_wheel()?;
+                    self.wheel_burst = Some(WheelBurst::of(delta));
+                }
+            },
+            None => self.wheel_burst = Some(WheelBurst::of(delta)),
+        }
+        Ok(())
+    }
+
+    /// Spend whatever the wheel has accumulated, if anything.
+    ///
+    /// Called from every door that must not run ahead of a notch: the top of
+    /// `window_event` for every event that is not itself a notch, and the top of
+    /// `about_to_wait`. Free — one `Option` read — for the overwhelming majority
+    /// of turns, in which nobody touched the wheel.
+    fn flush_wheel(&mut self) -> Result<()> {
+        let Some(burst) = self.wheel_burst.take() else {
+            return Ok(());
+        };
+        self.wheel_routings = self.wheel_routings.saturating_add(1);
+        self.mouse_wheel(burst.delta())
+    }
+
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
         // **A notch over the card is the card's** (user ruling, 2026-08-14), and
         // it is asked before the dismissal below for the obvious reason: the card
@@ -41238,6 +41417,34 @@ impl Runtime {
                     self.reconcile_authoritative_dpi("first-present")?;
                 }
                 let latency = receipt.latency();
+                // **The one number a user feels**, printed for every present and
+                // not only for a resize: how long the event that asked for this
+                // picture waited before the picture was handed to the
+                // compositor. Beside it, the two ratios that say whether the
+                // window is *doing* redundant work — frames composed against
+                // frames presented (the slot's own overwrite count is the
+                // difference), and notches taken from the platform against
+                // notches routed.
+                let presented_at = Instant::now();
+                let since_previous = self
+                    .last_present_at
+                    .map_or(Duration::ZERO, |previous| presented_at - previous);
+                self.last_present_at = Some(presented_at);
+                if self.trace_perf
+                    && let Ok(latency) = latency
+                {
+                    eprintln!(
+                        "BT_PERF_TRACE present source={:?} event_to_present_us={} event_to_submit_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={}",
+                        trigger.source,
+                        latency.event_to_present_call.as_micros(),
+                        latency.event_to_submit.as_micros(),
+                        since_previous.as_micros(),
+                        self.composed_terminal_frames,
+                        self.pending_frames.overwrites(),
+                        self.wheel_events,
+                        self.wheel_routings,
+                    );
+                }
                 if self.trace_startup
                     && matches!(trigger.source, FrameSource::Resize)
                     && let Ok(latency) = latency
@@ -41392,13 +41599,20 @@ impl ApplicationHandler<AppEvent> for FolioApp {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::PtyOutput => {
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.drain_pty()
-                {
-                    self.fail(event_loop, error);
-                }
-            }
+            // **Nothing is done here** — the same answer, and for the same
+            // reason, as [`AppEvent::GitChanged`] below.
+            //
+            // `about_to_wait` drains every shell on *every* turn of the loop, and
+            // it runs immediately after this arm returns; the posted message's
+            // whole job is to break a `ControlFlow::Wait` that would otherwise
+            // sleep through a shell that has spoken. Draining here as well meant
+            // two drains per turn while a shell was flooding — and, because bytes
+            // land between them, two composed frames per present, with the first
+            // one overwritten in a slot that holds one. Measured on the same
+            // 24-way `cargo` build with the same flood: 517 of 1504 composed
+            // frames discarded with this arm draining, against 1 of 765 without
+            // it.
+            AppEvent::PtyOutput => {}
             AppEvent::MathReady => {
                 if let Some(runtime) = self.runtime.as_mut()
                     && let Err(error) = runtime.apply_math_results()
@@ -41448,6 +41662,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if runtime.window.id() != window_id {
             return;
         }
+        // **A burst of notches is spent before anything that is not a notch.**
+        // See [`WheelBurst`]: the wheel accumulates so that a run of detents
+        // costs one frame instead of one frame each, and this is the line that
+        // keeps that from being a reordering — whatever arrives next answers the
+        // window the wheel has already moved.
+        if !matches!(event, WindowEvent::MouseWheel { .. })
+            && let Err(error) = runtime.flush_wheel()
+        {
+            self.fail(event_loop, error);
+            return;
+        }
         let result = match event {
             WindowEvent::CloseRequested => {
                 // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
@@ -41476,7 +41701,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
             WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
             WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
-            WindowEvent::MouseWheel { delta, .. } => runtime.mouse_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
             WindowEvent::Resized(size) => runtime.resize(size),
             WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
             WindowEvent::ThemeChanged(theme) => runtime.os_theme_changed(theme).map(|_| ()),
@@ -41582,6 +41807,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
+        // First, because everything below it is allowed to assume the window is
+        // where the hand last left it. This is the door the coalescing is *for*:
+        // the queue has just run dry, so whatever the wheel collected while the
+        // loop was away is one burst and gets one frame. See [`WheelBurst`].
+        if let Err(error) = runtime.flush_wheel() {
+            self.fail(event_loop, error);
+            return;
+        }
         runtime.apply_math_context_menu_result();
         if let Err(error) = runtime.apply_folder_pick_result() {
             self.fail(event_loop, error);
@@ -43659,6 +43892,14 @@ fn append_panic_report(path: &std::path::Path, report: &str) -> std::io::Result<
 
 fn main() -> Result<()> {
     install_panic_log_hook();
+    // **The thread that owns the window says so, before it owns one.** Every
+    // worker this process starts is spawned into the band below normal
+    // (`bt_platform::spawn_at_priority`), and this is the other half of that
+    // order: the loop that answers the keyboard, the wheel and the present goes
+    // one step above, so that on a machine with nothing left to give, what this
+    // process does get goes to the frame first. See `bt_platform::ThreadPriority`
+    // for why one step and not a multimedia scheduling class.
+    bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::AboveNormal);
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
@@ -50077,6 +50318,61 @@ mod tests {
         let mut pixels = 25.0;
         assert_eq!(drain_whole_units(&mut pixels, 17.0), 1);
         assert!((pixels - 8.0).abs() < 1e-9);
+    }
+
+    /// PIN — a run of notches inside one turn of the loop is **one** notch, and
+    /// it is the same notch arithmetically.
+    ///
+    /// The coalescing this pins is worth having only if it changes nothing but
+    /// the count: a burst that scrolled a different distance from the notches
+    /// that made it would be a wheel that behaves differently on a busy machine,
+    /// which is the opposite of the point. So the two halves are asserted
+    /// together — the burst is one delta, and that delta is the sum.
+    #[test]
+    fn wheel_burst_collapses_a_run_of_notches_without_changing_the_distance() {
+        let mut burst = WheelBurst::of(MouseScrollDelta::LineDelta(0.0, -1.0));
+        for _ in 0..4 {
+            burst = burst
+                .plus(MouseScrollDelta::LineDelta(0.0, -1.0))
+                .expect("a line delta merges into a line burst");
+        }
+        assert_eq!(
+            burst.delta(),
+            MouseScrollDelta::LineDelta(0.0, -5.0),
+            "five detents in one turn are five lines, spent once"
+        );
+
+        // The same for the currency a trackpad speaks, on both axes: a tilt
+        // wheel's horizontal travel is summed beside the vertical, not dropped.
+        let mut pixels = WheelBurst::of(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+            3.0, -12.5,
+        )));
+        pixels = pixels
+            .plus(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                -1.0, -7.5,
+            )))
+            .expect("a pixel delta merges into a pixel burst");
+        assert_eq!(
+            pixels.delta(),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(2.0, -20.0))
+        );
+
+        // **The two currencies do not add.** A device that changes its mind
+        // mid-burst is told to spend what is held first, rather than have its
+        // lines quietly reinterpreted as pixels.
+        assert_eq!(
+            WheelBurst::of(MouseScrollDelta::LineDelta(0.0, -1.0)).plus(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -1.0))
+            ),
+            None
+        );
+        assert_eq!(
+            WheelBurst::of(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                0.0, -1.0
+            )))
+            .plus(MouseScrollDelta::LineDelta(0.0, -1.0)),
+            None
+        );
     }
 
     #[test]

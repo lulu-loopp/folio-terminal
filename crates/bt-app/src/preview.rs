@@ -29,7 +29,6 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::mpsc;
-use std::thread;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -2478,9 +2477,10 @@ impl PreviewWorker {
     pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<PreviewRequest>();
         let (response_tx, response_rx) = mpsc::channel::<PreviewResponse>();
-        thread::Builder::new()
-            .name("bt-preview-worker".to_owned())
-            .spawn(move || {
+        bt_platform::spawn_at_priority(
+            "bt-preview-worker",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
                 run_preview_worker(request_rx, |request| {
                     // **This thread is a disk**, and both of its questions are
                     // about bytes at a path. A source with nothing at a path is
@@ -2507,8 +2507,9 @@ impl PreviewWorker {
                         let _ = proxy.send_event(AppEvent::PreviewReady);
                     }
                 });
-            })
-            .context("spawn file preview reading worker")?;
+            },
+        )
+        .context("spawn file preview reading worker")?;
         Ok(Self {
             requests: request_tx,
             responses: response_rx,
