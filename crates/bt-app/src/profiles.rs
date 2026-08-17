@@ -111,7 +111,9 @@ fn item_mark_logical_px(mark: ChromeMark) -> f32 {
 /// recent row's `agoLabel` (mock-up 7428/7432). They are the same declaration in the
 /// same place, so they are the same number here.
 const HINT_FONT_LOGICAL_PX: f32 = 11.0;
-const HINT_TEXT: &str = "default";
+fn hint_text() -> &'static str {
+    crate::i18n::Text::ProfileHintDefault.text()
+}
 /// What a row says instead of `default` when this machine cannot start it.
 ///
 /// The same slot, because it is the same sentence in the same place: one short
@@ -124,7 +126,9 @@ const HINT_TEXT: &str = "default";
 /// with no caption asks the user to work out *why* it is grey, and the two
 /// available guesses — "not on this machine" and "Folio is broken" —
 /// are not equally actionable.
-const UNAVAILABLE_HINT_TEXT: &str = "not installed";
+fn unavailable_hint_text() -> &'static str {
+    crate::i18n::Text::ProfileHintUnavailable.text()
+}
 
 /// **The `˅` menu's second section: one row, and what it is for** (H113,
 /// mock-up 7417-7423).
@@ -132,14 +136,18 @@ const UNAVAILABLE_HINT_TEXT: &str = "not installed";
 /// Every row above it makes a **tab**; this one adds a **pane** to the tab you
 /// are already in, and that is a different enough verb that the mock-up puts a
 /// rule between them rather than letting it read as a fifth profile.
-const FILES_PANE_TEXT: &str = "Files pane";
+fn files_pane_text() -> &'static str {
+    crate::i18n::Text::ProfileFilesPane.text()
+}
 /// The annotation that keeps the row honest about the difference.
 ///
 /// It rides the same `.default-hint` slot as `default` and `3m ago`, and it is
 /// doing the same job: saying the one thing about the row that its caption does
 /// not. Without it "Files pane" sits under four rows that all open new tabs and
 /// looks like the fifth.
-const FILES_PANE_HINT_TEXT: &str = "this tab";
+fn files_pane_hint_text() -> &'static str {
+    crate::i18n::Text::ProfileFilesPaneHint.text()
+}
 
 // ── the greyed row ─────────────────────────────────────────────────────────
 /// `.ticon-wrap.dead .ticon { opacity: .35; filter: grayscale(1) }` (mock-up
@@ -203,7 +211,9 @@ const SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 /// transform: a chrome label draws the string it is given. So the string it is
 /// given is the drawn one, and the mock-up's own casing lives in the doc line
 /// above rather than in a lowercase constant nothing would uppercase.
-const RECENT_SECTION_LABEL: &str = "RECENTLY OPENED";
+fn recent_section_label() -> &'static str {
+    crate::i18n::Text::ProfileRecentSection.text()
+}
 
 // ── `.recent-item` (mock-up lines 1030-1031) ───────────────────────────────
 /// `max-width: 260px`.
@@ -777,7 +787,7 @@ pub fn has_id(id: &str) -> bool {
 /// and that the answer is about this computer rather than about the product.
 #[must_use]
 pub fn unavailable_tip(profile: usize) -> String {
-    format!("{} — not found on this machine", title(profile))
+    crate::i18n::unavailable_profile_tip(title(profile))
 }
 
 /// What, if anything, this profile's title has to name before it is unambiguous
@@ -1470,11 +1480,11 @@ pub fn layout(
     // carry rather than the one it happens to carry today, so that changing the
     // default profile — or unplugging the drive Git lives on — cannot make the
     // menu change width under the pointer.
-    let annotation = measure(HINT_TEXT, px(HINT_FONT_LOGICAL_PX))
-        .max(measure(UNAVAILABLE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX)));
+    let annotation = measure(hint_text(), px(HINT_FONT_LOGICAL_PX))
+        .max(measure(unavailable_hint_text(), px(HINT_FONT_LOGICAL_PX)));
     // Measured before the closure below borrows `measure` for the rest of the
     // function, not because the order matters to the layout.
-    let files_hint = measure(FILES_PANE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX));
+    let files_hint = measure(files_pane_hint_text(), px(HINT_FONT_LOGICAL_PX));
     let mut row_content = |name: &str, font: f32, annotation: f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
             + px(ITEM_GAP_LOGICAL_PX)
@@ -1498,7 +1508,7 @@ pub fn layout(
     // same reason they do and not the reason Recent does not: its caption and
     // its annotation are both this module's own constants, so their length is a
     // fact the product is responsible for making room for.
-    let files_row = row_content(FILES_PANE_TEXT, px(ITEM_FONT_LOGICAL_PX), files_hint);
+    let files_row = row_content(files_pane_text(), px(ITEM_FONT_LOGICAL_PX), files_hint);
     let content = (0..PROFILES.len())
         // `title(index)` and not `Profile::title`: the qualifier is part of the
         // string the row draws, and on a machine with two distributions it is
@@ -1739,9 +1749,9 @@ pub fn build(
                 // resolved through [`default_profile`], which refuses to answer
                 // with a profile this machine cannot start.
                 hint: if available {
-                    (index == default).then(|| hint(HINT_TEXT.to_owned()))
+                    (index == default).then(|| hint(hint_text().to_owned()))
                 } else {
-                    Some(hint(UNAVAILABLE_HINT_TEXT.to_owned()))
+                    Some(hint(unavailable_hint_text().to_owned()))
                 },
                 hint_ink: None,
                 hovered: hover == Some(MenuRow::Profile(index)),
@@ -1769,8 +1779,8 @@ pub fn build(
             // names a shell. Borrowing one here would say the tree belongs to
             // whichever shell lent its glyph.
             mark: Some(ChromeMark::Folder),
-            name: FILES_PANE_TEXT,
-            hint: Some(hint(FILES_PANE_HINT_TEXT.to_owned())),
+            name: files_pane_text(),
+            hint: Some(hint(files_pane_hint_text().to_owned())),
             hint_ink: None,
             hovered: hover == Some(MenuRow::FilesPane),
             // A files column needs no program behind it, so there is nothing
@@ -1793,7 +1803,7 @@ pub fn build(
     }
 
     if let Some(band) = layout.section_label {
-        labels.push(section_label(RECENT_SECTION_LABEL, band, scale, palette));
+        labels.push(section_label(recent_section_label(), band, scale, palette));
     }
 
     for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
@@ -2090,9 +2100,9 @@ pub enum RootNote {
 impl RootNote {
     pub fn text(self) -> &'static str {
         match self {
-            Self::Home => "home",
-            Self::Terminal => "a terminal is here",
-            Self::Parent => "parent",
+            Self::Home => crate::i18n::Text::RootNoteHome.text(),
+            Self::Terminal => crate::i18n::Text::RootNoteTerminal.text(),
+            Self::Parent => crate::i18n::Text::RootNoteParent.text(),
         }
     }
 }
@@ -2288,7 +2298,7 @@ pub fn root_menu_layout(
     let content = content.max(
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
             + px(ITEM_GAP_LOGICAL_PX)
-            + measure(BROWSE_TEXT, px(ITEM_FONT_LOGICAL_PX)),
+            + measure(browse_text(), px(ITEM_FONT_LOGICAL_PX)),
     );
     let width = (chrome + content)
         .clamp(
@@ -2394,7 +2404,7 @@ pub fn root_menu_build(
         alpha(palette.menu_border_alpha),
     );
     labels.push(section_label(
-        ROOT_SECTION_LABEL,
+        root_section_label(),
         layout.label,
         scale,
         palette,
@@ -2443,7 +2453,7 @@ pub fn root_menu_build(
             // rows above wear an open folder to say "you are already here", and
             // this one wears it to say "go and look".
             mark: Some(ChromeMark::FolderOpen),
-            name: BROWSE_TEXT,
+            name: browse_text(),
             // No note. Every row above answers "why is this offered?"; this one is
             // offered because nothing else was, and a hint saying so would be the
             // menu apologising for itself.
@@ -2469,7 +2479,9 @@ pub fn root_menu_build(
 }
 
 /// `.rm-label` — the heading over the list (mock-up 5138).
-const ROOT_SECTION_LABEL: &str = "OPEN FOLDER";
+fn root_section_label() -> &'static str {
+    crate::i18n::Text::RootSection.text()
+}
 
 /// The escape hatch's own words (mock-up 5151).
 ///
@@ -2477,7 +2489,9 @@ const ROOT_SECTION_LABEL: &str = "OPEN FOLDER";
 /// dots: it is the platform convention for "this opens something that will ask
 /// you again", which is exactly the promise that separates this row from the
 /// rows above it, each of which commits the moment it is pressed.
-const BROWSE_TEXT: &str = "Browse…";
+fn browse_text() -> &'static str {
+    crate::i18n::Text::RootBrowse.text()
+}
 
 /// `.root-menu { min-width: 190px }` (mock-up 629).
 ///
@@ -2561,8 +2575,12 @@ pub struct FileMenuLayout {
 
 /// `Insert path into terminal` — the widest of the three, and the reason the
 /// menu is measured rather than given a fixed width.
-pub const INSERT_PATH_TEXT: &str = "Insert path into terminal";
-pub const COPY_PATH_TEXT: &str = "Copy path";
+pub fn insert_path_text() -> &'static str {
+    crate::i18n::Text::FileMenuInsertPath.text()
+}
+pub fn copy_path_text() -> &'static str {
+    crate::i18n::Text::FileMenuCopyPath.text()
+}
 
 /// The menu hung under the point a row was right-clicked at.
 ///
@@ -2599,8 +2617,8 @@ pub fn file_menu_layout(
             + measure(text, px(ITEM_FONT_LOGICAL_PX))
     };
     let content = row_width(open_text, measure)
-        .max(row_width(COPY_PATH_TEXT, measure))
-        .max(row_width(INSERT_PATH_TEXT, measure));
+        .max(row_width(copy_path_text(), measure))
+        .max(row_width(insert_path_text(), measure));
     let width = (chrome + content)
         .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
         .round();
@@ -2692,8 +2710,8 @@ pub fn file_menu_build(
                 mark: Some(row.mark()),
                 name: match row {
                     FileMenuRow::Open => open_text,
-                    FileMenuRow::CopyPath => COPY_PATH_TEXT,
-                    FileMenuRow::InsertPath => INSERT_PATH_TEXT,
+                    FileMenuRow::CopyPath => copy_path_text(),
+                    FileMenuRow::InsertPath => insert_path_text(),
                 },
                 hint: None,
                 hint_ink: None,
@@ -2876,7 +2894,9 @@ pub const GIT_MENU_UNSTAGE_TEXT: &str = "Unstage";
 pub const GIT_MENU_DISCARD_TEXT: &str = "Discard";
 pub const GIT_MENU_OPEN_DIFF_TEXT: &str = "Open diff";
 pub const GIT_MENU_REVEAL_TEXT: &str = "Reveal in Explorer";
-pub const GIT_MENU_COPY_PATH_TEXT: &str = "Copy path";
+pub fn git_menu_copy_path_text() -> &'static str {
+    crate::i18n::Text::FileMenuCopyPath.text()
+}
 pub const GIT_MENU_COPY_HASH_TEXT: &str = "Copy hash";
 pub const GIT_MENU_COPY_SUBJECT_TEXT: &str = "Copy subject";
 pub const GIT_MENU_COPY_NAME_TEXT: &str = "Copy name";
@@ -2900,7 +2920,7 @@ impl GitMenuRow {
             Self::Discard => GIT_MENU_DISCARD_TEXT,
             Self::OpenDiff => GIT_MENU_OPEN_DIFF_TEXT,
             Self::RevealInExplorer => GIT_MENU_REVEAL_TEXT,
-            Self::CopyPath => GIT_MENU_COPY_PATH_TEXT,
+            Self::CopyPath => git_menu_copy_path_text(),
             Self::CopyHash => GIT_MENU_COPY_HASH_TEXT,
             Self::CopySubject => GIT_MENU_COPY_SUBJECT_TEXT,
             Self::CopyName => GIT_MENU_COPY_NAME_TEXT,
@@ -4210,7 +4230,7 @@ const PICKER_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 /// The caption, in the section label's grammar (`.glabel`: 9.5-10.5px, tracked,
 /// upper-cased, `--ink3`).
 ///
-/// Written upper-case at the source for [`RECENT_SECTION_LABEL`]'s reason and
+/// Written upper-case at the source for [`recent_section_label()`]'s reason and
 /// not for a different one: this pipeline has no `text-transform`, a chrome
 /// label draws the string it is given, and a lower-case constant that nothing
 /// upper-cases would be a lie about what appears on screen.
@@ -4385,7 +4405,9 @@ pub const CLOSE_PANE_TEXT: &str = "Close pane";
 /// The `.default-hint` slot, on the profile picker's own precedent: the mark
 /// column belongs to the profile's own glyph, so "this is the one you are on"
 /// has to be said in words rather than with a tick.
-pub const CURRENT_PROFILE_HINT_TEXT: &str = "current";
+pub fn current_profile_hint_text() -> &'static str {
+    crate::i18n::Text::ProfileHintCurrent.text()
+}
 
 // ── what the pointer and the keyboard are on ───────────────────────────────
 
@@ -4860,7 +4882,7 @@ fn pane_submenu_layout(
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> PaneSubmenuLayout {
     let px = |value: f32| value * scale;
-    let hint = measure(CURRENT_PROFILE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX));
+    let hint = measure(current_profile_hint_text(), px(HINT_FONT_LOGICAL_PX));
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
     let content = (0..PROFILES.len())
         .map(|index| {
@@ -5179,8 +5201,8 @@ fn push_submenu(
     for (index, rect) in layout.items.iter().enumerate() {
         let hint = (current_profile == Some(index)).then(|| {
             (
-                CURRENT_PROFILE_HINT_TEXT.to_owned(),
-                measure(CURRENT_PROFILE_HINT_TEXT, px(HINT_FONT_LOGICAL_PX)),
+                current_profile_hint_text().to_owned(),
+                measure(current_profile_hint_text(), px(HINT_FONT_LOGICAL_PX)),
             )
         });
         push_row(
@@ -6101,7 +6123,7 @@ mod tests {
             &mut fake_measure,
         ));
         assert!(
-            layer.labels.iter().any(|label| label.text == BROWSE_TEXT),
+            layer.labels.iter().any(|label| label.text == browse_text()),
             "the row says its own name"
         );
     }
@@ -6359,8 +6381,8 @@ mod tests {
             let longest = (0..PROFILES.len())
                 .map(|index| fake_measure(title(index), ITEM_FONT_LOGICAL_PX * scale))
                 .fold(0.0_f32, f32::max);
-            let annotation = fake_measure(HINT_TEXT, HINT_FONT_LOGICAL_PX * scale).max(
-                fake_measure(UNAVAILABLE_HINT_TEXT, HINT_FONT_LOGICAL_PX * scale),
+            let annotation = fake_measure(hint_text(), HINT_FONT_LOGICAL_PX * scale).max(
+                fake_measure(unavailable_hint_text(), HINT_FONT_LOGICAL_PX * scale),
             );
             let chrome = 2.0
                 * ((FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
@@ -6752,7 +6774,7 @@ mod tests {
                 .enumerate()
                 .filter(|(_, row)| {
                     layers.iter().flat_map(|layer| &layer.labels).any(|label| {
-                        label.text == HINT_TEXT
+                        label.text == hint_text()
                             && label.rect[1] == row[1]
                             && label.rect[3] == row[3]
                     })
@@ -7467,7 +7489,7 @@ mod tests {
             layer
                 .labels
                 .iter()
-                .any(|label| label.text == UNAVAILABLE_HINT_TEXT),
+                .any(|label| label.text == unavailable_hint_text()),
             "with the reason in the hint slot, so the grey does not have to be guessed at"
         );
 
@@ -7499,7 +7521,7 @@ mod tests {
         assert_eq!(pwsh.opacity, UNAVAILABLE_MARK_OPACITY);
         assert!(pwsh.grayscale);
         assert!(
-            layer.labels.iter().any(|label| label.text == HINT_TEXT),
+            layer.labels.iter().any(|label| label.text == hint_text()),
             "and still says it is the default"
         );
     }
@@ -7777,7 +7799,7 @@ mod tests {
             "and that fill is `--hover` over `--menu`"
         );
         assert!(
-            rest_labels.iter().any(|label| label.text == HINT_TEXT),
+            rest_labels.iter().any(|label| label.text == hint_text()),
             "the default profile says so"
         );
     }
@@ -7838,7 +7860,8 @@ mod tests {
             ".recent-item max-width 260px"
         );
         assert_eq!(
-            RECENT_SECTION_LABEL, "RECENTLY OPENED",
+            recent_section_label(),
+            "RECENTLY OPENED",
             "`Recently opened` under `text-transform: uppercase`"
         );
 
@@ -7901,7 +7924,7 @@ mod tests {
         let sprites: Vec<_> = layers.iter().flat_map(|layer| &layer.sprites).collect();
         let hint = labels
             .iter()
-            .find(|label| label.text == HINT_TEXT)
+            .find(|label| label.text == hint_text())
             .expect("the default profile says so");
         assert_eq!(hint.color, palette.menu_item_hint_text);
         assert_eq!(hint.font_size_px, HINT_FONT_LOGICAL_PX * scale);
@@ -7987,7 +8010,7 @@ mod tests {
                 !layer
                     .labels
                     .iter()
-                    .any(|label| label.text == RECENT_SECTION_LABEL),
+                    .any(|label| label.text == recent_section_label()),
                 "scale {scale}: no heading over an empty list"
             );
             assert_eq!(
@@ -8219,7 +8242,7 @@ mod tests {
         let heading = layer
             .labels
             .iter()
-            .find(|label| label.text == RECENT_SECTION_LABEL)
+            .find(|label| label.text == recent_section_label())
             .expect("the section is titled");
         assert_eq!(heading.font_size_px, SECTION_LABEL_FONT_LOGICAL_PX * scale);
         assert_eq!(heading.letter_spacing_em, SECTION_LABEL_TRACKING_EM);
@@ -8468,7 +8491,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["Open preview", COPY_PATH_TEXT, INSERT_PATH_TEXT],
+            vec!["Open preview", copy_path_text(), insert_path_text()],
             "three rows, top to bottom, and no heading over them"
         );
         assert!(
@@ -9043,7 +9066,7 @@ mod tests {
             .labels
             .iter()
             .map(|label| label.text.as_str())
-            .filter(|text| *text != CURRENT_PROFILE_HINT_TEXT)
+            .filter(|text| *text != current_profile_hint_text())
             .collect();
         assert_eq!(
             names,
@@ -9054,7 +9077,7 @@ mod tests {
             child
                 .labels
                 .iter()
-                .filter(|label| label.text == CURRENT_PROFILE_HINT_TEXT)
+                .filter(|label| label.text == current_profile_hint_text())
                 .count(),
             1,
             "and exactly one row says it is the one this pane is running"
@@ -9098,7 +9121,7 @@ mod tests {
             child
                 .labels
                 .iter()
-                .filter(|l| l.text != CURRENT_PROFILE_HINT_TEXT)
+                .filter(|l| l.text != current_profile_hint_text())
                 .count(),
             PROFILES.len(),
             "no row is dropped — a missing row looks like a row nobody designed"

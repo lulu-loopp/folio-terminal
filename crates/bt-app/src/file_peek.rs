@@ -1002,7 +1002,7 @@ mod tests {
             24.0,
             SCALE,
         );
-        let notice = crate::preview::PREVIEW_TRUNCATED_NOTICE;
+        let notice = crate::preview::preview_truncated_notice();
         let dressed = foot(&layout, notice);
         let layer = build(
             &layout,

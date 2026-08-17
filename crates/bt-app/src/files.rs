@@ -51,11 +51,12 @@ pub const DIR_ENTRY_CAP: usize = 2000;
 
 /// The notice shown once when the files worker has stopped.
 ///
-/// Worded like [`crate::MATH_WORKER_STOPPED_NOTICE`] and for the same reason: a
+/// Worded like [`crate::math_worker_stopped_notice()`] and for the same reason: a
 /// worker dying is a feature going away, not a session ending, and the sentence
 /// has to say which half still works.
-pub const FILES_WORKER_STOPPED_NOTICE: &str =
-    "Directory reading stopped; terminal input and output remain available";
+pub fn files_worker_stopped_notice() -> &'static str {
+    crate::i18n::Text::FilesWorkerStopped.text()
+}
 
 /// **Who is asking.**
 ///
@@ -189,9 +190,9 @@ impl DirFault {
     /// The row's own words for itself.
     pub fn notice(self) -> &'static str {
         match self {
-            Self::PermissionDenied => "Permission denied",
-            Self::NotFound => "Folder not found",
-            Self::Unreadable => "Could not read folder",
+            Self::PermissionDenied => crate::i18n::Text::FilesPermissionDenied.text(),
+            Self::NotFound => crate::i18n::Text::FilesNotFound.text(),
+            Self::Unreadable => crate::i18n::Text::FilesUnreadable.text(),
         }
     }
 }
@@ -369,7 +370,7 @@ pub enum RowNotice {
     /// The root read, and there was nothing in it.
     ///
     /// Its own state and not silence, because silence is what a *broken* pane
-    /// looks like — the argument `PLACEHOLDER_SEAT_NOTICE` already makes.
+    /// looks like — the argument `placeholder_seat_notice()` already makes.
     Empty,
     /// The column has no root at all: opened with no focused shell and no
     /// `HOME` to fall back to. Not a folder that failed — a column that was
@@ -509,11 +510,11 @@ fn notice_row(key: &str, depth: usize, notice: RowNotice) -> TreeRow {
     TreeRow {
         key: key.to_owned(),
         name: match notice {
-            RowNotice::Loading => "Loading…".to_owned(),
+            RowNotice::Loading => crate::i18n::Text::FilesLoading.text().to_owned(),
             RowNotice::Fault(fault) => fault.notice().to_owned(),
-            RowNotice::More(count) => format!("{count} more not shown"),
-            RowNotice::Empty => "Empty folder".to_owned(),
-            RowNotice::Unrooted => "No folder opened".to_owned(),
+            RowNotice::More(count) => crate::i18n::files_more_not_shown(count),
+            RowNotice::Empty => crate::i18n::Text::FilesEmpty.text().to_owned(),
+            RowNotice::Unrooted => crate::i18n::Text::FilesUnrooted.text().to_owned(),
         },
         depth,
         kind: RowKind::Notice(notice),
@@ -995,7 +996,7 @@ pub fn disable_files_worker_state(running: &mut bool, notice_pending: &mut bool)
 
 pub fn take_files_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     if std::mem::take(notice_pending) {
-        Some(FILES_WORKER_STOPPED_NOTICE)
+        Some(files_worker_stopped_notice())
     } else {
         None
     }
@@ -1350,7 +1351,7 @@ mod tests {
         assert!(!disable_files_worker_state(&mut running, &mut pending));
         assert_eq!(
             take_files_worker_notice(&mut pending),
-            Some(FILES_WORKER_STOPPED_NOTICE)
+            Some(files_worker_stopped_notice())
         );
         assert_eq!(take_files_worker_notice(&mut pending), None);
     }

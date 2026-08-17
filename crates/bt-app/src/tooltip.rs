@@ -388,9 +388,9 @@ impl NameSource {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Manual => "Named by you",
-            Self::Program => "Set by the program",
-            Self::Cwd => "Working folder",
+            Self::Manual => crate::i18n::Text::NameSourceManual.text(),
+            Self::Program => crate::i18n::Text::NameSourceProgram.text(),
+            Self::Cwd => crate::i18n::Text::NameSourceCwd.text(),
         }
     }
 }
@@ -432,7 +432,7 @@ pub fn tab_tip(name: &str, source: Option<NameSource>, cwd: Option<&str>, pinned
     if pinned {
         // F46's wording, and it earns its own line: it is a fact about the tab's
         // future rather than about what it is showing now.
-        tip.push_str("\nPinned — restored next launch");
+        tip.push_str(crate::i18n::Text::TabTipPinned.text());
     }
     tip
 }
@@ -448,7 +448,7 @@ pub fn mark_tip(progress: Option<ProgressState>, working: bool) -> String {
         // `.ticon.working` carries `title="Working"` and nothing else — no
         // ellipsis, because this is a state and not a running commentary.
         return if working {
-            "Working".to_owned()
+            crate::i18n::Text::MarkWorking.text().to_owned()
         } else {
             String::new()
         };
@@ -460,10 +460,12 @@ pub fn mark_tip(progress: Option<ProgressState>, working: bool) -> String {
     match progress {
         // The one kind with no number to show: its arc has no length to mean
         // anything, so the tip says what is true instead.
-        ProgressState::Indeterminate => "Working…".to_owned(),
-        ProgressState::Normal(value) => format!("{}%", percent(Some(value))),
-        ProgressState::Error(value) => format!("{}% — error", percent(value)),
-        ProgressState::Paused(value) => format!("{}% — paused", percent(value)),
+        ProgressState::Indeterminate => crate::i18n::Text::MarkWorkingIndeterminate
+            .text()
+            .to_owned(),
+        ProgressState::Normal(value) => crate::i18n::progress_percent(percent(Some(value))),
+        ProgressState::Error(value) => crate::i18n::progress_error(percent(value)),
+        ProgressState::Paused(value) => crate::i18n::progress_paused(percent(value)),
     }
 }
 

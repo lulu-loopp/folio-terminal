@@ -15,11 +15,11 @@
 use std::path::PathBuf;
 
 use bt_persist::{
-    DegradationReport, FilesViewV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1, PreviewPaneV1,
-    PreviewPoolEntryV1, ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
-    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
-    SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session,
-    read_settings, write_session_atomic, write_settings_atomic,
+    DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1,
+    PreviewPaneV1, PreviewPoolEntryV1, ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
+    SessionThemeV1, SessionV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1,
+    ThemeModeV1, read_session, read_settings, write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -559,10 +559,11 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 6,
+        SETTINGS_SCHEMA_VERSION, 7,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
-         and the direction-less split's direction the v5→v6 (§1.3)"
+         the direction-less split's direction the v5→v6, and the interface \
+         language the v6→v7 (§1.3)"
     );
     assert!(
         defaults.display_formulas,
@@ -617,6 +618,41 @@ fn settings_v5_fixture_migrates_to_v6_with_the_longer_edge_and_disturbs_nothing(
     assert!(
         !v6.git_panel,
         "and the switch this user deliberately turned off stays off"
+    );
+}
+
+/// PIN (the Language row, 2026-08-17) — a v6 settings file migrates to v7 with
+/// the language following the operating system, and every sibling crosses
+/// untouched.
+///
+/// The fixture is non-default in all six of its older fields (§1.3 rule 1),
+/// `split_direction: "Down"` deliberately among them: it is the sibling added
+/// one version ago, and therefore the one a copy-paste of the step above would
+/// most plausibly reset while inserting its own field.
+///
+/// `System` and not `English` is the half of this worth pinning. Every build
+/// before v7 drew English and read nothing to decide that, so `English` would
+/// look right on the machine the migration runs on and be wrong on a Chinese
+/// Windows — a decision pinned into the file that its owner never made.
+#[test]
+fn settings_v6_fixture_migrates_to_v7_following_the_system_and_disturbs_nothing() {
+    let (v7, report) = read_settings(&fixture_path("settings_v6_split_down.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v7.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        v7.language,
+        LanguageV1::System,
+        "a v6 build never asked which language to speak, so the migration must          write the answer that defers rather than one that decides"
+    );
+    assert_eq!(v7.theme_mode, ThemeModeV1::Light);
+    assert!(!v7.display_formulas);
+    assert!(v7.inline_formulas);
+    assert_eq!(v7.default_profile, "gitbash");
+    assert!(!v7.git_panel);
+    assert_eq!(
+        v7.split_direction,
+        SplitDirectionV1::Down,
+        "v6→v7 is structural: every sibling crosses untouched"
     );
 }
 

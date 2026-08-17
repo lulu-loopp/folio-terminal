@@ -12,11 +12,18 @@ use serde::{Deserialize, Serialize};
 /// Current `schema_version` for `settings.json`.
 ///
 /// v2 adds `display_formulas`, v3 adds `inline_formulas`, v4 adds
-/// `default_profile`, v5 adds `git_panel`, v6 adds `split_direction`. §2's
-/// "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is satisfied the way §1.3
-/// intends it to be: each field arrives in the same change that gives it a
-/// reader, not ahead of one.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 6;
+/// `default_profile`, v5 adds `git_panel`, v6 adds `split_direction`, v7 adds
+/// `language`. §2's "只收录已经在 DESIGN/M2 文档里落定的用户可见项" is satisfied
+/// the way §1.3 intends it to be: each field arrives in the same change that
+/// gives it a reader, not ahead of one.
+///
+/// **v7 carries `language` alone**, and that is the ruling rather than an
+/// oversight: the Settings block has three fields queued behind it — a font, and
+/// the PSReadLine invitation's asked/declined/installed bit — and neither has a
+/// row to read it yet, so writing them here now would be §2's own "只写字段 = 死
+/// 规格" mistake in the same change that quotes it. They join this version if
+/// they land before it is committed, and take v8 if they do not.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 7;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -30,16 +37,17 @@ pub const SETTINGS_SCHEMA_VERSION: u32 = 6;
 /// gone" already goes down instead of through a second one.
 pub const DEFAULT_PROFILE_UNSET: &str = "";
 
-/// `settings.json` v6 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v7 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 6,
+///   "schema_version": 7,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
 ///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
 ///   "git_panel": true | false,
-///   "split_direction": "Auto" | "Right" | "Down"
+///   "split_direction": "Auto" | "Right" | "Down",
+///   "language": "System" | "English" | "Chinese"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +118,27 @@ pub struct SettingsV1 {
     /// before there was a question, and a setting that arrives having changed
     /// something is a setting that broke a habit to announce itself.
     pub split_direction: SplitDirectionV1,
+    /// Which language the window's own words are drawn in (user ruling,
+    /// 2026-08-10; shipped 2026-08-17).
+    ///
+    /// **The mode, never the resolved language** — `ThemeModeV1`'s rule, and it
+    /// is the same rule because it is the same shape of question. Someone who
+    /// picks `System` is saying "ask Windows", and a file that recorded
+    /// `Chinese` instead would freeze the Windows they had that day: switch the
+    /// OS to English later and Folio would still come up Chinese, with nothing
+    /// in the file to say the user had never asked for that.
+    ///
+    /// It lives here rather than in `session.json` for the reason `theme_mode`
+    /// does: a language is a preference a person holds about a program, not a
+    /// shape this one window happened to be left in. (`cursor_style` and
+    /// `tab_layout` are in the session file, and that is history rather than a
+    /// pattern to follow.)
+    ///
+    /// **Read exactly once, at startup.** The window's widths are measured and
+    /// cached, and there is no language revision to invalidate them with — see
+    /// `bt_app::i18n`, which argues it at length and owns the row's promise that
+    /// a change applies at the next start.
+    pub language: LanguageV1,
 }
 
 impl Default for SettingsV1 {
@@ -122,8 +151,23 @@ impl Default for SettingsV1 {
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),
             git_panel: true,
             split_direction: SplitDirectionV1::default(),
+            language: LanguageV1::default(),
         }
     }
+}
+
+/// Which language the interface is written in — `docs/DESIGN.md` §7.1.6c-3.
+///
+/// Three values, of which one is not a language: `System` is the answer "ask the
+/// operating system", stored as itself so that it goes on meaning that. The two
+/// named ones are the two columns `bt_app::i18n`'s table has; a third language
+/// is a fourth variant here and a third literal per arm there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LanguageV1 {
+    #[default]
+    System,
+    English,
+    Chinese,
 }
 
 /// Which way a direction-less split cuts — `docs/DESIGN.md` §7.1.6.
@@ -197,6 +241,37 @@ mod tests {
         assert_eq!(defaults.split_direction, SplitDirectionV1::Auto);
         let wire = serde_json::to_value(&defaults).unwrap();
         assert_eq!(wire["split_direction"], serde_json::Value::from("Auto"));
+    }
+
+    /// PIN — a settings file that has never been asked which language to speak
+    /// answers `System`, and says so with a word.
+    ///
+    /// `System` because it is the answer every user got before the question
+    /// existed — a machine's Windows is the only thing that has ever decided
+    /// this — and a word for `default_profile`'s reason one test up: an ordinal
+    /// would go on meaning `English` the day a language is inserted above it.
+    #[test]
+    fn a_settings_file_that_was_never_asked_follows_the_operating_system() {
+        let defaults = SettingsV1::default();
+        assert_eq!(defaults.language, LanguageV1::System);
+        let wire = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(wire["language"], serde_json::Value::from("System"));
+    }
+
+    /// PIN — every language survives a round trip, which is the whole of what
+    /// this field owes a reader.
+    #[test]
+    fn every_language_survives_a_round_trip_through_the_file() {
+        for language in [LanguageV1::System, LanguageV1::English, LanguageV1::Chinese] {
+            let settings = SettingsV1 {
+                language,
+                ..SettingsV1::default()
+            };
+            let text = serde_json::to_string(&settings).unwrap();
+            let read: SettingsV1 = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.language, language);
+            assert_eq!(read, settings);
+        }
     }
 
     /// PIN — the round trip, which is the whole of what this field owes a reader:

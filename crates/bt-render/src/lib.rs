@@ -28,7 +28,7 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
     Stretch, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
     Wrap,
-    cosmic_text::{FeatureTag, FontFeatures},
+    cosmic_text::{Fallback, FeatureTag, FontFeatures},
 };
 use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
@@ -7373,13 +7373,138 @@ fn cursor_shape_pixel_bounds(
     }
 }
 
+/// **The CJK half of the chrome's family stack, named and ordered** (i18n slice,
+/// 2026-08-17).
+///
+/// Until the Chinese interface shipped this was left to cosmic-text's own
+/// Windows fallback table, which asks for `Microsoft YaHei UI` and then falls
+/// through to `Segoe UI`, `Segoe UI Emoji`, `Segoe UI Symbol`. That is fine
+/// while no ideograph ever reaches the chrome and unacceptable the day every
+/// menu is written in them: the face an ideograph lands on decides its weight,
+/// its width and its vertical metrics, and "whatever the fallback table happened
+/// to find" is not a design decision, it is the absence of one. Worse, the tail
+/// of that list is a *symbol* face — a machine missing YaHei would draw the
+/// settings dialog in Segoe UI Symbol's outlines and nothing would say so.
+///
+/// So the chain is written down. It is read in this order, first face present on
+/// the machine wins, and it is the same order for every ideograph the window
+/// draws:
+///
+/// 1. `Microsoft YaHei UI` — Simplified Chinese, the UI cut, and Windows' own
+///    interface face since 7. The product's Chinese is 简体, so this is the face
+///    the design is drawn in.
+/// 2. `Microsoft YaHei` — the text cut of the same family, for a Windows that
+///    has one and not the other.
+/// 3. `DengXian` — Simplified, and the face Office installs; a machine that has
+///    had Chinese support added rather than shipped with it often has this and
+///    not YaHei.
+/// 4. `Microsoft JhengHei UI` / `Microsoft JhengHei` — Traditional. Not the
+///    product's Chinese, but every glyph it *does* have is a correct Han glyph,
+///    which is the whole question at this point in the list.
+/// 5. `Yu Gothic UI` / `Meiryo UI` — Japanese. Han unification means these carry
+///    the ideographs with Japanese regional forms; visibly a little off to a
+///    Chinese reader, and legible, which beats a box.
+/// 6. `Malgun Gothic` — Korean, same argument one step further out.
+/// 7. `SimSun` / `NSimSun` — the compatibility face every Chinese Windows has
+///    had since XP. Last because it is a serif screen face designed for 12px
+///    bitmaps and looks nothing like the rest of this window; present because it
+///    is the one that is always there.
+///
+/// Deliberately **no symbol or emoji face on this list.** An ideograph that
+/// reached one would be a mistake, and the shaper's `.notdef` box is a better
+/// report of that mistake than a plausible-looking wrong glyph.
+const CJK_FALLBACK_FAMILIES: [&str; 11] = [
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "DengXian",
+    "Microsoft JhengHei UI",
+    "Microsoft JhengHei",
+    "Yu Gothic UI",
+    "Meiryo UI",
+    "Malgun Gothic",
+    "SimSun",
+    "NSimSun",
+    "MS Gothic",
+];
+
+/// The files those families live in, in the order the families are read.
+///
+/// Files rather than families for [`CHROME_SANS_FONT_FILES`]' reason: a file name
+/// is a fact about this operating system and a family name is a claim about what
+/// is inside the file, and only one of the two can be checked by trying it.
+/// Missing entries are harmless — a machine without Korean support simply has no
+/// `malgun.ttf`, and the chain moves on.
+///
+/// They are memory-mapped rather than read, so a face nothing ever shapes costs
+/// address space and no pages. That is what lets this list grow past the three
+/// files it used to hold without giving up the "never enumerate Fonts/" rule the
+/// loader exists to keep.
+const CJK_FALLBACK_FONT_FILES: [&str; 9] = [
+    "msyh.ttc",
+    "msyhbd.ttc",
+    "msyhl.ttc",
+    "Deng.ttf",
+    "Dengb.ttf",
+    "Dengl.ttf",
+    "msjh.ttc",
+    "YuGothR.ttc",
+    "malgun.ttf",
+];
+
+/// This product's own fallback table: cosmic-text's Windows one, with the CJK
+/// scripts answered by [`CJK_FALLBACK_FAMILIES`] instead of by a one-entry guess
+/// keyed on a locale this process never sets.
+///
+/// The locale is the reason a custom table is needed rather than a longer font
+/// list. cosmic-text picks its Han face by *locale* — `zh-TW` gets JhengHei,
+/// `ja` gets Yu Gothic, everything else gets one entry, `Microsoft YaHei UI` —
+/// and this `FontSystem` is built with `"en-US"` and always will be: the locale
+/// steers language-sensitive shaping across the whole terminal grid, and
+/// switching it because the *chrome* is in Chinese would be changing how a shell's
+/// output is shaped to fix how a menu looks.
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct FolioFallback;
+
+#[cfg(target_os = "windows")]
+impl Fallback for FolioFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        // Unchanged from the platform's: this is the list reached after the
+        // script-specific one, and every CJK script now has a specific one.
+        &[
+            "Segoe UI",
+            "Segoe UI Emoji",
+            "Segoe UI Symbol",
+            "Segoe UI Historic",
+        ]
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn script_fallback(&self, script: unicode_script::Script, locale: &str) -> &[&'static str] {
+        use unicode_script::Script;
+        match script {
+            // One chain for all four, because they share the ideographs and
+            // because a mixed line — a Japanese file name in a Chinese dialog —
+            // must not change face halfway through for a character both faces
+            // have.
+            Script::Han | Script::Hiragana | Script::Katakana | Script::Hangul => {
+                &CJK_FALLBACK_FAMILIES
+            }
+            other => glyphon::cosmic_text::PlatformFallback.script_fallback(other, locale),
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn terminal_font_system() -> FontSystem {
     // Keep startup bounded: load a fixed terminal/CJK/symbol fallback chain, never enumerate
     // Fonts/. Noto Color Emoji is compiled into the executable so tests and a standalone binary
     // do not depend on their working directory or on an installer copying a sidecar font.
-    // Microsoft YaHei UI and DengXian cover Simplified Chinese on supported Windows versions;
-    // SimSun is the final compatibility face. Missing optional files are harmless.
+    // The CJK half of that chain is [`CJK_FALLBACK_FONT_FILES`], loaded in the order
+    // [`CJK_FALLBACK_FAMILIES`] names its families. Missing optional files are harmless.
     let windows = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     let fonts = std::path::PathBuf::from(windows).join("Fonts");
     let mut db = glyphon::fontdb::Database::new();
@@ -7391,21 +7516,18 @@ fn terminal_font_system() -> FontSystem {
         "consolab.ttf",
         "consolai.ttf",
         "consolaz.ttf",
-        "msyh.ttc",
-        "msyhbd.ttc",
-        "msyhl.ttc",
-        "Deng.ttf",
-        "Dengb.ttf",
-        "Dengl.ttf",
         "simsun.ttc",
         "seguiemj.ttf",
         "seguisym.ttf",
     ] {
         let _ = db.load_font_file(fonts.join(file));
     }
+    for file in CJK_FALLBACK_FONT_FILES {
+        let _ = db.load_font_file(fonts.join(file));
+    }
     db.set_monospace_family(PRIMARY_FONT_FAMILY);
     load_chrome_sans_family(&mut db, &fonts);
-    FontSystem::new_with_locale_and_db("en-US".to_owned(), db)
+    FontSystem::new_with_locale_and_db_and_fallback("en-US".to_owned(), db, FolioFallback)
 }
 
 /// The window chrome's UI face, from the mock-up's own stack
@@ -12593,6 +12715,115 @@ mod tests {
             emoji_family.contains("Emoji") || emoji_family.contains("Symbol"),
             "an emoji in a title must fall back to a face that has it, saw {emoji_family}"
         );
+    }
+
+    /// PIN (i18n slice, 2026-08-17) — **a Chinese chrome label shapes in a CJK
+    /// face this file names, and never in a symbol or emoji one.**
+    ///
+    /// **This one was green before the chain existed, and that is the point.**
+    /// cosmic-text's own Windows table looks an ideograph up by *locale*, this
+    /// `FontSystem`'s locale is `"en-US"` and always will be, and the single
+    /// entry that answers for it is `Microsoft YaHei UI` — which the machine
+    /// this was written on happens to have. Behind that one entry came
+    /// `Segoe UI`, `Segoe UI Emoji`, `Segoe UI Symbol`: a Windows without YaHei
+    /// would have drawn the whole settings dialog in a symbol face, and no test
+    /// anywhere would have said so. What is being pinned is therefore not a bug
+    /// that was fixed but a fact that was previously an accident.
+    ///
+    /// Both halves are asserted, and the second is the one that has teeth: it is
+    /// not enough that the glyphs resolve, they have to resolve *inside the
+    /// declared chain*. A face that is not on the list is the fallback table
+    /// having found something we never chose.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_chinese_chrome_label_shapes_in_a_named_cjk_face_and_never_in_a_symbol_one() {
+        // A row title, a picker item, an option and a category heading: the four
+        // shapes of Chinese this dialog actually draws.
+        const CHINESE: &str = "设置语言外观常规重启以切换";
+        let mut font_system = terminal_font_system();
+        let label = ChromeLabel {
+            text: CHINESE.to_owned(),
+            rect: [0.0, 0.0, 600.0, 34.0],
+            font_size_px: WINDOW_TAB_FONT_LOGICAL_PX,
+            color: [255, 255, 255],
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        };
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
+        let run = layouts[0]
+            .buffer
+            .layout_runs()
+            .next()
+            .expect("the label shapes");
+        let glyphs: Vec<_> = run.glyphs.iter().collect();
+        assert_eq!(
+            glyphs.len(),
+            CHINESE.chars().count(),
+            "every ideograph gets a glyph of its own"
+        );
+        for glyph in glyphs {
+            let character = CHINESE[glyph.start..glyph.end]
+                .chars()
+                .next()
+                .expect("a glyph covers at least one character");
+            assert_ne!(
+                glyph.glyph_id, 0,
+                "'{character}' came back as .notdef — no face on the chain has it"
+            );
+            let family = glyph_family(&font_system, glyph);
+            assert!(
+                !family.contains("Emoji") && !family.contains("Symbol"),
+                "'{character}' shaped in {family} — an ideograph must never reach a \
+                 symbol or emoji face"
+            );
+            assert!(
+                CJK_FALLBACK_FAMILIES.contains(&family.as_str()),
+                "'{character}' shaped in {family}, which is not on the declared \
+                 chain {CJK_FALLBACK_FAMILIES:?} — the fallback table found a face \
+                 nobody chose"
+            );
+        }
+    }
+
+    /// PIN — the chain is ordered, and the order is the design.
+    ///
+    /// Simplified Chinese before Traditional before Japanese before Korean before
+    /// the compatibility face, and no symbol or emoji face anywhere on it. This
+    /// reads the constant rather than shaping anything, because the order is a
+    /// ruling and a machine that happens to lack the first three faces would
+    /// still have to keep it.
+    #[test]
+    fn the_cjk_chain_puts_simplified_first_and_the_bitmap_serif_last() {
+        let index = |family: &str| {
+            CJK_FALLBACK_FAMILIES
+                .iter()
+                .position(|it| *it == family)
+                .unwrap_or_else(|| panic!("{family} must be on the chain"))
+        };
+        assert_eq!(
+            index("Microsoft YaHei UI"),
+            0,
+            "the product's Chinese is Simplified, so its UI face leads"
+        );
+        assert!(index("Microsoft YaHei") < index("DengXian"));
+        assert!(index("DengXian") < index("Microsoft JhengHei UI"));
+        assert!(index("Microsoft JhengHei UI") < index("Yu Gothic UI"));
+        assert!(index("Yu Gothic UI") < index("Malgun Gothic"));
+        assert!(
+            index("Malgun Gothic") < index("SimSun"),
+            "SimSun is the face that is always there, which is why it is the one \
+             reached only when nothing else was"
+        );
+        for family in CJK_FALLBACK_FAMILIES {
+            assert!(
+                !family.contains("Emoji") && !family.contains("Symbol"),
+                "{family} is on the ideograph chain and is not an ideograph face"
+            );
+        }
     }
 
     /// PIN — the active tab's title sits on the same axis its mark does.

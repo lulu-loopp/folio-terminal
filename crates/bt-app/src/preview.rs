@@ -56,11 +56,12 @@ pub const PREVIEW_HEAD_BYTES: usize = 64 * 1024;
 
 /// The notice shown once when the preview worker has stopped.
 ///
-/// Worded like [`crate::files::FILES_WORKER_STOPPED_NOTICE`] and for the same
+/// Worded like [`crate::files::files_worker_stopped_notice()`] and for the same
 /// reason: a worker dying is a feature going away, not a session ending, and the
 /// sentence has to say which half still works.
-pub const PREVIEW_WORKER_STOPPED_NOTICE: &str =
-    "File preview reading stopped; terminal input and output remain available";
+pub fn preview_worker_stopped_notice() -> &'static str {
+    crate::i18n::Text::PreviewWorkerStopped.text()
+}
 
 /// What kind of document a name claims to be.
 ///
@@ -1265,7 +1266,9 @@ fn widest_line_columns(text: &str) -> usize {
 ///
 /// The size is [`PREVIEW_HEAD_BYTES`] said the way [`format_byte_size`] says it,
 /// pinned by a test rather than left as two numbers that can drift apart.
-pub const PREVIEW_TRUNCATED_NOTICE: &str = "Read-only · 64 KB";
+pub fn preview_truncated_notice() -> &'static str {
+    crate::i18n::Text::PreviewTruncated.text()
+}
 
 /// A byte count the way a file manager says it.
 ///
@@ -1322,9 +1325,9 @@ impl PreviewRefusal {
     /// window cannot" and "this file is not there".
     pub fn notice(self) -> &'static str {
         match self {
-            Self::Type => "No preview for this file type",
-            Self::Binary => "No preview — this looks like a binary file",
-            Self::NetworkPath => "No preview — network paths are not read automatically",
+            Self::Type => crate::i18n::Text::PreviewRefusalType.text(),
+            Self::Binary => crate::i18n::Text::PreviewRefusalBinary.text(),
+            Self::NetworkPath => crate::i18n::Text::PreviewRefusalNetworkPath.text(),
             Self::Fault(fault) => fault.notice(),
         }
     }
@@ -1349,9 +1352,9 @@ impl PreviewFault {
 
     pub fn notice(self) -> &'static str {
         match self {
-            Self::PermissionDenied => "No preview — permission denied",
-            Self::NotFound => "No preview — file not found",
-            Self::Unreadable => "No preview — could not read this file",
+            Self::PermissionDenied => crate::i18n::Text::PreviewRefusalPermissionDenied.text(),
+            Self::NotFound => crate::i18n::Text::PreviewRefusalNotFound.text(),
+            Self::Unreadable => crate::i18n::Text::PreviewRefusalUnreadable.text(),
         }
     }
 }
@@ -1766,7 +1769,7 @@ impl PreviewBuffer {
             return SaveOutcome::Failed("there is no file behind this view".to_owned());
         };
         let Some(content) = self.content.as_deref() else {
-            return SaveOutcome::Failed("there is nothing to save".to_owned());
+            return SaveOutcome::Failed(crate::i18n::Text::PreviewNothingToSave.text().to_owned());
         };
         if file_mtime(&path) != self.disk_mtime {
             return SaveOutcome::Conflict;
@@ -1786,7 +1789,7 @@ impl PreviewBuffer {
     /// showed the first 64KB without saying so would be a preview quietly
     /// claiming the file ends there.
     pub fn truncation_notice(&self) -> Option<&'static str> {
-        self.truncated.then_some(PREVIEW_TRUNCATED_NOTICE)
+        self.truncated.then_some(preview_truncated_notice())
     }
 
     /// Which body this buffer is drawn as **on the surface asking**.
@@ -2212,7 +2215,9 @@ pub enum SaveOutcome {
 /// docked pane, a torn-off float — in the strip's **left** hand, where the
 /// reveal's confirmation goes, while the strip's right hand steps aside for as
 /// long as it stands.
-pub const PREVIEW_SAVED_NOTICE: &str = "Saved";
+pub fn preview_saved_notice() -> &'static str {
+    crate::i18n::Text::PreviewSaved.text()
+}
 
 /// What the window says instead of overwriting somebody else's write.
 ///
@@ -2226,7 +2231,9 @@ pub const PREVIEW_SAVED_NOTICE: &str = "Saved";
 /// become something that fits beside a path. What it must not lose is the third
 /// clause, and it has not: a user who reads only "Not saved" is the reader this
 /// wording exists for.
-pub const PREVIEW_CONFLICT_NOTICE: &str = "Not saved · changed on disk · edits kept";
+pub fn preview_conflict_notice() -> &'static str {
+    crate::i18n::Text::PreviewConflict.text()
+}
 
 /// When a file was last written, or `None` if it will not say.
 pub fn file_mtime(path: &Path) -> Option<SystemTime> {
@@ -2501,7 +2508,7 @@ pub fn disable_preview_worker_state(running: &mut bool, notice_pending: &mut boo
 
 pub fn take_preview_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     if std::mem::take(notice_pending) {
-        Some(PREVIEW_WORKER_STOPPED_NOTICE)
+        Some(preview_worker_stopped_notice())
     } else {
         None
     }
@@ -3948,7 +3955,7 @@ mod tests {
         buffer.accept(read("fn main() {}\n", false));
         assert_eq!(buffer.truncation_notice(), None);
         buffer.accept(read("fn main() {}\n", true));
-        assert_eq!(buffer.truncation_notice(), Some(PREVIEW_TRUNCATED_NOTICE));
+        assert_eq!(buffer.truncation_notice(), Some(preview_truncated_notice()));
     }
 
     /// PIN (user ruling, 2026-08-15) — **the conflict phrase still says all
@@ -3966,7 +3973,7 @@ mod tests {
     /// reasonable-looking abbreviation — and the third assertion goes red.
     #[test]
     fn the_conflict_phrase_says_what_happened_what_was_not_done_and_what_survived() {
-        let phrase = PREVIEW_CONFLICT_NOTICE;
+        let phrase = preview_conflict_notice();
         assert!(phrase.contains("Not saved"), "what was not done: {phrase}");
         assert!(
             phrase.contains("changed on disk"),
@@ -3979,7 +3986,7 @@ mod tests {
         // Short enough to share a 28px strip with a path, which is the whole
         // reason it stopped being a sentence.
         assert!(
-            phrase.chars().count() < PREVIEW_TRUNCATED_NOTICE.chars().count() * 3,
+            phrase.chars().count() < preview_truncated_notice().chars().count() * 3,
             "and it is a phrase, not a paragraph: {phrase}"
         );
     }

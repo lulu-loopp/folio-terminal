@@ -68,7 +68,9 @@ const TITLE_FONT_LOGICAL_PX: f32 = 15.0;
 const TITLE_LINE_LOGICAL_PX: f32 = 18.0;
 /// `margin: 0 0 5px`.
 const TITLE_MARGIN_BOTTOM_LOGICAL_PX: f32 = 5.0;
-pub const TITLE_TEXT: &str = "Reopen your other tabs?";
+pub fn title_text() -> &'static str {
+    crate::i18n::Text::RestoreTitle.text()
+}
 
 // ── `.restore .sub` ────────────────────────────────────────────────────────
 /// `font-size: 12.5px`.
@@ -79,14 +81,17 @@ const SUB_LINE_HEIGHT_RATIO: f32 = 1.5;
 const SUB_LINE_LOGICAL_PX: f32 = SUB_FONT_LOGICAL_PX * SUB_LINE_HEIGHT_RATIO;
 /// `margin: 0 0 14px`.
 const SUB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 14.0;
-/// The paragraph, word for word (mock-up line 2227).
+/// The paragraph (mock-up line 2227, less its closing aside).
 ///
-/// The sentence is the design: it promises the *folders* and refuses the
-/// *output* in the same breath, which is 「不存输出历史」 stated as a courtesy
-/// instead of an apology. It wraps, so it is drawn as lines — see [`wrap`].
-pub const SUB_TEXT: &str = "These were open when you last closed Folio. \
-They come back in the folders you left them, as new shells — the output is not \
-ours to keep.";
+/// **It states what happens and stops** (user ruling, 2026-08-17). The mock-up's
+/// line went on "— the output is not ours to keep", and that clause is the
+/// product talking about itself in the first person to excuse something it is
+/// not doing; "as new shells" has already told the reader the output is gone.
+/// It wraps, so it is drawn as lines — see [`wrap`], which had to learn how
+/// Chinese breaks before this line could be shown in it.
+pub fn sub_text() -> &'static str {
+    crate::i18n::Text::RestoreSub.text()
+}
 
 // ── `.restore-list` ────────────────────────────────────────────────────────
 /// `margin: 0 0 16px`.
@@ -144,8 +149,12 @@ const BUTTON_PRIMARY_HOVER_BRIGHTNESS: f32 = 1.07;
 /// `.btn.primary { color: #fff }` — a literal in the design rather than one of
 /// its variables, and opaque, so it lands as written.
 const BUTTON_PRIMARY_INK: [u8; 3] = [0xff, 0xff, 0xff];
-pub const DECLINE_TEXT: &str = "No thanks";
-pub const RESTORE_TEXT: &str = "Restore";
+pub fn decline_text() -> &'static str {
+    crate::i18n::Text::RestoreDecline.text()
+}
+pub fn restore_text() -> &'static str {
+    crate::i18n::Text::RestoreAccept.text()
+}
 
 /// What a press on the prompt asks the process to do.
 ///
@@ -363,12 +372,12 @@ pub struct RestoreContent {
     /// ones are already open behind this — you answered for them when you
     /// pinned them" (mock-up 2222-2224).
     pub rows: Vec<RestoreRow>,
-    /// [`SUB_TEXT`], already broken to lines that fit [`content_width`]. See
+    /// [`sub_text()`], already broken to lines that fit [`content_width`]. See
     /// [`wrap`].
     pub sub_lines: Vec<String>,
-    /// [`DECLINE_TEXT`] at [`BUTTON_FONT_LOGICAL_PX`] × scale.
+    /// [`decline_text()`] at [`BUTTON_FONT_LOGICAL_PX`] × scale.
     pub decline_text_width: f32,
-    /// [`RESTORE_TEXT`] at the same size.
+    /// [`restore_text()`] at the same size.
     pub restore_text_width: f32,
 }
 
@@ -393,31 +402,205 @@ fn dialog_width(surface_width: f32, scale: f32) -> f32 {
 /// Break `text` into lines no wider than `max_width`, measuring with the
 /// caller's own font.
 ///
-/// Greedy over whitespace, which is what CSS `overflow-wrap: normal` does: a
-/// word that cannot fit alone gets a line of its own and overruns it, because
-/// the alternative — breaking inside a word — is a thing the design never asked
-/// for and would put half a path on each of two lines.
+/// Greedy over [`break_pieces`], which is what CSS `overflow-wrap: normal` does
+/// in a browser that knows about CJK: a Latin word that cannot fit alone gets a
+/// line of its own and overruns it, because the alternative — breaking inside a
+/// word — is a thing the design never asked for and would put half a path on
+/// each of two lines; a run of ideographs breaks between any two of them,
+/// because that is where Chinese has its opportunities and it has no others.
+///
+/// The whitespace that separated two pieces is put back when they end up on one
+/// line and dropped when they do not, which is why this joins with a space
+/// rather than slicing the original: a line must not end in the space that
+/// happened to precede the word that did not fit.
 #[must_use]
 pub fn wrap(text: &str, max_width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
-    for word in text.split_whitespace() {
+    for piece in break_pieces(text) {
         if line.is_empty() {
-            line.push_str(word);
+            line.push_str(piece.text);
             continue;
         }
-        let candidate = format!("{line} {word}");
+        let candidate = if piece.space_before {
+            format!("{line} {}", piece.text)
+        } else {
+            format!("{line}{}", piece.text)
+        };
         if measure(&candidate) <= max_width {
             line = candidate;
         } else {
             lines.push(std::mem::take(&mut line));
-            line.push_str(word);
+            line.push_str(piece.text);
         }
     }
     if !line.is_empty() {
         lines.push(line);
     }
     lines
+}
+
+/// One atom of the paragraph, and whether a space stood in front of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BreakPiece<'a> {
+    text: &'a str,
+    space_before: bool,
+}
+
+/// Cut `text` into the smallest runs a line may end after.
+///
+/// **Whitespace first, then inside each word.** The first cut is the one this
+/// function has always made and is the whole of what English needs. The second
+/// exists because Chinese has no spaces at all: `SUB_TEXT` in Chinese is one
+/// forty-character "word", and a wrapper that only knew about spaces would draw
+/// it as a single line running off both edges of a 400px dialog. That is the one
+/// place in the whole string table where translation is not enough and the
+/// rendering path itself has to learn something (§A15 of the string inventory
+/// flagged it as such before the words existed).
+///
+/// **A character-class rule, not UAX#14.** The real algorithm has thirty-odd
+/// classes, a pair table and tailoring, and it exists to serve arbitrary text in
+/// any script; what is being wrapped here is one paragraph of this product's own
+/// prose, in two languages, at one measure. Three rules cover it, and each is
+/// listed because a rule that is not written down is a rule the next person
+/// deletes:
+///
+/// 1. **Break between two adjacent characters when either is CJK.** Ideographs,
+///    kana and Hangul are written without spaces and a line may end after any of
+///    them; the Latin/CJK boundary is a break opportunity too, so `Folio时` may
+///    split even though nothing separates them.
+/// 2. **Never break *before* closing punctuation** — `，。、！？；：）》」』` and
+///    their Latin equivalents. A line that began with `。` would be the single
+///    most obviously wrong thing this could do.
+/// 3. **Never break *after* opening punctuation** — `（《「『` and `([{`. The
+///    mirror of rule 2, and it is a separate rule rather than a symmetry because
+///    the two sets are not each other's mirror image in Unicode.
+///
+/// What is knowingly given up: no line-break class for the numeric and unit
+/// runs (`64 KB` is protected only by having a space in it, as it is in
+/// English), no tailoring for the two Chinese conventions about `·`, and no
+/// hyphenation in either language. None of the three is reachable from the four
+/// sentences this function actually wraps.
+fn break_pieces(text: &str) -> Vec<BreakPiece<'_>> {
+    let mut pieces = Vec::new();
+    for (index, word) in text.split_whitespace().enumerate() {
+        let mut start = 0usize;
+        let mut previous: Option<char> = None;
+        for (offset, character) in word.char_indices() {
+            if let Some(previous) = previous
+                && breaks_between(previous, character)
+            {
+                pieces.push(BreakPiece {
+                    text: &word[start..offset],
+                    space_before: index > 0 && start == 0,
+                });
+                start = offset;
+            }
+            previous = Some(character);
+        }
+        pieces.push(BreakPiece {
+            text: &word[start..],
+            space_before: index > 0 && start == 0,
+        });
+    }
+    pieces
+}
+
+/// Whether a line may end between these two characters — see [`break_pieces`]
+/// for the three rules and for what they deliberately leave out.
+fn breaks_between(before: char, after: char) -> bool {
+    if !is_cjk(before) && !is_cjk(after) {
+        return false;
+    }
+    !no_break_before(after) && !no_break_after(before)
+}
+
+/// The scripts written without spaces, plus the punctuation that belongs to
+/// them.
+///
+/// The ranges are blocks rather than a property lookup, which is the same trade
+/// `bt-unicode` makes for width: the answer only has to be right for text this
+/// product writes, and every one of these blocks is unambiguous.
+fn is_cjk(character: char) -> bool {
+    matches!(character,
+        '\u{1100}'..='\u{11ff}'      // Hangul Jamo
+        | '\u{2e80}'..='\u{2eff}'    // CJK radicals
+        | '\u{3000}'..='\u{303f}'    // CJK symbols and punctuation
+        | '\u{3040}'..='\u{30ff}'    // Hiragana, Katakana
+        | '\u{3130}'..='\u{318f}'    // Hangul compatibility jamo
+        | '\u{3400}'..='\u{4dbf}'    // CJK extension A
+        | '\u{4e00}'..='\u{9fff}'    // CJK unified ideographs
+        | '\u{a960}'..='\u{a97f}'    // Hangul jamo extended A
+        | '\u{ac00}'..='\u{d7ff}'    // Hangul syllables
+        | '\u{f900}'..='\u{faff}'    // CJK compatibility ideographs
+        | '\u{fe30}'..='\u{fe4f}'    // CJK compatibility forms
+        | '\u{ff00}'..='\u{ff60}'    // Fullwidth forms
+        | '\u{ffe0}'..='\u{ffe6}'    // Fullwidth signs
+        | '\u{20000}'..='\u{3ffff}'  // CJK extensions B and beyond
+    )
+}
+
+/// Punctuation a line may never begin with.
+fn no_break_before(character: char) -> bool {
+    matches!(
+        character,
+        '，' | '。'
+            | '、'
+            | '！'
+            | '？'
+            | '；'
+            | '：'
+            | '·'
+            | '…'
+            | '‥'
+            | '）'
+            | '〕'
+            | '】'
+            | '》'
+            | '〉'
+            | '」'
+            | '』'
+            | '〗'
+            | '〙'
+            | '〛'
+            | '〞'
+            | '＂'
+            | '％'
+            | '℃'
+            | 'ー'
+            | '～'
+            | '〜'
+            | ','
+            | '.'
+            | '!'
+            | '?'
+            | ';'
+            | ':'
+            | ')'
+            | ']'
+            | '}'
+            | '%'
+    )
+}
+
+/// Punctuation a line may never end with.
+fn no_break_after(character: char) -> bool {
+    matches!(
+        character,
+        '（' | '〔'
+            | '【'
+            | '《'
+            | '〈'
+            | '「'
+            | '『'
+            | '〖'
+            | '〘'
+            | '〚'
+            | '〝'
+            | '('
+            | '['
+            | '{'
+    )
 }
 
 /// One row's boxes, and the text that goes in them.
@@ -730,7 +913,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
     );
 
     labels.push(ChromeLabel {
-        text: TITLE_TEXT.to_owned(),
+        text: title_text().to_owned(),
         rect: layout.title,
         font_size_px: px(TITLE_FONT_LOGICAL_PX),
         color: palette.dialog_title_text,
@@ -824,7 +1007,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
         &mut quads,
         &mut labels,
         layout.decline,
-        DECLINE_TEXT,
+        decline_text(),
         false,
         hover == Some(RestoreTarget::Decline),
         scale,
@@ -835,7 +1018,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
         &mut quads,
         &mut labels,
         layout.restore,
-        RESTORE_TEXT,
+        restore_text(),
         true,
         hover == Some(RestoreTarget::Restore),
         scale,
@@ -1747,7 +1930,7 @@ mod tests {
         assert_eq!(TITLE_FONT_LOGICAL_PX, 15.0, ".restore h1 font-size: 15px");
         assert_eq!(TITLE_LINE_LOGICAL_PX, 18.0, "the 15px line box");
         assert_eq!(TITLE_MARGIN_BOTTOM_LOGICAL_PX, 5.0, "margin: 0 0 5px");
-        assert_eq!(TITLE_TEXT, "Reopen your other tabs?");
+        assert_eq!(title_text(), "Reopen your other tabs?");
 
         assert_eq!(SUB_FONT_LOGICAL_PX, 12.5, ".sub font-size: 12.5px");
         assert_eq!(SUB_LINE_HEIGHT_RATIO, 1.5, ".sub line-height: 1.5");
@@ -1791,12 +1974,12 @@ mod tests {
             [0xff, 0xff, 0xff],
             ".btn.primary {{ color: #fff }}"
         );
-        assert_eq!(DECLINE_TEXT, "No thanks");
-        assert_eq!(RESTORE_TEXT, "Restore");
+        assert_eq!(decline_text(), "No thanks");
+        assert_eq!(restore_text(), "Restore");
         assert_eq!(
-            SUB_TEXT,
+            sub_text(),
             "These were open when you last closed Folio. They come back \
-in the folders you left them, as new shells — the output is not ours to keep."
+in the folders you left them, as new shells."
         );
     }
 
@@ -2280,9 +2463,115 @@ in the folders you left them, as new shells — the output is not ours to keep."
         assert_eq!(stranger.mark, PROFILES[0].mark);
     }
 
+    /// PIN (i18n slice, 2026-08-17) — **Chinese wraps, and it wraps between
+    /// ideographs.**
+    ///
+    /// Red gate: this paragraph in Chinese contains exactly four spaces and is
+    /// forty characters long, so the wrapper that only knew about whitespace
+    /// returned it as one line four hundred units wide and drew it straight off
+    /// both edges of a 400px dialog. Every assertion below fails against that
+    /// wrapper.
+    ///
+    /// The ruler is ten units a character so the arithmetic is visible: at 100
+    /// units a line holds ten characters, and the interesting question is only
+    /// ever *where* the tenth one ends.
+    #[test]
+    fn a_chinese_paragraph_breaks_between_ideographs_and_never_onto_a_full_stop() {
+        let ruler = |text: &str| text.chars().count() as f32 * 10.0;
+
+        let lines = wrap("重新打开你的其他标签", 40.0, ruler);
+        assert_eq!(
+            lines,
+            vec!["重新打开", "你的其他", "标签"],
+            "a run of ideographs breaks between any two of them"
+        );
+
+        // Rule 2: no line may begin with closing punctuation. 签 and 。 are one
+        // atom, so the greedy fill stops six characters in rather than putting a
+        // lone full stop at the head of the second line.
+        let lines = wrap("重新打开你的标签。", 60.0, ruler);
+        assert_eq!(
+            lines,
+            vec!["重新打开你的", "标签。"],
+            "the full stop stays with the character it follows"
+        );
+        for line in &lines {
+            assert!(
+                !line.starts_with(['。', '，', '、', '！', '？']),
+                "{line:?} begins with punctuation that has nothing to close"
+            );
+        }
+
+        // Rule 3: no line may end with opening punctuation.
+        let lines = wrap("先看这个（新建标签）好吗", 50.0, ruler);
+        for line in &lines {
+            assert!(
+                !line.ends_with(['（', '《', '「', '『']),
+                "{line:?} ends with punctuation whose subject is on the next line"
+            );
+        }
+
+        // Nothing is lost and nothing is invented: the concatenation is the
+        // paragraph again, because a Chinese break inserts no space.
+        let paragraph = crate::i18n::Text::RestoreSub.in_lang(crate::i18n::Lang::Chinese);
+        let lines = wrap(paragraph, 260.0, ruler);
+        assert!(
+            lines.len() > 1,
+            "the restore prompt's own sentence wraps at the dialog's measure"
+        );
+        for line in &lines {
+            assert!(
+                ruler(line) <= 260.0,
+                "{line:?} is {} wide and the box is 260",
+                ruler(line)
+            );
+        }
+        let rejoined: String = lines
+            .iter()
+            .flat_map(|line| line.chars())
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let expected: String = paragraph
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert_eq!(
+            rejoined, expected,
+            "wrapping loses no character and adds none"
+        );
+    }
+
+    /// PIN — a Latin word is still atomic, even standing next to Chinese.
+    ///
+    /// The failure this guards is the over-eager fix: a rule that broke wherever
+    /// the script changed would also break `Folio` in half the moment it was
+    /// long enough to matter, and the product's own name arriving as `Fol` /
+    /// `io` is worse than the line it was trying to fit.
+    #[test]
+    fn a_latin_word_beside_chinese_is_still_broken_only_at_its_edges() {
+        let ruler = |text: &str| text.chars().count() as f32 * 10.0;
+        let lines = wrap("重启Folio以切换", 50.0, ruler);
+        assert_eq!(
+            lines,
+            vec!["重启", "Folio", "以切换"],
+            "the name moves to a line of its own rather than being cut"
+        );
+        for line in &lines {
+            assert!(
+                !line.contains("Fol") || line.contains("Folio"),
+                "{line:?} carries a fragment of a Latin word"
+            );
+        }
+    }
+
     /// PIN — the paragraph breaks at spaces and only at spaces, greedily, which
     /// is what `overflow-wrap: normal` does. Measured with a ruler of exactly
     /// ten units a character so the breaks are arithmetic rather than a font.
+    ///
+    /// **Unchanged by the CJK pass**, which is the half of that pass worth
+    /// pinning here: English has no break opportunity inside a word, so every
+    /// line below is the line this function drew before it had ever seen an
+    /// ideograph.
     #[test]
     fn the_paragraph_breaks_where_the_words_run_out() {
         let ruler = |text: &str| text.chars().count() as f32 * 10.0;
@@ -2298,18 +2587,18 @@ in the folders you left them, as new shells — the output is not ours to keep."
         );
         assert_eq!(wrap("", 100.0, ruler), Vec::<String>::new());
         assert_eq!(
-            wrap(SUB_TEXT, 4000.0, ruler).len(),
+            wrap(sub_text(), 4000.0, ruler).len(),
             1,
             "a wide enough box takes it whole"
         );
         // And the sentence really is three lines at the mock-up's own width:
         // 354 logical px at 12.5px, which this ruler stands in for by measuring
         // the same words the browser did.
-        let lines = wrap(SUB_TEXT, 530.0, ruler);
+        let lines = wrap(sub_text(), 530.0, ruler);
         assert!(lines.len() > 1, "at a realistic width it wraps");
         assert_eq!(
             lines.join(" "),
-            SUB_TEXT,
+            sub_text(),
             "wrapping loses no word and adds none"
         );
     }
@@ -2335,7 +2624,7 @@ in the folders you left them, as new shells — the output is not ours to keep."
                 .unwrap_or_else(|| panic!("the prompt says {text:?}"))
         };
 
-        let title = label(TITLE_TEXT);
+        let title = label(title_text());
         assert_eq!(title.color, palette.dialog_title_text, "--ink over --win");
         assert_eq!(title.font_size_px, TITLE_FONT_LOGICAL_PX);
         assert_eq!(
@@ -2399,7 +2688,7 @@ in the folders you left them, as new shells — the output is not ours to keep."
         let restore = rest
             .labels
             .iter()
-            .find(|label| label.text == RESTORE_TEXT)
+            .find(|label| label.text == restore_text())
             .expect("the primary button is named");
         assert_eq!(
             restore.color, BUTTON_PRIMARY_INK,
@@ -2409,7 +2698,7 @@ in the folders you left them, as new shells — the output is not ours to keep."
         let decline = rest
             .labels
             .iter()
-            .find(|label| label.text == DECLINE_TEXT)
+            .find(|label| label.text == decline_text())
             .expect("the plain button is named");
         assert_eq!(
             decline.color, palette.dialog_title_text,

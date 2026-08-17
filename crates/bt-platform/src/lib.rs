@@ -187,13 +187,14 @@ mod windows_impl {
             atomic::{AtomicI32, Ordering},
         },
     };
-    use windows::core::{HRESULT, IUnknown, Interface, PCWSTR};
+    use windows::core::{HRESULT, IUnknown, Interface, PCWSTR, PWSTR};
 
     use windows::Win32::{
         Foundation::{
             COLORREF, ERROR_CANCELLED, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM,
             LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError, WIN32_ERROR, WPARAM,
         },
+        Globalization::{GetUserDefaultUILanguage, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME},
         Graphics::DirectComposition::{
             DCompositionCreateDevice3, IDCompositionDesktopDevice, IDCompositionTarget,
             IDCompositionVisual,
@@ -1845,6 +1846,63 @@ mod windows_impl {
         Ok(())
     }
 
+    /// The BCP 47 tag Windows would write this user's *interface* in, e.g.
+    /// `"zh-Hans-CN"`, `"en-US"`, `"ja-JP"`.
+    ///
+    /// **The UI language and deliberately not the locale.** `GetUserDefaultLocaleName`
+    /// answers a different question — which calendar, which decimal point, which
+    /// sort order — and on a great many machines the two disagree: a Chinese
+    /// developer running an English Windows has `zh-CN` formats and an `en-US`
+    /// shell, and a product that read the locale would put its menus in a language
+    /// that user deliberately did not install. What "System" means in the Language
+    /// row is *the language the rest of your Windows is in*, and this is the call
+    /// that answers it.
+    ///
+    /// Preferred-languages first because that is the ordered list the user
+    /// actually edits in Settings, and it comes back as a name rather than as a
+    /// LANGID — no table of 16-bit numbers to keep. [`GetUserDefaultUILanguage`]
+    /// is the floor under it: it cannot fail, and the only two ids this product
+    /// has to tell apart are the Chinese ones, whose primary language is
+    /// `LANG_CHINESE = 0x04`. A machine that answered neither would be read as
+    /// English, which is what the source language is.
+    #[must_use]
+    pub fn os_ui_language() -> String {
+        let mut count = 0u32;
+        let mut length = 0u32;
+        if unsafe { GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut length) }
+            .is_ok()
+            && length > 0
+        {
+            let mut buffer = vec![0u16; length as usize];
+            if unsafe {
+                GetUserPreferredUILanguages(
+                    MUI_LANGUAGE_NAME,
+                    &mut count,
+                    Some(PWSTR(buffer.as_mut_ptr())),
+                    &mut length,
+                )
+            }
+            .is_ok()
+                && count > 0
+            {
+                // A `MULTI_SZ`: the first NUL ends the first — the preferred — tag.
+                let first: Vec<u16> = buffer.into_iter().take_while(|unit| *unit != 0).collect();
+                if !first.is_empty() {
+                    return String::from_utf16_lossy(&first);
+                }
+            }
+        }
+        // LANGID floor. `0x04` is `LANG_CHINESE`; the sub-language distinguishes
+        // Simplified from Traditional, and neither this crate nor its caller has
+        // to know which, because both are `zh`.
+        let langid = unsafe { GetUserDefaultUILanguage() };
+        if langid & 0x3ff == 0x04 {
+            "zh".to_owned()
+        } else {
+            "en".to_owned()
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
@@ -2062,7 +2120,7 @@ pub use windows_impl::{
     Compositor, CustomWindowFrame, FolderPicker, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
     client_area_animation_enabled, clipboard_text, get_dpi_for_window, get_window_rect,
     get_work_area, install_window_class_background, is_window_minimized, open_local_file,
-    open_local_path, request_window_close, reveal_in_explorer, set_clipboard_text,
+    open_local_path, os_ui_language, request_window_close, reveal_in_explorer, set_clipboard_text,
     set_window_outer_rect, shell_execute, wheel_scroll_amount,
 };
 

@@ -1,0 +1,9 @@
+{
+  "theme_mode": "Light",
+  "display_formulas": false,
+  "inline_formulas": true,
+  "default_profile": "gitbash",
+  "git_panel": false,
+  "split_direction": "Down",
+  "schema_version": 6
+}

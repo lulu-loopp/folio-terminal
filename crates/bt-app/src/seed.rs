@@ -257,11 +257,11 @@ pub fn ago_label(at: SystemTime, now: SystemTime) -> String {
     // closest true thing we can say about it.
     let minutes = now.duration_since(at).unwrap_or(Duration::ZERO).as_secs() / 60;
     if minutes < 1 {
-        "just now".to_owned()
+        crate::i18n::ago_just_now()
     } else if minutes < 60 {
-        format!("{minutes}m ago")
+        crate::i18n::ago_minutes(minutes)
     } else {
-        format!("{}h ago", minutes / 60)
+        crate::i18n::ago_hours(minutes / 60)
     }
 }
 

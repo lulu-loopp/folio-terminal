@@ -6015,7 +6015,7 @@ pub fn build_chrome_for_tabs(
                     // same on screen — and the second is the thing the rule
                     // exists to forbid. So it says what it is, in its own body,
                     // in the same quiet ink an empty preview uses.
-                    SeatKind::Placeholder => Some(PLACEHOLDER_SEAT_NOTICE),
+                    SeatKind::Placeholder => Some(placeholder_seat_notice()),
                     SeatKind::Files => files_notice.as_deref(),
                     SeatKind::Terminal => None,
                 };
@@ -7666,7 +7666,7 @@ fn rail_chrome(
         let pad_x = RAIL_LABEL_PADDING_X_LOGICAL_PX * scale;
         labels.push(ChromeLabel {
             rect: [label[0] + pad_x, label[1], label[2] - pad_x, label[3]],
-            text: "Tabs".to_owned(),
+            text: crate::i18n::Text::RailTabs.text().to_owned(),
             font_size_px: RAIL_LABEL_FONT_LOGICAL_PX * scale,
             color: palette.title_text_muted,
             align_right: false,
@@ -8311,7 +8311,7 @@ fn rail_chrome(
     let words_left = plus_slot_left + mark_size + RAIL_TAB_GAP_LOGICAL_PX * scale;
     if text > 0.0 && words_left < geometry.new_tab[2] {
         labels.push(ChromeLabel {
-            text: "New tab".to_owned(),
+            text: crate::i18n::Text::RailNewTab.text().to_owned(),
             rect: [
                 words_left,
                 geometry.new_tab[1],
@@ -8590,7 +8590,9 @@ pub(crate) fn seat_caption<'a>(
 /// It names the cause rather than apologising, because the cause is the only
 /// actionable thing in it: the tree came off disk carrying a kind this binary has
 /// no code for, which is what a session written by a newer build looks like.
-pub(crate) const PLACEHOLDER_SEAT_NOTICE: &str = "This pane was saved by a newer version of Folio";
+pub(crate) fn placeholder_seat_notice() -> &'static str {
+    crate::i18n::Text::PlaceholderSeatNotice.text()
+}
 
 // ── the file tree's own numbers, `.files-tree` and `.frow` (mock-up 774-799) ──
 //
@@ -11781,10 +11783,10 @@ fn clipped(quad: OverlayQuad, clip: [f32; 4]) -> Option<OverlayQuad> {
 
 fn seat_title(kind: SeatKind) -> &'static str {
     match kind {
-        SeatKind::Terminal => "Terminal",
-        SeatKind::Files => "Files",
-        SeatKind::Preview => "Preview",
-        SeatKind::Placeholder => "Unavailable",
+        SeatKind::Terminal => crate::i18n::Text::SeatTerminal.text(),
+        SeatKind::Files => crate::i18n::Text::SeatFiles.text(),
+        SeatKind::Preview => crate::i18n::Text::SeatPreview.text(),
+        SeatKind::Placeholder => crate::i18n::Text::SeatUnavailable.text(),
     }
 }
 
@@ -13112,7 +13114,7 @@ mod tests {
                 .labels
                 .into_iter()
                 .map(|label| label.text)
-                .filter(|text| text.starts_with("Loading ") || text == PLACEHOLDER_SEAT_NOTICE)
+                .filter(|text| text.starts_with("Loading ") || text == placeholder_seat_notice())
                 .collect::<Vec<_>>()
         };
 
@@ -22020,7 +22022,7 @@ mod tests {
         let notice = parts
             .labels
             .iter()
-            .find(|label| label.text == PLACEHOLDER_SEAT_NOTICE)
+            .find(|label| label.text == placeholder_seat_notice())
             .expect("T227: the degradation has to be visible");
         assert!(
             notice.align_center,
@@ -22047,7 +22049,7 @@ mod tests {
             lone_parts
                 .labels
                 .iter()
-                .any(|label| label.text == PLACEHOLDER_SEAT_NOTICE),
+                .any(|label| label.text == placeholder_seat_notice()),
             "the pane that cannot say what it is, is the one that has to say it"
         );
     }

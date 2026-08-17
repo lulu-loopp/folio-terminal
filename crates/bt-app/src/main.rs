@@ -20,6 +20,7 @@ mod git;
 mod git_graph;
 mod git_panel;
 mod highlight;
+mod i18n;
 mod input;
 mod marks;
 mod peek_strip;
@@ -145,8 +146,12 @@ const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const HYPERLINK_HOVER_DELAY: Duration = Duration::from_millis(300);
-const MATH_WORKER_STOPPED_NOTICE: &str =
-    "Formula rendering stopped; terminal input and output remain available";
+/// See [`i18n::Text::MathWorkerStopped`] — one of three sentences deliberately
+/// cut to one pattern, because a worker dying is a feature going away and all
+/// three have to say which half still works.
+fn math_worker_stopped_notice() -> &'static str {
+    i18n::Text::MathWorkerStopped.text()
+}
 /// What the tree says when a row it will not open is activated.
 ///
 /// **Short on purpose.** The status overlay is right-aligned into the pane's own
@@ -159,7 +164,9 @@ const MATH_WORKER_STOPPED_NOTICE: &str =
 /// The advice it might have added — that this is a terminal, and typing the
 /// name is how you run one — is left out for the same reason. It doubled the
 /// length to say something the prompt underneath is already saying.
-const FILES_PROGRAM_REFUSED_NOTICE: &str = "The files tree does not run programs";
+fn files_program_refused_notice() -> &'static str {
+    i18n::Text::FilesProgramRefused.text()
+}
 /// How long that answer stays on screen.
 ///
 /// Long enough to be read once without being in the way, and the same order as
@@ -2746,7 +2753,7 @@ impl RowActivation {
     /// said "the day the second door closes this collapses to one word without
     /// anything else moving" — and nothing else moved.
     fn open_text(&self) -> &'static str {
-        "Open preview"
+        i18n::Text::FileMenuOpenPreview.text()
     }
 }
 
@@ -3238,7 +3245,7 @@ fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> b
 
 fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     if std::mem::take(notice_pending) {
-        Some(MATH_WORKER_STOPPED_NOTICE)
+        Some(math_worker_stopped_notice())
     } else {
         None
     }
@@ -5526,28 +5533,38 @@ enum DividerGrip {
 /// the tooltip beside it says "Dock as a pane on the left" in sentence case, and
 /// storing the shouted form would make the two disagree about what the button is
 /// called.
-const FLOAT_DOCK_LABEL: &str = "DOCK";
+fn float_dock_label() -> &'static str {
+    i18n::Text::FloatDock.text()
+}
 
 /// What every folder trigger's tip says (H108) — `title="Peek files here"` on
 /// the tab's and on the pane head's alike.
-const FLOAT_TRIGGER_TIP: &str = "Peek files here";
+fn float_trigger_tip() -> &'static str {
+    i18n::Text::FloatTriggerTip.text()
+}
 
 /// What a foot says while it is confirming a reveal (B24).
-const FOOT_REVEALED_LABEL: &str = "Revealed in File Explorer";
+fn foot_revealed_label() -> &'static str {
+    i18n::Text::FilesRevealed.text()
+}
 
 /// How long that confirmation stands before the path comes back (B24) — the
 /// mock-up's own `setTimeout(…, 1300)` in `revealFolderFeedback`, which is one
 /// function serving the flyout's foot and the pane's alike.
 const FOOT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
 /// `.pv-unknown button` at rest (mock-up 4987).
-const PREVIEW_OPEN_EXTERNALLY_LABEL: &str = "Open in default app";
+fn preview_open_externally_label() -> &'static str {
+    i18n::Text::PreviewOpenExternally.text()
+}
 /// And for [`FOOT_REVEAL_FEEDBACK`] after it is pressed (mock-up 7823-7829).
 ///
 /// **1300ms, not the mock-up's 1100.** The prototype grew four of these
 /// acknowledgements at four durations — 1100, 1300, 1400, 1500 — and none of the
 /// differences was ever a decision. Ruling 6 (2026-08-12) collapses them onto
 /// the one that was reasoned about: `revealFolderFeedback`'s.
-const PREVIEW_OPENED_LABEL: &str = "Opened \u{2713}";
+fn preview_opened_label() -> &'static str {
+    i18n::Text::PreviewOpened.text()
+}
 
 /// The preview head's two measured strings and the state they were measured for.
 ///
@@ -7119,10 +7136,20 @@ impl HyperlinkHover {
         if columns == 0 {
             return None;
         }
-        let suffix = if self.blocked { " · blocked" } else { "" };
+        let suffix = if self.blocked {
+            i18n::Text::HyperlinkBlockedSuffix.text()
+        } else {
+            ""
+        };
         let suffix_len = suffix.chars().count();
         if columns <= suffix_len {
-            return Some("blocked".chars().take(columns).collect());
+            return Some(
+                i18n::Text::HyperlinkBlocked
+                    .text()
+                    .chars()
+                    .take(columns)
+                    .collect(),
+            );
         }
         let target_columns = columns - suffix_len;
         let mut status = if uri.len() > target_columns {
@@ -7357,7 +7384,7 @@ impl PreviewImageState {
     fn title(&self) -> String {
         let name = self.file_name();
         match self.native {
-            Some((width, height)) => format!("{name} \u{2014} {width}\u{00d7}{height}"),
+            Some((width, height)) => i18n::image_preview_title(&name, width, height),
             None => name,
         }
     }
@@ -7365,7 +7392,7 @@ impl PreviewImageState {
     fn message(&self) -> Option<String> {
         self.failure.clone().or_else(|| {
             (self.pending.is_some() || self.raster.is_none())
-                .then(|| format!("Loading {}\u{2026}", self.file_name()))
+                .then(|| i18n::preview_loading(&self.file_name()))
         })
     }
 
@@ -10527,8 +10554,8 @@ impl DropLanding {
     /// saying the same thing, and the first one to be believed when they drift.
     fn caption(self, source: &DragSource) -> &'static str {
         match (self, source) {
-            (Self::SeatCentre { .. }, DragSource::Pane(_)) => "Swap panes",
-            (Self::SeatCentre { .. }, DragSource::Tab(_)) => "Replace pane",
+            (Self::SeatCentre { .. }, DragSource::Pane(_)) => i18n::Text::DragSwapPanes.text(),
+            (Self::SeatCentre { .. }, DragSource::Tab(_)) => i18n::Text::DragReplacePane.text(),
             // L141/L142 — a row's centre verbs say their names for exactly the
             // reason a pane's and a tab's do: the box is the same rectangle and
             // the outcome is not. "Open in this preview" changes what a page is
@@ -13568,6 +13595,22 @@ impl Runtime {
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
         let settings_store = persist::SettingsStore::open();
+        // **The language, before anything is measured.** Every width in this
+        // window is measured from the words that go in it, and the first of
+        // those measurements happens as soon as a chrome frame is built — so the
+        // language has to be decided here, between reading the file and building
+        // anything, rather than at the first draw. `i18n::install` is a one-shot
+        // for the same reason: a second call would be a hot switch through the
+        // back door, with every cached width still measured for the language
+        // before it.
+        i18n::install(i18n::resolve(
+            match settings_store.loaded().language {
+                bt_persist::LanguageV1::System => i18n::LanguageMode::System,
+                bt_persist::LanguageV1::English => i18n::LanguageMode::English,
+                bt_persist::LanguageV1::Chinese => i18n::LanguageMode::Chinese,
+            },
+            &bt_platform::os_ui_language(),
+        ));
         // Defaults, then the file, then whatever the file could not be honoured
         // for — reported rather than repaired, because the file is the user's
         // own words and a build that silently rewrote one it could not read
@@ -14991,14 +15034,14 @@ impl Runtime {
                     // answer (G-3, [`preview::PreviewBuffer::body_notice`]).
                     (None, Some(buffer)) => {
                         if buffer.load == preview::PreviewLoad::Pending {
-                            Some(format!("Loading {}\u{2026}", buffer.name))
+                            Some(i18n::preview_loading(&buffer.name))
                         } else {
                             buffer.body_notice().map(str::to_owned)
                         }
                     }
                     // An open pane with nothing chosen invites rather than sits
                     // mute.
-                    (None, None) => Some("Click a dotted path to preview it here".to_owned()),
+                    (None, None) => Some(i18n::Text::PreviewEmptyState.text().to_owned()),
                 }?;
                 Some((seat, message))
             })
@@ -15275,14 +15318,14 @@ impl Runtime {
                     // The gear, silenced while the dialog it opens is up — the
                     // chevron's rule, for the same reason.
                     seats::ChromeTarget::Settings if self.settings.is_open() => "",
-                    seats::ChromeTarget::Settings => "Settings",
+                    seats::ChromeTarget::Settings => i18n::Text::Settings.text(),
                     // `title="Toggle sidebar"` (mock-up 2270), quoted rather than
                     // reworded: the tip is the mock-up's own text and it names the
                     // verb in both directions, which is what a toggle needs.
-                    seats::ChromeTarget::PanelToggle => "Toggle sidebar",
-                    seats::ChromeTarget::Minimize => "Minimize",
-                    seats::ChromeTarget::Maximize => "Maximize",
-                    seats::ChromeTarget::CloseWindow => "Close",
+                    seats::ChromeTarget::PanelToggle => i18n::Text::ToggleSidebar.text(),
+                    seats::ChromeTarget::Minimize => i18n::Text::Minimize.text(),
+                    seats::ChromeTarget::Maximize => i18n::Text::Maximize.text(),
+                    seats::ChromeTarget::CloseWindow => i18n::Text::CloseWindow.text(),
                     _ => "",
                 };
                 let Some(id) = tooltip_anchor_for(target) else {
@@ -15486,16 +15529,16 @@ impl Runtime {
                         // Solid pin = "it is pinned", and the tip names the verb
                         // *and* the reason, because "Unpin" alone does not
                         // explain why the close button went away (mock-up 4204).
-                        "Unpin — a pinned tab closes only after unpinning"
+                        i18n::Text::Unpin.text()
                     } else {
-                        "Pin"
+                        i18n::Text::Pin.text()
                     }
                 })
                 .unwrap_or_default()
                 .to_owned(),
             // H108: both surfaces say the same five words, because it is one
             // action wearing one glyph in two places.
-            tooltip::TooltipAnchorId::TabFiles(_) => FLOAT_TRIGGER_TIP.to_owned(),
+            tooltip::TooltipAnchorId::TabFiles(_) => float_trigger_tip().to_owned(),
             tooltip::TooltipAnchorId::TabIcon(index) => self
                 .tabs
                 .get(index)
@@ -15510,7 +15553,7 @@ impl Runtime {
                 .map(TabState::tooltip_text)
                 .unwrap_or_default(),
             tooltip::TooltipAnchorId::NewTab => new_tab_tip(self.default_profile()),
-            tooltip::TooltipAnchorId::NewTabMenu => "Choose a profile".to_owned(),
+            tooltip::TooltipAnchorId::NewTabMenu => i18n::Text::ChooseProfile.text().to_owned(),
             _ => String::new(),
         }
     }
@@ -17442,16 +17485,16 @@ impl Runtime {
         let content = restore::RestoreContent {
             rows,
             sub_lines: restore::wrap(
-                restore::SUB_TEXT,
+                restore::sub_text(),
                 restore::content_width(width, scale),
                 |text| measure(text, restore::SUB_FONT_LOGICAL_PX * scale),
             ),
             decline_text_width: measure(
-                restore::DECLINE_TEXT,
+                restore::decline_text(),
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
             restore_text_width: measure(
-                restore::RESTORE_TEXT,
+                restore::restore_text(),
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
         };
@@ -17540,6 +17583,7 @@ impl Runtime {
             inline_formulas: self.settings_store.loaded().inline_formulas,
             git_panel: self.settings_store.loaded().git_panel,
             split_direction: self.settings_store.loaded().split_direction,
+            language: self.settings_store.loaded().language,
             default_profile: self.default_profile(),
             profile_available: std::array::from_fn(|index| {
                 self.profile_programs.is_available(index)
@@ -18415,6 +18459,9 @@ impl Runtime {
         if let Some(direction) = settings::split_direction_requested(target) {
             self.apply_split_direction(direction)?;
         }
+        if let Some(language) = settings::language_requested(target) {
+            self.apply_language(language)?;
+        }
         // Both rail combos go through the one constructor: the layout choice
         // keeps the sidebar mode standing and the sidebar choice keeps the
         // layout standing, and Q190's combination rule inside `RailState`
@@ -18965,6 +19012,37 @@ impl Runtime {
         let mut settings = self.settings_store.loaded().clone();
         settings.split_direction = direction;
         Ok(self.settings_store.store(settings))
+    }
+
+    /// **The one setting whose effect is not on screen when it is chosen.**
+    ///
+    /// The file is written like every other row's — a setting that waited for a
+    /// restart to be *recorded* would be a setting that lost itself in a crash —
+    /// and then a card says so, because the alternative is a picker that visibly
+    /// moves its tick while nothing else in the window changes, which reads as a
+    /// bug rather than as a rule. [`crate::i18n`]'s header argues why the rule
+    /// exists; the card is how the user finds out about it without reading a
+    /// description they may have already scrolled past.
+    ///
+    /// Anchored to the window rather than to the dialog, which is the only choice
+    /// available: `ToastAnchor` names surfaces that outlive a modal, and a card
+    /// pinned to a dialog the user is about to dismiss would leave with it.
+    ///
+    /// Silent when the value did not change, for the reason every confirmation in
+    /// this window is: a card is a report that something happened, and pressing
+    /// the item that is already ticked is not something happening.
+    fn apply_language(&mut self, language: bt_persist::LanguageV1) -> Result<bool> {
+        let Some(notice) = language_restart_notice(self.settings_store.loaded().language, language)
+        else {
+            return Ok(false);
+        };
+        let mut settings = self.settings_store.loaded().clone();
+        settings.language = language;
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        self.toast(notice.kind, notice.anchor, None, notice.body)?;
+        Ok(true)
     }
 
     fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
@@ -20317,11 +20395,11 @@ impl Runtime {
                 .into_owned(),
         };
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
-        let saved = self.preview_save_notice(surface, now) == Some(preview::PREVIEW_SAVED_NOTICE);
+        let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
         let flash = if revealed {
-            Some(FOOT_REVEALED_LABEL)
+            Some(foot_revealed_label())
         } else if saved {
-            Some(preview::PREVIEW_SAVED_NOTICE)
+            Some(preview::preview_saved_notice())
         } else {
             None
         };
@@ -21079,9 +21157,9 @@ impl Runtime {
     fn preview_open_button_label(&self, now: Instant) -> &'static str {
         match self.preview_opened_at {
             Some(at) if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK => {
-                PREVIEW_OPENED_LABEL
+                preview_opened_label()
             }
-            _ => PREVIEW_OPEN_EXTERNALLY_LABEL,
+            _ => preview_open_externally_label(),
         }
     }
 
@@ -21575,7 +21653,7 @@ impl Runtime {
             .and_then(preview::PreviewBuffer::truncation_notice)
             .or_else(|| {
                 self.preview_save_notice(surface, now)
-                    .filter(|notice| *notice != preview::PREVIEW_SAVED_NOTICE)
+                    .filter(|notice| *notice != preview::preview_saved_notice())
             })
     }
 
@@ -21726,11 +21804,11 @@ impl Runtime {
             return Ok(());
         }
         let notice = match buffer.save() {
-            preview::SaveOutcome::Saved => preview::PREVIEW_SAVED_NOTICE.to_owned(),
-            preview::SaveOutcome::Conflict => preview::PREVIEW_CONFLICT_NOTICE.to_owned(),
+            preview::SaveOutcome::Saved => preview::preview_saved_notice().to_owned(),
+            preview::SaveOutcome::Conflict => preview::preview_conflict_notice().to_owned(),
             preview::SaveOutcome::Failed(error) => {
                 eprintln!("recoverable preview save failure: {error}");
-                format!("Not saved \u{2014} {error}")
+                i18n::not_saved(&error)
             }
         };
         self.preview_pane_mut(surface).notice = Some((notice, Instant::now()));
@@ -21747,7 +21825,7 @@ impl Runtime {
     /// is entitled to have missed.
     fn preview_save_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
         let (notice, at) = self.preview_pane(surface)?.notice.as_ref()?;
-        if notice == preview::PREVIEW_SAVED_NOTICE
+        if notice == preview::preview_saved_notice()
             && now.saturating_duration_since(*at) >= FOOT_REVEAL_FEEDBACK
         {
             return None;
@@ -21766,7 +21844,7 @@ impl Runtime {
         self.preview_panes
             .iter()
             .filter_map(|(_, pane)| pane.notice.as_ref())
-            .filter(|(notice, _)| notice == preview::PREVIEW_SAVED_NOTICE)
+            .filter(|(notice, _)| notice == preview::preview_saved_notice())
             .map(|(_, at)| *at + FOOT_REVEAL_FEEDBACK)
             .min()
     }
@@ -22949,7 +23027,7 @@ impl Runtime {
             Some(PeekCacheEntry::Failed) => {
                 if let Some(preview) = self.preview_raster_image_mut() {
                     preview.failure.get_or_insert_with(|| {
-                        "Preview failed: image could not be loaded".to_owned()
+                        i18n::Text::PreviewFailedImageLoad.text().to_owned()
                     });
                 }
                 self.renderer.set_preview_image(None);
@@ -22966,8 +23044,7 @@ impl Runtime {
             self.renderer.set_preview_image(None);
             if !self.math_worker_running {
                 if let Some(preview) = self.preview_raster_image_mut() {
-                    preview.failure =
-                        Some("Preview failed: image worker is unavailable".to_owned());
+                    preview.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
                 }
                 return;
             }
@@ -22982,7 +23059,7 @@ impl Runtime {
             {
                 self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
             } else if let Some(preview) = self.preview_raster_image_mut() {
-                preview.failure = Some("Preview failed: image worker is unavailable".to_owned());
+                preview.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
             }
             return;
         };
@@ -23007,7 +23084,7 @@ impl Runtime {
         // with the refusal this has always been.
         if body.width == 0 || body.height == 0 || native_width == 0 || native_height == 0 {
             if let Some(preview) = self.preview_raster_image_mut() {
-                preview.failure = Some("Preview failed: preview seat is too small".to_owned());
+                preview.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
             }
             self.renderer.set_preview_image(None);
             return;
@@ -23050,7 +23127,7 @@ impl Runtime {
             native_height,
         ) else {
             if let Some(preview) = self.preview_raster_image_mut() {
-                preview.failure = Some("Preview failed: preview seat is too small".to_owned());
+                preview.failure = Some(i18n::Text::PreviewFailedSeatTooSmall.text().to_owned());
             }
             self.renderer.set_preview_image(None);
             return;
@@ -23105,7 +23182,7 @@ impl Runtime {
                 preview.failure = None;
             }
         } else if let Some(preview) = self.preview_raster_image_mut() {
-            preview.failure = Some("Preview failed: image worker is unavailable".to_owned());
+            preview.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
         }
     }
 
@@ -25276,7 +25353,7 @@ impl Runtime {
             let path_box = seats::files_pane_geometry(rect, scale, segmented).foot_path;
             let room = path_box[2] - path_box[0];
             let text = if revealed {
-                FOOT_REVEALED_LABEL.to_owned()
+                foot_revealed_label().to_owned()
             } else {
                 root
             };
@@ -30387,7 +30464,7 @@ impl Runtime {
     fn float_dock_label_width(&mut self, scale: f32) -> f32 {
         let font = float::FLOAT_DOCK_FONT_LOGICAL_PX * scale;
         self.renderer.measure_chrome_label(
-            FLOAT_DOCK_LABEL,
+            float_dock_label(),
             font,
             bt_render::ChromeLabelWeight::SemiBold,
             float::FLOAT_HEAD_TRACKING_EM,
@@ -30560,7 +30637,7 @@ impl Runtime {
         let name = profiles::cwd_leaf(&root).to_uppercase();
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Float(id), now);
         let root = if revealed {
-            FOOT_REVEALED_LABEL.to_owned()
+            foot_revealed_label().to_owned()
         } else {
             root
         };
@@ -30599,7 +30676,7 @@ impl Runtime {
                 // empty by construction rather than by this frame's luck.
                 notice: "",
                 notice_width: 0.0,
-                dock_label: FLOAT_DOCK_LABEL,
+                dock_label: float_dock_label(),
                 dock_mark: marks::ChromeMark::DockLeft,
                 hover,
                 revealed,
@@ -30674,11 +30751,11 @@ impl Runtime {
         // as a consequence). "Saved" was drawn only in a docked pane's foot, and
         // a float's went to the body strip that the ruling retired — so without
         // this the word would have had nowhere left to be printed at all.
-        let saved = self.preview_save_notice(surface, now) == Some(preview::PREVIEW_SAVED_NOTICE);
+        let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
         let flash = if revealed {
-            Some(FOOT_REVEALED_LABEL)
+            Some(foot_revealed_label())
         } else if saved {
-            Some(preview::PREVIEW_SAVED_NOTICE)
+            Some(preview::preview_saved_notice())
         } else {
             None
         };
@@ -30735,7 +30812,7 @@ impl Runtime {
                 path: &foot.lead,
                 notice: &foot.notice,
                 notice_width: foot.notice_width,
-                dock_label: FLOAT_DOCK_LABEL,
+                dock_label: float_dock_label(),
                 dock_mark: marks::ChromeMark::DockRight,
                 hover,
                 revealed: foot.flashing,
@@ -31474,7 +31551,8 @@ impl Runtime {
         });
         if let Err(error) = result {
             if format!("{error:#}").contains(bt_platform::PROGRAM_REFUSED) {
-                self.files_notice = Some((FILES_PROGRAM_REFUSED_NOTICE.to_owned(), Instant::now()));
+                self.files_notice =
+                    Some((files_program_refused_notice().to_owned(), Instant::now()));
             }
             eprintln!("recoverable files row open failure: {error:#}");
             return false;
@@ -33339,7 +33417,7 @@ impl Runtime {
                 self.peek_cache
                     .insert(cache_key.clone(), PeekCacheEntry::Failed);
                 if preview_matches && let Some(preview) = self.preview_raster_image_mut() {
-                    preview.failure = Some(format!("Preview failed: {error}"));
+                    preview.failure = Some(i18n::preview_failed(&error.to_string()));
                 }
             }
         }
@@ -40559,9 +40637,7 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
                 .to_owned(),
         )
     };
-    banner_line(&format!(
-        "{requested} failed to start; using {started} instead."
-    ))
+    banner_line(&i18n::fallback_banner_text(&requested, &started))
 }
 
 /// The first line of a pane whose saved profile this build does not have —
@@ -40584,9 +40660,42 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
 /// the part that *is* ours.
 fn unknown_profile_banner(unknown: &str) -> String {
     let started = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
-    banner_line(&format!(
-        "Profile {unknown:?} is not in this build; using {started} instead."
-    ))
+    banner_line(&i18n::unknown_profile_banner_text(unknown, started))
+}
+
+/// The card a language change owes the reader, or `None` when it owes none.
+///
+/// A function rather than three lines inside [`Runtime::apply_language`] because
+/// all three of its answers are rulings and a `Runtime` cannot be built without a
+/// window: pulled out here they are testable, and what they are is worth being
+/// able to test.
+#[must_use]
+fn language_restart_notice(
+    stored: bt_persist::LanguageV1,
+    chosen: bt_persist::LanguageV1,
+) -> Option<LanguageNotice> {
+    // Silent when nothing changed, for the reason every confirmation in this
+    // window is silent then: a card reports that something happened, and pressing
+    // the item that already wears the tick is not something happening.
+    (stored != chosen).then_some(LanguageNotice {
+        // `Info` and not `Ok`: nothing succeeded, and nothing failed. It is a
+        // fact about *when* — the one thing the reader cannot see for themselves,
+        // because the window they are looking at is still in the old language.
+        kind: toast::ToastKind::Info,
+        // The window and not the dialog, which is the only choice available:
+        // `ToastAnchor` names surfaces that outlive a modal, and a card pinned to
+        // a dialog the reader is about to dismiss would leave with it.
+        anchor: toast::ToastAnchor::Window,
+        body: i18n::Text::LanguageRestartToast.text(),
+    })
+}
+
+/// What that card is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LanguageNotice {
+    kind: toast::ToastKind,
+    anchor: toast::ToastAnchor,
+    body: &'static str,
 }
 
 /// One dim, prefixed, self-terminating line — the register all of these speak
@@ -40607,7 +40716,7 @@ fn banner_line(text: &str) -> String {
 /// the *verb* first and qualifies it, so that a user who reads only the first two
 /// words has still read the truth.
 fn new_tab_tip(profile: usize) -> String {
-    format!("New tab ({})", profiles::title(profile))
+    i18n::new_tab_tip(profiles::title(profile))
 }
 
 fn resolve_title(
@@ -41621,6 +41730,41 @@ mod tests {
             "the whole word as clause"
         );
         assert_eq!(super::preedit_caret_byte(None), None);
+    }
+
+    /// PIN (the Language row, 2026-08-17) — **choosing a language raises one
+    /// quiet card on the window, and choosing the language already in force
+    /// raises none.**
+    ///
+    /// Three rulings, and each of the three is a way this could have been wrong
+    /// in a way nobody would notice for months:
+    ///
+    /// * a card at all, because this is the one setting whose effect is not on
+    ///   screen when it is chosen — the tick moves and nothing else does, which
+    ///   reads as a bug rather than as a rule;
+    /// * `Info`, because nothing succeeded and nothing failed. It is a fact about
+    ///   *when*;
+    /// * `Window`, because a card anchored to the dialog would leave with the
+    ///   dialog the reader is about to dismiss.
+    #[test]
+    fn choosing_a_new_language_says_the_window_has_to_restart_and_says_it_once() {
+        use bt_persist::LanguageV1;
+        let notice = super::language_restart_notice(LanguageV1::System, LanguageV1::Chinese)
+            .expect("a change is worth a card");
+        assert_eq!(notice.kind, toast::ToastKind::Info);
+        assert_eq!(notice.anchor, toast::ToastAnchor::Window);
+        assert_eq!(notice.body, i18n::Text::LanguageRestartToast.text());
+        assert_eq!(
+            i18n::Text::LanguageRestartToast.in_lang(i18n::Lang::Chinese),
+            "重启 Folio 以切换语言"
+        );
+        for mode in [LanguageV1::System, LanguageV1::English, LanguageV1::Chinese] {
+            assert_eq!(
+                super::language_restart_notice(mode, mode),
+                None,
+                "{mode:?} was already chosen, so nothing happened to report"
+            );
+        }
     }
 
     use super::*;
@@ -48003,7 +48147,7 @@ mod tests {
 
         assert_eq!(
             take_math_worker_notice(&mut notice_pending),
-            Some(MATH_WORKER_STOPPED_NOTICE)
+            Some(math_worker_stopped_notice())
         );
         assert!(!notice_pending);
         assert_eq!(take_math_worker_notice(&mut notice_pending), None);
@@ -48678,14 +48822,14 @@ mod tests {
             ("the startup trace title", WINDOW_TITLE),
             (
                 "a pane this build cannot draw",
-                seats::PLACEHOLDER_SEAT_NOTICE,
+                seats::placeholder_seat_notice(),
             ),
             (
                 "the settings dialog's startup row",
                 settings::SettingsRow::DefaultProfile
                     .description(settings::SettingsValues::sample()),
             ),
-            ("the restore prompt", restore::SUB_TEXT),
+            ("the restore prompt", restore::sub_text()),
             ("this terminal's own banner", &banner),
             (
                 "the TERM_PROGRAM this terminal declares",
@@ -56946,7 +57090,7 @@ mod tests {
     fn the_read_only_fact_hangs_on_the_path_foots_right_hand() {
         // ① The phrase, and the size it names.
         assert_eq!(
-            preview::PREVIEW_TRUNCATED_NOTICE,
+            preview::preview_truncated_notice(),
             format!(
                 "Read-only · {}",
                 preview::format_byte_size(preview::PREVIEW_HEAD_BYTES as u64)
@@ -56962,21 +57106,21 @@ mod tests {
                 run,
                 lead: r"C:\w\huge.txt",
                 flash: None,
-                notice: preview::PREVIEW_TRUNCATED_NOTICE,
+                notice: preview::preview_truncated_notice(),
                 cut_left: true,
                 font_px: 10.0,
                 gap_px: gap,
             },
             &mut ruler,
         );
-        assert_eq!(words.notice, preview::PREVIEW_TRUNCATED_NOTICE);
+        assert_eq!(words.notice, preview::preview_truncated_notice());
         assert_eq!(
             words.notice_box[2], run[2],
             "flush with the strip's right edge"
         );
         assert_eq!(
             words.notice_box[2] - words.notice_box[0],
-            ruler(preview::PREVIEW_TRUNCATED_NOTICE, 10.0),
+            ruler(preview::preview_truncated_notice(), 10.0),
             "and no wider than its own words"
         );
         assert_eq!(
@@ -57017,7 +57161,7 @@ mod tests {
                 run,
                 lead: long,
                 flash: None,
-                notice: preview::PREVIEW_TRUNCATED_NOTICE,
+                notice: preview::preview_truncated_notice(),
                 cut_left: true,
                 font_px: 10.0,
                 gap_px: gap,
@@ -57035,7 +57179,7 @@ mod tests {
         );
         assert_eq!(
             words.notice,
-            preview::PREVIEW_TRUNCATED_NOTICE,
+            preview::preview_truncated_notice(),
             "and the phrase is whole"
         );
 
@@ -57081,13 +57225,13 @@ mod tests {
     #[test]
     fn a_flashing_foot_gives_the_whole_strip_to_the_word_it_is_flashing() {
         let run = [0.0, 0.0, 300.0, 28.0];
-        for flash in [FOOT_REVEALED_LABEL, preview::PREVIEW_SAVED_NOTICE] {
+        for flash in [foot_revealed_label(), preview::preview_saved_notice()] {
             let words = seats::dress_foot(
                 seats::FootDress {
                     run,
                     lead: r"C:\w\huge.txt",
                     flash: Some(flash),
-                    notice: preview::PREVIEW_TRUNCATED_NOTICE,
+                    notice: preview::preview_truncated_notice(),
                     cut_left: true,
                     font_px: 10.0,
                     gap_px: 12.0,

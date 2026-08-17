@@ -114,7 +114,7 @@ const GIT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// The notice shown once when the git worker has stopped.
 ///
-/// Worded like [`crate::files::FILES_WORKER_STOPPED_NOTICE`] and for the same
+/// Worded like [`crate::files::files_worker_stopped_notice()`] and for the same
 /// reason: a worker dying is a feature going away, not a session ending, and the
 /// sentence has to say which half still works.
 pub const GIT_WORKER_STOPPED_NOTICE: &str =

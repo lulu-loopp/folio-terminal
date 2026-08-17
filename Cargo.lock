@@ -366,6 +366,7 @@ dependencies = [
  "pollster",
  "thiserror 2.0.18",
  "unicode-properties",
+ "unicode-script",
  "wgpu",
 ]
 

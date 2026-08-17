@@ -41,6 +41,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (3, migrate_settings_v3_to_v4),
     (4, migrate_settings_v4_to_v5),
     (5, migrate_settings_v5_to_v6),
+    (6, migrate_settings_v6_to_v7),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -122,6 +123,26 @@ fn migrate_settings_v5_to_v6(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(6));
         object.insert("split_direction".to_owned(), Value::from("Auto"));
+    }
+    value
+}
+
+/// v6 -> v7: which language the interface is written in, defaulted to
+/// **`System`**.
+///
+/// A third shape again, and the closest of the six to `v1_to_v2`: not a
+/// behaviour carried forward exactly, but the *only* answer that has ever been
+/// given. Every build before this one drew its own words in English and read
+/// nothing to decide that; `System` is what that silence turns out to have
+/// meant on an English Windows, and it is the answer a Chinese-Windows user
+/// would have wanted all along. Writing `English` here would look identical on
+/// the machine the migration runs on and would differ on the next one — it would
+/// pin a decision its owner never made, indistinguishable from one they had,
+/// which is exactly what `v3_to_v4` refused to do with `"pwsh"`.
+fn migrate_settings_v6_to_v7(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(7));
+        object.insert("language".to_owned(), Value::from("System"));
     }
     value
 }
@@ -616,6 +637,41 @@ mod tests {
         assert_eq!(migrated["inline_formulas"], json!(true));
         assert_eq!(migrated["default_profile"], json!("gitbash"));
         assert_eq!(migrated["git_panel"], json!(false));
+    }
+
+    /// PIN — v6 -> v7 writes `System` and leaves every sibling exactly as it
+    /// found it (rule 3, "迁移函数只做结构升级").
+    ///
+    /// The fixture is non-default in all six older fields, `split_direction`
+    /// deliberately among them: a step that reset a sibling to its default while
+    /// inserting its own field is the one failure this shape of test exists to
+    /// catch, and the most recently added sibling is the one a copy-paste of the
+    /// step above is most likely to clobber.
+    #[test]
+    fn real_settings_v6_to_v7_migration_adds_the_follow_the_system_default() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 6,
+                "theme_mode": "Light",
+                "display_formulas": false,
+                "inline_formulas": true,
+                "default_profile": "gitbash",
+                "git_panel": false,
+                "split_direction": "Down"
+            }),
+            6,
+            7,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(7));
+        assert_eq!(migrated["language"], json!("System"));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(migrated["inline_formulas"], json!(true));
+        assert_eq!(migrated["default_profile"], json!("gitbash"));
+        assert_eq!(migrated["git_panel"], json!(false));
+        assert_eq!(migrated["split_direction"], json!("Down"));
     }
 
     #[test]

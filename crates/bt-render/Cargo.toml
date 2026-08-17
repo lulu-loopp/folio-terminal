@@ -14,6 +14,10 @@ bytemuck.workspace = true
 glyphon.workspace = true
 thiserror.workspace = true
 unicode-properties.workspace = true
+# The `Fallback` trait cosmic-text takes speaks in `unicode_script::Script`, and
+# cosmic-text does not re-export the crate. Pinned to the version cosmic-text
+# itself depends on, so the trait and the argument are the same type.
+unicode-script.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]

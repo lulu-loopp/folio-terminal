@@ -33,13 +33,14 @@
 //! Nothing here is layout: the dialog is not a seat, takes no space from the
 //! solver, and is never persisted (a dialog does not survive a restart).
 
-use bt_persist::{SplitDirectionV1, ThemeModeV1};
+use bt_persist::{LanguageV1, SplitDirectionV1, ThemeModeV1};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
     WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette, rounded_overlay_fill, rounded_overlay_shadow,
 };
 
+use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::profiles;
 use crate::seats::{RailMode, TabLayoutMode};
@@ -281,8 +282,8 @@ const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
 // collects a table by *finding* these, and a literal buried at a call site is a
 // string that never gets translated.
 
-/// The header, and the gear's own tooltip.
-const DIALOG_TITLE: &str = "Settings";
+/// The header, and the gear's own tooltip — [`Text::Settings`], which the gear
+/// reads too, because they are one word for one thing.
 const RECORD_BUTTON_LABEL: &str = "Record";
 /// What the button says while it is listening.
 const RECORD_LISTENING_LABEL: &str = "Press…";
@@ -351,34 +352,69 @@ pub const SPLIT_DIRECTION_OPTIONS: [SplitDirectionV1; 3] = [
     SplitDirectionV1::Right,
     SplitDirectionV1::Down,
 ];
+/// The three answers to "which language is this window written in", in the order
+/// [`THEME_OPTIONS`] established and for its reason: the two named answers first,
+/// and the one that means "ask somebody else" after them.
+///
+/// **中文 first among the two named ones**, which is the one place this list is
+/// not simply Theme's shape copied. A picker's job here is to be findable by
+/// somebody who cannot read the dialog it is in: a user who opened Settings
+/// *because* the window is in a language they do not read is looking for their
+/// own language's name, and 中文 above English puts it where a Chinese reader's
+/// eye goes first while costing an English reader nothing — they can read every
+/// row on the page.
+pub const LANGUAGE_OPTIONS: [LanguageV1; 3] =
+    [LanguageV1::Chinese, LanguageV1::English, LanguageV1::System];
 
 /// The label a theme wears in the picker, matching the mock-up's own casing.
 fn theme_label(theme: ThemeModeV1) -> &'static str {
     match theme {
-        ThemeModeV1::System => "System",
-        ThemeModeV1::Light => "Light",
-        ThemeModeV1::Dark => "Dark",
+        ThemeModeV1::System => Text::OptionSystem.text(),
+        ThemeModeV1::Light => Text::OptionLight.text(),
+        ThemeModeV1::Dark => Text::OptionDark.text(),
+    }
+}
+
+/// The label a language wears in the picker.
+///
+/// **The two named ones are endonyms and are not translated**: `English` reads
+/// `English` in a Chinese dialog and `中文` reads `中文` in an English one, which
+/// is what every operating system's own language picker does and for the reason
+/// this row exists at all — the person who most needs to find their language is
+/// the person who cannot read the words around it. Only `System` is a word about
+/// the question rather than a name, so only `System` is translated, and it is
+/// [`Text::OptionSystem`] — the same string the Theme row uses, because it is the
+/// same promise.
+fn language_label(language: LanguageV1) -> &'static str {
+    match language {
+        LanguageV1::System => Text::OptionSystem.text(),
+        LanguageV1::English => "English",
+        LanguageV1::Chinese => "中文",
     }
 }
 
 fn cursor_label(style: CursorStyle) -> &'static str {
     match style {
-        CursorStyle::Bar => "Bar",
-        CursorStyle::Block => "Block",
-        CursorStyle::Underline => "Underline",
+        CursorStyle::Bar => Text::OptionCursorBar.text(),
+        CursorStyle::Block => Text::OptionCursorBlock.text(),
+        CursorStyle::Underline => Text::OptionCursorUnderline.text(),
     }
 }
 
 fn tab_layout_label(layout: TabLayoutMode) -> &'static str {
     match layout {
-        TabLayoutMode::Horizontal => "Horizontal",
-        TabLayoutMode::Vertical => "Vertical",
+        TabLayoutMode::Horizontal => Text::OptionHorizontal.text(),
+        TabLayoutMode::Vertical => Text::OptionVertical.text(),
     }
 }
 
 /// The mock-up's own word for both states of every On/Off picker it draws.
 fn on_off_label(enabled: bool) -> &'static str {
-    if enabled { "On" } else { "Off" }
+    if enabled {
+        Text::OptionOn.text()
+    } else {
+        Text::OptionOff.text()
+    }
 }
 
 /// User ruling 2026-08-10: the mode's name, not a sentence about it.
@@ -390,8 +426,8 @@ fn on_off_label(enabled: bool) -> &'static str {
 /// choosing it. The rail still expands on hover — the label just stops saying so.
 fn sidebar_label(mode: RailMode) -> &'static str {
     match mode {
-        RailMode::Expanded => "Expanded",
-        RailMode::Icons => "Icons",
+        RailMode::Expanded => Text::OptionExpanded.text(),
+        RailMode::Icons => Text::OptionIcons.text(),
     }
 }
 
@@ -405,9 +441,9 @@ fn sidebar_label(mode: RailMode) -> &'static str {
 /// `Down` are bare for exactly the reason the ruling gives.
 fn split_direction_label(direction: SplitDirectionV1) -> &'static str {
     match direction {
-        SplitDirectionV1::Auto => "Auto (longer edge)",
-        SplitDirectionV1::Right => "Right",
-        SplitDirectionV1::Down => "Down",
+        SplitDirectionV1::Auto => Text::OptionSplitAuto.text(),
+        SplitDirectionV1::Right => Text::OptionSplitRight.text(),
+        SplitDirectionV1::Down => Text::OptionSplitDown.text(),
     }
 }
 
@@ -503,11 +539,11 @@ impl SettingsCategory {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::General => "GENERAL",
-            Self::Appearance => "APPEARANCE",
-            Self::Terminal => "TERMINAL",
-            Self::RenderedBlocks => "RENDERED BLOCKS",
-            Self::Shortcuts => "SHORTCUTS",
+            Self::General => Text::CategoryGeneral.text(),
+            Self::Appearance => Text::CategoryAppearance.text(),
+            Self::Terminal => Text::CategoryTerminal.text(),
+            Self::RenderedBlocks => Text::CategoryRenderedBlocks.text(),
+            Self::Shortcuts => Text::CategoryShortcuts.text(),
         }
     }
 
@@ -523,11 +559,11 @@ impl SettingsCategory {
     #[must_use]
     pub fn nav_label(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Appearance => "Appearance",
-            Self::Terminal => "Terminal",
-            Self::RenderedBlocks => "Rendered blocks",
-            Self::Shortcuts => "Shortcuts",
+            Self::General => Text::NavGeneral.text(),
+            Self::Appearance => Text::NavAppearance.text(),
+            Self::Terminal => Text::NavTerminal.text(),
+            Self::RenderedBlocks => Text::NavRenderedBlocks.text(),
+            Self::Shortcuts => Text::NavShortcuts.text(),
         }
     }
 }
@@ -599,6 +635,20 @@ pub enum SettingsRow {
     /// A greyed item is the same sentence the `˅` menu's greyed row speaks, in
     /// the same words, because it is the same fact.
     DefaultProfile,
+    /// **Which language the window writes in** (user ruling 2026-08-10, shipped
+    /// 2026-08-17) — `General`'s first row, above the two that were already here.
+    ///
+    /// First because it is the row that decides how every other row reads. A
+    /// user who has opened this dialog to change the language has opened it
+    /// unable to read it, and the one kindness available is to put the row where
+    /// the eye lands first rather than under two sentences they cannot parse.
+    ///
+    /// **The only row in the dialog whose answer does not take effect where you
+    /// can see it.** Its description says so and choosing a value raises a card
+    /// that says it again; [`crate::i18n`]'s header argues why, and the short of
+    /// it is that this window caches measured widths in a dozen places and has no
+    /// language revision to invalidate them with.
+    Language,
 }
 
 impl SettingsRow {
@@ -624,25 +674,32 @@ impl SettingsRow {
             // Both were headings over one row apiece — `FILES` and `STARTUP` —
             // and both are the same kind of question: not a look, not a block, no
             // page of their own to fill. See [`SettingsCategory::General`].
-            Self::GitPanel | Self::DefaultProfile => SettingsCategory::General,
+            //
+            // Language joins them rather than `Appearance`, and the distinction
+            // is the one that page's own name makes: appearance is what the
+            // window *looks* like, and a language is what it *says*. A reader
+            // hunting for it under a heading about looks would be hunting for the
+            // wrong noun.
+            Self::GitPanel | Self::DefaultProfile | Self::Language => SettingsCategory::General,
         }
     }
 
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
-            Self::Theme => "Theme",
-            Self::Cursor => "Cursor",
-            Self::Formulas => "Display formulas",
-            Self::InlineFormulas => "Inline formulas",
-            Self::GitPanel => "Git panel",
+            Self::Theme => Text::RowTheme.text(),
+            Self::Cursor => Text::RowCursor.text(),
+            Self::Formulas => Text::RowFormulas.text(),
+            Self::InlineFormulas => Text::RowInlineFormulas.text(),
+            Self::GitPanel => Text::RowGitPanel.text(),
             // Mock-up 2360.
-            Self::TabLayout => "Tab layout",
+            Self::TabLayout => Text::RowTabLayout.text(),
             // Mock-up 2374.
-            Self::Sidebar => "Sidebar",
-            Self::SplitDirection => "Split direction",
+            Self::Sidebar => Text::RowSidebar.text(),
+            Self::SplitDirection => Text::RowSplitDirection.text(),
             // Mock-up 2467.
-            Self::DefaultProfile => "Default profile",
+            Self::DefaultProfile => Text::RowDefaultProfile.text(),
+            Self::Language => Text::RowLanguage.text(),
         }
     }
 
@@ -681,35 +738,38 @@ impl SettingsRow {
             // did not have; System shipped, and the note outlived the fact —
             // leaving the one line a user reads to find out what the picker
             // offers naming two of its three items.
-            Self::Theme => "Light, dark, or follow your system setting",
-            Self::Cursor => "Focused cursor shape",
+            Self::Theme => Text::DescTheme.text(),
+            Self::Cursor => Text::DescCursor.text(),
             // What Off does and, just as much, what it does not do: the line has
             // to say "source" or a reader will expect the formula to vanish.
-            Self::Formulas => "Typeset $$…$$ blocks; off shows the LaTeX source",
+            Self::Formulas => Text::DescFormulas.text(),
             // Says "in command output" because that limit is the feature, not a
             // caveat about it: a `$…$` on the prompt or input line is never
             // typeset, and a user who reads only this line should not go away
             // expecting one to be.
-            Self::InlineFormulas => "Typeset $…$ in command output; off shows the source",
+            Self::InlineFormulas => Text::DescInlineFormulas.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
-            Self::GitPanel => "A Git page beside the file tree; off reads no repository",
+            Self::GitPanel => Text::DescGitPanel.text(),
             // Mock-up 2361.
-            Self::TabLayout => "Choose where tabs appear in the window",
+            Self::TabLayout => Text::DescTabLayout.text(),
             // Mock-up 2375.
-            Self::Sidebar => "How the vertical tab sidebar rests",
+            Self::Sidebar => Text::DescSidebar.text(),
             // Says *which* splits, because the scope is the setting. A line
             // reading "which way a pane splits" would promise to override the
             // two chords that draw their own rule and the picker's four zones,
             // and a user who then found `Alt+Shift+-` still stacking panes would
             // conclude the switch was broken.
-            Self::SplitDirection => "Where a split with no direction of its own puts the new pane",
+            Self::SplitDirection => Text::DescSplitDirection.text(),
             // Mock-up 2468, word for word. It is also the *scope* of the setting
             // and the reason `profiles::index_of_id` does not read it: a tab and
             // a launch are the two things it answers for, and a pane coming back
             // off disk is neither.
-            Self::DefaultProfile => "What opens on a new tab, and when Folio starts",
+            Self::DefaultProfile => Text::DescDefaultProfile.text(),
+            // The one line in this dialog that describes *when* rather than
+            // what, because "when" is the surprising half. See the variant.
+            Self::Language => Text::DescLanguage.text(),
         }
     }
 
@@ -723,6 +783,7 @@ impl SettingsRow {
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
+            Self::Language => LANGUAGE_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
             // (mock-up 7645: "the default-profile picker is built from the same
             // list the ⌄ menu uses"). Not a copy of it — the same table — so a
@@ -752,6 +813,7 @@ impl SettingsRow {
                 .get(index)
                 .copied()
                 .map(split_direction_label),
+            Self::Language => LANGUAGE_OPTIONS.get(index).copied().map(language_label),
             Self::DefaultProfile => {
                 (index < profiles::PROFILES.len()).then(|| profiles::title(index))
             }
@@ -821,6 +883,9 @@ impl SettingsRow {
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .iter()
                 .position(|it| *it == values.split_direction),
+            Self::Language => LANGUAGE_OPTIONS
+                .iter()
+                .position(|it| *it == values.language),
             // The *resolved* default, which is why the caller hands over an index
             // rather than the stored id. **Mock-up bug not copied** (2471): its
             // combo button is born with the literal text `PowerShell` and only
@@ -858,6 +923,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::SplitDirection);
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
+    rows.push(SettingsRow::Language);
     rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
     rows
@@ -946,6 +1012,14 @@ pub struct SettingsValues {
     pub git_panel: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
+    /// Which language the window writes in — **the stored mode**, not the
+    /// resolved language.
+    ///
+    /// The row has to show what the file says: a user who picked `System` on a
+    /// Chinese Windows must see the tick on `System`, not on the Chinese item.
+    /// The resolved answer lives in [`crate::i18n::current`] and is a different
+    /// question.
+    pub language: LanguageV1,
     /// The resolved default profile — an index into `profiles::PROFILES`, never
     /// the stored id.
     ///
@@ -984,6 +1058,7 @@ impl SettingsValues {
             inline_formulas: true,
             git_panel: true,
             split_direction: SplitDirectionV1::Auto,
+            language: LanguageV1::System,
             default_profile: profiles::FALLBACK_PROFILE,
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
@@ -2175,6 +2250,21 @@ pub fn split_direction_requested(target: SettingsTarget) -> Option<SplitDirectio
     }
 }
 
+/// The language a press asks for, if it asks at all.
+///
+/// **The mode, not the resolved language** — what goes in the file is what the
+/// user pointed at, and `System` has to survive as itself so it goes on meaning
+/// "ask Windows" on the next machine this file is read on.
+#[must_use]
+pub fn language_requested(target: SettingsTarget) -> Option<LanguageV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::Language, index) => {
+            LANGUAGE_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
 /// The Git panel's master switch, as a press on its picker.
 #[must_use]
 pub fn git_panel_requested(target: SettingsTarget) -> Option<bool> {
@@ -2978,7 +3068,7 @@ pub fn build(
     );
 
     labels.push(ChromeLabel {
-        text: DIALOG_TITLE.to_owned(),
+        text: Text::Settings.text().to_owned(),
         rect: [
             layout.header_content[0],
             layout.header_content[1],
@@ -6168,6 +6258,7 @@ mod tests {
                 SettingsRow::SplitDirection,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile
             ]
@@ -6182,6 +6273,7 @@ mod tests {
                 SettingsRow::SplitDirection,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile
             ],
@@ -6654,7 +6746,7 @@ mod tests {
         );
         assert_eq!(
             panel.focus(),
-            Some(SettingsTarget::Combo(SettingsRow::GitPanel)),
+            Some(SettingsTarget::Combo(SettingsRow::Language)),
             "the first row of the page it opened on - not the rail, and not the close"
         );
         assert_eq!(panel.focus_ring(), None, "opened by pointer, so no ring");
@@ -7123,6 +7215,124 @@ mod tests {
             THEME_OPTIONS,
             [ThemeModeV1::Light, ThemeModeV1::Dark, ThemeModeV1::System],
             "which is what the press router maps by index"
+        );
+    }
+
+    /// PIN (the Language row, 2026-08-17) — **the row exists, it is on the page
+    /// a reader would look for it on, and it is the first thing there.**
+    ///
+    /// Red gate: before this slice `visible_rows` had no `Language` at all and
+    /// `General` opened onto the Git panel switch. All three assertions fail
+    /// against that build, and the third is the one worth stating out loud: a
+    /// user who opens this dialog to change the language opens it unable to read
+    /// it, so the row goes where the eye lands rather than under two sentences
+    /// they cannot parse.
+    #[test]
+    fn the_language_row_leads_the_general_page() {
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        assert!(rows.contains(&SettingsRow::Language));
+        assert_eq!(
+            SettingsRow::Language.category(),
+            SettingsCategory::General,
+            "a language is what the window says, not what it looks like"
+        );
+        let page: Vec<SettingsRow> = rows
+            .iter()
+            .copied()
+            .filter(|row| row.category() == SettingsCategory::General)
+            .collect();
+        assert_eq!(
+            page.first(),
+            Some(&SettingsRow::Language),
+            "and it is the first row on that page"
+        );
+    }
+
+    /// PIN — the Language picker is Theme's shape with Theme's own `System`, and
+    /// the two named languages are endonyms.
+    ///
+    /// Every clause is a decision. `System` shared with Theme because it is one
+    /// promise said once (T046 of the string inventory asks for the reuse by
+    /// name); `System` **last** because that is the order this dialog's other
+    /// three-way picker takes; and `中文` / `English` untranslated because the
+    /// person who most needs to find their language is the person who cannot
+    /// read the words around it — which is what every operating system's own
+    /// picker concludes too.
+    #[test]
+    fn the_language_picker_names_each_language_in_itself_and_shares_theme_s_system() {
+        let drawn: Vec<&str> = SettingsRow::Language.option_labels().collect();
+        assert_eq!(drawn.len(), 3);
+        assert_eq!(drawn[0], "中文");
+        assert_eq!(drawn[1], "English");
+        assert_eq!(
+            drawn[2],
+            crate::i18n::Text::OptionSystem.text(),
+            "the third item is Theme's own word, not a second spelling of it"
+        );
+        assert_eq!(
+            LANGUAGE_OPTIONS,
+            [LanguageV1::Chinese, LanguageV1::English, LanguageV1::System],
+            "which is what the press router maps by index"
+        );
+        assert_eq!(
+            *THEME_OPTIONS.last().expect("three themes"),
+            ThemeModeV1::System,
+            "and the two pickers put the ask-somebody-else answer in the same place"
+        );
+    }
+
+    /// PIN — the tick sits on the **stored mode**, and a press asks for a mode.
+    ///
+    /// The trap is the resolved language: on a Chinese Windows, `System` and
+    /// `中文` come out at the same place, and a row that ticked the resolved
+    /// answer would show `中文` to a user who had chosen `System` — then write
+    /// `中文` into their file the next time they touched anything else.
+    #[test]
+    fn the_language_row_ticks_what_the_file_says_and_asks_for_the_same_thing() {
+        for (index, mode) in LANGUAGE_OPTIONS.into_iter().enumerate() {
+            let values = SettingsValues {
+                language: mode,
+                ..values()
+            };
+            assert_eq!(
+                SettingsRow::Language.selected_index(values),
+                Some(index),
+                "{mode:?} ticks its own item"
+            );
+            assert_eq!(
+                language_requested(SettingsTarget::Choice(SettingsRow::Language, index)),
+                Some(mode),
+                "and pressing that item asks for {mode:?}"
+            );
+        }
+        assert_eq!(
+            language_requested(SettingsTarget::Choice(SettingsRow::Theme, 0)),
+            None,
+            "another row's press is not a language"
+        );
+        assert_eq!(language_requested(SettingsTarget::Close), None);
+    }
+
+    /// PIN — the row says *when* it takes effect, in whichever language it is
+    /// currently saying it.
+    ///
+    /// The one line in this dialog that describes a moment rather than a value,
+    /// and it has to, because this is the one setting whose effect is not on
+    /// screen when it is chosen. See [`crate::i18n`]'s header for why there is no
+    /// hot switch to describe instead.
+    #[test]
+    fn the_language_row_promises_the_next_start_in_both_languages() {
+        assert_eq!(
+            SettingsRow::Language.description(values()),
+            crate::i18n::Text::DescLanguage.text()
+        );
+        assert_eq!(
+            crate::i18n::Text::DescLanguage.in_lang(crate::i18n::Lang::English),
+            "Applies the next time Folio starts"
+        );
+        assert_eq!(
+            crate::i18n::Text::DescLanguage.in_lang(crate::i18n::Lang::Chinese),
+            "下次启动 Folio 时生效"
         );
     }
 
