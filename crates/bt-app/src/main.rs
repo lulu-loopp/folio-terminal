@@ -141,16 +141,6 @@ const STRIP_ANIMATION_FRAME: Duration = Duration::from_millis(16);
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
 /// silence interval while the local surface and terminal grid continue to follow every event.
 const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
-/// Whether a live OSC 133 input buffer withholds terminal and ConPTY resizes (user ruling
-/// 2026-08-06). **A policy bit, not a structure.**
-///
-/// `false` lets every resize through the existing 200 ms coalescer even while input is present.
-/// The post-commit private shell-integration injection remains active, so PSReadLine repairs its
-/// cached anchor at every landed width. Empty buffers use the integration's output-free re-anchor;
-/// non-empty buffers retain InvokePrompt. Flipping this back to `true` restores the retained
-/// confirm-then-release machine verbatim; `typed_input_defers_resize` is the single production
-/// convergence point.
-const TYPED_INPUT_RESIZE_DEFERRAL: bool = false;
 /// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -3736,10 +3726,10 @@ struct Runtime {
     /// The size the child has actually been told about — never a size that has only been solved or
     /// queued. It is the same value as `grid` at rest, and the two are deliberately separate only
     /// where they genuinely differ: inside the `WINDOW_RESIZE_QUIET` coalescing window our grid has
-    /// already reflowed while the child has not heard yet, and under the typed-input deferral
-    /// (`schedule_grid_change`) neither has moved but a target is queued. Asking "does the child
-    /// need to hear this?" of our own grid answers that question with the wrong fact, and a drag
-    /// that comes back to where the child already sits would then still send it a resize.
+    /// already reflowed while the child has not heard yet, and a target is queued for it. Asking
+    /// "does the child need to hear this?" of our own grid answers that question with the wrong
+    /// fact, and a drag that comes back to where the child already sits would then still send it a
+    /// resize.
     modifiers: ModifiersState,
     math_context_menu: bt_platform::MathContextMenu,
     /// The system folder chooser behind the root menu's `Browse…` (E55).
@@ -5802,48 +5792,6 @@ struct PendingPtyResize {
     grid: GridSize,
     physical: PhysicalSize<u32>,
     deadline: Instant,
-    /// When the typed-input gate started answering "empty", or `None` if the last sample of it
-    /// found content. See `sample_typed_input_gate`.
-    blank_since: Option<Instant>,
-}
-
-impl PendingPtyResize {
-    /// Has the gate answered "empty" for an unbroken `WINDOW_RESIZE_QUIET`, ending at `now`?
-    fn blank_confirmed_at(&self, now: Instant) -> bool {
-        self.blank_since
-            .is_some_and(|since| now >= since + WINDOW_RESIZE_QUIET)
-    }
-
-    /// The first instant this request could be released: its own coalescing deadline, and — once a
-    /// blank run has started — the end of that run's confirmation window.
-    fn release_deadline(&self) -> Instant {
-        self.blank_since.map_or(self.deadline, |since| {
-            self.deadline.max(since + WINDOW_RESIZE_QUIET)
-        })
-    }
-}
-
-/// Record what the typed-input gate answered at this wake.
-///
-/// The gate is a question about the grid's *current* contents, and the child rewrites that grid in
-/// whatever pieces a 16 KiB read happens to cut its output into. PSReadLine redraws by parking the
-/// cursor on `B`, erasing, and writing the buffer back; when the erase and the rewrite arrive in
-/// different reads, the wake in between finds a grid that honestly holds nothing. So a single
-/// sample cannot be a release condition — only an unbroken run of them can, and any sample that
-/// finds content starts the next run from scratch.
-fn sample_typed_input_gate(
-    pending: &mut Option<PendingPtyResize>,
-    now: Instant,
-    typed_input_live: bool,
-) {
-    let Some(pending) = pending.as_mut() else {
-        return;
-    };
-    if typed_input_live {
-        pending.blank_since = None;
-    } else {
-        pending.blank_since.get_or_insert(now);
-    }
 }
 
 fn coalesce_pty_resize(
@@ -5856,10 +5804,6 @@ fn coalesce_pty_resize(
         grid,
         physical,
         deadline: observed_at + WINDOW_RESIZE_QUIET,
-        // A new size is not a new answer about the child's buffer: a drag over an idle prompt keeps
-        // sampling "empty" from its first frame on, so the confirmation window it started runs
-        // alongside the coalescer's and adds nothing to the wait.
-        blank_since: pending.as_ref().and_then(|pending| pending.blank_since),
     });
 }
 
@@ -5891,10 +5835,7 @@ fn take_due_pty_resize(
 ///
 /// `conpty_grid` is what the child was last *told*, which is why the same answer also cancels a
 /// queued request: a drag that wanders out and comes back leaves the child exactly where it already
-/// was, and replaying the intermediate size at release would be a resize nobody asked for. (Before
-/// the typed-input deferral the two grids could not diverge far enough for this to be observable;
-/// under it they can, and "exactly one resize at release, carrying the final size" would otherwise
-/// be false whenever the final size is the one the child never left.)
+/// was, and replaying the intermediate size at release would be a resize nobody asked for.
 fn coalesce_pty_resize_on_grid_change(
     pending: &mut Option<PendingPtyResize>,
     next_grid: GridSize,
@@ -5911,47 +5852,24 @@ fn coalesce_pty_resize_on_grid_change(
     changed
 }
 
-/// The retained typed-input half of the same gate (policy introduced 2026-08-04, default disabled
-/// by user ruling 2026-08-06).
-///
-/// PSReadLine — 2.0.0 and 2.4.5 alike — reduces its cached render-anchor *column* modulo the new
-/// width whenever the pane narrows, and never restores it when the pane widens again. The fault
-/// arms only while its input buffer is non-empty across that narrowing; the next redraw then
-/// splices into the prompt row. Three commits of ours produced byte-identical corruption and an
-/// independent reference terminal reproduced it from the child's own bytes, so there is nothing on
-/// our side to correct — the only faithful mitigation is not to tell the child about a width it
-/// would re-anchor against while it is holding text.
-///
-/// When the policy feeds this machine `typed_input_live = true`, a due resize is held back and
-/// released once that has been false for an unbroken `WINDOW_RESIZE_QUIET`. What releases is still
-/// a *question about current state* and
-/// never a timer over the drag: the input region closing (submission), its content going empty (the
-/// line cleared), a screen switch, a reset, ED 2 or an alternate-screen transition all make
-/// `DualPlaneSession::typed_shell_input_live` answer `false`, and every one of them reaches us as
-/// child output — which wakes the event loop on its own. A buffer that still holds text is held for
-/// as long as it holds it, however long the drag has been over.
-///
-/// The confirmation window is what a single sample cannot give: the gate reads the grid, and a
-/// redraw split across two reads leaves the grid momentarily empty between them
-/// (`sample_typed_input_gate`). Waiting out the same quiet period the coalescer already uses costs
-/// an idle prompt nothing — its blank run starts at the drag's first frame — and costs a line that
-/// was genuinely emptied one quiet window.
-fn release_due_pty_resize(
-    pending: &mut Option<PendingPtyResize>,
-    now: Instant,
-    typed_input_live: bool,
-) -> Option<PendingPtyResize> {
-    sample_typed_input_gate(pending, now, typed_input_live);
-    pending
-        .is_some_and(|pending| pending.blank_confirmed_at(now))
-        .then(|| take_due_pty_resize(pending, now))
-        .flatten()
-}
-
 /// The whole scheduling decision `Runtime::schedule_grid_change` makes, with no window in it:
-/// queue (or cancel) what the child still owes, and answer the grid our own actor should reflow to
-/// *now* — `None` while the retained gate holds. With the policy off, `typed_input_live` reaches
-/// this function as false and the actor always follows the solved grid immediately.
+/// queue (or cancel) what the child still owes, and answer the grid our own actor should reflow
+/// to *now*.
+///
+/// **The typed-input withholding gate was retired here (2026-08-16).** A seventh parameter used to
+/// arrive from a `TYPED_INPUT_RESIZE_DEFERRAL` policy bit, and while it was live a solved grid was
+/// kept from the actor *and* from ConPTY for as long as the shell held an unsubmitted line — the
+/// 2026-08-04 mitigation for PSReadLine's stale render anchor, complete with a
+/// confirm-then-release blank window so that the empty instant inside a redraw could not be
+/// mistaken for an empty prompt.
+///
+/// The user's 2026-08-06 ruling turned it off on sight — freezing the reflow and cropping the old
+/// width read worse than the artefact it prevented — kept the machine as a policy bit at `false`,
+/// and ordered the root cause fixed instead. That fix shipped: the patched PSReadLine re-anchors
+/// itself, and `scripts/shell-integration/folio.ps1` needs no reflection repair at ≥ 2.4.6. The
+/// same ruling ends 「修好后扣留政策位永久退役」, and this is that retirement. A bit nailed to
+/// `false` in front of a state machine nothing can reach is not an option the product has; it is a
+/// second reading of the resize path that no test of the shipping one covers.
 fn plan_grid_change(
     pending: &mut Option<PendingPtyResize>,
     next_grid: GridSize,
@@ -5959,64 +5877,34 @@ fn plan_grid_change(
     local_grid: GridSize,
     physical: PhysicalSize<u32>,
     observed_at: Instant,
-    typed_input_live: bool,
 ) -> Option<GridSize> {
     coalesce_pty_resize_on_grid_change(pending, next_grid, conpty_grid, physical, observed_at);
-    // A pointer frame is a sample of the gate like any other, and taking it here is what keeps the
-    // confirmation window free for the case it must stay free for: a drag over an idle prompt has
-    // been reading "empty" since its first frame, so the window has long since elapsed by the time
-    // the drag stops and the coalescer's own deadline arrives.
-    sample_typed_input_gate(pending, observed_at, typed_input_live);
-    (next_grid != local_grid && !typed_input_live).then_some(next_grid)
+    (next_grid != local_grid).then_some(next_grid)
 }
 
-/// The instant the coalesced ConPTY resize could next be released, or `None` while nothing is owed
-/// or the typed-input gate is holding it.
+/// The instant the coalesced ConPTY resize could next be released, or `None` while nothing is owed.
 ///
-/// Withholding it while held is not an optimisation: the deadline has usually already passed by
-/// then, and handing an event loop a past instant to wait until is a spin. There is nothing to
-/// wait *for* either — a gate that is holding on *content* is released by child output, which wakes
-/// the loop by itself. A gate reading empty is the opposite case: the confirmation window it is
-/// serving may well end with no further output at all, so the loop is given that instant to wake
-/// at.
-fn pty_resize_wake_deadline(
-    pending: Option<PendingPtyResize>,
-    typed_input_live: bool,
-    now: Instant,
-) -> Option<Instant> {
-    (!typed_input_live)
-        .then_some(pending)
-        .flatten()
-        .map(|pending| pending.release_deadline())
-        // `about_to_wait` has already serviced everything due at `now`. Re-offering that instant
-        // (or an older coalescing deadline retained across a gate transition) makes winit wake
-        // immediately and re-enter this turn without an external event. Only a future confirmation
-        // boundary is a useful wake-up request.
+/// Handing an event loop a past instant to wait until is a spin: `about_to_wait` has already
+/// serviced everything due at `now`, so re-offering that instant makes winit wake immediately and
+/// re-enter this turn with no external event to answer. Only a future deadline is a useful
+/// wake-up request.
+fn pty_resize_wake_deadline(pending: Option<PendingPtyResize>, now: Instant) -> Option<Instant> {
+    pending
+        .map(|pending| pending.deadline)
         .filter(|deadline| *deadline > now)
 }
 
-/// Advance the resize gate and derive its next wake from the same gate sample.
+/// Release whatever is due and derive the loop's next wake from the same reading.
 ///
-/// Keeping these two decisions together prevents `about_to_wait` from servicing a content-holding
-/// state and then deriving `WaitUntil` from a different, empty-state reading of the session. The
-/// latter can expose the request's already-due coalescing deadline while `blank_since` still says
-/// that no empty confirmation run has begun.
+/// The two travel together so that `about_to_wait` cannot service one state of the pending request
+/// and then compute its `WaitUntil` from another.
 fn service_pending_pty_resize(
     pending: &mut Option<PendingPtyResize>,
     now: Instant,
-    typed_input_live: bool,
 ) -> (Option<PendingPtyResize>, Option<Instant>) {
-    let due = release_due_pty_resize(pending, now, typed_input_live);
-    let wake = pty_resize_wake_deadline(*pending, typed_input_live, now);
+    let due = take_due_pty_resize(pending, now);
+    let wake = pty_resize_wake_deadline(*pending, now);
     (due, wake)
-}
-
-const fn typed_input_resize_deferral_active(
-    policy: bool,
-    pty_present: bool,
-    typed_input_live: bool,
-) -> bool {
-    policy && pty_present && typed_input_live
 }
 
 /// The private shell-integration input owed after one successful ConPTY resize commit.
@@ -6694,6 +6582,42 @@ fn graph_key_of(key: &Key, modifiers: ModifiersState) -> Option<git_graph::Graph
         Key::Named(NamedKey::Enter) => Some(git_graph::GraphKey::Enter),
         Key::Named(NamedKey::Escape) => Some(git_graph::GraphKey::Escape),
         _ => None,
+    }
+}
+
+/// **Winit's key, in the settings dialog's own vocabulary.**
+///
+/// Total rather than partial — every key maps, and the ones with no verb map to
+/// [`settings::SettingsKey::Other`] — because a modal swallows all of them and
+/// every one of them is keyboard interaction that turns the focus ring on. An
+/// `Option` here would have made "no verb" and "not a key press" the same
+/// answer, and they are different answers to `:focus-visible`.
+///
+/// **A held modifier makes it `Other`.** `Ctrl+Tab` is the tab-switching chord,
+/// `Alt+F4` is the window's; neither is this dialog's Tab, and a dialog that
+/// took the second half of somebody else's chord as its own would be walking its
+/// focus order on a keystroke aimed past it. The chords themselves stay
+/// swallowed — a modal means MODAL — so this narrows what the dialog *does*,
+/// never what it lets through.
+///
+/// Auto-repeat walks and does not press: holding Down runs down a picker, while
+/// holding Enter chooses once. A repeat of an activating key is a key the user
+/// is *still* holding, not a second decision.
+fn settings_key_of(key: &Key, modifiers: ModifiersState, repeat: bool) -> settings::SettingsKey {
+    if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
+        return settings::SettingsKey::Other;
+    }
+    match key {
+        Key::Named(NamedKey::Tab) => settings::SettingsKey::Tab {
+            backwards: modifiers.shift_key(),
+        },
+        Key::Named(NamedKey::ArrowDown) => settings::SettingsKey::Down,
+        Key::Named(NamedKey::ArrowUp) => settings::SettingsKey::Up,
+        Key::Named(NamedKey::Home) => settings::SettingsKey::Home,
+        Key::Named(NamedKey::End) => settings::SettingsKey::End,
+        Key::Named(NamedKey::Enter | NamedKey::Space) if !repeat => settings::SettingsKey::Activate,
+        Key::Named(NamedKey::Escape) if !repeat => settings::SettingsKey::Escape,
+        _ => settings::SettingsKey::Other,
     }
 }
 
@@ -17577,10 +17501,13 @@ impl Runtime {
             // knows where the cut falls. Same division, and same hoist, as the
             // profile menu's measured hints below.
             let hover = self.settings.hover();
+            // The ring, not the focus: `focus_ring` is `None` while the keyboard
+            // arrived at this control by way of somebody's finger.
+            let focus = self.settings.focus_ring();
             let values = self.settings_values();
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
-            settings::build(&layout, hover, values, &mut measure)
+            settings::build(&layout, hover, focus, values, &mut measure)
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the prompt floats over a
             // window that already works, which is the whole reason it is
@@ -18305,7 +18232,8 @@ impl Runtime {
     /// between the pointer and the gear it is over — the highlight would be a
     /// button claiming to be reachable through a modal.
     fn toggle_settings_panel(&mut self) -> Result<()> {
-        self.settings.toggle();
+        self.settings
+            .toggle(&settings::visible_rows(self.rail.layout));
         // A dialog opens at its top. The distance belongs to the sitting the
         // wheel moved, not to the preference the dialog edits, so it does not
         // outlive the dialog being shut.
@@ -18322,6 +18250,52 @@ impl Runtime {
         Ok(())
     }
 
+    /// **Take a picker item** — everything choosing one does to the process.
+    ///
+    /// One function and not a block inside the press router, because there are
+    /// now two roads to the same choice: a click on the item, and Enter on the
+    /// item the ring is on. A verb reachable two ways whose body lives on one of
+    /// them is a verb that half works, and the half that would have been missed
+    /// here is the half the keyboard was built for.
+    fn apply_settings_choice(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        if let Some(mode) = settings::theme_requested(target) {
+            self.apply_theme_mode(mode)?;
+        }
+        if let Some(style) = settings::cursor_style_requested(target) {
+            self.apply_cursor_style(style)?;
+        }
+        if let Some(enabled) = settings::display_formulas_requested(target) {
+            self.apply_display_formulas(enabled)?;
+        }
+        if let Some(enabled) = settings::inline_formulas_requested(target) {
+            self.apply_inline_formulas(enabled)?;
+        }
+        if let Some(enabled) = settings::git_panel_requested(target) {
+            self.apply_git_panel(enabled)?;
+        }
+        if let Some(direction) = settings::split_direction_requested(target) {
+            self.apply_split_direction(direction)?;
+        }
+        // Both rail combos go through the one constructor: the layout choice
+        // keeps the sidebar mode standing and the sidebar choice keeps the
+        // layout standing, and Q190's combination rule inside `RailState`
+        // decides what that pair actually puts on screen.
+        if let Some(layout) = settings::tab_layout_requested(target) {
+            self.set_rail_state(rail_state_for(layout, self.rail.mode))?;
+        }
+        if let Some(mode) = settings::sidebar_mode_requested(target) {
+            self.set_rail_state(rail_state_for(self.rail.layout, mode))?;
+        }
+        if let Some(id) = settings::default_profile_requested(target) {
+            self.apply_default_profile(id)?;
+        }
+        // Tab layout is the one choice that changes which rows exist, and the
+        // focus may be standing on the row it just deleted.
+        self.settings
+            .keep_focus_reachable(&settings::visible_rows(self.rail.layout));
+        Ok(())
+    }
+
     /// Route a press that landed on the modal overlay. Every press is consumed:
     /// that is what the scrim is for.
     fn settings_mouse_input(
@@ -18334,43 +18308,19 @@ impl Runtime {
         if state != ElementState::Pressed || button != MouseButton::Left {
             return Ok(());
         }
-        match settings::hit(layout, self.settings_values(), position.x, position.y) {
+        let target = settings::hit(layout, self.settings_values(), position.x, position.y);
+        // The focus follows the finger, with the ring off — the pointer half of
+        // `:focus-visible`. Stated before the verb below, because closing the
+        // dialog drops the focus, and a press that set it afterwards would leave
+        // a shut dialog remembering one.
+        self.settings.press(target);
+        match target {
             settings::SettingsTarget::Scrim => self.settings.close(),
             settings::SettingsTarget::Close => self.settings.close(),
             settings::SettingsTarget::Combo(row) => self.settings.toggle_menu(row),
             target @ settings::SettingsTarget::Choice(..) => {
                 self.settings.close_menu();
-                if let Some(mode) = settings::theme_requested(target) {
-                    self.apply_theme_mode(mode)?;
-                }
-                if let Some(style) = settings::cursor_style_requested(target) {
-                    self.apply_cursor_style(style)?;
-                }
-                if let Some(enabled) = settings::display_formulas_requested(target) {
-                    self.apply_display_formulas(enabled)?;
-                }
-                if let Some(enabled) = settings::inline_formulas_requested(target) {
-                    self.apply_inline_formulas(enabled)?;
-                }
-                if let Some(enabled) = settings::git_panel_requested(target) {
-                    self.apply_git_panel(enabled)?;
-                }
-                if let Some(direction) = settings::split_direction_requested(target) {
-                    self.apply_split_direction(direction)?;
-                }
-                // Both rail combos go through the one constructor: the layout
-                // choice keeps the sidebar mode standing and the sidebar choice
-                // keeps the layout standing, and Q190's combination rule inside
-                // `RailState` decides what that pair actually puts on screen.
-                if let Some(layout) = settings::tab_layout_requested(target) {
-                    self.set_rail_state(rail_state_for(layout, self.rail.mode))?;
-                }
-                if let Some(mode) = settings::sidebar_mode_requested(target) {
-                    self.set_rail_state(rail_state_for(self.rail.layout, mode))?;
-                }
-                if let Some(id) = settings::default_profile_requested(target) {
-                    self.apply_default_profile(id)?;
-                }
+                self.apply_settings_choice(target)?;
             }
             // A press on the dialog's own body, or inside the open menu but on
             // none of its items, lands nowhere. It notably does *not* close: the
@@ -22918,8 +22868,9 @@ impl Runtime {
             self.refresh_chrome();
         }
         self.sync_math_layout_key();
-        // The grid actually in force, which under the typed-input gate is still the old one. The
-        // present gate admits the grid the frame will really carry, never the one merely solved.
+        // The grid actually in force, which inside a coalescing window is not yet the one the
+        // child has heard. The present gate admits the grid the frame will really carry, never the
+        // one merely solved.
         self.pending_resize_present = Some(self.grid);
         self.mark_session_dirty(now);
         self.publish_frame(FrameTrigger {
@@ -32338,15 +32289,13 @@ impl Runtime {
         Ok(())
     }
 
-    /// Carry a freshly solved grid to the child and to our own grid — or, when the retained
-    /// typed-input policy is enabled and the shell is holding input, to neither.
+    /// Carry a freshly solved grid to the child and to our own grid.
     ///
     /// The seat rectangle has already moved by the time this is called (`resolve_seat_layout` is
-    /// what produced `next_grid`), so a drag stays exactly as responsive as it is today. What is
-    /// deferred is the pair: the ruling forbids desynchronizing our grid from ConPTY's, so under
-    /// the gate they both stay at the old width and `flush_pending_pty_resize` moves them together.
-    /// A grid that is wider than its seat is already the ordinary case for the renderer — the seat
-    /// viewport scissors it — and it is the case a divider drag produces on every frame.
+    /// what produced `next_grid`), and our own actor follows it in the same turn; only the child's
+    /// hearing of it is coalesced, at the 200 ms quiet boundary every `Resized` shares. A grid that
+    /// is wider than its seat is the ordinary case for the renderer in between — the seat viewport
+    /// scissors it — and it is the case a divider drag produces on every frame.
     fn schedule_grid_change(
         &mut self,
         next_grid: GridSize,
@@ -32354,7 +32303,6 @@ impl Runtime {
         observed_at: Instant,
         context: &'static str,
     ) -> Result<()> {
-        let deferred = self.typed_input_defers_resize();
         let active = self.active_tab;
         let conpty_grid = self.tabs[active].conpty_grid;
         let grid = self.tabs[active].grid;
@@ -32365,7 +32313,6 @@ impl Runtime {
             grid,
             physical,
             observed_at,
-            deferred,
         ) else {
             return Ok(());
         };
@@ -32385,12 +32332,11 @@ impl Runtime {
     /// **The geometry is the same sentence for all of them**: a leaf's grid is
     /// [`seats::pane_body_viewport`] of *that leaf's* seat, and of nothing else.
     /// Only the timing differs. [`Self::schedule_grid_change`] speaks for the
-    /// focused leaf, where the typed-input gate and the ConPTY quiet-window
-    /// coalescer live; that gate exists to keep a shell holding a half-typed
-    /// line from being reflowed under the user's hands — a thing that can only
-    /// be true of the pane with the keyboard. The others have no typed input to
-    /// protect, so their grids follow the solver at once, actor then ConPTY, in
-    /// the order every other resize path uses.
+    /// focused leaf, where the ConPTY quiet-window coalescer lives — the pane
+    /// with the keyboard is the one a drag is being aimed at, and the one whose
+    /// child is worth telling once rather than sixty times. The others have no
+    /// drag to coalesce, so their grids follow the solver at once, actor then
+    /// ConPTY, in the order every other resize path uses.
     ///
     /// The focused leaf used to be sized from [`Self::resolve_seat_layout`]'s
     /// return instead, which is the body of `seats.terminal()` — the tab's
@@ -32427,8 +32373,8 @@ impl Runtime {
         let active = self.active_tab;
         // The panes without the keyboard, before the focused one: they take the
         // solver's answer unconditionally, so doing them first keeps the focused
-        // leaf's typed-input gate the last word rather than a thing another
-        // pane's resize could race.
+        // leaf's coalescer the last word rather than a thing another pane's
+        // resize could race.
         for target in plan.iter().copied().filter(|target| !target.focused) {
             let (seat, body) = (target.seat, target.body);
             let next_grid = self
@@ -32475,23 +32421,9 @@ impl Runtime {
         Ok(Some(next_grid))
     }
 
-    /// Is a PTY resize deferred right now?
-    ///
-    /// This is the single policy convergence point. With `TYPED_INPUT_RESIZE_DEFERRAL` off it is
-    /// always false. If that bit is restored, a child holding typed input defers as before, while
-    /// `BT_PROBE_INPUT` — which spawns no child — still reflows immediately.
-    fn typed_input_defers_resize(&self) -> bool {
-        typed_input_resize_deferral_active(
-            TYPED_INPUT_RESIZE_DEFERRAL,
-            self.pty.is_some(),
-            self.session.typed_shell_input_live(),
-        )
-    }
-
     fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
-        let deferred = self.typed_input_defers_resize();
         let (pending, wake_deadline) =
-            service_pending_pty_resize(&mut self.pending_pty_resize, now, deferred);
+            service_pending_pty_resize(&mut self.pending_pty_resize, now);
         let Some(pending) = pending else {
             return Ok(wake_deadline);
         };
@@ -32511,9 +32443,9 @@ impl Runtime {
             self.sync_math_layout_key();
             self.pending_resize_present = Some(pending.grid);
         }
-        // Snapshot the OSC 133 phase before resize reconciliation mutates terminal geometry. This
-        // is broader than the typed-input gate on purpose: an empty, already-printed prompt caches
-        // the same PSReadLine anchor and needs the same post-resize repair. Its 2.4.x handler is
+        // Snapshot the OSC 133 phase before resize reconciliation mutates terminal geometry. It
+        // deliberately includes an empty prompt: one caches the same PSReadLine anchor and needs
+        // the same post-resize repair. Its 2.4.x handler is
         // output-free for an empty buffer; using InvokePrompt there abandons old wrapped rows on
         // every committed divider stop (the real-ConPTY chain probe pins that distinction).
         let shell_input_region_open = self.session.shell_input_region_open();
@@ -37736,24 +37668,56 @@ impl Runtime {
             }
             return Ok(());
         }
-        // A modal owns the keyboard. Esc unwinds one layer per press (§7.1.5:
-        // the open menu first, then the dialog); every other key is swallowed
-        // rather than typed into a terminal the user cannot see. This sits above
-        // the IME branch on purpose — a composition that outlived the dialog
-        // opening must not be able to reach the child either.
+        // **A modal owns the keyboard, and now has somewhere to put it.** Esc
+        // unwinds one layer per press (§7.1.5: the open picker first, then the
+        // dialog), Tab and the arrows walk the dialog's own focus order, and
+        // Enter or Space presses whatever the ring is on. Every *other* key is
+        // still swallowed rather than typed into a terminal the user cannot see
+        // — the guard is unchanged, it is only no longer the whole story.
+        //
+        // This sits above the IME branch on purpose — a composition that
+        // outlived the dialog opening must not be able to reach the child
+        // either, and nothing in this dialog takes text yet. The first surface
+        // here that does (a shortcut recorder, a theme name) opts in through
+        // `ImeOwner`, which is where that decision belongs.
         if self.settings_layout().is_some() {
-            if matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                && !event.repeat
-                && self.settings.close_one_layer()
-            {
-                if let Some(position) = self.pointer_position
-                    && !self.settings.is_open()
-                {
-                    self.update_chrome_hover(position)?;
+            let key = settings_key_of(&event.logical_key, self.modifiers, event.repeat);
+            let rows = settings::visible_rows(self.rail.layout);
+            match self.settings.key(key, &rows, self.settings_values()) {
+                settings::SettingsKeyVerdict::Inert => return Ok(()),
+                settings::SettingsKeyVerdict::Moved => {}
+                settings::SettingsKeyVerdict::Chose(target) => {
+                    self.apply_settings_choice(target)?;
                 }
-                if self.refresh_chrome() {
-                    self.present_chrome_change()?;
+                settings::SettingsKeyVerdict::Closed => {
+                    if let Some(position) = self.pointer_position {
+                        self.update_chrome_hover(position)?;
+                    }
                 }
+            }
+            // **Scrolling follows the focus** (minimal movement): a row Tab
+            // reached below the fold is brought into the content box, because a
+            // ring drawn outside the box that clips it is a ring nobody sees.
+            // Asked of a fresh layout, since the row that now has the focus may
+            // be one this frame's scroll had cut off.
+            if let (Some(focus), Some(layout)) = (self.settings.focus(), self.settings_layout()) {
+                let scrolled = layout.scroll_to_show(focus, self.settings_scroll);
+                if scrolled != self.settings_scroll {
+                    self.settings_scroll = scrolled;
+                    // The stack moved under a stationary pointer, which is the
+                    // wheel's own rule (`scroll_settings`) reached by the other
+                    // door: the row now under the cursor is not the row that was.
+                    if let Some(position) = self.pointer_position
+                        && let Some(moved) = self.settings_layout()
+                    {
+                        let hover =
+                            settings::hit(&moved, self.settings_values(), position.x, position.y);
+                        self.settings.set_hover(Some(hover));
+                    }
+                }
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
             }
             return Ok(());
         }
@@ -38453,7 +38417,8 @@ impl Runtime {
         // promised to anyone, and its anchor has just moved.
         self.reclamp_float();
         self.sync_math_layout_key();
-        // The grid actually in force, which under the typed-input gate is still the old one.
+        // The grid actually in force, which inside a coalescing window is not yet the one the
+        // child has heard.
         self.pending_resize_present = Some(self.grid);
         self.publish_frame(resize_trigger)?;
         // Windows dispatches Resized from its modal move/size loop. `Renderer::resize` only records
@@ -40890,8 +40855,8 @@ struct LeafResizeTarget {
 /// per terminal leaf out.
 ///
 /// `focused` enters the answer **only as a flag**. It says which leaf's carry
-/// goes through the typed-input gate and the ConPTY quiet window; it does not
-/// and must not reach any `body`. Sizing a shell is a question about a
+/// goes through the ConPTY quiet window; it does not and must not reach any
+/// `body`. Sizing a shell is a question about a
 /// rectangle, and which pane holds the keyboard is not one of that rectangle's
 /// inputs — the version of this code that let the two mix is the one that told a
 /// narrow focused pane it had the primary pane's columns.
@@ -45838,7 +45803,7 @@ mod tests {
     #[test]
     fn the_gear_opens_the_settings_surface_rather_than_deciding_a_theme() {
         let mut panel = settings::SettingsPanel::default();
-        panel.toggle();
+        panel.toggle(&settings::visible_rows(seats::TabLayoutMode::Horizontal));
         assert!(panel.is_open(), "the gear's verb is 'open the dialog'");
         assert_eq!(
             settings::theme_requested(settings::SettingsTarget::Close),
@@ -45848,9 +45813,10 @@ mod tests {
         assert_eq!(
             settings::theme_requested(settings::SettingsTarget::Choice(
                 settings::SettingsRow::Theme,
-                1
+                0
             )),
-            Some(ThemeModeV1::Light)
+            Some(ThemeModeV1::Light),
+            "the mock-up's picker opens with Light (2500)"
         );
     }
 
@@ -48301,7 +48267,8 @@ mod tests {
             ),
             (
                 "the settings dialog's startup row",
-                settings::SettingsRow::DefaultProfile.description(),
+                settings::SettingsRow::DefaultProfile
+                    .description(settings::SettingsValues::sample()),
             ),
             ("the restore prompt", restore::SUB_TEXT),
             ("this terminal's own banner", &banner),
@@ -50034,9 +50001,9 @@ mod tests {
     /// target size.
     ///
     /// The other half of the same rule. `focused` is allowed to decide *when* a
-    /// shell hears a new size — the typed-input gate and the 200ms ConPTY quiet
-    /// window both hang off it — and is allowed to decide nothing about *what*
-    /// that size is. Solving the identical layout twice, differing only in which
+    /// shell hears a new size — the 200ms ConPTY quiet window hangs off it — and
+    /// is allowed to decide nothing about *what* that size is. Solving the
+    /// identical layout twice, differing only in which
     /// leaf holds the keyboard, must produce the identical rectangles; only the
     /// flag moves. Let focus back into the geometry and this goes red.
     #[test]
@@ -50079,25 +50046,20 @@ mod tests {
     /// The scheduling half of `Runtime`, with no GPU in it.
     ///
     /// Every decision below is taken by the *production* functions — `plan_grid_change`,
-    /// `release_due_pty_resize`, `pty_resize_wake_deadline` — and the gate answer comes from a real
-    /// `DualPlaneSession` fed real OSC 133 bytes, not from a bool a test invented. What the harness
-    /// itself owns is only the bookkeeping the runtime does around them: applying the reflow to the
-    /// session, and recording the ConPTY requests that were actually issued.
+    /// `service_pending_pty_resize`, `pty_resize_wake_deadline` — driven against a real
+    /// `DualPlaneSession` fed real OSC 133 bytes. What the harness itself owns is only the
+    /// bookkeeping the runtime does around them: applying the reflow to the session, and recording
+    /// the ConPTY requests that were actually issued.
     struct ResizeGateHarness {
         session: DualPlaneSession,
         pending: Option<PendingPtyResize>,
         grid: GridSize,
         conpty: GridSize,
         requests: Vec<GridSize>,
-        typed_input_resize_deferral: bool,
     }
 
     impl ResizeGateHarness {
         fn new(columns: u16, rows: u16) -> Self {
-            Self::with_policy(columns, rows, TYPED_INPUT_RESIZE_DEFERRAL)
-        }
-
-        fn with_policy(columns: u16, rows: u16, typed_input_resize_deferral: bool) -> Self {
             let grid = grid_of(columns, rows);
             Self {
                 session: DualPlaneSession::new(
@@ -50108,16 +50070,7 @@ mod tests {
                 grid,
                 conpty: grid,
                 requests: Vec::new(),
-                typed_input_resize_deferral,
             }
-        }
-
-        fn deferring(&self) -> bool {
-            typed_input_resize_deferral_active(
-                self.typed_input_resize_deferral,
-                true,
-                self.session.typed_shell_input_live(),
-            )
         }
 
         fn feed(&mut self, bytes: &[u8], at: Instant) {
@@ -50128,7 +50081,6 @@ mod tests {
         /// answered `columns`, and this is everything `Runtime::resize` does with that answer.
         fn drag_to(&mut self, columns: u16, at: Instant) {
             let next = grid_of(columns, self.grid.rows.get());
-            let deferred = self.deferring();
             if let Some(reflow) = plan_grid_change(
                 &mut self.pending,
                 next,
@@ -50136,7 +50088,6 @@ mod tests {
                 self.grid,
                 PhysicalSize::new(u32::from(columns) * 8, 600),
                 at,
-                deferred,
             ) {
                 self.session
                     .resize(
@@ -50148,10 +50099,9 @@ mod tests {
             }
         }
 
-        /// One `about_to_wait`: drain has already happened, so the gate is asked again here.
+        /// One `about_to_wait`: drain has already happened, and this is what the loop then owes.
         fn tick(&mut self, at: Instant) {
-            let deferred = self.deferring();
-            let (pending, _) = service_pending_pty_resize(&mut self.pending, at, deferred);
+            let (pending, _) = service_pending_pty_resize(&mut self.pending, at);
             let Some(pending) = pending else {
                 return;
             };
@@ -50166,10 +50116,6 @@ mod tests {
             }
             self.conpty = pending.grid;
             self.requests.push(pending.grid);
-        }
-
-        fn wake_deadline(&self, now: Instant) -> Option<Instant> {
-            pty_resize_wake_deadline(self.pending, self.deferring(), now)
         }
     }
 
@@ -50188,19 +50134,20 @@ mod tests {
         }
     }
 
-    /// POLICY PIN (user ruling 2026-08-06): typed input does not hold a resize by default. The
-    /// local grid follows the drag immediately, while ConPTY still receives exactly the coalesced
-    /// final size at the ordinary quiet boundary.
+    /// POLICY PIN (user ruling 2026-08-06, machine retired 2026-08-16): **typed input does not
+    /// hold a resize.** The local grid follows the drag in the same turn even while the shell is
+    /// holding an unsubmitted line, and ConPTY receives exactly the coalesced final size at the
+    /// ordinary quiet boundary — not one request per drag step, and not none at all.
+    ///
+    /// This used to read the policy bit and assert it was `false`. The bit is gone, along with the
+    /// confirm-then-release machine behind it, so what is left is the pin on the behaviour that
+    /// actually ships: the ruling's own sentence, said about the only path there now is.
+    ///
+    /// Red gate: restore a hold — make `plan_grid_change` withhold the reflow while
+    /// `typed_shell_input_live` — and the first assertion goes red naming the grid that did not
+    /// move. Drop the coalescer and the second goes red instead.
     #[test]
-    fn typed_input_resize_deferral_is_off_and_live_resize_is_the_default() {
-        const {
-            assert!(!TYPED_INPUT_RESIZE_DEFERRAL);
-        }
-        assert!(!typed_input_resize_deferral_active(false, true, true));
-        assert!(typed_input_resize_deferral_active(true, true, true));
-        assert!(!typed_input_resize_deferral_active(true, false, true));
-        assert!(!typed_input_resize_deferral_active(true, true, false));
-
+    fn a_drag_reflows_at_once_while_the_shell_holds_typed_input() {
         let start = Instant::now();
         let mut harness = ResizeGateHarness::new(100, 24);
         harness.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
@@ -50210,7 +50157,7 @@ mod tests {
         assert_eq!(
             harness.grid,
             grid_of(80, 24),
-            "policy=false must reflow locally even while the shell holds text"
+            "the local grid reflows even while the shell holds text"
         );
         harness.tick(start + WINDOW_RESIZE_QUIET - Duration::from_millis(1));
         assert!(
@@ -50221,18 +50168,21 @@ mod tests {
         assert_eq!(
             harness.requests,
             vec![grid_of(80, 24)],
-            "policy=false commits the coalesced resize while input remains live"
+            "the coalesced resize commits while input remains live"
         );
     }
 
     /// PIN: a PTY deadline handed to `ControlFlow::WaitUntil` must still be in the future.
     ///
-    /// The gate can be sampled as live while servicing the pending resize and read empty by the
-    /// later control-flow calculation. In that state `blank_since` is still `None`, so the pending
-    /// request's coalescing deadline is the only deadline available -- and it is already due. A
-    /// past `WaitUntil` makes winit immediately re-enter `about_to_wait` instead of sleeping.
+    /// A past `WaitUntil` makes winit immediately re-enter `about_to_wait` instead of sleeping, so
+    /// the loop spins on a deadline it has already served. The pending request's own coalescing
+    /// deadline is the only one there is, and the instant it comes due it is released and there is
+    /// nothing left to wait for.
+    ///
+    /// Red gate: drop the `filter(|deadline| *deadline > now)` in `pty_resize_wake_deadline` and
+    /// the first assertion names the already-due instant it offered.
     #[test]
-    fn a_gate_transition_cannot_offer_wait_until_an_already_due_resize_deadline() {
+    fn wait_until_is_never_offered_an_already_due_resize_deadline() {
         let start = Instant::now();
         let mut pending = None;
         coalesce_pty_resize(
@@ -50241,286 +50191,26 @@ mod tests {
             PhysicalSize::new(800, 600),
             start,
         );
-        let now = start + WINDOW_RESIZE_QUIET;
+        let due_at = start + WINDOW_RESIZE_QUIET;
 
+        assert_eq!(
+            pty_resize_wake_deadline(pending, start),
+            Some(due_at),
+            "before it is due, the coalescing deadline is exactly what the loop should wait for"
+        );
         assert!(
-            pty_resize_wake_deadline(pending, false, now).is_none_or(|deadline| deadline > now),
+            pty_resize_wake_deadline(pending, due_at).is_none(),
             "ControlFlow::WaitUntil must never receive an already-due PTY deadline"
         );
-        let (released, wake_deadline) = service_pending_pty_resize(&mut pending, now, false);
-        assert!(released.is_none(), "one empty sample cannot release");
+        let (released, wake_deadline) = service_pending_pty_resize(&mut pending, due_at);
         assert_eq!(
-            wake_deadline,
-            Some(now + WINDOW_RESIZE_QUIET),
-            "the same gate sample starts confirmation and schedules its future boundary"
-        );
-    }
-
-    /// MACHINERY PIN (policy=true): while an OSC 133 input region holds typed content, a PTY
-    /// resize is deferred — zero requests during the drag, exactly one at release carrying the
-    /// final dragged size, and our own grid held in lockstep with the child's the whole way.
-    ///
-    /// This is the minimal repro's shape, in the app's own scheduling terms: type without
-    /// submitting, drag narrower than the prompt, drag wider again, and only then let go.
-    #[test]
-    fn a_drag_while_the_shell_holds_typed_input_reaches_conpty_exactly_once_at_release() {
-        let start = Instant::now();
-        let mut harness = ResizeGateHarness::with_policy(100, 24, true);
-        harness.feed(
-            b"\x1b]133;A\x07PS D:\\Developer\\BetterTerminal> \x1b]133;B\x07Get-ChildItem",
-            start,
-        );
-        assert!(harness.session.typed_shell_input_live());
-
-        // The narrowing drag, then the widening one, with the loop turning between each step.
-        for (step, columns) in [92_u16, 84, 70, 39, 55, 80, 96].into_iter().enumerate() {
-            let at = start + Duration::from_millis(20 * step as u64);
-            harness.drag_to(columns, at);
-            harness.tick(at + Duration::from_millis(1));
-        }
-        // Long past every quiet deadline the drag ever set: the gate is not a debounce.
-        harness.tick(start + Duration::from_secs(3600));
-
-        assert!(
-            harness.requests.is_empty(),
-            "zero ConPTY resizes are owed while the child is holding text, got {:?}",
-            harness.requests
+            released.map(|released| released.grid),
+            Some(grid_of(80, 24)),
+            "the same reading that refuses the deadline is the one that released the request"
         );
         assert_eq!(
-            (harness.grid, harness.conpty),
-            (grid_of(100, 24), grid_of(100, 24)),
-            "our grid and the child's stay in lockstep at the old width across the whole drag"
-        );
-        assert!(
-            harness
-                .wake_deadline(start + Duration::from_secs(3600))
-                .is_none(),
-            "a held resize must not offer the loop a deadline it would spin on"
-        );
-
-        // RELEASE: the command is submitted, and the empty line that follows it is confirmed over
-        // one quiet window (`a_redraw_split_across_two_reads_never_releases_in_its_blank_window` is
-        // why the drain that carries `133;C` cannot be trusted on its own). It carries the last size
-        // the drag reached — not the narrow one it passed through, and not one request per step.
-        let released_at = start + Duration::from_secs(3600);
-        harness.feed(b"\r\n\x1b]133;C\x07", released_at);
-        harness.tick(released_at);
-        assert!(harness.requests.is_empty());
-        assert_eq!(
-            harness.wake_deadline(released_at),
-            Some(released_at + WINDOW_RESIZE_QUIET),
-            "the loop is told when to come back and confirm, since no further output need arrive"
-        );
-        harness.tick(released_at + WINDOW_RESIZE_QUIET);
-        assert_eq!(
-            harness.requests,
-            vec![grid_of(96, 24)],
-            "exactly one resize lands at release, carrying the final dragged size"
-        );
-        assert_eq!(harness.grid, grid_of(96, 24));
-        assert_eq!(harness.conpty, grid_of(96, 24));
-    }
-
-    /// MACHINERY PIN (policy=true): the three non-holding/release cases stay cheap.
-    #[test]
-    fn an_idle_prompt_a_bare_screen_and_a_cleared_line_all_resize_without_deferral() {
-        let start = Instant::now();
-
-        // An empty prompt: the drag lands as it always has. The confirmation window a release now
-        // waits out started at this drag's own first frame, so it has already elapsed when the
-        // coalescer's deadline arrives — the deadline the loop is given is the coalescer's own.
-        let mut idle = ResizeGateHarness::with_policy(100, 24, true);
-        idle.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start);
-        idle.drag_to(80, start);
-        assert_eq!(
-            idle.grid,
-            grid_of(80, 24),
-            "an empty prompt reflows immediately"
-        );
-        assert_eq!(
-            idle.wake_deadline(start),
-            Some(start + WINDOW_RESIZE_QUIET),
-            "confirming an already-idle prompt must not add a second quiet window to the drag"
-        );
-        idle.tick(start + WINDOW_RESIZE_QUIET);
-        assert_eq!(idle.requests, vec![grid_of(80, 24)]);
-
-        // A screen that never emitted OSC 133 is untouched by any of this.
-        let mut bare = ResizeGateHarness::with_policy(100, 24, true);
-        bare.feed(b"PS> Get-ChildItem", start);
-        bare.drag_to(80, start);
-        assert_eq!(bare.grid, grid_of(80, 24));
-        bare.tick(start + WINDOW_RESIZE_QUIET);
-        assert_eq!(
-            bare.requests,
-            vec![grid_of(80, 24)],
-            "honest degradation: without shell integration this is today's path, unchanged"
-        );
-
-        // Clearing the line is a release in its own right — no submission needed. What it does need
-        // is the confirmation window, because "the line is empty" is exactly what a redraw's erase
-        // chunk also says one millisecond before its rewrite arrives.
-        let mut cleared = ResizeGateHarness::with_policy(100, 24, true);
-        cleared.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
-        cleared.drag_to(80, start);
-        cleared.tick(start + WINDOW_RESIZE_QUIET);
-        assert!(cleared.requests.is_empty());
-        let emptied_at = start + WINDOW_RESIZE_QUIET;
-        cleared.feed(b"\x1b[5G\x1b[K", emptied_at);
-        cleared.tick(emptied_at);
-        assert!(
-            cleared.requests.is_empty(),
-            "the first blank sample only starts the confirmation"
-        );
-        cleared.tick(emptied_at + WINDOW_RESIZE_QUIET);
-        assert_eq!(
-            cleared.requests,
-            vec![grid_of(80, 24)],
-            "a line that stays empty releases the gate with no submission"
-        );
-    }
-
-    /// MACHINERY PIN (policy=true): a drag that wanders away and comes back tells the child
-    /// nothing at all. Without this,
-    /// "exactly one resize at release" would be false whenever the final size is the one the child
-    /// never left — and that resize would be a gratuitous reflow of a settled prompt.
-    #[test]
-    fn a_drag_that_returns_to_the_childs_own_size_releases_nothing() {
-        let start = Instant::now();
-        let mut harness = ResizeGateHarness::with_policy(100, 24, true);
-        harness.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
-        for columns in [70_u16, 39, 100] {
-            harness.drag_to(columns, start);
-        }
-        harness.feed(b"\r\n\x1b]133;C\x07", start);
-        harness.tick(start + WINDOW_RESIZE_QUIET);
-        assert!(
-            harness.requests.is_empty(),
-            "the child is already 100 columns wide; nothing is owed"
-        );
-        assert_eq!(harness.grid, grid_of(100, 24));
-    }
-
-    /// MACHINERY PIN (policy=true, confirm-then-release): the blank instant inside a redraw is not
-    /// an empty prompt.
-    ///
-    /// The reader thread hands the loop whatever a single read returned — up to 16 KiB — and wakes
-    /// it for every chunk. PSReadLine redraws a line by parking the cursor on `B`, erasing, and
-    /// writing the buffer back, so a redraw that straddles two reads leaves a wake in between where
-    /// the grid honestly holds nothing. Sampling the gate once at that wake and releasing on it is
-    /// how the narrow width reached the child through a gate with no bypass in it.
-    ///
-    /// So a release needs the *same* answer for `WINDOW_RESIZE_QUIET` — the quiet period already
-    /// used for "the drag has stopped" — and any sample that reads content restarts the clock. The
-    /// millisecond-scale blank of a redraw can never clear that bar; a line the user actually
-    /// emptied always does.
-    #[test]
-    fn a_redraw_split_across_two_reads_never_releases_in_its_blank_window() {
-        let start = Instant::now();
-        let mut harness = ResizeGateHarness::with_policy(100, 24, true);
-        // A 12-column prompt: `B` lands on column 12, which is CUP column 13.
-        harness.feed(
-            b"\x1b]133;A\x07PS D:\\dist> \x1b]133;B\x07Get-ChildItem",
-            start,
-        );
-        assert!(harness.session.typed_shell_input_live());
-
-        harness.drag_to(35, start);
-        harness.tick(start + Duration::from_millis(1));
-        assert!(
-            harness.requests.is_empty(),
-            "the buffer is full; nothing is owed"
-        );
-
-        // The chunk that carries the erase but not the rewrite, drained at a wake past the
-        // coalescer's own deadline.
-        let erased_at = start + WINDOW_RESIZE_QUIET + Duration::from_millis(5);
-        harness.feed(b"\x1b[13G\x1b[J", erased_at);
-        assert!(
-            !harness.session.typed_shell_input_live(),
-            "the fixture must really empty the grid, or this pin proves nothing"
-        );
-        harness.tick(erased_at);
-        assert!(
-            harness.requests.is_empty(),
-            "one blank sample is not an empty prompt: {:?}",
-            harness.requests
-        );
-
-        // The rewrite lands three milliseconds later. The buffer was never empty.
-        let rewritten_at = erased_at + Duration::from_millis(3);
-        harness.feed(b"Get-ChildItem2", rewritten_at);
-        harness.tick(rewritten_at);
-        assert!(harness.requests.is_empty());
-
-        // A second redraw's erase, ten milliseconds after the first. The confirmation window must
-        // restart here, not run from the first blank sample.
-        let erased_again_at = erased_at + Duration::from_millis(10);
-        harness.feed(b"\x1b[13G\x1b[J", erased_again_at);
-        harness.tick(erased_again_at);
-        harness.tick(erased_at + WINDOW_RESIZE_QUIET);
-        assert!(
-            harness.requests.is_empty(),
-            "a content sample between the two blanks restarts the confirmation: {:?}",
-            harness.requests
-        );
-
-        harness.feed(b"Get-ChildItem23", erased_at + WINDOW_RESIZE_QUIET);
-        harness.tick(erased_again_at + WINDOW_RESIZE_QUIET);
-        assert!(harness.requests.is_empty());
-
-        // RELEASE: the command is submitted, and the line stays empty through the window.
-        let submitted_at = start + Duration::from_secs(1);
-        harness.feed(b"\r\n\x1b]133;C\x07", submitted_at);
-        harness.tick(submitted_at);
-        assert!(
-            harness.requests.is_empty(),
-            "even a submission is confirmed before it releases"
-        );
-        harness.tick(submitted_at + WINDOW_RESIZE_QUIET);
-        assert_eq!(
-            harness.requests,
-            vec![grid_of(35, 24)],
-            "exactly one resize, carrying the dragged size, once the line is confirmed empty"
-        );
-    }
-
-    /// RED-CHECK for the deferral pin: prove it is not vacuous. This is the pre-mitigation path —
-    /// the same drag with the gate answer forced to `false` — and it is exactly what the forensic
-    /// run showed reaching PSReadLine: the 39-column width, narrower than the prompt, delivered
-    /// while the input buffer is non-empty.
-    #[test]
-    fn without_the_gate_the_same_drag_hands_conpty_the_narrow_width_mid_input() {
-        let start = Instant::now();
-        let mut pending = None;
-        let mut conpty = grid_of(100, 24);
-        let mut local = conpty;
-        let mut requests = Vec::new();
-        for (step, columns) in [92_u16, 84, 70, 39, 55, 80, 96].into_iter().enumerate() {
-            let at = start + Duration::from_millis(20 * step as u64);
-            let next = grid_of(columns, 24);
-            // `typed_input_live: false` is the clause removed.
-            if let Some(reflow) = plan_grid_change(
-                &mut pending,
-                next,
-                conpty,
-                local,
-                PhysicalSize::new(u32::from(columns) * 8, 600),
-                at,
-                false,
-            ) {
-                local = reflow;
-            }
-            if let Some(due) = release_due_pty_resize(&mut pending, at + WINDOW_RESIZE_QUIET, false)
-            {
-                conpty = due.grid;
-                requests.push(due.grid);
-            }
-        }
-        assert!(
-            requests.contains(&grid_of(39, 24)),
-            "the ungated path really does hand the child a width narrower than the prompt, \
-             which is the whole precondition of the PSReadLine anchor fault: {requests:?}"
+            wake_deadline, None,
+            "nothing is owed, so nothing is awaited"
         );
     }
 

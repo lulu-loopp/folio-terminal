@@ -21,6 +21,15 @@
 //!   [`bt_render::OverlayQuad`]s, which blend, because a scrim and a hairline
 //!   over an unknown surface cannot be pre-composited.
 //!
+//! **The dialog's own keyboard** (2026-08-16) is the third: `InputOwner::Dialog`
+//! says keys come *here*, and [`SettingsPanel::focus`] says where in here they
+//! land. Until this slice the answer was nowhere — the modal swallowed every key
+//! but Esc — and every surface the Settings block is about to grow (a category
+//! rail, a shortcut recorder, a profile page) needs one before it can be
+//! reached at all. The order is [`focus_order`], the walk is
+//! [`SettingsPanel::key`], and the ring is the mock-up's own
+//! `button:focus-visible` shown under the web's own `:focus-visible` rule.
+//!
 //! Nothing here is layout: the dialog is not a seat, takes no space from the
 //! solver, and is never persisted (a dialog does not survive a restart).
 
@@ -146,6 +155,18 @@ const TICK_WIDTH_LOGICAL_PX: f32 = 14.0;
 const TICK_FONT_LOGICAL_PX: f32 = 11.0;
 const TICK: &str = "\u{2713}";
 
+// ── `button:focus-visible` (mock-up 2205) ──────────────────────────────────
+/// `outline: 2px solid var(--accent)` — the mock-up's one global focus ring,
+/// declared for every `button` on the page and therefore for this dialog's `×`
+/// and every row's picker button alike.
+const FOCUS_RING_WIDTH_LOGICAL_PX: f32 = 2.0;
+/// `outline-offset: 1px` — the gap between the control's own edge and the ring.
+const FOCUS_RING_OFFSET_LOGICAL_PX: f32 = 1.0;
+/// `border-radius: 6px`. The same round the controls themselves wear, which is
+/// what keeps the ring concentric with the thing it names rather than a
+/// rectangle around a rounded box.
+const FOCUS_RING_RADIUS_LOGICAL_PX: f32 = 6.0;
+
 // ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
 /// `.profile-item .ticon { width: 14px }` (mock-up 1023) — the same column the
 /// `˅` menu gives a profile mark, because it is the same `.ticon` class.
@@ -170,9 +191,17 @@ fn option_icon_advance(row: SettingsRow, scale: f32) -> f32 {
 /// is how two surfaces come to disagree about what grey means.
 const UNAVAILABLE_MARK_OPACITY: f32 = 0.35;
 
-/// The persisted theme modes, in product order.
+/// The persisted theme modes, in the mock-up's own picker order (2500-2502:
+/// `Light`, `Dark`, then the selected `System`).
+///
+/// The two named modes first and the follow-the-OS one last, which is the order
+/// every system picker in Windows uses and the order the mock-up draws: `System`
+/// is not a third colour, it is the answer "ask somebody else", and an answer
+/// about the question belongs after the answers to it. This list used to open
+/// with `System` — the enum's own declaration order, arrived at by writing the
+/// constant off `ThemeModeV1` instead of off the picker it draws.
 pub const THEME_OPTIONS: [ThemeModeV1; 3] =
-    [ThemeModeV1::System, ThemeModeV1::Light, ThemeModeV1::Dark];
+    [ThemeModeV1::Light, ThemeModeV1::Dark, ThemeModeV1::System];
 pub const CURSOR_OPTIONS: [CursorStyle; 3] =
     [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline];
 pub const TAB_LAYOUT_OPTIONS: [TabLayoutMode; 2] =
@@ -432,13 +461,42 @@ impl SettingsRow {
         }
     }
 
+    /// The line under a row's title — **a function of the row's current value**.
+    ///
+    /// The mock-up varies two of these with the picker beside them: `wrap-desc`
+    /// says "Long lines fold at the pane's edge" on and "Long lines run on and
+    /// the pane scrolls sideways" off (2561, 7897), and `blockmax-desc` swaps
+    /// between "Rendered blocks show in full" and "Blocks taller than this
+    /// scroll inside themselves" (2576, 7904). A description that describes the
+    /// *setting* rather than the *state* is the one line a user reads to find
+    /// out what the switch they are looking at is currently doing, so the value
+    /// has to be in scope here.
+    ///
+    /// Neither of those two rows exists yet — there is no line-wrapping and no
+    /// block-height setting behind them (`bt_persist::SettingsV1` holds neither),
+    /// and this build does not invent a row for a preference nothing reads. What
+    /// arrives now is the *shape*: the parameter, so that the slice which adds
+    /// those rows adds two match arms rather than changing every call site of a
+    /// method with nine of them.
+    ///
+    /// Still `&'static str`, which is the i18n ruling's own constraint
+    /// (2026-08-13): the language table is a `match lang` returning one of two
+    /// literals, and a description that varied by value *and* by language is
+    /// still a choice among literals. A `String` here would allocate on every
+    /// frame of a dialog that redraws on hover.
     #[must_use]
-    pub fn description(self) -> &'static str {
+    #[allow(
+        unused_variables,
+        reason = "the two rows that read it are not built yet"
+    )]
+    pub fn description(self, values: SettingsValues) -> &'static str {
         match self {
-            // The mock-up's own line names a third option this build does not
-            // have; a description that promises what the picker cannot do is a
-            // lie in the one place the user goes to find out what it does.
-            Self::Theme => "Light or dark",
+            // Mock-up 2496, word for word. It used to read "Light or dark" with
+            // a note claiming the mock-up's line named a third option this build
+            // did not have; System shipped, and the note outlived the fact —
+            // leaving the one line a user reads to find out what the picker
+            // offers naming two of its three items.
+            Self::Theme => "Light, dark, or follow your system setting",
             Self::Cursor => "Focused cursor shape",
             // What Off does and, just as much, what it does not do: the line has
             // to say "source" or a reader will expect the formula to vanish.
@@ -695,6 +753,29 @@ pub struct SettingsPanel {
     /// per press (§7.1.5) and "the menu is open" is the top layer.
     menu: Option<SettingsRow>,
     hover: Option<SettingsTarget>,
+    /// **Which control the keyboard is on** — the dialog's own focus, and the
+    /// half of `InputOwner::Dialog` that did not exist until this slice.
+    ///
+    /// The window-level owner (`main.rs`'s `KeyboardOwner`/`ImeOwner::Modal`)
+    /// answers "do keys go to the dialog"; it never answered "and where in it",
+    /// so until now the dialog swallowed every key but Esc and had nowhere for
+    /// one to land. This field is the answer to the second question and lives
+    /// here rather than up there because it is a fact about *this* dialog's
+    /// contents, which is also what makes it testable without a window.
+    ///
+    /// `None` while the dialog is shut. Opening it seats the focus (see
+    /// [`Self::toggle`]), so an open dialog always has one.
+    focus: Option<SettingsTarget>,
+    /// **Whether the ring is drawn** — the web's `:focus-visible` heuristic,
+    /// which this dialog owes a native equivalent of because the mock-up's ring
+    /// (`button:focus-visible`, 2205) is spelled in exactly those terms.
+    ///
+    /// The rule that heuristic encodes: a ring answers "where will the next key
+    /// go", which is a question only somebody using the keyboard is asking.
+    /// Ringing a button somebody just *clicked* tells them where their own
+    /// finger was. So a pointer press moves the focus with the ring off, and any
+    /// key press turns it on until the next pointer press.
+    focus_visible: bool,
 }
 
 impl SettingsPanel {
@@ -707,23 +788,41 @@ impl SettingsPanel {
     }
 
     /// The gear: open when shut, shut when open. Closing takes the menu with it.
-    pub fn toggle(&mut self) {
+    ///
+    /// **Opening seats the focus on the first row's control, not on the `×`.**
+    /// The visual order puts the close first (it is in the header, above
+    /// everything), and Tab walks that order — but the row a user came for is
+    /// the first row, and a dialog that opens with the keyboard parked on
+    /// "leave" has spent its one free position on the verb nobody opened it to
+    /// reach. The ring is off, because a gear pressed with the mouse is not a
+    /// keyboard interaction; the first key turns it on.
+    pub fn toggle(&mut self, rows: &[SettingsRow]) {
         self.open = !self.open;
         self.menu = None;
         self.hover = None;
+        self.focus_visible = false;
+        self.focus = self
+            .open
+            .then(|| rows.first().map(|row| SettingsTarget::Combo(*row)))
+            .flatten();
     }
 
     /// Close the top-most open layer and report whether there was one — the Esc
     /// route of §7.1.5, which unwinds exactly one layer per press.
+    ///
+    /// The picker is a rung of its own here as it is in the mock-up's own Esc
+    /// ladder (6184-6187: `.combo.open`, then the dialog), and closing it hands
+    /// the keyboard back to the button it hangs under rather than dropping the
+    /// focus on the floor.
     pub fn close_one_layer(&mut self) -> bool {
-        if self.menu.is_some() {
+        if let Some(row) = self.menu {
             self.menu = None;
             self.hover = None;
+            self.focus = Some(SettingsTarget::Combo(row));
             return true;
         }
         if self.open {
-            self.open = false;
-            self.hover = None;
+            self.close();
             return true;
         }
         false
@@ -734,12 +833,16 @@ impl SettingsPanel {
         self.open = false;
         self.menu = None;
         self.hover = None;
+        self.focus = None;
+        self.focus_visible = false;
     }
 
     /// Shut whichever picker is open, leaving the dialog up — what choosing an
     /// item does, and the only direction the runtime ever asks for.
     pub fn close_menu(&mut self) {
-        self.menu = None;
+        if let Some(row) = self.menu.take() {
+            self.focus = Some(SettingsTarget::Combo(row));
+        }
     }
 
     pub fn toggle_menu(&mut self, row: SettingsRow) {
@@ -756,12 +859,330 @@ impl SettingsPanel {
     pub fn hover(self) -> Option<SettingsTarget> {
         self.hover
     }
+
+    /// Where the keyboard is, whether or not the ring is showing.
+    #[must_use]
+    pub fn focus(self) -> Option<SettingsTarget> {
+        self.focus
+    }
+
+    /// Where the **ring** is drawn, which is the focus only while it was reached
+    /// by keyboard. The one reader is the draw, so the heuristic is stated once.
+    #[must_use]
+    pub fn focus_ring(self) -> Option<SettingsTarget> {
+        self.focus_visible.then_some(self.focus).flatten()
+    }
+
+    /// A pointer press: the focus goes to what was pressed, with the ring off.
+    ///
+    /// Every press the dialog takes comes through here, including the ones that
+    /// close it — the scrim and the panel body move the focus nowhere, but they
+    /// are still pointer interaction and still put the ring away, which is the
+    /// half of `:focus-visible` a naive "set focus on click" would miss.
+    pub fn press(&mut self, target: SettingsTarget) {
+        self.focus_visible = false;
+        match target {
+            SettingsTarget::Close | SettingsTarget::Combo(_) => self.focus = Some(target),
+            // An item's own row is what the keyboard lands on: the menu is about
+            // to close, and a focus naming an item of a shut picker names
+            // nothing.
+            SettingsTarget::Choice(row, _) | SettingsTarget::Menu(row) => {
+                self.focus = Some(SettingsTarget::Combo(row));
+            }
+            SettingsTarget::Scrim | SettingsTarget::Panel => {}
+        }
+    }
+
+    /// Put the focus back on something the dialog still holds.
+    ///
+    /// The row list is conditional ([`visible_rows`]), so choosing `Horizontal`
+    /// in the Tab layout picker deletes the Sidebar row — and the focus may be
+    /// standing on it. Called by the runtime after any press that could change
+    /// the list, and again at the top of [`Self::key`], because a focus naming a
+    /// row that is gone draws no ring and answers no key: the dialog would look
+    /// like it had swallowed the keyboard.
+    pub fn keep_focus_reachable(&mut self, rows: &[SettingsRow]) {
+        if !self.open {
+            return;
+        }
+        // **An open picker's own item is a legal place for the focus and is not
+        // in the Tab order**, which is a list of the dialog's controls: while a
+        // picker is up the keyboard is *inside* one of them. Checked against the
+        // picker that is actually open, so an item of a shut one is still
+        // unreachable.
+        if let (Some(menu), Some(SettingsTarget::Choice(row, index))) = (self.menu, self.focus)
+            && menu == row
+            && rows.contains(&row)
+            && index < row.option_count()
+        {
+            return;
+        }
+        let order = focus_order(rows);
+        if self.focus.is_some_and(|focus| order.contains(&focus)) {
+            return;
+        }
+        // A picker open on a row that just vanished goes with it.
+        if self.menu.is_some_and(|row| !rows.contains(&row)) {
+            self.menu = None;
+        }
+        self.focus = order.first().copied();
+    }
 }
 
-/// Something in the overlay the pointer can be over.
+/// One key press, in the dialog's own vocabulary.
+///
+/// The runtime maps winit's keys onto this so that the whole focus model is a
+/// pure function of an enum — the same division `hit` runs on, and the only way
+/// "Shift+Tab from the first control wraps to the last" is a property rather
+/// than something you check by opening the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsKey {
+    /// Tab, or Shift+Tab when `backwards`.
+    Tab {
+        backwards: bool,
+    },
+    Down,
+    Up,
+    Home,
+    End,
+    /// Enter or Space — "press the thing the ring is on".
+    Activate,
+    Escape,
+    /// Every other key. It does nothing and is still swallowed, but it is a
+    /// keyboard interaction, so it turns the ring on.
+    Other,
+}
+
+/// What a key press did, for a runtime that has to repaint, scroll or persist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsKeyVerdict {
+    /// Nothing moved. The press is consumed all the same: a modal owns the
+    /// keyboard, and a key it has no verb for is a key that must not reach the
+    /// terminal behind the scrim.
+    Inert,
+    /// The focus, the ring or the open picker changed — repaint, and bring the
+    /// focused row into view.
+    Moved,
+    /// The focused item was chosen. The runtime runs exactly the side effects a
+    /// *press* on this target runs, because it is the same press arriving by a
+    /// different road.
+    Chose(SettingsTarget),
+    /// The last layer unwound and the dialog is now shut.
+    Closed,
+}
+
+impl SettingsPanel {
+    /// Drive the dialog from one key.
+    ///
+    /// **The Esc ladder is one rung deeper than the pointer's** and that is the
+    /// mock-up's own order (6184-6187): a press closes the open picker and
+    /// leaves the dialog up, the next closes the dialog. `close_one_layer` is
+    /// still the thing that does it, so there is one ladder rather than two.
+    ///
+    /// Inside an open picker the arrows move the *option* and skip the ones this
+    /// machine cannot honour — the same [`SettingsRow::option_enabled`] answer
+    /// the hit test and the draw read, because an item the pointer is refused is
+    /// an item the keyboard must be refused too. Outside one they move the
+    /// focus, which is the same walk Tab makes: one order, two spellings.
+    pub fn key(
+        &mut self,
+        key: SettingsKey,
+        rows: &[SettingsRow],
+        values: SettingsValues,
+    ) -> SettingsKeyVerdict {
+        if !self.open {
+            return SettingsKeyVerdict::Inert;
+        }
+        self.keep_focus_reachable(rows);
+        // Every key press is keyboard interaction, including the ones with no
+        // verb here: `:focus-visible`'s heuristic is about the *input device*,
+        // not about whether the key happened to be bound.
+        let ring_appeared = !self.focus_visible;
+        self.focus_visible = true;
+        let moved = match key {
+            SettingsKey::Escape => {
+                return if self.close_one_layer() {
+                    if self.open {
+                        SettingsKeyVerdict::Moved
+                    } else {
+                        SettingsKeyVerdict::Closed
+                    }
+                } else {
+                    SettingsKeyVerdict::Inert
+                };
+            }
+            SettingsKey::Activate => return self.activate(values),
+            SettingsKey::Tab { backwards } => {
+                // Tab leaves an open picker rather than walking inside it — a
+                // `<select>`'s own behaviour, and the only reading that keeps
+                // "one popup at a time" (mock-up 5102) true of the keyboard.
+                self.close_menu();
+                self.step_focus(rows, if backwards { -1 } else { 1 })
+            }
+            SettingsKey::Down => self.step(rows, values, 1),
+            SettingsKey::Up => self.step(rows, values, -1),
+            SettingsKey::Home => self.jump(rows, values, false),
+            SettingsKey::End => self.jump(rows, values, true),
+            SettingsKey::Other => false,
+        };
+        if moved || ring_appeared {
+            SettingsKeyVerdict::Moved
+        } else {
+            SettingsKeyVerdict::Inert
+        }
+    }
+
+    /// Enter or Space on whatever the ring is on.
+    fn activate(&mut self, values: SettingsValues) -> SettingsKeyVerdict {
+        match self.focus {
+            Some(SettingsTarget::Close) => {
+                self.close();
+                SettingsKeyVerdict::Closed
+            }
+            Some(SettingsTarget::Combo(row)) => {
+                // "Opens its menu with the current value focused": the picker
+                // opens where the user already is, not at its top, so the first
+                // arrow press moves one step from what they have rather than
+                // teleporting them to an option they did not ask about.
+                self.menu = Some(row);
+                self.focus = Some(SettingsTarget::Choice(
+                    row,
+                    row.selected_index(values).unwrap_or(0),
+                ));
+                SettingsKeyVerdict::Moved
+            }
+            Some(target @ SettingsTarget::Choice(row, index)) => {
+                if !row.option_enabled(index, values) {
+                    return SettingsKeyVerdict::Inert;
+                }
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
+            }
+            _ => SettingsKeyVerdict::Inert,
+        }
+    }
+
+    /// One step of the arrows: through the open picker's options if there is
+    /// one, otherwise through the dialog's own controls.
+    fn step(&mut self, rows: &[SettingsRow], values: SettingsValues, delta: isize) -> bool {
+        match (self.menu, self.focus) {
+            (Some(menu), Some(SettingsTarget::Choice(row, index))) if menu == row => {
+                self.step_option(row, values, index, delta)
+            }
+            _ => self.step_focus(rows, delta),
+        }
+    }
+
+    /// Home/End: the first or last option of an open picker, else the first or
+    /// last control of the dialog.
+    fn jump(&mut self, rows: &[SettingsRow], values: SettingsValues, last: bool) -> bool {
+        if let (Some(menu), Some(SettingsTarget::Choice(row, _))) = (self.menu, self.focus)
+            && menu == row
+        {
+            // Stepped *onto* the end from just outside it, so Home and End land
+            // on the first choosable item at that end rather than on a greyed
+            // one — the same skip the arrows make, and not a second rule.
+            return if last {
+                self.step_option_from(row, values, row.option_count() as isize, -1)
+            } else {
+                self.step_option_from(row, values, -1, 1)
+            };
+        }
+        let order = focus_order(rows);
+        let landing = if last { order.last() } else { order.first() };
+        let Some(landing) = landing.copied() else {
+            return false;
+        };
+        let changed = self.focus != Some(landing);
+        self.focus = Some(landing);
+        changed
+    }
+
+    fn step_option(
+        &mut self,
+        row: SettingsRow,
+        values: SettingsValues,
+        index: usize,
+        delta: isize,
+    ) -> bool {
+        self.step_option_from(row, values, index as isize, delta)
+    }
+
+    /// Walk the picker from `start` in `delta`, wrapping, and stop at the first
+    /// item this machine can honour. Answers `false` when there is no such item
+    /// to move to, which leaves the focus exactly where it was.
+    fn step_option_from(
+        &mut self,
+        row: SettingsRow,
+        values: SettingsValues,
+        start: isize,
+        delta: isize,
+    ) -> bool {
+        let count = row.option_count() as isize;
+        if count == 0 {
+            return false;
+        }
+        for step in 1..=count {
+            let index = (start + delta * step).rem_euclid(count) as usize;
+            if row.option_enabled(index, values) {
+                let landing = SettingsTarget::Choice(row, index);
+                let changed = self.focus != Some(landing);
+                self.focus = Some(landing);
+                return changed;
+            }
+        }
+        false
+    }
+
+    /// One step along the dialog's Tab order, wrapping at both ends.
+    fn step_focus(&mut self, rows: &[SettingsRow], delta: isize) -> bool {
+        let order = focus_order(rows);
+        if order.is_empty() {
+            return false;
+        }
+        let at = self
+            .focus
+            .and_then(|focus| order.iter().position(|entry| *entry == focus))
+            .unwrap_or(0) as isize;
+        let landing = order[(at + delta).rem_euclid(order.len() as isize) as usize];
+        let changed = self.focus != Some(landing);
+        self.focus = Some(landing);
+        changed
+    }
+}
+
+/// **The dialog's Tab order**: the close, then every visible row's control, top
+/// to bottom.
+///
+/// Derived from the row list for [`visible_rows`]' own reason — the conditional
+/// Sidebar row must not be a stop the keyboard can reach while it is not drawn,
+/// and a second list stating the order beside the one stating the rows is a
+/// second place to forget that. The close is first because it is first on the
+/// page; where the focus *starts* is a different question, and
+/// [`SettingsPanel::toggle`] answers it.
+#[must_use]
+pub fn focus_order(rows: &[SettingsRow]) -> Vec<SettingsTarget> {
+    let mut order = Vec::with_capacity(rows.len() + 1);
+    order.push(SettingsTarget::Close);
+    order.extend(rows.iter().map(|row| SettingsTarget::Combo(*row)));
+    order
+}
+
+/// Something in the overlay the pointer can be over — **and the same enumeration
+/// the keyboard's focus is stated in** (`SettingsPanel::focus`).
+///
+/// One type for both, because a control is a control: the ring goes where a
+/// press would go, and a second enumeration for "focusable things" would be a
+/// second place to teach every control this dialog grows. The two of these that
+/// are not controls (`Scrim`, `Panel`) are simply never in [`focus_order`].
 ///
 /// There is no `None`: while the dialog is up every point in the window is one
 /// of these, which is the whole of what "modal" means here.
+///
+/// **Extensible on purpose.** The Settings block's own roadmap adds a left
+/// category rail, a shortcut-editing panel and a profile page; each of those
+/// brings focusable things that are not a row's picker, and each arrives as a
+/// variant here and a line in [`focus_order`] — not as a parallel focus type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTarget {
     /// The dimmed world behind the dialog. A press here closes.
@@ -782,6 +1203,13 @@ pub enum SettingsTarget {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowLayout {
     pub row: SettingsRow,
+    /// `.row`'s own border box — the full `11 + content + 11` band, padding and
+    /// all, which is the rectangle "this row is on screen" is a claim about.
+    ///
+    /// Not derivable from the three boxes below: the padding is outside all of
+    /// them, so a scroll that brought their union into view would still leave
+    /// the row's rule and its breathing room cut by the content edge.
+    pub band: [f32; 4],
     pub title: [f32; 4],
     pub desc: [f32; 4],
     pub combo: [f32; 4],
@@ -854,6 +1282,45 @@ impl SettingsLayout {
     #[must_use]
     pub fn content_box(&self) -> [f32; 4] {
         self.content
+    }
+
+    /// **The scroll that brings the focused control into view**, given the one
+    /// this layout was built at — or that same number when it is already there.
+    ///
+    /// *Minimal* movement, which is the whole of the rule: a row one pixel below
+    /// the fold rises one pixel, not to the top of the box. Scrolling further
+    /// than the fix requires moves rows the user was reading for a reason they
+    /// did not ask about, and the browsers this behaviour is borrowed from
+    /// (`scrollIntoView({ block: "nearest" })`) settled the same way.
+    ///
+    /// The row's whole [`RowLayout::band`] is what has to fit, not its control:
+    /// a combo brought exactly to the content edge leaves its own title cut off
+    /// above it, and the ring drawn round it is then a ring half outside the box
+    /// that clips it. `Close` never moves anything — the header does not scroll.
+    #[must_use]
+    pub fn scroll_to_show(&self, target: SettingsTarget, scroll: f32) -> f32 {
+        let row = match target {
+            SettingsTarget::Combo(row) | SettingsTarget::Menu(row) => row,
+            SettingsTarget::Choice(row, _) => row,
+            SettingsTarget::Close | SettingsTarget::Scrim | SettingsTarget::Panel => {
+                return scroll;
+            }
+        };
+        let Some(placed) = self.row(row) else {
+            return scroll;
+        };
+        let above = self.content[1] - placed.band[1];
+        let below = placed.band[3] - self.content[3];
+        // A band taller than the viewport cannot satisfy both ends; its top wins,
+        // because that is where a row's title is and reading starts there.
+        let travel = if above > 0.0 {
+            -above
+        } else if below > 0.0 {
+            below
+        } else {
+            0.0
+        };
+        (scroll + travel).clamp(0.0, self.max_scroll)
     }
 
     /// Whether a content box landed wholly inside the scroll viewport.
@@ -1291,6 +1758,7 @@ pub fn layout_for_menu(
             previous_group = Some(group);
         }
         placed_rows.push({
+            let band = [row_left, cursor, row_right, cursor + row_height];
             let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
             cursor += row_height;
             let combo_top = top + (row_content_height - combo_height) / 2.0;
@@ -1317,6 +1785,7 @@ pub fn layout_for_menu(
             ];
             RowLayout {
                 row: *row,
+                band,
                 title,
                 desc,
                 combo,
@@ -1485,10 +1954,16 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
 /// the layer. Covering therefore happens between layers and not inside one: the
 /// dialog and its rows are the first layer, the open picker is a second one over
 /// it, and a row added to the first layer tomorrow cannot reach through.
+///
+/// `focus` is where the **ring** goes, not where the keyboard is: the caller
+/// hands over [`SettingsPanel::focus_ring`], which is `None` while the focus was
+/// reached by pointer. Passing the focus itself would draw a ring round whatever
+/// the user just clicked, which is the thing `:focus-visible` exists to stop.
 #[must_use]
 pub fn build(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
+    focus: Option<SettingsTarget>,
     values: SettingsValues,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
@@ -1553,6 +2028,9 @@ pub fn build(
             1.0,
         ));
     }
+    if focus == Some(SettingsTarget::Close) {
+        quads.extend(focus_ring(layout.close, scale, palette.accent));
+    }
     let glyph = px(WINDOW_CAPTION_GLYPH_LOGICAL_PX).round().max(1.0);
     let glyph_left = ((layout.close[0] + layout.close[2]) / 2.0 - glyph / 2.0).round();
     let glyph_top = ((layout.close[1] + layout.close[3]) / 2.0 - glyph / 2.0).round();
@@ -1606,7 +2084,7 @@ pub fn build(
             clip: None,
         });
         content_stack.labels.push(ChromeLabel {
-            text: placed.row.description().to_owned(),
+            text: placed.row.description(values).to_owned(),
             rect: placed.desc,
             font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
             color: palette.dialog_muted_text,
@@ -1638,6 +2116,14 @@ pub fn build(
             palette,
             measure,
         );
+        // After the button it names, because a ring is a fill and a layer draws
+        // its fills in order — pushed before, the button's own face would cover
+        // the inner edge of it.
+        if focus == Some(SettingsTarget::Combo(placed.row)) {
+            content_stack
+                .quads
+                .extend(focus_ring(placed.combo, scale, palette.accent));
+        }
     }
     clip_content(clip, content_stack, &mut quads, &mut labels, &mut sprites);
 
@@ -1670,7 +2156,16 @@ pub fn build(
             // An item that cannot be chosen is never hovered — `hit` answers
             // `Menu` over it — but the state is read from the same predicate
             // rather than inferred from that, so the two cannot come apart.
-            let is_hovered = enabled && hover == Some(SettingsTarget::Choice(row, index));
+            //
+            // **The keyboard's option wears the pointer's ink**, and not the
+            // `button:focus-visible` ring: that rule is declared for `button`
+            // and a `.combo-item` is a `div`, so the mock-up gives an item
+            // exactly one lit state and this is it. Two lit states inside one
+            // open picker would also be two answers to "which one does Enter
+            // take", when there is only ever one.
+            let is_hovered = enabled
+                && (hover == Some(SettingsTarget::Choice(row, index))
+                    || focus == Some(SettingsTarget::Choice(row, index)));
             if is_hovered {
                 popup.quads.extend(rounded_overlay_fill(
                     *item,
@@ -1754,6 +2249,35 @@ pub fn build(
     } else {
         vec![content, popup]
     }
+}
+
+/// **`button:focus-visible`** (mock-up 2205) — the ring round a control the
+/// keyboard is on.
+///
+/// A CSS `outline` is drawn *outside* the border box, `outline-offset` away from
+/// it, and it follows the box's own round: so the ring's inner edge is the
+/// control grown by the offset, its own radius is the control's plus that same
+/// offset, and it reaches `FOCUS_RING_WIDTH` further out. Stated that way rather
+/// than as four bars because the controls are rounded and four bars meet at
+/// square corners.
+///
+/// [`bt_render::rounded_overlay_halo`] is the exact, uniform ring its own doc
+/// promises to stay — the one primitive here that is a stroke rather than a
+/// falloff, which is what an outline needs and what a shadow must not be.
+fn focus_ring(rect: [f32; 4], scale: f32, accent: [u8; 3]) -> Vec<OverlayQuad> {
+    let offset = FOCUS_RING_OFFSET_LOGICAL_PX * scale;
+    bt_render::rounded_overlay_halo(
+        [
+            rect[0] - offset,
+            rect[1] - offset,
+            rect[2] + offset,
+            rect[3] + offset,
+        ],
+        FOCUS_RING_RADIUS_LOGICAL_PX * scale + offset,
+        FOCUS_RING_WIDTH_LOGICAL_PX * scale,
+        accent,
+        1.0,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2288,12 +2812,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn theme_picker_orders_system_light_dark() {
-        let labels: Vec<_> = THEME_OPTIONS.into_iter().map(theme_label).collect();
-        assert_eq!(labels, ["System", "Light", "Dark"]);
-    }
-
     /// PIN: the mapping a press on a picker item makes to `set_theme` — the one
     /// thing between "the user clicked Light" and the process being light.
     ///
@@ -2311,7 +2829,7 @@ mod tests {
         }
         assert_eq!(
             THEME_OPTIONS,
-            [ThemeModeV1::System, ThemeModeV1::Light, ThemeModeV1::Dark,]
+            [ThemeModeV1::Light, ThemeModeV1::Dark, ThemeModeV1::System,]
         );
         for target in [
             SettingsTarget::Scrim,
@@ -2671,7 +3189,7 @@ mod tests {
                 // crop, and a box with nothing showing draws nothing at all.
                 for (box_of, text) in [
                     (row.title, row.row.title()),
-                    (row.desc, row.row.description()),
+                    (row.desc, row.row.description(values())),
                 ] {
                     match clipped(box_of, content) {
                         None => assert!(
@@ -2978,7 +3496,7 @@ mod tests {
     fn escape_unwinds_one_layer_per_press() {
         let mut panel = SettingsPanel::default();
         assert!(!panel.close_one_layer(), "nothing is open yet");
-        panel.toggle();
+        panel.toggle(&flat_rows());
         panel.toggle_menu(SettingsRow::Theme);
         assert!(panel.close_one_layer());
         assert!(
@@ -2995,12 +3513,12 @@ mod tests {
     #[test]
     fn the_gear_toggles_and_shutting_takes_the_menu_with_it() {
         let mut panel = SettingsPanel::default();
-        panel.toggle();
+        panel.toggle(&flat_rows());
         assert!(panel.is_open());
         panel.toggle_menu(SettingsRow::Theme);
-        panel.toggle();
+        panel.toggle(&flat_rows());
         assert!(!panel.is_open() && panel.menu().is_none());
-        panel.toggle();
+        panel.toggle(&flat_rows());
         assert!(panel.is_open() && panel.menu().is_none());
         panel.close();
         assert!(!panel.is_open());
@@ -3025,7 +3543,7 @@ mod tests {
         hover: Option<SettingsTarget>,
         values: SettingsValues,
     ) -> Vec<OverlayLayer> {
-        build(placed, hover, values, &mut measure)
+        build(placed, hover, None, values, &mut measure)
     }
 
     /// Every fill the overlay draws, whatever layer it is on — the question
@@ -3593,7 +4111,7 @@ mod tests {
             "mock-up 2467"
         );
         assert_eq!(
-            SettingsRow::DefaultProfile.description(),
+            SettingsRow::DefaultProfile.description(values()),
             "What opens on a new tab, and when Folio starts",
             "mock-up 2468, word for word but for the product's name"
         );
@@ -4110,7 +4628,7 @@ mod tests {
         let labels = labels_of(&flat, None, values());
         for absent in [
             SettingsRow::Sidebar.title(),
-            SettingsRow::Sidebar.description(),
+            SettingsRow::Sidebar.description(values()),
         ] {
             assert!(
                 !labels.iter().any(|label| label.text == absent),
@@ -4233,6 +4751,598 @@ mod tests {
                 .any(|label| label.text == "Icons, expand on hover"),
             "the sentence form is what the ruling removed; drawing it again is the regression"
         );
+    }
+
+    // ── the dialog's own keyboard (slice 1, 2026-08-16) ────────────────────
+
+    /// The dialog in a window too short to hold its whole stack, at this scroll.
+    fn cramped(scroll: f32) -> SettingsLayout {
+        layout_for_menu(SURFACE.0, 320.0, 1.0, None, &flat_rows(), 0.0, scroll)
+            .expect("a short window still hosts the dialog")
+    }
+
+    /// An open dialog with the keyboard already on it, ready to be driven.
+    fn keyboarded() -> SettingsPanel {
+        let mut panel = SettingsPanel::default();
+        panel.toggle(&flat_rows());
+        panel
+    }
+
+    /// Where the focus is after this run of keys, from a freshly opened dialog.
+    fn after(keys: &[SettingsKey]) -> Option<SettingsTarget> {
+        let mut panel = keyboarded();
+        for key in keys {
+            panel.key(*key, &flat_rows(), values());
+        }
+        panel.focus()
+    }
+
+    /// PIN: **the Tab order is the page's order** — the close first, because it
+    /// is in the header above everything, then every visible row's control top
+    /// to bottom. It is derived from the same row list the drawing is, so the
+    /// conditional Sidebar row is a stop exactly while it is a row.
+    ///
+    /// Red gate: state the order beside the rows instead of from them and the
+    /// second half goes red — Sidebar is reachable by keyboard in a dialog that
+    /// is not drawing it, which is `visible_rows`' own bug one surface along.
+    #[test]
+    fn the_tab_order_is_the_close_then_every_visible_row_in_the_order_it_is_drawn() {
+        let flat = flat_rows();
+        let expected: Vec<SettingsTarget> = std::iter::once(SettingsTarget::Close)
+            .chain(flat.iter().map(|row| SettingsTarget::Combo(*row)))
+            .collect();
+        assert_eq!(focus_order(&flat), expected);
+
+        let down = visible_rows(TabLayoutMode::Vertical);
+        assert!(
+            focus_order(&down).contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
+            "the sidebar row is a keyboard stop while the tabs run down the side"
+        );
+        assert!(
+            !focus_order(&flat).contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
+            "and is not one while the dialog is not drawing it"
+        );
+    }
+
+    /// PIN: Tab walks that order, Shift+Tab walks it backwards, and both wrap.
+    ///
+    /// Wrapping rather than stopping because the dialog is the whole of what the
+    /// keyboard can reach while it is up — there is nowhere past the last
+    /// control for a focus to go, and a Tab that did nothing at the end would
+    /// read as a dead key.
+    #[test]
+    fn tab_walks_the_order_and_wraps_at_both_ends() {
+        let forwards = SettingsKey::Tab { backwards: false };
+        let backwards = SettingsKey::Tab { backwards: true };
+        let flat = flat_rows();
+        let order = focus_order(&flat);
+
+        // Opening seats the focus on the first row, which is one past the close.
+        assert_eq!(after(&[]), Some(order[1]));
+        assert_eq!(after(&[forwards]), Some(order[2]));
+        assert_eq!(after(&[backwards]), Some(order[0]), "back onto the close");
+        assert_eq!(
+            after(&[backwards, backwards]),
+            order.last().copied(),
+            "and past it, round to the last row"
+        );
+
+        let all_forwards: Vec<SettingsKey> = vec![forwards; order.len()];
+        assert_eq!(
+            after(&all_forwards),
+            Some(order[1]),
+            "a full lap comes back to where it started"
+        );
+    }
+
+    /// PIN: the arrows are the same walk under another name, and Home/End are
+    /// its two ends. One order and one lap, not a second navigation model that
+    /// has to be kept in step with Tab's.
+    #[test]
+    fn the_arrows_home_and_end_reach_the_same_places_tab_does() {
+        let flat = flat_rows();
+        let order = focus_order(&flat);
+        assert_eq!(after(&[SettingsKey::Down]), Some(order[2]));
+        assert_eq!(after(&[SettingsKey::Up]), Some(order[0]));
+        assert_eq!(after(&[SettingsKey::Home]), Some(order[0]));
+        assert_eq!(after(&[SettingsKey::End]), order.last().copied());
+        assert_eq!(
+            after(&[SettingsKey::End, SettingsKey::Down]),
+            Some(order[0]),
+            "the arrows wrap where Tab wraps"
+        );
+    }
+
+    /// PIN: **opening puts the keyboard on the first row, not on the close**,
+    /// and with the ring off.
+    ///
+    /// The order starts at the close because the page does; where the focus
+    /// starts is the other question, and the answer is the row the user opened
+    /// the dialog to reach. A dialog that opened with the keyboard parked on
+    /// "leave" would have spent its one free position on the verb nobody came
+    /// for. The ring is off because a gear pressed with a mouse is not keyboard
+    /// interaction — that is `:focus-visible`, not `:focus`.
+    #[test]
+    fn opening_the_dialog_puts_the_keyboard_on_the_first_row_with_no_ring() {
+        let panel = keyboarded();
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Theme))
+        );
+        assert_eq!(panel.focus_ring(), None, "opened by pointer, so no ring");
+
+        let mut shut = keyboarded();
+        shut.toggle(&flat_rows());
+        assert_eq!(
+            shut.focus(),
+            None,
+            "a shut dialog holds no focus for the next opening to inherit"
+        );
+    }
+
+    /// PIN (`:focus-visible`): a pointer press moves the focus and puts the ring
+    /// away; any key press brings it back.
+    ///
+    /// Both halves, because either alone is a different rule. Without the first,
+    /// clicking a control rings it and tells the user where their own finger
+    /// was; without the second, a user who reaches for Tab after clicking gets a
+    /// focus that moves invisibly.
+    ///
+    /// Red gate: draw the ring from `focus` instead of `focus_ring` and the
+    /// second assertion goes red.
+    #[test]
+    fn a_pointer_press_moves_the_focus_and_puts_the_ring_away() {
+        let mut panel = keyboarded();
+        panel.key(SettingsKey::Down, &flat_rows(), values());
+        assert!(panel.focus_ring().is_some(), "a key lights the ring");
+
+        panel.press(SettingsTarget::Combo(SettingsRow::GitPanel));
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::GitPanel)),
+            "the focus follows the finger"
+        );
+        assert_eq!(panel.focus_ring(), None, "and the ring goes away");
+
+        // Even a press that lands on nothing is pointer interaction.
+        panel.key(SettingsKey::Down, &flat_rows(), values());
+        assert!(panel.focus_ring().is_some());
+        panel.press(SettingsTarget::Panel);
+        assert_eq!(panel.focus_ring(), None);
+    }
+
+    /// PIN: Enter opens a picker **on the value it is already showing**, the
+    /// arrows move from there, and Enter takes the one under them — reported as
+    /// the very `Choice` a press on that item would have been, so the runtime
+    /// runs one set of side effects rather than two.
+    ///
+    /// Space is the same verb: a button on the web answers both.
+    #[test]
+    fn enter_opens_a_picker_on_its_current_value_and_the_arrows_choose_from_there() {
+        let flat = flat_rows();
+        let mut panel = keyboarded();
+        assert_eq!(
+            panel.key(SettingsKey::Activate, &flat, values()),
+            SettingsKeyVerdict::Moved
+        );
+        assert_eq!(panel.menu(), Some(SettingsRow::Theme));
+        let selected = SettingsRow::Theme
+            .selected_index(values())
+            .expect("the theme row always has a value");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Choice(SettingsRow::Theme, selected)),
+            "the picker opens where the user already is"
+        );
+
+        panel.key(SettingsKey::Down, &flat, values());
+        let next = (selected + 1) % SettingsRow::Theme.option_count();
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Choice(SettingsRow::Theme, next))
+        );
+        assert_eq!(
+            panel.key(SettingsKey::Activate, &flat, values()),
+            SettingsKeyVerdict::Chose(SettingsTarget::Choice(SettingsRow::Theme, next)),
+            "the same target a click on that item would have carried"
+        );
+        assert_eq!(panel.menu(), None, "choosing shuts the picker");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Theme)),
+            "and hands the keyboard back to the button it hung under"
+        );
+
+        // Home and End are the picker's own two ends while it is open.
+        let mut ended = keyboarded();
+        ended.key(SettingsKey::Activate, &flat, values());
+        ended.key(SettingsKey::End, &flat, values());
+        assert_eq!(
+            ended.focus(),
+            Some(SettingsTarget::Choice(
+                SettingsRow::Theme,
+                SettingsRow::Theme.option_count() - 1
+            ))
+        );
+        ended.key(SettingsKey::Home, &flat, values());
+        assert_eq!(
+            ended.focus(),
+            Some(SettingsTarget::Choice(SettingsRow::Theme, 0))
+        );
+
+        // And Tab leaves an open picker rather than walking inside it, which is
+        // what keeps "one popup at a time" true of the keyboard.
+        let mut tabbed = keyboarded();
+        tabbed.key(SettingsKey::Activate, &flat, values());
+        tabbed.key(SettingsKey::Tab { backwards: false }, &flat, values());
+        assert_eq!(tabbed.menu(), None);
+        assert_eq!(
+            tabbed.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Cursor))
+        );
+    }
+
+    /// PIN (Esc, §7.1.5): one rung per press — the open picker, then the dialog
+    /// — and the picker's rung leaves the keyboard on the button it hung under
+    /// rather than dropping it.
+    ///
+    /// Red gate: close both layers on one press and the second assertion names a
+    /// dialog that is already gone.
+    #[test]
+    fn escape_closes_the_picker_first_and_the_dialog_second() {
+        let flat = flat_rows();
+        let mut panel = keyboarded();
+        panel.key(SettingsKey::Activate, &flat, values());
+        assert_eq!(panel.menu(), Some(SettingsRow::Theme));
+
+        assert_eq!(
+            panel.key(SettingsKey::Escape, &flat, values()),
+            SettingsKeyVerdict::Moved
+        );
+        assert!(panel.is_open(), "the picker went first");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Theme))
+        );
+
+        assert_eq!(
+            panel.key(SettingsKey::Escape, &flat, values()),
+            SettingsKeyVerdict::Closed
+        );
+        assert!(!panel.is_open());
+        assert_eq!(
+            panel.key(SettingsKey::Escape, &flat, values()),
+            SettingsKeyVerdict::Inert,
+            "a shut dialog answers no key, so the press falls to whoever owns it next"
+        );
+    }
+
+    /// PIN: **an option this machine cannot start is skipped by the arrows and
+    /// refused by Enter** — the same [`SettingsRow::option_enabled`] answer the
+    /// hit test and the draw already read. A greyed item the keyboard could land
+    /// on would be the pointer's own bug, arrived at through the other door.
+    #[test]
+    fn the_keyboard_skips_an_option_this_machine_cannot_start() {
+        let flat = flat_rows();
+        let mut lacking = values();
+        // Only the fallback shell is installed.
+        lacking.profile_available =
+            std::array::from_fn(|index| index == profiles::FALLBACK_PROFILE);
+        lacking.default_profile = profiles::FALLBACK_PROFILE;
+
+        let mut panel = keyboarded();
+        panel.key(SettingsKey::End, &flat, lacking);
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::DefaultProfile))
+        );
+        panel.key(SettingsKey::Activate, &flat, lacking);
+        assert_eq!(panel.menu(), Some(SettingsRow::DefaultProfile));
+
+        // Every arrow press from here lands on the one profile that can start.
+        for _ in 0..profiles::PROFILES.len() + 1 {
+            panel.key(SettingsKey::Down, &flat, lacking);
+            assert_eq!(
+                panel.focus(),
+                Some(SettingsTarget::Choice(
+                    SettingsRow::DefaultProfile,
+                    profiles::FALLBACK_PROFILE
+                )),
+                "the arrows have nowhere else this machine can go"
+            );
+        }
+        panel.key(SettingsKey::Home, &flat, lacking);
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Choice(
+                SettingsRow::DefaultProfile,
+                profiles::FALLBACK_PROFILE
+            )),
+            "Home lands on the first *choosable* item, not on a greyed one"
+        );
+    }
+
+    /// PIN: a key the dialog has no verb for changes nothing, is still swallowed
+    /// — the caller never gets a chance to type it into the terminal behind the
+    /// scrim — and still turns the ring on, because it is still somebody using a
+    /// keyboard.
+    #[test]
+    fn a_key_the_dialog_has_no_verb_for_is_swallowed_and_still_lights_the_ring() {
+        let flat = flat_rows();
+        let mut panel = keyboarded();
+        let before = panel.focus();
+        assert_eq!(
+            panel.key(SettingsKey::Other, &flat, values()),
+            SettingsKeyVerdict::Moved,
+            "the ring appearing is a change worth repainting"
+        );
+        assert_eq!(panel.focus(), before, "and nothing moved");
+        assert_eq!(panel.focus_ring(), before);
+        assert_eq!(
+            panel.key(SettingsKey::Other, &flat, values()),
+            SettingsKeyVerdict::Inert,
+            "the second one changes nothing at all"
+        );
+    }
+
+    /// PIN: **the ring is the mock-up's own `button:focus-visible`** (2205):
+    /// `outline: 2px solid var(--accent)` at `outline-offset: 1px`, round, and
+    /// around the control — never over it.
+    ///
+    /// Red gate: draw it as a filled rectangle and the last assertion names the
+    /// accent quad sitting on top of the value the button is showing.
+    #[test]
+    fn the_ring_is_the_mock_ups_own_outline_around_the_control_it_names() {
+        let placed = open(1.0, false);
+        let combo = combo_of(&placed, SettingsRow::Theme);
+        let focus = Some(SettingsTarget::Combo(SettingsRow::Theme));
+        let accent = chrome_palette().accent;
+
+        let unfocused: Vec<OverlayQuad> = quads_of(&placed, None, values())
+            .into_iter()
+            .filter(|quad| quad.color == accent)
+            .collect();
+        assert!(
+            unfocused.is_empty(),
+            "a dialog nobody is driving by keyboard draws no ring"
+        );
+
+        let ring: Vec<OverlayQuad> = build(&placed, None, focus, values(), &mut measure)
+            .into_iter()
+            .flat_map(|layer| layer.quads)
+            .filter(|quad| quad.color == accent)
+            .collect();
+        assert!(!ring.is_empty(), "the focused control wears one");
+
+        let reach = FOCUS_RING_OFFSET_LOGICAL_PX + FOCUS_RING_WIDTH_LOGICAL_PX;
+        // The offset box snapped to whole pixels first, which is
+        // `rounded_overlay_halo`'s own arithmetic: a ring and the box it
+        // surrounds share one grid, or the outline is a pixel thicker on one
+        // side than the other. A 27.5px control does not sit on that grid.
+        let offset = FOCUS_RING_OFFSET_LOGICAL_PX;
+        let width = FOCUS_RING_WIDTH_LOGICAL_PX;
+        let outer = [
+            (combo[0] - offset).round() - width,
+            (combo[1] - offset).round() - width,
+            (combo[2] + offset).round() + width,
+            (combo[3] + offset).round() + width,
+        ];
+        // The value's own room: inside the button by the ring's whole reach and
+        // its round, which is everything the outline may not touch.
+        let clear = FOCUS_RING_RADIUS_LOGICAL_PX + reach;
+        let inner = [
+            combo[0] + clear,
+            combo[1] + clear,
+            combo[2] - clear,
+            combo[3] - clear,
+        ];
+        assert!(inner[2] > inner[0] && inner[3] > inner[1], "a real box");
+        for quad in &ring {
+            assert!(
+                within(quad.rect, outer),
+                "the outline reaches {reach} past the control and no further: {:?}",
+                quad.rect
+            );
+            assert!(
+                !overlaps(quad.rect, inner),
+                "an outline is around a control, not over it: {:?}",
+                quad.rect
+            );
+        }
+        assert!(
+            ring.iter().any(|quad| quad.rect[1] < combo[1]),
+            "and it really does stand off the top edge"
+        );
+    }
+
+    /// PIN: **scrolling follows the focus, by exactly as much as it has to.**
+    ///
+    /// A row Tab reached below the fold is brought to the fold and no further:
+    /// scrolling it to the top of the box instead would move every row the user
+    /// was reading for a reason they did not ask about, which is what
+    /// `scrollIntoView({ block: "nearest" })` settled on for the same reason. A
+    /// row already in view moves nothing at all.
+    ///
+    /// Red gate: scroll the row to the content box's top instead and the
+    /// "exactly at the fold" assertion names the overshoot.
+    #[test]
+    fn the_focus_scrolls_into_view_by_exactly_what_it_has_to() {
+        let top = cramped(0.0);
+        assert!(top.max_scroll() > 0.0, "this window really does overflow");
+
+        let first = SettingsTarget::Combo(SettingsRow::Theme);
+        assert_eq!(
+            top.scroll_to_show(first, 0.0),
+            0.0,
+            "a row already in view moves nothing"
+        );
+        assert_eq!(
+            top.scroll_to_show(SettingsTarget::Close, 0.0),
+            0.0,
+            "the header does not scroll"
+        );
+
+        let last = SettingsTarget::Combo(SettingsRow::DefaultProfile);
+        let scrolled_to = top.scroll_to_show(last, 0.0);
+        assert!(scrolled_to > 0.0, "the last row is below the fold");
+        let landed = cramped(scrolled_to);
+        let band = landed.row(SettingsRow::DefaultProfile).expect("held").band;
+        let content = landed.content_box();
+        assert!(
+            band[1] >= content[1] && band[3] <= content[3],
+            "the row is wholly inside the content box"
+        );
+        assert!(
+            (band[3] - content[3]).abs() < 0.5,
+            "and exactly at the fold — no further than it had to travel"
+        );
+
+        // And back the other way, by the same minimum.
+        let back = landed.scroll_to_show(first, scrolled_to);
+        assert!(back < scrolled_to);
+        let risen = cramped(back);
+        let theme = risen.row(SettingsRow::Theme).expect("held").band;
+        assert!(
+            (theme[1] - risen.content_box()[1]).abs() < 0.5,
+            "the first row rose to the top edge and stopped there"
+        );
+    }
+
+    /// PIN: a row that disappears out from under the focus hands it to one that
+    /// is there.
+    ///
+    /// Choosing `Horizontal` in the Tab layout picker deletes the Sidebar row —
+    /// and the Sidebar row may be the one the keyboard is standing on. A focus
+    /// naming a row the dialog no longer holds draws no ring and answers no key,
+    /// which reads as the dialog having swallowed the keyboard whole.
+    #[test]
+    fn a_row_that_disappears_under_the_focus_hands_it_back_to_a_row_that_is_there() {
+        let down = visible_rows(TabLayoutMode::Vertical);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(&down);
+        panel.press(SettingsTarget::Combo(SettingsRow::Sidebar));
+        panel.toggle_menu(SettingsRow::Sidebar);
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Combo(SettingsRow::Sidebar))
+        );
+
+        let flat = flat_rows();
+        panel.keep_focus_reachable(&flat);
+        assert!(
+            focus_order(&flat).contains(&panel.focus().expect("an open dialog holds a focus")),
+            "the focus landed somewhere the dialog is actually drawing"
+        );
+        assert_eq!(
+            panel.menu(),
+            None,
+            "and the picker that hung off the vanished row went with it"
+        );
+    }
+
+    /// The mock-up itself, so a claim about "what the mock-up says" is read out
+    /// of it rather than transcribed once and left to rot.
+    const MOCKUP: &str = include_str!("../../../design/ui-mockup.html");
+
+    /// The `.desc` line and the picker items of one `data-combo`, as the mock-up
+    /// writes them.
+    fn mockup_combo(kind: &str) -> (String, Vec<String>) {
+        let at = MOCKUP
+            .find(&format!("data-combo=\"{kind}\""))
+            .expect("the mock-up has this combo");
+        let head = &MOCKUP[..at];
+        let desc_at = head
+            .rfind("<div class=\"desc\"")
+            .expect("every row in the mock-up carries a description");
+        let desc = &head[desc_at..];
+        let desc = &desc[desc.find('>').expect("an open tag closes") + 1..];
+        let desc = desc[..desc.find("</div>").expect("and the element closes")].to_owned();
+
+        // Every item of this combo and no other: the tail stops at the next one.
+        let tail = &MOCKUP[at..];
+        let tail = &tail[..tail[1..]
+            .find("data-combo=")
+            .map_or(tail.len(), |next| next + 1)];
+        let items = tail
+            .match_indices("class=\"combo-item")
+            .map(|(start, _)| {
+                let item = &tail[start..];
+                let item = &item[..item.find("</div>").expect("an item closes")];
+                let text = item.rfind("</span>").map_or(item, |end| &item[end + 7..]);
+                text.trim().to_owned()
+            })
+            .collect();
+        (desc, items)
+    }
+
+    /// PIN (Q5): **the Theme row is the mock-up's, in the mock-up's order, with
+    /// the mock-up's line** — read out of `design/ui-mockup.html` rather than
+    /// copied into an assertion.
+    ///
+    /// Both halves had drifted. The order was the enum's (`System` first) rather
+    /// than the picker's, because the constant was written off `ThemeModeV1`
+    /// instead of off the thing it draws. And the description read "Light or
+    /// dark" under a note explaining that the mock-up's own line named a third
+    /// option this build did not have — true when it was written, and false from
+    /// the day System shipped, which left the one line a user reads to find out
+    /// what the picker offers naming two of its three items.
+    ///
+    /// Red gate: this is the test that was missing. Change either the order or
+    /// the sentence and it reads the mock-up's own answer back.
+    #[test]
+    fn the_theme_row_wears_the_mock_ups_own_order_and_its_own_line() {
+        let (desc, items) = mockup_combo("theme");
+        assert_eq!(items, ["Light", "Dark", "System"], "the fixture parsed");
+        assert_eq!(
+            SettingsRow::Theme.description(values()),
+            desc,
+            "the row's description is the mock-up's sentence"
+        );
+        let drawn: Vec<String> = SettingsRow::Theme
+            .option_labels()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            drawn, items,
+            "and its picker is the mock-up's list, in order"
+        );
+        assert_eq!(
+            THEME_OPTIONS,
+            [ThemeModeV1::Light, ThemeModeV1::Dark, ThemeModeV1::System],
+            "which is what the press router maps by index"
+        );
+    }
+
+    /// PIN (Q4): a description is a function of the row **and its values**.
+    ///
+    /// Today every row's answer is constant in the values — the two the mock-up
+    /// varies (`wrap-desc`, `blockmax-desc`) have no setting behind them yet and
+    /// no row here. What this pins is the shape: the parameter is in the
+    /// signature, it reaches every arm, and the answer is still `&'static str`,
+    /// which is the i18n ruling's own constraint on this method.
+    ///
+    /// Red gate: drop the parameter and this does not compile, which is the
+    /// point — the slice that adds Line wrapping adds a match arm, not a
+    /// migration of every call site.
+    #[test]
+    fn a_rows_description_is_a_function_of_its_values() {
+        let light = SettingsValues {
+            theme: ThemeModeV1::Light,
+            ..values()
+        };
+        let dark = SettingsValues {
+            theme: ThemeModeV1::Dark,
+            ..values()
+        };
+        for row in visible_rows(TabLayoutMode::Vertical) {
+            let line: &'static str = row.description(light);
+            assert!(!line.is_empty(), "{row:?} says something");
+            assert_eq!(
+                line,
+                row.description(dark),
+                "{row:?} has no line that follows a value yet, and does not pretend to"
+            );
+        }
     }
 
     /// A fresh panel is shut, with nothing open inside it and nothing hovered.

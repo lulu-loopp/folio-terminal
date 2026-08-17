@@ -2672,12 +2672,14 @@ mod tests {
         cpr_log: Vec<AppCprExchange>,
         pending: Option<(u16, u16, Instant)>,
         commits: Vec<(u16, u16)>,
-        /// The typed-input ConPTY resize gate (user ruling 2026-08-04). `false` is the loop exactly
-        /// as it was before the mitigation, which is what makes the before/after pair one probe.
+        /// The typed-input ConPTY resize gate (2026-08-04), **retired from the app on 2026-08-16**
+        /// once the PSReadLine root cause was fixed. It is reproduced here and nowhere else,
+        /// because these probes are the evidence the ruling that retired it was made on: the whole
+        /// point of the pair is the before/after, and `false` is the loop exactly as it shipped.
         typed_input_gate: bool,
-        /// `bt-app::PendingPtyResize::blank_since`: when the gate started answering "empty" for the
-        /// queued request. A real child's redraw arrives in whatever pieces a read returns, so a
-        /// single "empty" sample is not an empty buffer — only an unbroken quiet window of them is.
+        /// When that gate started answering "empty" for the queued request. A real child's redraw
+        /// arrives in whatever pieces a read returns, so a single "empty" sample is not an empty
+        /// buffer — only an unbroken quiet window of them is.
         blank_since: Option<Instant>,
         /// Whether that window is honoured. `false` is the loop as it was before
         /// confirm-then-release, which is what makes the blank-window probe's pair one probe.
@@ -2728,7 +2730,7 @@ mod tests {
             self.typed_input_gate && self.session.typed_shell_input_live()
         }
 
-        /// `bt-app::sample_typed_input_gate`: record this turn's answer against the queued request.
+        /// Record this turn's gate answer against the queued request.
         fn sample_gate(&mut self, now: Instant) {
             if self.pending.is_none() {
                 return;
