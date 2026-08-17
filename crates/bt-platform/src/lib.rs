@@ -30,6 +30,29 @@ pub struct CustomFrameMetrics {
     pub resizable: bool,
 }
 
+/// The self-drawn frame's two logical measurements, handed in at install time
+/// rather than restated here.
+///
+/// # One number for the bar that is painted and the bar that is clicked
+///
+/// This crate used to keep its own `TITLE_BAR_LOGICAL_PX = 40` and
+/// `CAPTION_BUTTON_LOGICAL_PX = 46` for the hit test while `bt-render` exported
+/// `WINDOW_TITLE_BAR_LOGICAL_PX` and `WINDOW_CAPTION_BUTTON_LOGICAL_PX` for the
+/// painting — two copies of the same design decision, in two crates, agreeing
+/// by coincidence. The multiwindow spike (Q5, item 2) called it in: what is
+/// drawn and what is clicked must be the same number, and the number belongs to
+/// the side that draws it. So it arrives as an argument, and this crate no
+/// longer has an opinion about how tall a title bar is.
+///
+/// Logical pixels at Win32's 96-DPI baseline; every read scales them by the
+/// window's live DPI, so one window at 1.5x and another at 2.0x are two
+/// different physical bars from one pair of numbers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CustomFrameGeometry {
+    pub title_bar_logical_px: u32,
+    pub caption_button_logical_px: u32,
+}
+
 /// Win32 non-client regions expressed without Win32 constants so their mapping
 /// can be pinned on every host used by the workspace tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,8 +216,8 @@ mod windows_impl {
     };
 
     use super::{
-        CustomFrameHit, CustomFrameMetrics, NonZeroIsize, WheelScrollAmount, WindowRect,
-        custom_frame_hit_test, logical_px_for_dpi,
+        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, WheelScrollAmount,
+        WindowRect, custom_frame_hit_test, logical_px_for_dpi,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -213,8 +236,6 @@ mod windows_impl {
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
     const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
-    const TITLE_BAR_LOGICAL_PX: u32 = 40;
-    const CAPTION_BUTTON_LOGICAL_PX: u32 = 46;
     const CAPTION_BUTTON_COUNT: i32 = 4;
 
     /// Keeps winit's ordinary overlapped-window styles (and therefore native
@@ -228,8 +249,13 @@ mod windows_impl {
     /// Everything the subclass procedure reads out of the owning
     /// `CustomWindowFrame`. It is reached through the subclass reference data, so
     /// it must be a single stable allocation the frame keeps alive.
-    #[derive(Default)]
     struct CustomFrameState {
+        /// This window's frame measurements, as the caller stated them. Plain
+        /// values rather than atomics because they are settled at install and
+        /// nothing may move them afterwards — a title bar that changed height
+        /// mid-session would be painted at one number and clicked at another,
+        /// which is the very thing this field exists to prevent.
+        geometry: CustomFrameGeometry,
         tab_strip_right_px: AtomicI32,
         /// Smallest client size the window may be dragged to, in logical pixels,
         /// or `(0, 0)` for "no minimum". Logical rather than physical so the
@@ -239,9 +265,14 @@ mod windows_impl {
     }
 
     impl CustomWindowFrame {
-        pub fn install(hwnd: NonZeroIsize) -> Result<Self, String> {
+        pub fn install(hwnd: NonZeroIsize, geometry: CustomFrameGeometry) -> Result<Self, String> {
             let hwnd = HWND(hwnd.get() as *mut c_void);
-            let state = Box::new(CustomFrameState::default());
+            let state = Box::new(CustomFrameState {
+                geometry,
+                tab_strip_right_px: AtomicI32::new(0),
+                min_client_logical_width: AtomicI32::new(0),
+                min_client_logical_height: AtomicI32::new(0),
+            });
             let reference_data = (&*state as *const CustomFrameState) as usize;
             let installed = unsafe {
                 SetWindowSubclass(
@@ -448,16 +479,21 @@ mod windows_impl {
                 };
                 // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
                 // before dropping it, so the reference-data pointer is live for every callback.
-                let tab_strip_right_px = unsafe { &*(reference_data as *const CustomFrameState) }
-                    .tab_strip_right_px
-                    .load(Ordering::Relaxed);
+                let state = unsafe { &*(reference_data as *const CustomFrameState) };
+                let tab_strip_right_px = state.tab_strip_right_px.load(Ordering::Relaxed);
                 let hit = custom_frame_hit_test(
                     CustomFrameMetrics {
                         width: client.right.saturating_sub(client.left),
                         height: client.bottom.saturating_sub(client.top),
-                        title_bar_height: logical_px_for_dpi(TITLE_BAR_LOGICAL_PX, dpi),
+                        title_bar_height: logical_px_for_dpi(
+                            state.geometry.title_bar_logical_px,
+                            dpi,
+                        ),
                         tab_strip_right_px,
-                        caption_button_width: logical_px_for_dpi(CAPTION_BUTTON_LOGICAL_PX, dpi),
+                        caption_button_width: logical_px_for_dpi(
+                            state.geometry.caption_button_logical_px,
+                            dpi,
+                        ),
                         caption_button_count: CAPTION_BUTTON_COUNT,
                         resize_border,
                         resizable: resize_border > 0,

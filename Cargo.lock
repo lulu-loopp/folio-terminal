@@ -363,6 +363,7 @@ dependencies = [
  "bt-viewport",
  "bytemuck",
  "glyphon",
+ "pollster",
  "thiserror 2.0.18",
  "unicode-properties",
  "wgpu",

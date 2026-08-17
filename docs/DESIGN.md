@@ -94,6 +94,24 @@
 - **聚类模式**：DEC private mode 2027 开启 UAX #29 extended grapheme clustering（`DECSET 2027`），`DECRST 2027` 恢复逐 scalar 兼容档，`DECRQM CSI ? 2027 $ p` 按标准分别回报 set/reset。单簇宽度由 `unicode-width 0.2` 的字符串规则判定并钳制到最多 2 cells；VS15/VS16、emoji modifier、ZWJ 与 regional-indicator 序列走同一路径。
 - **默认档（ConPTY 实测裁决，2026-07-17）**：默认关闭 2027。Windows 10.0.26200.8875 / system ConPTY 的原始 UTF-8 转发完整，但 Console cursor 簿记对 family ZWJ 为 11、skin tone 为 4、combining 为 2、flag 为 4；发送 2027 后簿记不变，同时 `CSI ? 2027 h/l` 会原样转发。因此 BetterTerminal 保持 legacy 默认，协商成功的程序显式开启聚类，避免未协商程序与 ConPTY 再增加一种默认差异。证据与复现见 `docs/M1-width-correctness.md`。
 
+### 2.2 渲染器的两层：device 层与 window 层（多窗块 片 A1，2026-08-16，已落地）
+
+**`bt_render::Renderer` 拆成 `GpuContext` 与 `WindowRenderer` 两个真类型。** 依据是多窗 spike（`docs/spikes/spike-multiwindow.md` Q2 的共享边界表、Q3 的 DPI 结论）：第二个 OS 窗口是第二个 `wgpu::Surface`，不是第二个渲染器，而**这两个东西今天挤在同一个 struct 里**，所以在拆开之前，「多开一个窗」这句话在类型上讲不出来。
+
+- **`GpuContext`（进程一份）**：`instance`、`adapter`、`device`、`queue`、`format`、设备上限、`FontSystem`、`SwashCache`、glyphon `Cache`、`TextAtlas`、`rect_pipeline`、`math_pipeline` 与其 bind group layout/sampler、内容键的 `math_textures` LRU、`chrome_cap_height_ratio`。`instance`/`adapter` 是 spike 对生产代码唯一的实质要求：第二个 surface 必须由**同一个 instance** 建、格式必须问**同一个 adapter**，而旧的 `Renderer::new` 把这两个当局部变量丢掉了。共享 `FontSystem` 是这一片最实在的收益，而且不在 GPU 上——`terminal_font_system()` 每调一次就从磁盘重读十三个字体文件，每窗一个渲染器就是每开一个窗再读一遍。
+- **`WindowRenderer`（每 surface 一份）**：`surface`/`config`/`configured_size`、每 seat 的 `Viewport` 与 `TextRenderer`、chrome viewport 与它的三个 text renderer、`CellMetrics`、`composed_row_cache`、宽/窄 shaping cache、`font_revision`、`seat`，以及那一窗自己的 chrome/overlay/peek/preview 状态与帧计数。
+
+**三条硬约束写进类型，不是写进注释：**
+
+1. **格式相等才可共享。** atlas 与两条 pipeline 都把 surface 的 `TextureFormat` 烤了进去，所以格式不等**是错误不是退化**：唯一的窗口构造门 `GpuContext::accept_format` 返回 `RenderError::FormatMismatch { context, surface }`，绝不悄悄再配一份 atlas。
+2. **prepare→render 必须成对完成在同一窗的同一帧内。** atlas 是共享的，一次 prepare 可能让它增长并挪动**别的**窗已经拿到坐标的字形；glyphon 0.12 不导出任何 atlas 占用/变更计数（`RenderProbeSample` 里那几个 `Option` 常年是 `None`），破了这条不会有指标报警，只会看见另一个窗的字花掉。所以对外**只有一个** `WindowRenderer::present_frame`，没有可以被调用者攥在手里的 `prepare`。
+3. **按像素字号 key 的缓存跟着窗走，不跟着设备走。** 1.5x 与 2.0x 两块屏同时成立时是两套像素字号，一套缓存装两套就是互相驱逐或互相污染。
+   例外只有一处并已记账：`update_scale_factor` 仍清空**共享的** `math_textures`，第二个窗因此多付一次重传（画不错任何东西）；把它收窄成"只清本窗的键"需要给键加窗标识，属于开第二个窗的那一片。
+
+**`Renderer` 保留为薄门面**（一个 `GpuContext` + 一个 `WindowRenderer`），所以 `bt-app` 的几百处 `renderer.…` 在这一片里一行未改；第二个窗的开法是 `Renderer::split()` 取出 `GpuContext` 交给 `WindowRenderer::new`，而不是再造一个 `Renderer`。**`HeadlessRenderProbe` 折回这两层**——它本来就是 spike 说的"没有 surface 的 device 层"的现成样板，现在是 `GpuContext` + 一个 target 为纹理的 `WindowRenderer`，于是 `bt-replay` 量到的 shaping/atlas/encode 路径**就是**生产路径，而不是靠人手与生产路径保持一致的第二份实现。
+
+**顺手收拢的两笔小账（spike Q5）：** ① 标题栏几何的两份副本收成一处——`bt-platform` 私有的 `TITLE_BAR_LOGICAL_PX`/`CAPTION_BUTTON_LOGICAL_PX` 删除，改由 `CustomWindowFrame::install(hwnd, CustomFrameGeometry { … })` 从 `bt-render` 的 `WINDOW_TITLE_BAR_LOGICAL_PX`/`WINDOW_CAPTION_BUTTON_LOGICAL_PX` 传入：**画的和点的必须是同一个数**，而这个数属于画它的那一侧。② 新窗必须走 `set_window_outer_rect` 重述几何（否则每开一次大一圈），本片只在建窗处留注，实现留给开第二个窗的那一片。
+
 ## 3. 内容模型
 
 ### 3.1 内容生命周期事件表（v3.7：单一所有权版）

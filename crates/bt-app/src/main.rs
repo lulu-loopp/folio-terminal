@@ -13602,9 +13602,20 @@ impl Runtime {
         install_theme_class_background(&window)?;
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
-        let custom_window_frame = bt_platform::CustomWindowFrame::install(hwnd)
-            .map_err(|error| anyhow!(error))
-            .context("install self-drawn Win32 window frame")?;
+        // The frame's two measurements travel with the install, from the crate
+        // that paints them (spike Q5 item 2): the title bar the pointer is
+        // tested against and the title bar the renderer draws are now literally
+        // the same number instead of two constants in two crates that happened
+        // to agree.
+        let custom_window_frame = bt_platform::CustomWindowFrame::install(
+            hwnd,
+            bt_platform::CustomFrameGeometry {
+                title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
+                caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
+            },
+        )
+        .map_err(|error| anyhow!(error))
+        .context("install self-drawn Win32 window frame")?;
         let ime_system_caret = bt_platform::ImeSystemCaret::new(hwnd);
         let math_context_menu = bt_platform::MathContextMenu::new(hwnd)
             .map_err(|error| anyhow!(error))
@@ -13618,6 +13629,18 @@ impl Runtime {
         // frame margin (26x71 physical at 192 DPI) that this window does not
         // wear, and left alone it would be saved, re-inflated and re-saved on
         // every restart. The window is still hidden, so this costs no flicker.
+        //
+        // # Note for the second window (multiwindow spike Q5, item 3)
+        //
+        // This is not first-window startup housekeeping — it is what every
+        // window this process ever opens owes itself, and the spike deliberately
+        // left its second window unfixed as evidence: it asked for 720x420
+        // logical and got a 1466x911 client, because winit sizes by client and
+        // `WM_NCCALCSIZE` then makes the client the whole outer rectangle. A
+        // torn-out window that skips this line opens one native frame margin
+        // larger than the one it was torn from, and grows again on every
+        // restart. Left as a note rather than as a helper because the slice that
+        // opens a second window is the one that will have somewhere to put it.
         let opened_at = dpi_snapshot(&window)?;
         bt_platform::set_window_outer_rect(
             hwnd,

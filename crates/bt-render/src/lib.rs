@@ -749,6 +749,22 @@ pub enum RenderError {
     MissingChromeSansMetrics,
     #[error("surface validation failed")]
     SurfaceValidation,
+    /// A window asked to draw through a [`GpuContext`] whose atlas and pipelines
+    /// were baked for a different swapchain format.
+    ///
+    /// An error and never a degradation. The format is baked into
+    /// [`TextAtlas::new`] and into both pipelines, so "share anyway" would mean
+    /// a second atlas, a second rect pipeline and a second math pipeline behind
+    /// a name that says one — every glyph in the process uploaded twice, and
+    /// nothing in glyphon 0.12 reporting that it happened (spike Q2).
+    #[error(
+        "surface format {surface:?} does not match the device context's {context:?}; \
+         a second format needs a second renderer, not a second swapchain"
+    )]
+    FormatMismatch {
+        context: wgpu::TextureFormat,
+        surface: wgpu::TextureFormat,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2012,12 +2028,114 @@ struct SeatTextSlot {
     status_text_renderer: TextRenderer,
 }
 
-pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+/// Everything one process's GPU costs once — the device, the shared glyph
+/// atlas, the two pipelines, the font system — and nothing that belongs to a
+/// single window.
+///
+/// # Why this is a layer and not a field bag
+///
+/// A second OS window is a second `wgpu::Surface`, not a second renderer. The
+/// multiwindow spike (2026-08-12, Q2) measured which side of that line every
+/// resource falls on and this struct is that column of the table: an
+/// `Instance`, an `Adapter`, a `Device` and a `Queue` can serve any number of
+/// surfaces, one `Cache`/`TextAtlas` pair holds every window's glyphs, and one
+/// [`FontSystem`] spares each new window the thirteen-file fallback chain
+/// [`terminal_font_system`] loads from disk. What may *not* be shared lives on
+/// [`WindowRenderer`].
+///
+/// Three constraints travel with it, and all three are enforced here rather
+/// than trusted:
+///
+/// 1. **The format is a hinge.** [`TextAtlas::new`] and both pipelines bake the
+///    surface's [`wgpu::TextureFormat`] in. A window whose swapchain resolves to
+///    a different format cannot share this context — that is a second renderer,
+///    not a second swapchain — so [`GpuContext::accept_format`] returns
+///    [`RenderError::FormatMismatch`] instead of quietly minting a second atlas.
+/// 2. **prepare→render is a pair.** See [`WindowRenderer::present_frame`].
+/// 3. **Caches keyed by pixel font size follow the surface, not the device.**
+///    They are on [`WindowRenderer`]; two windows on monitors of different
+///    scale factors are two sets of pixel font sizes, and one cache holding both
+///    would evict or pollute per frame.
+pub struct GpuContext {
+    /// Kept — not dropped after `new` as it once was — because a second
+    /// `Surface` must be created by the same `Instance` that created the
+    /// `Device`, and `get_default_config`/`get_capabilities` must be asked of
+    /// the same `Adapter`.
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+    /// The format the atlas and both pipelines were built for. The whole of the
+    /// sharing contract: a surface that cannot resolve to this is not this
+    /// context's window.
+    format: wgpu::TextureFormat,
     max_texture_dimension_2d: u32,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    /// Kept so a window — or a seat that appears mid-session (a split) — can
+    /// mint its own viewport without rebuilding anything.
+    glyphon_cache: Cache,
+    atlas: TextAtlas,
+    rect_pipeline: wgpu::RenderPipeline,
+    math_pipeline: wgpu::RenderPipeline,
+    math_bind_group_layout: wgpu::BindGroupLayout,
+    math_sampler: wgpu::Sampler,
+    /// Content-keyed textures for math rasters, peek thumbnails, chrome marks
+    /// and preview pictures. Shared with the device because the bytes are the
+    /// same bytes whichever window asks for them.
+    math_textures: ByteLru<String, CachedMathTexture>,
+    math_texture_evictions: u64,
+    /// The chrome sans face's cap height per em, resolved once: it is a property
+    /// of the face, so neither a DPI change nor a new title nor a second window
+    /// can move it.
+    chrome_cap_height_ratio: f32,
+    /// The device-layer half of [`RendererInitTimings`]. `surface_configure`
+    /// is a window's cost and is stored on [`WindowRenderer`]; the field is left
+    /// zero here and filled in by [`Renderer::init_timings`].
+    init_timings: RendererInitTimings,
+}
+
+/// Where one [`WindowRenderer`] puts its frame.
+///
+/// A swapchain image and an offscreen attachment differ in exactly two places —
+/// how the frame is acquired and whether anything is handed back to the
+/// compositor — and in nothing else: same format, same size discipline, same
+/// pass. Keeping them one type is what lets the headless probe be a real window
+/// renderer instead of a parallel copy of one.
+enum WindowTarget {
+    Surface(Box<wgpu::Surface<'static>>),
+    Offscreen(wgpu::Texture),
+}
+
+/// What a window owes the compositor once its pass closes: a swapchain image is
+/// handed back through `Queue::present`, and an offscreen attachment is not
+/// handed back at all.
+enum AcquiredFrame {
+    Swapchain(wgpu::SurfaceTexture),
+    Offscreen,
+}
+
+/// What acquiring this frame's attachment said, decided before anything is done
+/// about it so the borrow of [`WindowTarget`] ends first — the reconfigure a
+/// suboptimal swapchain asks for needs `&mut self`.
+enum SurfaceAcquisition {
+    Frame(wgpu::SurfaceTexture),
+    Suboptimal(wgpu::SurfaceTexture),
+    Failed(SurfaceFailure),
+    Offscreen(wgpu::TextureView),
+}
+
+/// One window's half of the renderer: its surface, its resolution, its metrics,
+/// and every cache that is keyed by a pixel font size.
+///
+/// Constructible against a [`GpuContext`] any number of times — that is the
+/// point of the split — and each instance keeps its own [`CellMetrics`],
+/// composed-row cache and shaping caches, because those are keyed by pixel font
+/// size and two windows at 1.5x and 2.0x are two sets of pixel font sizes
+/// (spike Q3).
+pub struct WindowRenderer {
+    target: WindowTarget,
+    config: wgpu::SurfaceConfiguration,
     configured_size: (u32, u32),
     /// The terminal seat's rectangle inside the swapchain (§4.1). Equal to the
     /// whole surface whenever the tree is a lone terminal leaf.
@@ -2034,11 +2152,9 @@ pub struct Renderer {
     /// cover the dialog in every channel, not just in the one it happens to draw
     /// its own surface with — see [`OverlayLayer`].
     overlay_layers: Vec<OverlayLayer>,
-    font_system: FontSystem,
-    swash_cache: SwashCache,
     /// One glyphon viewport and text-renderer pair per Terminal seat, grown on
     /// demand — the same shape, and for the same reason, as
-    /// [`Renderer::overlay_text_renderers`].
+    /// [`WindowRenderer::overlay_text_renderers`].
     ///
     /// Two constraints force it. A glyphon `Viewport` is a GPU uniform holding
     /// *one* resolution, and grid text is laid out in seat-local pixels, so two
@@ -2050,34 +2166,28 @@ pub struct Renderer {
     /// every frame it ever draws, which is the whole of the N = 1 identity
     /// argument: same object, same resolution, same batch, same draw call.
     seat_slots: Vec<SeatTextSlot>,
-    /// Kept so a seat that appears mid-session (a split) can mint its own
-    /// viewport without rebuilding the renderer.
-    glyphon_cache: Cache,
     /// A second glyphon viewport whose resolution names the whole surface rather
     /// than the seat, so chrome text can be positioned in window coordinates
     /// while grid text stays in seat-local ones.
     chrome_viewport: Viewport,
-    atlas: TextAtlas,
     chrome_text_renderer: TextRenderer,
     /// One text renderer per overlay layer, grown on demand: a glyphon renderer
     /// holds one prepared batch, so two layers of text are two renderers.
     overlay_text_renderers: Vec<TextRenderer>,
-    rect_pipeline: wgpu::RenderPipeline,
-    math_pipeline: wgpu::RenderPipeline,
-    math_bind_group_layout: wgpu::BindGroupLayout,
-    math_sampler: wgpu::Sampler,
-    math_textures: ByteLru<String, CachedMathTexture>,
-    math_texture_evictions: u64,
     /// Artifacts the byte budget refused outright, and visible blocks left without a texture. Both
     /// used to be silent `continue`s; a band that draws its placement but not its pixels is a bare
     /// rectangle on screen, so it is counted where the frame trace can see it.
+    ///
+    /// Counted per window rather than beside the shared LRU: they are read by
+    /// `BT_PERF_TRACE`, which reports one window's frame.
     math_texture_refusals: u64,
     textureless_math_blocks: u64,
     metrics: CellMetrics,
-    /// The chrome sans face's cap height per em, resolved once: it is a property
-    /// of the face, so neither a DPI change nor a new title can move it.
-    chrome_cap_height_ratio: f32,
-    init_timings: RendererInitTimings,
+    /// This window's share of [`RendererInitTimings`] — configuring its own
+    /// swapchain, and measuring the cell against its own scale factor. The rest
+    /// of that report is the device layer's and is charged once per process.
+    surface_configure_time: Duration,
+    font_metrics_time: Duration,
     text_rows: Vec<Arc<ComposedRow>>,
     status_overlay: Option<Arc<ComposedRow>>,
     composed_row_cache: ComposedRowCache,
@@ -2093,6 +2203,21 @@ pub struct Renderer {
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
+}
+
+/// One process, one device, one window — the shape this product opens in.
+///
+/// A façade over the two layers, kept for the whole of slice A1 so that the
+/// app's several hundred `renderer.…` call sites do not have to learn the split
+/// in the same commit that introduces it. It owns exactly one of each and adds
+/// nothing: every method below is one line handing its own [`GpuContext`] to
+/// its own [`WindowRenderer`].
+///
+/// The second window arrives by constructing a second [`WindowRenderer`]
+/// against this one's [`GpuContext`], not by constructing a second `Renderer`.
+pub struct Renderer {
+    gpu: GpuContext,
+    window: WindowRenderer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2665,39 +2790,119 @@ pub struct RenderProbeSample {
 }
 
 /// Headless render-path instrumentation used by `bt-replay`.
+///
+/// Two layers and nothing else: the process's [`GpuContext`], and one
+/// [`WindowRenderer`] whose target is a texture instead of a swapchain. The
+/// multiwindow spike called this shape the template for the split — "the device
+/// layer without a surface" — and folding it back onto the real types is what
+/// keeps the claim honest: the probe measures the production shaping, atlas and
+/// encoding paths because it *is* a window renderer, not because a second copy
+/// of one was kept in step by hand.
 #[doc(hidden)]
 pub struct HeadlessRenderProbe {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    font_system: FontSystem,
-    swash_cache: SwashCache,
-    viewport: Viewport,
-    atlas: TextAtlas,
-    text_renderer: TextRenderer,
-    status_text_renderer: TextRenderer,
-    math_bind_group_layout: wgpu::BindGroupLayout,
-    math_sampler: wgpu::Sampler,
-    math_textures: ByteLru<String, CachedMathTexture>,
-    math_texture_evictions: u64,
-    metrics: CellMetrics,
-    text_rows: Vec<Arc<ComposedRow>>,
-    status_overlay: Option<Arc<ComposedRow>>,
-    composed_row_cache: ComposedRowCache,
-    font_revision: u64,
-    narrow_shaping_cache: NarrowShapingCache,
-    wide_shaping_cache: WideShapingCache,
-    target: wgpu::Texture,
-    width: u32,
-    height: u32,
+    gpu: GpuContext,
+    window: WindowRenderer,
     adapter_name: String,
-    max_texture_dimension_2d: u32,
 }
 
 impl HeadlessRenderProbe {
     pub async fn new(width: u32, height: u32, scale_factor: f64) -> Result<Self, RenderError> {
-        let width = width.max(1);
-        let height = height.max(1);
+        // Named outright rather than asked of a swapchain, which is the whole of
+        // what "headless" means here. It is the format the window path picks on
+        // every machine this ships to, so the atlas and pipelines the probe
+        // measures are the ones a window would have built.
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let mut gpu = GpuContext::headless(format).await?;
+        let adapter_name = gpu.adapter_name();
+        let window = WindowRenderer::offscreen(&mut gpu, width, height, scale_factor, format)?;
+        Ok(Self {
+            gpu,
+            window,
+            adapter_name,
+        })
+    }
+
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    pub fn max_texture_dimension_2d(&self) -> u32 {
+        self.gpu.max_texture_dimension_2d()
+    }
+
+    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
+        self.window.update_scale_factor(&mut self.gpu, scale_factor)
+    }
+
+    pub fn prepare_frame(
+        &mut self,
+        frame: &ViewportFrame,
+    ) -> Result<RenderProbeSample, RenderError> {
+        self.window.probe_frame(&mut self.gpu, frame)
+    }
+}
+
+impl GpuContext {
+    /// Build the device layer against the surface that bootstraps it.
+    ///
+    /// The surface comes in by reference and stays the caller's, because two
+    /// separate things are being read off it and neither of them makes this
+    /// context the surface's owner. An adapter is chosen *for* a surface —
+    /// `compatible_surface` is not decoration on a hybrid-GPU laptop — and the
+    /// swapchain format the atlas and both pipelines are baked for is that
+    /// surface's. Every later window is measured against the answer this one
+    /// gave: see [`Self::accept_format`].
+    pub async fn bootstrap_for_surface(
+        instance: wgpu::Instance,
+        surface: &wgpu::Surface<'static>,
+    ) -> Result<Self, RenderError> {
+        let phase_started = Instant::now();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(surface),
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let adapter_time = phase_started.elapsed();
+        let phase_started = Instant::now();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Folio device"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let device_time = phase_started.elapsed();
+        let format = surface
+            .get_capabilities(&adapter)
+            .formats
+            .into_iter()
+            .find(wgpu::TextureFormat::is_srgb)
+            .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
+        Self::assemble(
+            instance,
+            adapter,
+            device,
+            queue,
+            format,
+            adapter_time,
+            device_time,
+        )
+    }
+
+    /// The device layer with no window at all: `compatible_surface: None` and
+    /// the format named outright rather than asked of a swapchain.
+    ///
+    /// The replay probe's shape, and the shape every headless test uses. It is
+    /// also the honest statement of what this layer is — nothing here needs a
+    /// surface except the choice of adapter, and a caller who has no surface has
+    /// no choice to make.
+    pub async fn headless(format: wgpu::TextureFormat) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let phase_started = Instant::now();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: None,
@@ -2707,7 +2912,8 @@ impl HeadlessRenderProbe {
             })
             .await
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
-        let adapter_name = adapter.get_info().name;
+        let adapter_time = phase_started.elapsed();
+        let phase_started = Instant::now();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio replay probe device"),
@@ -2715,265 +2921,143 @@ impl HeadlessRenderProbe {
             })
             .await
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
-        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
-        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let mut font_system = terminal_font_system();
-        let metrics = CellMetrics::measure(&mut font_system, scale_factor)?;
-        let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let status_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let (_, math_bind_group_layout, math_sampler) = create_math_pipeline(&device, format);
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Folio replay probe target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        Ok(Self {
+        let device_time = phase_started.elapsed();
+        Self::assemble(
+            instance,
+            adapter,
             device,
             queue,
+            format,
+            adapter_time,
+            device_time,
+        )
+    }
+
+    fn assemble(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+        adapter_time: Duration,
+        device_time: Duration,
+    ) -> Result<Self, RenderError> {
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        let phase_started = Instant::now();
+        let mut font_system = terminal_font_system();
+        let font_system_time = phase_started.elapsed();
+        let phase_started = Instant::now();
+        let mut swash_cache = SwashCache::new();
+        let chrome_cap_height_ratio = chrome_cap_height_ratio(&mut font_system, &mut swash_cache)
+            .ok_or(RenderError::MissingChromeSansMetrics)?;
+        let font_metrics_time = phase_started.elapsed();
+        let phase_started = Instant::now();
+        let glyphon_cache = Cache::new(&device);
+        let atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
+        let rect_pipeline = create_rect_pipeline(&device, format);
+        let (math_pipeline, math_bind_group_layout, math_sampler) =
+            create_math_pipeline(&device, format);
+        let render_resources_time = phase_started.elapsed();
+        Ok(Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            format,
+            max_texture_dimension_2d,
             font_system,
             swash_cache,
-            viewport,
+            glyphon_cache,
             atlas,
-            text_renderer,
-            status_text_renderer,
+            rect_pipeline,
+            math_pipeline,
             math_bind_group_layout,
             math_sampler,
             math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
             math_texture_evictions: 0,
-            metrics,
-            text_rows: Vec::new(),
-            status_overlay: None,
-            composed_row_cache: ComposedRowCache::new(),
-            font_revision: 1,
-            narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(true),
-            wide_shaping_cache: WideShapingCache::with_perf_tracking(true),
-            target,
-            width,
-            height,
-            adapter_name,
-            max_texture_dimension_2d,
+            chrome_cap_height_ratio,
+            init_timings: RendererInitTimings {
+                adapter: adapter_time,
+                device: device_time,
+                // A window's cost, filled in by `Renderer::init_timings`.
+                surface_configure: Duration::ZERO,
+                font_system: font_system_time,
+                font_metrics: font_metrics_time,
+                render_resources: render_resources_time,
+            },
         })
     }
 
-    pub fn adapter_name(&self) -> &str {
-        &self.adapter_name
+    /// The swapchain format this context's atlas and pipelines were baked for.
+    #[must_use]
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.format
     }
 
+    #[must_use]
+    pub fn adapter_name(&self) -> String {
+        self.adapter.get_info().name
+    }
+
+    #[must_use]
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.max_texture_dimension_2d
     }
 
-    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
-        self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
-        self.text_rows.clear();
-        self.status_overlay = None;
-        self.composed_row_cache.clear();
-        self.font_revision = self.font_revision.saturating_add(1);
-        self.narrow_shaping_cache.clear();
-        self.wide_shaping_cache.clear();
-        self.math_textures.clear();
-        Ok(self.metrics)
-    }
-
-    pub fn prepare_frame(
-        &mut self,
-        frame: &ViewportFrame,
-    ) -> Result<RenderProbeSample, RenderError> {
-        let started = Instant::now();
-        frame.validate_shape()?;
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.width,
-                height: self.height,
-            },
-        );
-        let text_stats = prepare_text_rows(
-            frame,
-            self.metrics,
-            &mut self.text_rows,
-            &mut self.status_overlay,
-            &mut self.composed_row_cache,
-            self.font_revision,
-            theme_revision(),
-            &mut self.font_system,
-            &mut self.swash_cache,
-            &mut self.narrow_shaping_cache,
-            &mut self.wide_shaping_cache,
-        )?;
-        let rows_prepared_at = Instant::now();
-        prepare_text_atlas(
-            &mut self.text_renderer,
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            &mut self.swash_cache,
-            &self.text_rows,
-            self.metrics,
-            frame,
-        )
-        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-        prepare_status_text_atlas(
-            &mut self.status_text_renderer,
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            &mut self.swash_cache,
-            self.status_overlay.as_deref(),
-            self.metrics,
-            frame,
-            // A headless probe has no seat: it renders into the whole target, so the surface is
-            // the pane.
-            self.width as f32,
-        )
-        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-        let atlas_prepared_at = Instant::now();
-        let math_evictions_before = self.math_texture_evictions;
-        let (math_texture_uploads, math_texture_upload_bytes) = self.prepare_math_textures(frame);
-        let math_prepared_at = Instant::now();
-        let view = self.target.create_view(&Default::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Folio replay probe frame"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Folio replay probe pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(theme_clear_color()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-            if self.status_overlay.is_some() {
-                self.status_text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-            }
+    /// The sharing gate. `Ok` only when `format` is the one the atlas and both
+    /// pipelines were built for.
+    ///
+    /// Every window constructor goes through here, and there is no path around
+    /// it: an unequal format is [`RenderError::FormatMismatch`] and never a
+    /// silently-minted second atlas.
+    fn accept_format(&self, format: wgpu::TextureFormat) -> Result<(), RenderError> {
+        if format == self.format {
+            Ok(())
+        } else {
+            Err(RenderError::FormatMismatch {
+                context: self.format,
+                surface: format,
+            })
         }
-        self.queue.submit([encoder.finish()]);
-        let submitted_at = Instant::now();
-        self.atlas.trim();
-        Ok(RenderProbeSample {
-            total: started.elapsed(),
-            row_compose: text_stats.elapsed,
-            shape_cache_miss: text_stats.narrow.miss_time + text_stats.wide.miss_time,
-            atlas_prepare_upload: atlas_prepared_at - rows_prepared_at,
-            encode_submit: submitted_at - math_prepared_at,
-            math_prepare_upload: math_prepared_at - atlas_prepared_at,
-            rows_reshaped: text_stats.rows_reshaped,
-            row_cache_hits: text_stats.row_cache.hits,
-            row_cache_misses: text_stats.row_cache.misses,
-            row_cache_evictions: text_stats.row_cache.evictions,
-            row_cache_resident_bytes: text_stats.row_cache.resident_bytes,
-            narrow_hits: text_stats.narrow.hits,
-            narrow_misses: text_stats.narrow.misses,
-            narrow_evictions: text_stats.narrow.evictions,
-            wide_hits: text_stats.wide.hits,
-            wide_misses: text_stats.wide.misses,
-            wide_evictions: text_stats.wide.evictions,
-            narrow_resident_bytes: text_stats.narrow.resident_bytes,
-            wide_resident_bytes: text_stats.wide.resident_bytes,
-            math_texture_uploads,
-            math_texture_upload_bytes,
-            math_texture_evictions: self
-                .math_texture_evictions
-                .saturating_sub(math_evictions_before),
-            math_texture_resident_bytes: self.math_textures.resident_bytes(),
-            atlas_hits: None,
-            atlas_misses: None,
-            atlas_grows: None,
-            atlas_evictions: None,
-            atlas_upload_bytes: None,
-            narrow_glyphs: self
-                .text_rows
-                .iter()
-                .map(|row| row.narrow_glyphs.len() as u64)
-                .sum(),
-            wide_glyphs: self
-                .text_rows
-                .iter()
-                .map(|row| row.wide_glyphs.len() as u64)
-                .sum(),
-        })
-    }
-
-    fn prepare_math_textures(&mut self, frame: &ViewportFrame) -> (u64, usize) {
-        let mut uploads = 0_u64;
-        let mut upload_bytes = 0_usize;
-        for placement in &frame.math_blocks {
-            if !math_block_admits_texture(frame, placement) {
-                continue;
-            }
-            let key = &placement.artifact.key;
-            if self.math_textures.get(key).is_some() {
-                continue;
-            }
-            let Some(texture) = self.upload_math_texture(&placement.artifact) else {
-                continue;
-            };
-            uploads = uploads.saturating_add(1);
-            upload_bytes = upload_bytes.saturating_add(placement.artifact.rgba.len());
-            let (_, evictions) =
-                self.math_textures
-                    .insert(key.clone(), texture, placement.artifact.rgba.len());
-            self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
-        }
-        (uploads, upload_bytes)
     }
 
     fn upload_math_texture(
         &self,
         artifact: &bt_viewport::ProjectedMathArtifact,
     ) -> Option<CachedMathTexture> {
-        let expected = artifact.width_px as usize * artifact.height_px as usize * 4;
-        if artifact.width_px == 0 || artifact.height_px == 0 || artifact.rgba.len() != expected {
+        self.upload_rgba_tiles(&artifact.rgba, artifact.width_px, artifact.height_px)
+    }
+
+    /// Cut an RGBA image into device-sized tiles and upload each as its own
+    /// bound texture. On the device layer because the bytes, the sampler and the
+    /// bind-group layout are all the device's; nothing here knows which window
+    /// asked.
+    fn upload_rgba_tiles(
+        &self,
+        rgba: &[u8],
+        width_px: u32,
+        height_px: u32,
+    ) -> Option<CachedMathTexture> {
+        let expected = width_px as usize * height_px as usize * 4;
+        if width_px == 0 || height_px == 0 || rgba.len() != expected {
             return None;
         }
         let tile_limit = self.max_texture_dimension_2d.max(1);
         let mut tiles = Vec::new();
-        for y in (0..artifact.height_px).step_by(tile_limit as usize) {
-            let height = (artifact.height_px - y).min(tile_limit);
-            for x in (0..artifact.width_px).step_by(tile_limit as usize) {
-                let width = (artifact.width_px - x).min(tile_limit);
+        for y in (0..height_px).step_by(tile_limit as usize) {
+            let height = (height_px - y).min(tile_limit);
+            for x in (0..width_px).step_by(tile_limit as usize) {
+                let width = (width_px - x).min(tile_limit);
                 let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
                 for row in y..y + height {
-                    let start = (row as usize * artifact.width_px as usize + x as usize) * 4;
+                    let start = (row as usize * width_px as usize + x as usize) * 4;
                     let end = start + width as usize * 4;
-                    bytes.extend_from_slice(&artifact.rgba[start..end]);
+                    bytes.extend_from_slice(&rgba[start..end]);
                 }
                 let texture = self.device.create_texture_with_data(
                     &self.queue,
                     &wgpu::TextureDescriptor {
-                        label: Some("headless math block texture tile"),
+                        label: Some("math block texture tile"),
                         size: wgpu::Extent3d {
                             width,
                             height,
@@ -2991,7 +3075,7 @@ impl HeadlessRenderProbe {
                 );
                 let view = texture.create_view(&Default::default());
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("headless math block texture bind group"),
+                    label: Some("math block texture bind group"),
                     layout: &self.math_bind_group_layout,
                     entries: &[
                         wgpu::BindGroupEntry {
@@ -3017,149 +3101,202 @@ impl HeadlessRenderProbe {
     }
 }
 
-impl Renderer {
-    pub async fn new(
+impl WindowRenderer {
+    /// A window over an existing device layer: the second, third and every
+    /// later `Folio` window.
+    ///
+    /// The surface is created from `gpu`'s own [`wgpu::Instance`], which is not
+    /// a convenience — a surface created by any other instance cannot be
+    /// presented on this device.
+    pub fn new(
+        gpu: &mut GpuContext,
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
         scale_factor: f64,
     ) -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance
+        let surface = gpu
+            .instance
             .create_surface(target)
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        Self::from_surface(gpu, surface, width, height, scale_factor)
+    }
+
+    /// The same window, when the caller already holds the surface — which the
+    /// first window does, because its surface is what chose the adapter.
+    fn from_surface(
+        gpu: &mut GpuContext,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+    ) -> Result<Self, RenderError> {
         let phase_started = Instant::now();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
-        let adapter_time = phase_started.elapsed();
-        let phase_started = Instant::now();
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Folio device"),
-                ..Default::default()
-            })
-            .await
-            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
-        let device_time = phase_started.elapsed();
-        let phase_started = Instant::now();
-        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
-        let swapchain_size = surface_config_size(width, height, max_texture_dimension_2d);
+        let swapchain_size = surface_config_size(width, height, gpu.max_texture_dimension_2d);
         let mut config = surface
-            .get_default_config(&adapter, swapchain_size.0, swapchain_size.1)
+            .get_default_config(&gpu.adapter, swapchain_size.0, swapchain_size.1)
             .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
         config.format = surface
-            .get_capabilities(&adapter)
+            .get_capabilities(&gpu.adapter)
             .formats
             .into_iter()
             .find(wgpu::TextureFormat::is_srgb)
             .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
+        gpu.accept_format(config.format)?;
         config.desired_maximum_frame_latency = 1;
-        surface.configure(&device, &config);
+        surface.configure(&gpu.device, &config);
         let surface_configure_time = phase_started.elapsed();
+        Self::assemble(
+            gpu,
+            WindowTarget::Surface(Box::new(surface)),
+            config,
+            swapchain_size,
+            scale_factor,
+            surface_configure_time,
+        )
+    }
 
+    /// A window renderer with a texture where its swapchain would be.
+    ///
+    /// Everything else about it is a window: its own metrics for its own scale
+    /// factor, its own composed-row and shaping caches, its own seat slots and
+    /// chrome viewport, and the shared atlas underneath. That is what makes the
+    /// replay probe a real instance of this type rather than a second
+    /// implementation of it, and what lets a test hold two of them over one
+    /// [`GpuContext`] without a window manager.
+    pub fn offscreen(
+        gpu: &mut GpuContext,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self, RenderError> {
+        gpu.accept_format(format)?;
+        let size = surface_config_size(width.max(1), height.max(1), gpu.max_texture_dimension_2d);
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Folio offscreen window target"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.0,
+            height: size.1,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 1,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            view_formats: Vec::new(),
+        };
+        Self::assemble(
+            gpu,
+            WindowTarget::Offscreen(texture),
+            config,
+            size,
+            scale_factor,
+            Duration::ZERO,
+        )
+    }
+
+    /// The per-window state both constructors end in: the glyphon objects that
+    /// hold one prepared batch each, the metrics this window's scale factor
+    /// produces, and the caches keyed by the pixel font size those metrics name.
+    fn assemble(
+        gpu: &mut GpuContext,
+        target: WindowTarget,
+        config: wgpu::SurfaceConfiguration,
+        configured_size: (u32, u32),
+        scale_factor: f64,
+        surface_configure_time: Duration,
+    ) -> Result<Self, RenderError> {
         let phase_started = Instant::now();
-        let mut font_system = terminal_font_system();
-        let font_system_time = phase_started.elapsed();
-        let phase_started = Instant::now();
-        let metrics = CellMetrics::measure(&mut font_system, scale_factor)?;
-        let mut swash_cache = SwashCache::new();
-        let chrome_cap_height_ratio = chrome_cap_height_ratio(&mut font_system, &mut swash_cache)
-            .ok_or(RenderError::MissingChromeSansMetrics)?;
+        let metrics = CellMetrics::measure(&mut gpu.font_system, scale_factor)?;
         let font_metrics_time = phase_started.elapsed();
-        let phase_started = Instant::now();
-        let cache = Cache::new(&device);
-        let chrome_viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
+        let device = &gpu.device;
+        let cache = &gpu.glyphon_cache;
+        let chrome_viewport = Viewport::new(device, cache);
         // Slot 0: the seat a lone terminal leaf draws into on every frame it
         // ever draws. Built here rather than on demand so that shape never pays
         // an allocation mid-frame.
         let seat_slots = vec![SeatTextSlot {
-            viewport: Viewport::new(&device, &cache),
+            viewport: Viewport::new(device, cache),
             text_renderer: TextRenderer::new(
-                &mut atlas,
-                &device,
+                &mut gpu.atlas,
+                device,
                 wgpu::MultisampleState::default(),
                 None,
             ),
             status_text_renderer: TextRenderer::new(
-                &mut atlas,
-                &device,
+                &mut gpu.atlas,
+                device,
                 wgpu::MultisampleState::default(),
                 None,
             ),
         }];
-        let chrome_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let chrome_text_renderer = TextRenderer::new(
+            &mut gpu.atlas,
+            device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
         // Its own renderer rather than a share of the chrome's, for the reason
         // every seat has its own: one `TextRenderer` holds one prepared batch,
         // and a preview body is prepared from a different shaping run (a
         // monospace face, one buffer per line) than the chrome around it.
-        let preview_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let overlay_text_renderers = Vec::new();
-        let rect_pipeline = create_rect_pipeline(&device, config.format);
-        let (math_pipeline, math_bind_group_layout, math_sampler) =
-            create_math_pipeline(&device, config.format);
-        let render_resources_time = phase_started.elapsed();
-        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
-        Ok(Self {
-            surface,
+        let preview_text_renderer = TextRenderer::new(
+            &mut gpu.atlas,
             device,
-            queue,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
+        // A window that draws into a texture is an instrument by construction —
+        // `HeadlessRenderProbe` is the only thing that builds one — so its
+        // shaping caches count hits, misses and evictions whether or not the
+        // trace is on, which is what `bt-replay` reports. A window on a
+        // swapchain pays for that counting only when someone asked for it.
+        let measure_shaping = trace_perf || matches!(target, WindowTarget::Offscreen(_));
+        Ok(Self {
+            target,
             config,
-            max_texture_dimension_2d,
-            configured_size: swapchain_size,
-            seat: SeatViewport::whole(swapchain_size.0, swapchain_size.1),
+            configured_size,
+            seat: SeatViewport::whole(configured_size.0, configured_size.1),
             chrome_quads: Vec::new(),
             chrome_labels: Vec::new(),
             chrome_icons: Vec::new(),
             overlay_layers: Vec::new(),
-            font_system,
-            swash_cache,
             seat_slots,
-            glyphon_cache: cache,
             chrome_viewport,
-            atlas,
             chrome_text_renderer,
-            preview_text_renderer,
-            overlay_text_renderers,
-            rect_pipeline,
-            math_pipeline,
-            math_bind_group_layout,
-            math_sampler,
-            math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
-            math_texture_evictions: 0,
+            overlay_text_renderers: Vec::new(),
             math_texture_refusals: 0,
             textureless_math_blocks: 0,
             metrics,
-            chrome_cap_height_ratio,
-            init_timings: RendererInitTimings {
-                adapter: adapter_time,
-                device: device_time,
-                surface_configure: surface_configure_time,
-                font_system: font_system_time,
-                font_metrics: font_metrics_time,
-                render_resources: render_resources_time,
-            },
+            surface_configure_time,
+            font_metrics_time,
             text_rows: Vec::new(),
             status_overlay: None,
             composed_row_cache: ComposedRowCache::new(),
             font_revision: 1,
-            narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(trace_perf),
-            wide_shaping_cache: WideShapingCache::with_perf_tracking(trace_perf),
+            narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(measure_shaping),
+            wide_shaping_cache: WideShapingCache::with_perf_tracking(measure_shaping),
             glyph_degraded_frames: 0,
             window_focused: true,
             cursor_blink_visible: true,
             peek_overlay: None,
             preview_image: None,
             preview_bodies: Vec::new(),
+            preview_text_renderer,
             trace_perf,
             perf_frame: 0,
         })
@@ -3167,10 +3304,6 @@ impl Renderer {
 
     pub fn metrics(&self) -> CellMetrics {
         self.metrics
-    }
-
-    pub fn init_timings(&self) -> RendererInitTimings {
-        self.init_timings
     }
 
     pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
@@ -3213,10 +3346,10 @@ impl Renderer {
         })
     }
 
-    pub fn presentation_geometry(&self) -> PresentationGeometry {
+    pub fn presentation_geometry(&self, gpu: &GpuContext) -> PresentationGeometry {
         PresentationGeometry {
             swapchain_size: (self.config.width, self.config.height),
-            max_texture_dimension_2d: self.max_texture_dimension_2d,
+            max_texture_dimension_2d: gpu.max_texture_dimension_2d,
         }
     }
 
@@ -3325,6 +3458,7 @@ impl Renderer {
     /// same reason that one does.
     pub fn measure_preview_paragraph(
         &mut self,
+        gpu: &mut GpuContext,
         runs: &[PreviewRun],
         width_px: f32,
         font_size_px: f32,
@@ -3334,7 +3468,7 @@ impl Renderer {
             return line_height_px;
         }
         let mut buffer = Buffer::new(
-            &mut self.font_system,
+            &mut gpu.font_system,
             Metrics::new(font_size_px, line_height_px),
         );
         buffer.set_wrap(Wrap::WordOrGlyph);
@@ -3345,7 +3479,7 @@ impl Renderer {
             0.0,
             Metrics::new(font_size_px, line_height_px),
         );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut gpu.font_system, false);
         buffer.layout_runs().count().max(1) as f32 * line_height_px
     }
 
@@ -3361,6 +3495,7 @@ impl Renderer {
     /// scroll that stops before the last word.
     pub fn measure_preview_paragraph_width(
         &mut self,
+        gpu: &mut GpuContext,
         runs: &[PreviewRun],
         font_size_px: f32,
         line_height_px: f32,
@@ -3369,7 +3504,7 @@ impl Renderer {
             return 0.0;
         }
         let mut buffer = Buffer::new(
-            &mut self.font_system,
+            &mut gpu.font_system,
             Metrics::new(font_size_px, line_height_px),
         );
         buffer.set_wrap(Wrap::None);
@@ -3380,7 +3515,7 @@ impl Renderer {
             0.0,
             Metrics::new(font_size_px, line_height_px),
         );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut gpu.font_system, false);
         buffer
             .layout_runs()
             .map(|run| run.line_w)
@@ -3402,10 +3537,11 @@ impl Renderer {
     /// measured any other way is a box in a different place than the glyphs.
     pub fn measure_preview_run_boxes(
         &mut self,
+        gpu: &mut GpuContext,
         paragraph: &PreviewParagraph,
     ) -> Vec<PreviewRunBox> {
         let mut buffer = Buffer::new(
-            &mut self.font_system,
+            &mut gpu.font_system,
             Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
         );
         if paragraph.wrap {
@@ -3421,7 +3557,7 @@ impl Renderer {
             paragraph.letter_spacing_em,
             Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
         );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut gpu.font_system, false);
         let left = preview_paragraph_left(paragraph, &buffer);
         let top = paragraph.rect[1];
         // The runs are concatenated into one line before shaping, so a glyph
@@ -3465,12 +3601,12 @@ impl Renderer {
     /// single advance carries the face's own rounding, and a document three
     /// hundred columns wide would end up three hundred roundings away from where
     /// its own scroller thinks it ends.
-    pub fn preview_mono_advance(&mut self, font_size_px: f32) -> f32 {
+    pub fn preview_mono_advance(&mut self, gpu: &mut GpuContext, font_size_px: f32) -> f32 {
         const CELLS: usize = 32;
         let sample = "M".repeat(CELLS);
         let line_height = font_size_px * 1.4;
         let mut buffer = Buffer::new(
-            &mut self.font_system,
+            &mut gpu.font_system,
             Metrics::new(font_size_px, line_height),
         );
         buffer.set_wrap(Wrap::None);
@@ -3481,7 +3617,7 @@ impl Renderer {
             Shaping::Advanced,
             None,
         );
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.shape_until_scroll(&mut gpu.font_system, false);
         let width = buffer
             .layout_runs()
             .map(|run| run.line_w)
@@ -3513,11 +3649,11 @@ impl Renderer {
         changed
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
+    pub fn resize(&mut self, gpu: &GpuContext, width: u32, height: u32) -> Result<(), RenderError> {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        let swapchain_size = surface_config_size(width, height, self.max_texture_dimension_2d);
+        let swapchain_size = surface_config_size(width, height, gpu.max_texture_dimension_2d);
         self.config.width = swapchain_size.0;
         self.config.height = swapchain_size.1;
         // A new surface makes the seat rectangle that was solved against the old
@@ -3603,8 +3739,13 @@ impl Renderer {
     /// majority of this chrome's labels are drawn as. A caller whose label
     /// carries either must measure with it; see the note on
     /// [`chrome_label_attrs`].
-    pub fn measure_chrome_text(&mut self, text: &str, font_size_px: f32) -> f32 {
-        self.measure_chrome_label(text, font_size_px, ChromeLabelWeight::Regular, 0.0)
+    pub fn measure_chrome_text(
+        &mut self,
+        gpu: &mut GpuContext,
+        text: &str,
+        font_size_px: f32,
+    ) -> f32 {
+        self.measure_chrome_label(gpu, text, font_size_px, ChromeLabelWeight::Regular, 0.0)
     }
 
     /// How wide `text` will be when drawn as a [`ChromeLabel`] carrying `weight`
@@ -3616,13 +3757,14 @@ impl Renderer {
     /// a box the caption overflows by a letter.
     pub fn measure_chrome_label(
         &mut self,
+        gpu: &mut GpuContext,
         text: &str,
         font_size_px: f32,
         weight: ChromeLabelWeight,
         letter_spacing_em: f32,
     ) -> f32 {
         measure_chrome_label(
-            &mut self.font_system,
+            &mut gpu.font_system,
             text,
             font_size_px,
             weight,
@@ -3630,15 +3772,34 @@ impl Renderer {
         )
     }
 
-    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
-        self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
+    /// Re-measure the cell for a new scale factor and drop everything keyed by
+    /// the pixel font size the old one named.
+    ///
+    /// Every cache cleared here except one is this window's, which is the whole
+    /// reason they sit on this side of the split: a window dragged to a 1.5x
+    /// monitor invalidates its own composed rows and its own shaping, and says
+    /// nothing about a window still on the 2.0x one.
+    ///
+    /// The exception is `math_textures`, which is the device's shared LRU. A
+    /// scale change re-rasterizes every band, so the entries this window put
+    /// there are dead; clearing the whole cache also drops a second window's
+    /// live entries, which costs that window one re-upload per band and cannot
+    /// draw anything wrong. Narrowing that to this window's own keys wants a
+    /// window tag on the key and belongs with the slice that opens the second
+    /// window, not with the one that splits the type.
+    pub fn update_scale_factor(
+        &mut self,
+        gpu: &mut GpuContext,
+        scale_factor: f64,
+    ) -> Result<CellMetrics, RenderError> {
+        self.metrics = CellMetrics::measure(&mut gpu.font_system, scale_factor)?;
         self.text_rows.clear();
         self.status_overlay = None;
         self.composed_row_cache.clear();
         self.font_revision = self.font_revision.saturating_add(1);
         self.narrow_shaping_cache.clear();
         self.wide_shaping_cache.clear();
-        self.math_textures.clear();
+        gpu.math_textures.clear();
         Ok(self.metrics)
     }
 
@@ -3647,19 +3808,19 @@ impl Renderer {
     /// Grown and never shrunk, exactly as `overlay_text_renderers` is: closing a
     /// pane is a common thing to do and re-opening one should not have to build
     /// GPU objects again.
-    fn ensure_seat_slots(&mut self, count: usize) {
+    fn ensure_seat_slots(&mut self, gpu: &mut GpuContext, count: usize) {
         while self.seat_slots.len() < count {
             self.seat_slots.push(SeatTextSlot {
-                viewport: Viewport::new(&self.device, &self.glyphon_cache),
+                viewport: Viewport::new(&gpu.device, &gpu.glyphon_cache),
                 text_renderer: TextRenderer::new(
-                    &mut self.atlas,
-                    &self.device,
+                    &mut gpu.atlas,
+                    &gpu.device,
                     wgpu::MultisampleState::default(),
                     None,
                 ),
                 status_text_renderer: TextRenderer::new(
-                    &mut self.atlas,
-                    &self.device,
+                    &mut gpu.atlas,
+                    &gpu.device,
                     wgpu::MultisampleState::default(),
                     None,
                 ),
@@ -3669,16 +3830,18 @@ impl Renderer {
 
     /// Present one terminal frame into the seat the caller last placed.
     ///
-    /// The N = 1 door into [`Self::present_seats`]. Kept as its own entry point
+    /// The N = 1 door into [`Self::present_frame`]. Kept as its own entry point
     /// because a lone terminal leaf is the shape this product opens in, and
     /// because every replay and probe path has exactly one shell by
     /// construction.
     pub fn present(
         &mut self,
+        gpu: &mut GpuContext,
         frame: &ViewportFrame,
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
-        self.present_seats(
+        self.present_frame(
+            gpu,
             &[SeatFrame {
                 seat: self.seat,
                 // Nothing animates on this path — it is the single-seat wrapper
@@ -3703,8 +3866,28 @@ impl Renderer {
     /// An empty slice is a legal frame, not an error: a tab whose panes are all
     /// files columns has no terminal to draw and still owes the window its
     /// chrome.
-    pub fn present_seats(
+    ///
+    /// # One call, and why there is no `prepare` beside it
+    ///
+    /// Preparing and rendering are one entry point on purpose, and this is the
+    /// invariant the multiwindow spike (Q2) asked slice A be built around:
+    /// **the prepares and the render of one window's one frame must complete as
+    /// a pair, with no other window's prepare between them.**
+    ///
+    /// The atlas is shared. A `prepare` can grow it, and growing it moves every
+    /// glyph already placed in it — including the ones another window's
+    /// `TextRenderer` has already been handed coordinates for. Batch two
+    /// windows' prepares and render them afterwards and the first window draws
+    /// its text from the wrong place in the atlas. glyphon 0.12 exports no
+    /// occupancy or mutation counter (every atlas field of [`RenderProbeSample`]
+    /// is permanently `None`), so nothing will report the violation — it will
+    /// only be visible as the other window's characters turning to confetti.
+    ///
+    /// Making the pair a single call is how that is enforced rather than
+    /// documented: there is no public `prepare` for a caller to hold open.
+    pub fn present_frame(
         &mut self,
+        gpu: &mut GpuContext,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
@@ -3718,14 +3901,14 @@ impl Renderer {
         // is that seat's, updated inside the loop below; the pass viewport lands
         // those pixels at the seat's corner.
         self.chrome_viewport.update(
-            &self.queue,
+            &gpu.queue,
             Resolution {
                 width: self.config.width,
                 height: self.config.height,
             },
         );
         let viewport_updated_at = Instant::now();
-        self.ensure_seat_slots(seats.len());
+        self.ensure_seat_slots(gpu, seats.len());
         // Outside this function `self.seat` names the focused seat, and the tail
         // of the loop puts it back. Inside, it is the seat *currently being
         // composed*, which is what every extent helper below already means by
@@ -3746,13 +3929,13 @@ impl Renderer {
             let frame = entry.frame;
             self.seat = entry.seat;
             self.seat_slots[index].viewport.update(
-                &self.queue,
+                &gpu.queue,
                 Resolution {
                     width: entry.seat.width,
                     height: entry.seat.height,
                 },
             );
-            let text_stats = self.prepare_text_rows(frame)?;
+            let text_stats = self.prepare_text_rows(gpu, frame)?;
             rows_prepared_at = Instant::now();
             // `text_rows` and `status_overlay` stay single slots on purpose:
             // they are staging for the prepare that immediately follows, and
@@ -3762,24 +3945,24 @@ impl Renderer {
                 let slot = &mut self.seat_slots[index];
                 match prepare_text_atlas(
                     &mut slot.text_renderer,
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut gpu.font_system,
+                    &mut gpu.atlas,
                     &slot.viewport,
-                    &mut self.swash_cache,
+                    &mut gpu.swash_cache,
                     &self.text_rows,
                     self.metrics,
                     frame,
                 ) {
                     Ok(()) => prepare_status_text_atlas(
                         &mut slot.status_text_renderer,
-                        &self.device,
-                        &self.queue,
-                        &mut self.font_system,
-                        &mut self.atlas,
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut gpu.font_system,
+                        &mut gpu.atlas,
                         &slot.viewport,
-                        &mut self.swash_cache,
+                        &mut gpu.swash_cache,
                         self.status_overlay.as_deref(),
                         self.metrics,
                         frame,
@@ -3802,7 +3985,7 @@ impl Renderer {
                                 );
                             }
                             self.glyph_degraded_frames += 1;
-                            self.atlas.trim();
+                            gpu.atlas.trim();
                             false
                         }
                     }
@@ -3812,10 +3995,10 @@ impl Renderer {
 
             // Math draws first: the hover dim rect decorates a block's raster, so it must know which
             // rasters this frame actually put on screen before it decides to darken anything.
-            let math_batch = self.prepare_math_draws(frame);
+            let math_batch = self.prepare_math_draws(gpu, frame);
             math_prepared_at = Instant::now();
             let math_vertex_buffer = (!math_batch.vertices.is_empty()).then(|| {
-                self.device
+                gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("visible math block vertices"),
                         contents: bytemuck::cast_slice(&math_batch.vertices),
@@ -3832,7 +4015,7 @@ impl Renderer {
             } else {
                 rects.as_slice()
             };
-            let rect_buffer = self
+            let rect_buffer = gpu
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("terminal cell rectangles"),
@@ -3862,7 +4045,7 @@ impl Renderer {
                 status_rects.as_slice()
             };
             let status_rect_buffer =
-                self.device
+                gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("status overlay rectangle"),
                         contents: bytemuck::cast_slice(status_rect_data),
@@ -3875,7 +4058,7 @@ impl Renderer {
                 math_overlays.as_slice()
             };
             let math_overlay_buffer =
-                self.device
+                gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("math toolbar overlay rectangles"),
                         contents: bytemuck::cast_slice(overlay_data),
@@ -3912,9 +4095,9 @@ impl Renderer {
         // band's right edge — means that one by it.
         self.seat = focused_seat;
 
-        let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws();
+        let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws(gpu);
         let peek_rect_buffer = (!peek_rects.is_empty()).then(|| {
-            self.device
+            gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("peek flyout rectangles"),
                     contents: bytemuck::cast_slice(&peek_rects),
@@ -3922,16 +4105,16 @@ impl Renderer {
                 })
         });
         let peek_vertex_buffer = (!peek_vertices.is_empty()).then(|| {
-            self.device
+            gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("peek flyout image vertices"),
                     contents: bytemuck::cast_slice(&peek_vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let (preview_seat, preview_draws, preview_vertices) = self.prepare_preview_draws();
+        let (preview_seat, preview_draws, preview_vertices) = self.prepare_preview_draws(gpu);
         let preview_vertex_buffer = (!preview_vertices.is_empty()).then(|| {
-            self.device
+            gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("preview seat image vertices"),
                     contents: bytemuck::cast_slice(&preview_vertices),
@@ -3949,7 +4132,7 @@ impl Renderer {
             })
             .collect();
         let chrome_rect_buffer = (!chrome_rects.is_empty()).then(|| {
-            self.device
+            gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("seat chrome rectangles"),
                     contents: bytemuck::cast_slice(chrome_rects.as_slice()),
@@ -3958,10 +4141,10 @@ impl Renderer {
         });
         let chrome_icons = std::mem::take(&mut self.chrome_icons);
         let (chrome_icon_draws, chrome_icon_vertices) =
-            self.prepare_chrome_icon_draws(&chrome_icons);
+            self.prepare_chrome_icon_draws(gpu, &chrome_icons);
         self.chrome_icons = chrome_icons;
         let chrome_icon_buffer = (!chrome_icon_vertices.is_empty()).then(|| {
-            self.device
+            gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("chrome mark vertices"),
                     contents: bytemuck::cast_slice(chrome_icon_vertices.as_slice()),
@@ -3969,20 +4152,20 @@ impl Renderer {
                 })
         });
         let chrome_layouts = shape_chrome_labels(
-            &mut self.font_system,
+            &mut gpu.font_system,
             &self.chrome_labels,
-            self.chrome_cap_height_ratio,
+            gpu.chrome_cap_height_ratio,
             1.0,
         );
         let chrome_prepared = !chrome_layouts.is_empty()
             && prepare_chrome_text_atlas(
                 &mut self.chrome_text_renderer,
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.font_system,
+                &mut gpu.atlas,
                 &self.chrome_viewport,
-                &mut self.swash_cache,
+                &mut gpu.swash_cache,
                 &chrome_layouts,
             )
             .is_ok();
@@ -3998,7 +4181,7 @@ impl Renderer {
             })
             .collect();
         let preview_body_rect_buffer = (!preview_body_rects.is_empty()).then(|| {
-            self.device
+            gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("preview body fills"),
                     contents: bytemuck::cast_slice(preview_body_rects.as_slice()),
@@ -4007,17 +4190,17 @@ impl Renderer {
         });
         let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
         for body in &self.preview_bodies {
-            preview_text_layouts.extend(shape_preview_body(&mut self.font_system, body));
+            preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
         }
         let preview_text_prepared = !preview_text_layouts.is_empty()
             && prepare_chrome_text_atlas(
                 &mut self.preview_text_renderer,
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.font_system,
+                &mut gpu.atlas,
                 &self.chrome_viewport,
-                &mut self.swash_cache,
+                &mut gpu.swash_cache,
                 &preview_text_layouts,
             )
             .is_ok();
@@ -4057,16 +4240,17 @@ impl Renderer {
                 ));
             }
             let rect_buffer = (!rects.is_empty()).then(|| {
-                self.device
+                gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("modal overlay rectangles"),
                         contents: bytemuck::cast_slice(rects.as_slice()),
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             });
-            let (icon_draws, icon_vertices) = self.prepare_chrome_icon_draws(&layer.faded_icons());
+            let (icon_draws, icon_vertices) =
+                self.prepare_chrome_icon_draws(gpu, &layer.faded_icons());
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
-                self.device
+                gpu.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("modal overlay mark vertices"),
                         contents: bytemuck::cast_slice(icon_vertices.as_slice()),
@@ -4074,18 +4258,18 @@ impl Renderer {
                     })
             });
             let mut layouts = shape_chrome_labels(
-                &mut self.font_system,
+                &mut gpu.font_system,
                 &layer.labels,
-                self.chrome_cap_height_ratio,
+                gpu.chrome_cap_height_ratio,
                 layer.opacity,
             );
             if let Some(body) = layer.body.as_ref() {
-                layouts.extend(shape_preview_body(&mut self.font_system, body));
+                layouts.extend(shape_preview_body(&mut gpu.font_system, body));
             }
             while self.overlay_text_renderers.len() <= index {
                 self.overlay_text_renderers.push(TextRenderer::new(
-                    &mut self.atlas,
-                    &self.device,
+                    &mut gpu.atlas,
+                    &gpu.device,
                     wgpu::MultisampleState::default(),
                     None,
                 ));
@@ -4093,12 +4277,12 @@ impl Renderer {
             let text_prepared = !layouts.is_empty()
                 && prepare_chrome_text_atlas(
                     &mut self.overlay_text_renderers[index],
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut gpu.font_system,
+                    &mut gpu.atlas,
                     &self.chrome_viewport,
-                    &mut self.swash_cache,
+                    &mut gpu.swash_cache,
                     &layouts,
                 )
                 .is_ok();
@@ -4118,29 +4302,25 @@ impl Renderer {
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
-        self.configure_surface_if_needed()?;
-        let texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
-                self.configure_surface()?;
-                texture
+        self.configure_surface_if_needed(gpu)?;
+        let acquisition = self.acquire();
+        let (acquired, view) = match acquisition {
+            SurfaceAcquisition::Frame(texture) => {
+                let view = texture.texture.create_view(&Default::default());
+                (AcquiredFrame::Swapchain(texture), view)
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return self.handle_surface_failure(SurfaceFailure::Unavailable);
+            SurfaceAcquisition::Suboptimal(texture) => {
+                self.configure_surface(gpu)?;
+                let view = texture.texture.create_view(&Default::default());
+                (AcquiredFrame::Swapchain(texture), view)
             }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                return self.handle_surface_failure(SurfaceFailure::Outdated);
+            SurfaceAcquisition::Failed(failure) => {
+                return self.handle_surface_failure(gpu, failure);
             }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                return self.handle_surface_failure(SurfaceFailure::Lost);
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                return self.handle_surface_failure(SurfaceFailure::Validation);
-            }
+            SurfaceAcquisition::Offscreen(view) => (AcquiredFrame::Offscreen, view),
         };
         let surface_acquired_at = Instant::now();
-        let view = texture.texture.create_view(&Default::default());
-        let mut encoder = self
+        let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Folio frame"),
@@ -4182,15 +4362,15 @@ impl Renderer {
                 pass.set_scissor_rect(seat.clip.x, seat.clip.y, seat.clip.width, seat.clip.height);
                 let slot = &self.seat_slots[seat.slot];
                 if seat.rect_count > 0 {
-                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, seat.rect_buffer.slice(..));
                     pass.draw(0..6, 0..seat.rect_count as u32);
                 }
                 if let Some(vertex_buffer) = seat.math_vertex_buffer.as_ref() {
-                    pass.set_pipeline(&self.math_pipeline);
+                    pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &seat.math_draws {
-                        if let Some(texture) = self.math_textures.get(&draw.key)
+                        if let Some(texture) = gpu.math_textures.get(&draw.key)
                             && let Some(tile) = texture.tiles.get(draw.tile_index)
                         {
                             pass.set_bind_group(0, &tile.bind_group, &[]);
@@ -4200,19 +4380,19 @@ impl Renderer {
                 }
                 if seat.text_prepared {
                     slot.text_renderer
-                        .render(&self.atlas, &slot.viewport, &mut pass)
+                        .render(&gpu.atlas, &slot.viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
                 if seat.text_prepared && seat.status_rect_count > 0 {
-                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, seat.status_rect_buffer.slice(..));
                     pass.draw(0..6, 0..seat.status_rect_count as u32);
                     slot.status_text_renderer
-                        .render(&self.atlas, &slot.viewport, &mut pass)
+                        .render(&gpu.atlas, &slot.viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
                 if seat.math_overlay_count > 0 {
-                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, seat.math_overlay_buffer.slice(..));
                     pass.draw(0..6, 0..seat.math_overlay_count as u32);
                 }
@@ -4231,7 +4411,7 @@ impl Renderer {
                 );
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
                 if let Some(buffer) = chrome_rect_buffer.as_ref() {
-                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     pass.draw(0..6, 0..chrome_rects.len() as u32);
                 }
@@ -4239,10 +4419,10 @@ impl Renderer {
                 // own silhouette is a mark, and it has to land over the title
                 // bar's fill and under the tab's title.
                 if let Some(buffer) = chrome_icon_buffer.as_ref() {
-                    pass.set_pipeline(&self.math_pipeline);
+                    pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     for draw in &chrome_icon_draws {
-                        if let Some(texture) = self.math_textures.get(&draw.key)
+                        if let Some(texture) = gpu.math_textures.get(&draw.key)
                             && let Some(tile) = texture.tiles.get(draw.tile_index)
                         {
                             pass.set_bind_group(0, &tile.bind_group, &[]);
@@ -4252,7 +4432,7 @@ impl Renderer {
                 }
                 if chrome_prepared {
                     self.chrome_text_renderer
-                        .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                        .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
             }
@@ -4274,10 +4454,10 @@ impl Renderer {
                     1.0,
                 );
                 pass.set_scissor_rect(clip.x, clip.y, clip.width, clip.height);
-                pass.set_pipeline(&self.math_pipeline);
+                pass.set_pipeline(&gpu.math_pipeline);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 for draw in &preview_draws {
-                    if let Some(texture) = self.math_textures.get(&draw.key)
+                    if let Some(texture) = gpu.math_textures.get(&draw.key)
                         && let Some(tile) = texture.tiles.get(draw.tile_index)
                     {
                         pass.set_bind_group(0, &tile.bind_group, &[]);
@@ -4306,13 +4486,13 @@ impl Renderer {
                 // body, and both are drawn in the document's own scrolled
                 // coordinates.
                 if let Some(buffer) = preview_body_rect_buffer.as_ref() {
-                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     pass.draw(0..6, 0..preview_body_rects.len() as u32);
                 }
                 if preview_text_prepared {
                     self.preview_text_renderer
-                        .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                        .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
             }
@@ -4336,15 +4516,15 @@ impl Renderer {
                 );
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
                 if let Some(rect_buffer) = peek_rect_buffer.as_ref() {
-                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, rect_buffer.slice(..));
                     pass.draw(0..6, 0..peek_rects.len() as u32);
                 }
                 if let Some(vertex_buffer) = peek_vertex_buffer.as_ref() {
-                    pass.set_pipeline(&self.math_pipeline);
+                    pass.set_pipeline(&gpu.math_pipeline);
                     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                     for draw in &peek_draws {
-                        if let Some(texture) = self.math_textures.get(&draw.key)
+                        if let Some(texture) = gpu.math_textures.get(&draw.key)
                             && let Some(tile) = texture.tiles.get(draw.tile_index)
                         {
                             pass.set_bind_group(0, &tile.bind_group, &[]);
@@ -4375,15 +4555,15 @@ impl Renderer {
                 // whether that row drew itself as a fill, a mark or a caption.
                 for (index, layer) in overlay_draws.iter().enumerate() {
                     if let Some(buffer) = layer.rect_buffer.as_ref() {
-                        pass.set_pipeline(&self.rect_pipeline);
+                        pass.set_pipeline(&gpu.rect_pipeline);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.draw(0..6, 0..layer.rect_count);
                     }
                     if let Some(buffer) = layer.icon_buffer.as_ref() {
-                        pass.set_pipeline(&self.math_pipeline);
+                        pass.set_pipeline(&gpu.math_pipeline);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         for draw in &layer.icon_draws {
-                            if let Some(texture) = self.math_textures.get(&draw.key)
+                            if let Some(texture) = gpu.math_textures.get(&draw.key)
                                 && let Some(tile) = texture.tiles.get(draw.tile_index)
                             {
                                 pass.set_bind_group(0, &tile.bind_group, &[]);
@@ -4393,23 +4573,28 @@ impl Renderer {
                     }
                     if layer.text_prepared {
                         self.overlay_text_renderers[index]
-                            .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                            .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
                             .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                     }
                 }
             }
         }
         let encoded_at = Instant::now();
-        self.queue.submit([encoder.finish()]);
+        gpu.queue.submit([encoder.finish()]);
         let submitted_at = Instant::now();
-        self.queue.present(texture);
+        match acquired {
+            AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
+            // Nothing to hand back: an offscreen frame is finished the moment it
+            // is submitted.
+            AcquiredFrame::Offscreen => {}
+        }
         let present_called_at = Instant::now();
         let receipt = PresentReceipt {
             trigger,
             submitted_at,
             present_called_at,
         };
-        self.atlas.trim();
+        gpu.atlas.trim();
         // The trace reports the focused seat: it is the one whose latency a
         // person is waiting on, and summing counters across seats would invent a
         // number no cache ever held (`resident_bytes` is a gauge, not a tally).
@@ -4461,10 +4646,10 @@ impl Renderer {
                 (rectangles_prepared_at - math_prepared_at).as_micros(),
                 (math_prepared_at - atlas_prepared_at).as_micros(),
                 frame.math_blocks.len(),
-                self.math_texture_evictions,
+                gpu.math_texture_evictions,
                 self.math_texture_refusals,
                 self.textureless_math_blocks,
-                self.math_textures.resident_bytes(),
+                gpu.math_textures.resident_bytes(),
                 (surface_acquired_at - rectangles_prepared_at).as_micros(),
                 (encoded_at - surface_acquired_at).as_micros(),
                 (present_called_at - encoded_at).as_micros(),
@@ -4476,6 +4661,7 @@ impl Renderer {
 
     fn prepare_text_rows(
         &mut self,
+        gpu: &mut GpuContext,
         frame: &ViewportFrame,
     ) -> Result<TextPreparationStats, RenderError> {
         prepare_text_rows(
@@ -4486,14 +4672,14 @@ impl Renderer {
             &mut self.composed_row_cache,
             self.font_revision,
             theme_revision(),
-            &mut self.font_system,
-            &mut self.swash_cache,
+            &mut gpu.font_system,
+            &mut gpu.swash_cache,
             &mut self.narrow_shaping_cache,
             &mut self.wide_shaping_cache,
         )
     }
 
-    fn prepare_math_draws(&mut self, frame: &ViewportFrame) -> MathDrawBatch {
+    fn prepare_math_draws(&mut self, gpu: &mut GpuContext, frame: &ViewportFrame) -> MathDrawBatch {
         // UI-UX §7.5c, M1.9a ruling: do not invent automatic math line breaking. With terminal
         // wrapping on (the current native default), the pane clips a left-aligned, max-content
         // raster and therefore acts as the block's horizontal viewport. Scrolling controls are
@@ -4513,18 +4699,18 @@ impl Renderer {
                 continue;
             }
             let key = &placement.artifact.key;
-            if self.math_textures.get(key).is_none()
-                && let Some(texture) = self.upload_math_texture(&placement.artifact)
+            if gpu.math_textures.get(key).is_none()
+                && let Some(texture) = gpu.upload_math_texture(&placement.artifact)
             {
                 let (admitted, evictions) =
-                    self.math_textures
+                    gpu.math_textures
                         .insert(key.clone(), texture, placement.artifact.rgba.len());
-                self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+                gpu.math_texture_evictions = gpu.math_texture_evictions.saturating_add(evictions);
                 if !admitted {
                     self.note_math_texture_refusal(key, placement.artifact.rgba.len());
                 }
             }
-            let Some(tile_geometry) = self.math_textures.get(key).map(|texture| {
+            let Some(tile_geometry) = gpu.math_textures.get(key).map(|texture| {
                 texture
                     .tiles
                     .iter()
@@ -4533,7 +4719,7 @@ impl Renderer {
             }) else {
                 // A placed band with no texture. Silence here is what painted a bare grey
                 // rectangle: the band's own pixels never drew while everything around them did.
-                self.note_textureless_block(key, placement.artifact.rgba.len());
+                self.note_textureless_block(gpu, key, placement.artifact.rgba.len());
                 continue;
             };
             let Some(geometry) = self.math_block_geometry(frame, placement) else {
@@ -4618,12 +4804,12 @@ impl Renderer {
 
     /// A visible block whose texture is not resident after this frame's upload attempt. Counted
     /// always so `BT_PERF_TRACE` can carry it; printed per occurrence only under the trace.
-    fn note_textureless_block(&mut self, key: &str, resident_bytes: usize) {
+    fn note_textureless_block(&mut self, gpu: &GpuContext, key: &str, resident_bytes: usize) {
         self.textureless_math_blocks = self.textureless_math_blocks.saturating_add(1);
         if self.trace_perf {
             eprintln!(
                 "BT_PERF_TRACE math_block_without_texture key={key} bytes={resident_bytes} resident={}",
-                self.math_textures.resident_bytes(),
+                gpu.math_textures.resident_bytes(),
             );
         }
     }
@@ -4635,7 +4821,10 @@ impl Renderer {
     /// Everything here is in whole-window physical pixels — the pane the hover belongs to is
     /// consulted for the box's *size* and for nothing else — so the pass draws it with the
     /// viewport restored to the surface, above every seat and above seat chrome.
-    fn prepare_peek_draws(&mut self) -> (Vec<RectInstance>, Vec<MathDraw>, Vec<MathVertex>) {
+    fn prepare_peek_draws(
+        &mut self,
+        gpu: &mut GpuContext,
+    ) -> (Vec<RectInstance>, Vec<MathDraw>, Vec<MathVertex>) {
         let Some(overlay) = self.peek_overlay.clone() else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
@@ -4653,19 +4842,19 @@ impl Renderer {
         ) else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
-        if self.math_textures.get(&overlay.key).is_none()
+        if gpu.math_textures.get(&overlay.key).is_none()
             && let Some(texture) =
-                self.upload_rgba_tiles(&overlay.rgba, overlay.width_px, overlay.height_px)
+                gpu.upload_rgba_tiles(&overlay.rgba, overlay.width_px, overlay.height_px)
         {
             let (admitted, evictions) =
-                self.math_textures
+                gpu.math_textures
                     .insert(overlay.key.clone(), texture, overlay.rgba.len());
-            self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+            gpu.math_texture_evictions = gpu.math_texture_evictions.saturating_add(evictions);
             if !admitted {
                 self.note_math_texture_refusal(&overlay.key, overlay.rgba.len());
             }
         }
-        let Some(tile_geometry) = self.math_textures.get(&overlay.key).map(|texture| {
+        let Some(tile_geometry) = gpu.math_textures.get(&overlay.key).map(|texture| {
             texture
                 .tiles
                 .iter()
@@ -4753,6 +4942,7 @@ impl Renderer {
     /// drift apart.
     fn prepare_chrome_icon_draws(
         &mut self,
+        gpu: &mut GpuContext,
         icons: &[ChromeIcon],
     ) -> (Vec<MathDraw>, Vec<MathVertex>) {
         let icons = icons.to_vec();
@@ -4760,19 +4950,19 @@ impl Renderer {
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
         for icon in &icons {
-            if self.math_textures.get(&icon.key).is_none()
+            if gpu.math_textures.get(&icon.key).is_none()
                 && let Some(texture) =
-                    self.upload_rgba_tiles(&icon.rgba, icon.width_px, icon.height_px)
+                    gpu.upload_rgba_tiles(&icon.rgba, icon.width_px, icon.height_px)
             {
                 let (admitted, evictions) =
-                    self.math_textures
+                    gpu.math_textures
                         .insert(icon.key.clone(), texture, icon.rgba.len());
-                self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+                gpu.math_texture_evictions = gpu.math_texture_evictions.saturating_add(evictions);
                 if !admitted {
                     self.note_math_texture_refusal(&icon.key, icon.rgba.len());
                 }
             }
-            let Some(tile_geometry) = self.math_textures.get(&icon.key).map(|texture| {
+            let Some(tile_geometry) = gpu.math_textures.get(&icon.key).map(|texture| {
                 texture
                     .tiles
                     .iter()
@@ -4820,6 +5010,7 @@ impl Renderer {
     /// holding only the viewport would have to invent the crop.
     fn prepare_preview_draws(
         &mut self,
+        gpu: &mut GpuContext,
     ) -> (
         Option<(SeatViewport, SeatViewport)>,
         Vec<MathDraw>,
@@ -4828,19 +5019,19 @@ impl Renderer {
         let Some(image) = self.preview_image.clone() else {
             return (None, Vec::new(), Vec::new());
         };
-        if self.math_textures.get(&image.key).is_none()
+        if gpu.math_textures.get(&image.key).is_none()
             && let Some(texture) =
-                self.upload_rgba_tiles(&image.rgba, image.width_px, image.height_px)
+                gpu.upload_rgba_tiles(&image.rgba, image.width_px, image.height_px)
         {
             let (admitted, evictions) =
-                self.math_textures
+                gpu.math_textures
                     .insert(image.key.clone(), texture, image.rgba.len());
-            self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+            gpu.math_texture_evictions = gpu.math_texture_evictions.saturating_add(evictions);
             if !admitted {
                 self.note_math_texture_refusal(&image.key, image.rgba.len());
             }
         }
-        let Some(tile_geometry) = self.math_textures.get(&image.key).map(|texture| {
+        let Some(tile_geometry) = gpu.math_textures.get(&image.key).map(|texture| {
             texture
                 .tiles
                 .iter()
@@ -5026,107 +5217,91 @@ impl Renderer {
         Some((marker, hit))
     }
 
-    fn upload_math_texture(
-        &self,
-        artifact: &bt_viewport::ProjectedMathArtifact,
-    ) -> Option<CachedMathTexture> {
-        self.upload_rgba_tiles(&artifact.rgba, artifact.width_px, artifact.height_px)
-    }
-
-    fn upload_rgba_tiles(
-        &self,
-        rgba: &[u8],
-        width_px: u32,
-        height_px: u32,
-    ) -> Option<CachedMathTexture> {
-        let expected = width_px as usize * height_px as usize * 4;
-        if width_px == 0 || height_px == 0 || rgba.len() != expected {
-            return None;
-        }
-        let tile_limit = self.max_texture_dimension_2d.max(1);
-        let mut tiles = Vec::new();
-        for y in (0..height_px).step_by(tile_limit as usize) {
-            let height = (height_px - y).min(tile_limit);
-            for x in (0..width_px).step_by(tile_limit as usize) {
-                let width = (width_px - x).min(tile_limit);
-                let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
-                for row in y..y + height {
-                    let start = (row as usize * width_px as usize + x as usize) * 4;
-                    let end = start + width as usize * 4;
-                    bytes.extend_from_slice(&rgba[start..end]);
-                }
-                let texture = self.device.create_texture_with_data(
-                    &self.queue,
-                    &wgpu::TextureDescriptor {
-                        label: Some("math block texture tile"),
-                        size: wgpu::Extent3d {
-                            width,
-                            height,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                        view_formats: &[],
-                    },
-                    wgpu::util::TextureDataOrder::LayerMajor,
-                    &bytes,
-                );
-                let view = texture.create_view(&Default::default());
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("math block texture bind group"),
-                    layout: &self.math_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.math_sampler),
-                        },
-                    ],
-                });
-                tiles.push(MathTextureTile {
-                    bind_group,
-                    x_px: x,
-                    y_px: y,
-                    width_px: width,
-                    height_px: height,
-                });
-            }
-        }
-        Some(CachedMathTexture { tiles })
-    }
-
     fn handle_surface_failure(
         &mut self,
+        gpu: &GpuContext,
         failure: SurfaceFailure,
     ) -> Result<PresentOutcome, RenderError> {
         match surface_failure_policy(failure) {
             SurfaceFailurePolicy::Skip => Ok(PresentOutcome::Skipped),
             SurfaceFailurePolicy::Reconfigure => {
-                self.configure_surface()?;
+                self.configure_surface(gpu)?;
                 Ok(PresentOutcome::Reconfigure)
             }
             SurfaceFailurePolicy::FatalValidation => Err(RenderError::SurfaceValidation),
         }
     }
 
-    fn configure_surface_if_needed(&mut self) -> Result<(), RenderError> {
+    fn configure_surface_if_needed(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
         let requested_size = (self.config.width, self.config.height);
         if self.configured_size != requested_size {
-            self.configure_surface()?;
+            self.configure_surface(gpu)?;
         }
         Ok(())
     }
 
-    fn configure_surface(&mut self) -> Result<(), RenderError> {
-        self.surface.configure(&self.device, &self.config);
+    /// Bring the target up to the size `config` names.
+    ///
+    /// A swapchain is reconfigured; an offscreen texture is rebuilt, because a
+    /// texture has no `configure` and its extent is fixed at creation. Both
+    /// leave `configured_size` equal to `config`, which is the only thing the
+    /// rest of the frame reads.
+    fn configure_surface(&mut self, gpu: &GpuContext) -> Result<(), RenderError> {
+        match &mut self.target {
+            WindowTarget::Surface(surface) => surface.configure(&gpu.device, &self.config),
+            WindowTarget::Offscreen(texture) => {
+                *texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Folio offscreen window target"),
+                    size: wgpu::Extent3d {
+                        width: self.config.width,
+                        height: self.config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+            }
+        }
         self.configured_size = (self.config.width, self.config.height);
         Ok(())
+    }
+
+    /// Ask the target for this frame's attachment, and decide nothing about it.
+    ///
+    /// Split from acting on the answer so the borrow of [`WindowTarget`] ends
+    /// before `&mut self` is needed again for a reconfigure.
+    fn acquire(&self) -> SurfaceAcquisition {
+        match &self.target {
+            WindowTarget::Surface(surface) => match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(texture) => SurfaceAcquisition::Frame(texture),
+                wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                    SurfaceAcquisition::Suboptimal(texture)
+                }
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    SurfaceAcquisition::Failed(SurfaceFailure::Unavailable)
+                }
+                wgpu::CurrentSurfaceTexture::Outdated => {
+                    SurfaceAcquisition::Failed(SurfaceFailure::Outdated)
+                }
+                wgpu::CurrentSurfaceTexture::Lost => {
+                    SurfaceAcquisition::Failed(SurfaceFailure::Lost)
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    SurfaceAcquisition::Failed(SurfaceFailure::Validation)
+                }
+            },
+            // An offscreen attachment is always available and never stale: it is
+            // the same texture until a resize replaces it. Its view is taken
+            // here, where the target is already in hand, so that the frame never
+            // has to ask a second time which kind of target it is drawing into.
+            WindowTarget::Offscreen(texture) => {
+                SurfaceAcquisition::Offscreen(texture.create_view(&Default::default()))
+            }
+        }
     }
 
     /// One seat's flat fills. `seat_focused` is that seat's own caret standing:
@@ -5497,6 +5672,420 @@ impl Renderer {
             ],
             color: rect_gpu_color_with_coverage(color, coverage),
         }
+    }
+
+    /// Draw one frame's grid text into this window's attachment and report what
+    /// the CPU spent doing it — the `bt-replay` instrumentation path.
+    ///
+    /// Every phase here is the production path: the same [`prepare_text_rows`]
+    /// against the same composed-row and shaping caches, the same glyphon
+    /// prepare into the same shared atlas, the same math textures through the
+    /// same device LRU. What it leaves out is everything a window draws *around*
+    /// the grid — seat chrome, the modal overlay, the peek flyout, a preview's
+    /// picture — because a replay has none of them and timing an empty list is
+    /// timing nothing.
+    ///
+    /// Written against [`Self::acquire`] rather than against a texture, so a
+    /// probe over a swapchain would present a real frame instead of taking a
+    /// branch no window can reach.
+    ///
+    /// The pair invariant of [`Self::present_frame`] holds here for the same
+    /// reason and by the same construction: the prepares and the render are
+    /// inside one call.
+    fn probe_frame(
+        &mut self,
+        gpu: &mut GpuContext,
+        frame: &ViewportFrame,
+    ) -> Result<RenderProbeSample, RenderError> {
+        let started = Instant::now();
+        frame.validate_shape()?;
+        let (width, height) = (self.config.width, self.config.height);
+        self.seat_slots[0]
+            .viewport
+            .update(&gpu.queue, Resolution { width, height });
+        let text_stats = self.prepare_text_rows(gpu, frame)?;
+        let rows_prepared_at = Instant::now();
+        {
+            let slot = &mut self.seat_slots[0];
+            prepare_text_atlas(
+                &mut slot.text_renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.font_system,
+                &mut gpu.atlas,
+                &slot.viewport,
+                &mut gpu.swash_cache,
+                &self.text_rows,
+                self.metrics,
+                frame,
+            )
+            .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            prepare_status_text_atlas(
+                &mut slot.status_text_renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.font_system,
+                &mut gpu.atlas,
+                &slot.viewport,
+                &mut gpu.swash_cache,
+                self.status_overlay.as_deref(),
+                self.metrics,
+                frame,
+                // A headless probe has no seat: it renders into the whole target, so the surface is
+                // the pane.
+                width as f32,
+            )
+            .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+        }
+        let atlas_prepared_at = Instant::now();
+        let math_evictions_before = gpu.math_texture_evictions;
+        let (math_texture_uploads, math_texture_upload_bytes) =
+            self.probe_math_textures(gpu, frame);
+        let math_prepared_at = Instant::now();
+        let (acquired, view) = match self.acquire() {
+            SurfaceAcquisition::Frame(texture) | SurfaceAcquisition::Suboptimal(texture) => {
+                let view = texture.texture.create_view(&Default::default());
+                (AcquiredFrame::Swapchain(texture), view)
+            }
+            SurfaceAcquisition::Offscreen(view) => (AcquiredFrame::Offscreen, view),
+            SurfaceAcquisition::Failed(failure) => {
+                return Err(RenderError::Wgpu(format!(
+                    "probe could not acquire a frame: {failure:?}"
+                )));
+            }
+        };
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Folio replay probe frame"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Folio replay probe pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(theme_clear_color()),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            let slot = &self.seat_slots[0];
+            slot.text_renderer
+                .render(&gpu.atlas, &slot.viewport, &mut pass)
+                .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            if self.status_overlay.is_some() {
+                slot.status_text_renderer
+                    .render(&gpu.atlas, &slot.viewport, &mut pass)
+                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+        let submitted_at = Instant::now();
+        match acquired {
+            AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
+            AcquiredFrame::Offscreen => {}
+        }
+        gpu.atlas.trim();
+        Ok(RenderProbeSample {
+            total: started.elapsed(),
+            row_compose: text_stats.elapsed,
+            shape_cache_miss: text_stats.narrow.miss_time + text_stats.wide.miss_time,
+            atlas_prepare_upload: atlas_prepared_at - rows_prepared_at,
+            encode_submit: submitted_at - math_prepared_at,
+            math_prepare_upload: math_prepared_at - atlas_prepared_at,
+            rows_reshaped: text_stats.rows_reshaped,
+            row_cache_hits: text_stats.row_cache.hits,
+            row_cache_misses: text_stats.row_cache.misses,
+            row_cache_evictions: text_stats.row_cache.evictions,
+            row_cache_resident_bytes: text_stats.row_cache.resident_bytes,
+            narrow_hits: text_stats.narrow.hits,
+            narrow_misses: text_stats.narrow.misses,
+            narrow_evictions: text_stats.narrow.evictions,
+            wide_hits: text_stats.wide.hits,
+            wide_misses: text_stats.wide.misses,
+            wide_evictions: text_stats.wide.evictions,
+            narrow_resident_bytes: text_stats.narrow.resident_bytes,
+            wide_resident_bytes: text_stats.wide.resident_bytes,
+            math_texture_uploads,
+            math_texture_upload_bytes,
+            math_texture_evictions: gpu
+                .math_texture_evictions
+                .saturating_sub(math_evictions_before),
+            math_texture_resident_bytes: gpu.math_textures.resident_bytes(),
+            atlas_hits: None,
+            atlas_misses: None,
+            atlas_grows: None,
+            atlas_evictions: None,
+            atlas_upload_bytes: None,
+            narrow_glyphs: self
+                .text_rows
+                .iter()
+                .map(|row| row.narrow_glyphs.len() as u64)
+                .sum(),
+            wide_glyphs: self
+                .text_rows
+                .iter()
+                .map(|row| row.wide_glyphs.len() as u64)
+                .sum(),
+        })
+    }
+
+    /// Upload every math raster this frame would draw, and count what that cost.
+    ///
+    /// [`Self::prepare_math_draws`]'s upload half without its geometry half: the
+    /// probe has no pass to place quads in, and the number it is after is the
+    /// device traffic.
+    fn probe_math_textures(&mut self, gpu: &mut GpuContext, frame: &ViewportFrame) -> (u64, usize) {
+        let mut uploads = 0_u64;
+        let mut upload_bytes = 0_usize;
+        for placement in &frame.math_blocks {
+            if !math_block_admits_texture(frame, placement) {
+                continue;
+            }
+            let key = &placement.artifact.key;
+            if gpu.math_textures.get(key).is_some() {
+                continue;
+            }
+            let Some(texture) = gpu.upload_math_texture(&placement.artifact) else {
+                continue;
+            };
+            uploads = uploads.saturating_add(1);
+            upload_bytes = upload_bytes.saturating_add(placement.artifact.rgba.len());
+            let (_, evictions) =
+                gpu.math_textures
+                    .insert(key.clone(), texture, placement.artifact.rgba.len());
+            gpu.math_texture_evictions = gpu.math_texture_evictions.saturating_add(evictions);
+        }
+        (uploads, upload_bytes)
+    }
+}
+
+impl Renderer {
+    /// Open the process's device layer and its first window in one call.
+    ///
+    /// The order is the one the hardware forces and not a preference: an
+    /// `Instance` makes the `Surface`, the `Surface` chooses the `Adapter`, the
+    /// `Adapter` names the format, and only then can an atlas and two pipelines
+    /// be baked for it. A second window skips the first three steps entirely —
+    /// [`WindowRenderer::new`] against the [`GpuContext`] this built.
+    pub async fn new(
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+    ) -> Result<Self, RenderError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let surface = instance
+            .create_surface(target)
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let mut gpu = GpuContext::bootstrap_for_surface(instance, &surface).await?;
+        let window = WindowRenderer::from_surface(&mut gpu, surface, width, height, scale_factor)?;
+        Ok(Self { gpu, window })
+    }
+
+    /// The two layers, borrowed apart.
+    ///
+    /// The door a second window comes through: hand the [`GpuContext`] to
+    /// [`WindowRenderer::new`] and the new window shares this one's device,
+    /// atlas and font system. It is also the shape of every method below —
+    /// this, with the pair handed straight to one call.
+    pub fn split(&mut self) -> (&mut GpuContext, &mut WindowRenderer) {
+        (&mut self.gpu, &mut self.window)
+    }
+
+    /// The device layer this window draws through.
+    #[must_use]
+    pub fn context(&self) -> &GpuContext {
+        &self.gpu
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> CellMetrics {
+        self.window.metrics()
+    }
+
+    /// Startup phase timings, reassembled from the two layers.
+    ///
+    /// `adapter`, `device`, `font_system` and `render_resources` are charged
+    /// once per process; `surface_configure` is this window's; `font_metrics`
+    /// is both — the face's cap height is measured once and the cell is
+    /// measured per window, because the cell is a function of that window's
+    /// scale factor.
+    #[must_use]
+    pub fn init_timings(&self) -> RendererInitTimings {
+        RendererInitTimings {
+            surface_configure: self.window.surface_configure_time,
+            font_metrics: self.gpu.init_timings.font_metrics + self.window.font_metrics_time,
+            ..self.gpu.init_timings
+        }
+    }
+
+    #[must_use]
+    pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
+        self.window.ime_cursor_area(frame)
+    }
+
+    #[must_use]
+    pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
+        self.window.math_hit_test(frame, x, y)
+    }
+
+    #[must_use]
+    pub fn presentation_geometry(&self) -> PresentationGeometry {
+        self.window.presentation_geometry(&self.gpu)
+    }
+
+    pub fn set_window_focused(&mut self, focused: bool) -> bool {
+        self.window.set_window_focused(focused)
+    }
+
+    pub fn set_cursor_blink_visible(&mut self, visible: bool) -> bool {
+        self.window.set_cursor_blink_visible(visible)
+    }
+
+    #[must_use]
+    pub fn peek_thumbnail_extent(
+        &self,
+        seat: SeatViewport,
+        image_width_px: u32,
+        image_height_px: u32,
+    ) -> Option<(u32, u32)> {
+        self.window
+            .peek_thumbnail_extent(seat, image_width_px, image_height_px)
+    }
+
+    pub fn set_peek_overlay(&mut self, overlay: Option<PeekImageOverlay>) -> bool {
+        self.window.set_peek_overlay(overlay)
+    }
+
+    pub fn set_preview_image(&mut self, image: Option<PreviewImage>) -> bool {
+        self.window.set_preview_image(image)
+    }
+
+    pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
+        self.window.set_preview_bodies(bodies)
+    }
+
+    pub fn measure_preview_paragraph(
+        &mut self,
+        runs: &[PreviewRun],
+        width_px: f32,
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        self.window.measure_preview_paragraph(
+            &mut self.gpu,
+            runs,
+            width_px,
+            font_size_px,
+            line_height_px,
+        )
+    }
+
+    pub fn measure_preview_paragraph_width(
+        &mut self,
+        runs: &[PreviewRun],
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        self.window.measure_preview_paragraph_width(
+            &mut self.gpu,
+            runs,
+            font_size_px,
+            line_height_px,
+        )
+    }
+
+    pub fn measure_preview_run_boxes(
+        &mut self,
+        paragraph: &PreviewParagraph,
+    ) -> Vec<PreviewRunBox> {
+        self.window
+            .measure_preview_run_boxes(&mut self.gpu, paragraph)
+    }
+
+    pub fn preview_mono_advance(&mut self, font_size_px: f32) -> f32 {
+        self.window
+            .preview_mono_advance(&mut self.gpu, font_size_px)
+    }
+
+    pub fn place_preview_image(&mut self, seat: SeatViewport, clip: SeatViewport) -> bool {
+        self.window.place_preview_image(seat, clip)
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
+        self.window.resize(&self.gpu, width, height)
+    }
+
+    #[must_use]
+    pub fn seat_viewport(&self) -> SeatViewport {
+        self.window.seat_viewport()
+    }
+
+    pub fn set_seat_viewport(&mut self, seat: SeatViewport) -> bool {
+        self.window.set_seat_viewport(seat)
+    }
+
+    pub fn set_chrome(
+        &mut self,
+        quads: Vec<ChromeQuad>,
+        labels: Vec<ChromeLabel>,
+        icons: Vec<ChromeIcon>,
+    ) -> bool {
+        self.window.set_chrome(quads, labels, icons)
+    }
+
+    pub fn set_modal_overlay(&mut self, layers: Vec<OverlayLayer>) -> bool {
+        self.window.set_modal_overlay(layers)
+    }
+
+    pub fn measure_chrome_text(&mut self, text: &str, font_size_px: f32) -> f32 {
+        self.window
+            .measure_chrome_text(&mut self.gpu, text, font_size_px)
+    }
+
+    pub fn measure_chrome_label(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        weight: ChromeLabelWeight,
+        letter_spacing_em: f32,
+    ) -> f32 {
+        self.window.measure_chrome_label(
+            &mut self.gpu,
+            text,
+            font_size_px,
+            weight,
+            letter_spacing_em,
+        )
+    }
+
+    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
+        self.window.update_scale_factor(&mut self.gpu, scale_factor)
+    }
+
+    pub fn present(
+        &mut self,
+        frame: &ViewportFrame,
+        trigger: FrameTrigger,
+    ) -> Result<PresentOutcome, RenderError> {
+        self.window.present(&mut self.gpu, frame, trigger)
+    }
+
+    /// Prepare and render one window's frame, as one call.
+    ///
+    /// See [`WindowRenderer::present_frame`] for the invariant that makes it one
+    /// call and not two.
+    pub fn present_seats(
+        &mut self,
+        seats: &[SeatFrame<'_>],
+        trigger: FrameTrigger,
+    ) -> Result<PresentOutcome, RenderError> {
+        self.window.present_frame(&mut self.gpu, seats, trigger)
     }
 }
 
@@ -12462,5 +13051,171 @@ mod tests {
             small_line, full_line,
             "the line box is the paragraph's, whatever the run is set at"
         );
+    }
+
+    /// The multiwindow block's slice A1. Every test here needs a real adapter:
+    /// what is under test is which side of the device/window line a resource
+    /// lives on, and that is not a question a mock can answer.
+    mod two_layers {
+        use super::*;
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+        fn context() -> GpuContext {
+            pollster::block_on(GpuContext::headless(FORMAT))
+                .expect("a headless device context on this machine's adapter")
+        }
+
+        /// The device layer, standing up with no window anywhere near it.
+        ///
+        /// Not a smoke test — it is the whole claim of the split. If a
+        /// `GpuContext` could only be reached through a surface, a second window
+        /// would have to bring its own device, and the atlas and the thirteen
+        /// font files behind `terminal_font_system` would be per window again.
+        #[test]
+        fn a_gpu_context_is_constructible_with_no_surface_at_all() {
+            let gpu = context();
+            assert_eq!(
+                gpu.format(),
+                FORMAT,
+                "the format is the context's, named outright rather than asked of a swapchain"
+            );
+            assert!(
+                gpu.max_texture_dimension_2d() > 0,
+                "the device limit the tile cutter reads has to arrive with the device"
+            );
+            assert!(
+                !gpu.adapter_name().is_empty(),
+                "the adapter is kept, not dropped after `new` as it once was"
+            );
+        }
+
+        /// Unequal formats are an error and never a degradation.
+        ///
+        /// The atlas and both pipelines bake the format in, so "share anyway"
+        /// would mean a second atlas behind a name that says one. The refusal is
+        /// on the constructor because that is the only door a window comes
+        /// through.
+        #[test]
+        fn a_window_refuses_a_context_baked_for_another_format() {
+            let mut gpu = context();
+            let refused = WindowRenderer::offscreen(
+                &mut gpu,
+                200,
+                120,
+                1.0,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+            match refused {
+                Err(RenderError::FormatMismatch { context, surface }) => {
+                    assert_eq!(context, FORMAT);
+                    assert_eq!(surface, wgpu::TextureFormat::Rgba8UnormSrgb);
+                }
+                Err(other) => panic!("expected a format mismatch, got {other}"),
+                Ok(_) => panic!("a second format was silently accepted"),
+            }
+            WindowRenderer::offscreen(&mut gpu, 200, 120, 1.0, FORMAT)
+                .expect("the context's own format is accepted");
+        }
+
+        /// Spike Q3: `CellMetrics` follows the surface, not the device.
+        ///
+        /// Two monitors at 1.5x and 2.0x are two pixel font sizes at the same
+        /// instant, so a window that re-measures says nothing about its
+        /// neighbour — including through `font_revision`, which is what every
+        /// cache key in the composed-row cache is stamped with.
+        #[test]
+        fn two_windows_over_one_context_measure_their_own_cells() {
+            let mut gpu = context();
+            let fine =
+                WindowRenderer::offscreen(&mut gpu, 400, 300, 2.0, FORMAT).expect("a 2.0x window");
+            let mut coarse =
+                WindowRenderer::offscreen(&mut gpu, 800, 600, 1.5, FORMAT).expect("a 1.5x window");
+            assert_eq!(fine.metrics().scale_factor, 2.0);
+            assert_eq!(coarse.metrics().scale_factor, 1.5);
+            assert!(
+                fine.metrics().font_size_px > coarse.metrics().font_size_px,
+                "the same logical size on a denser window is more pixels: {} vs {}",
+                fine.metrics().font_size_px,
+                coarse.metrics().font_size_px
+            );
+
+            let fine_metrics = fine.metrics();
+            let fine_revision = fine.font_revision;
+            coarse
+                .update_scale_factor(&mut gpu, 3.0)
+                .expect("the coarse window follows its own monitor");
+            assert_eq!(coarse.metrics().scale_factor, 3.0);
+            assert_eq!(
+                fine.metrics(),
+                fine_metrics,
+                "one window's DPI change may not re-measure another window's cell"
+            );
+            assert_eq!(
+                fine.font_revision, fine_revision,
+                "nor may it invalidate another window's row cache"
+            );
+        }
+
+        /// The other half of Q3: the caches keyed by pixel font size are the
+        /// window's, and the atlas underneath them is the device's.
+        ///
+        /// Both windows are at the same scale here on purpose. Equal metrics
+        /// means equal cache keys, so a second window missing on a row the first
+        /// one has already composed can only mean the two caches are two
+        /// objects — which is exactly what a shared cache would get wrong.
+        #[test]
+        fn each_window_composes_rows_into_its_own_cache_over_the_shared_atlas() {
+            let mut gpu = context();
+            let mut first =
+                WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("first window");
+            let mut second =
+                WindowRenderer::offscreen(&mut gpu, 400, 300, 1.0, FORMAT).expect("second window");
+            let frame = single_cell_cursor_frame(first.metrics());
+
+            let cold = first
+                .probe_frame(&mut gpu, &frame)
+                .expect("the first window's first frame");
+            assert_eq!(cold.row_cache_misses, 1);
+            assert!(
+                cold.narrow_glyphs > 0,
+                "a frame with a character in it puts a glyph in the shared atlas"
+            );
+
+            let warm = first
+                .probe_frame(&mut gpu, &frame)
+                .expect("the first window's second frame");
+            assert_eq!(warm.row_cache_hits, 1);
+            assert_eq!(warm.row_cache_misses, 0);
+
+            let other = second
+                .probe_frame(&mut gpu, &frame)
+                .expect("the second window's first frame");
+            assert_eq!(
+                other.row_cache_misses, 1,
+                "the second window owns its own composed rows, warm or not"
+            );
+            assert!(
+                other.narrow_glyphs > 0,
+                "and draws them through the one atlas the first window already grew"
+            );
+        }
+
+        /// The replay probe is the two layers and nothing else.
+        #[test]
+        fn the_replay_probe_is_a_context_and_an_offscreen_window() {
+            let mut probe = pollster::block_on(HeadlessRenderProbe::new(400, 300, 1.0))
+                .expect("a headless probe");
+            assert!(!probe.adapter_name().is_empty());
+            assert!(probe.max_texture_dimension_2d() > 0);
+            let frame = single_cell_cursor_frame(probe.window.metrics());
+            let sample = probe.prepare_frame(&frame).expect("one replayed frame");
+            assert!(sample.narrow_glyphs > 0);
+            assert_eq!(sample.row_cache_misses, 1);
+            let metrics = probe
+                .update_scale_factor(2.0)
+                .expect("the probe re-measures like any window");
+            assert_eq!(metrics.scale_factor, 2.0);
+        }
     }
 }

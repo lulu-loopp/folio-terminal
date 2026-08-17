@@ -20,6 +20,7 @@ wgpu.workspace = true
 bt-detect = { path = "../bt-detect" }
 bt-math = { path = "../bt-math" }
 bt-term = { path = "../bt-term" }
+pollster.workspace = true
 
 [lints]
 workspace = true
