@@ -1,5 +1,6 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
+mod ground;
 mod procedural;
 mod rounded_rect;
 mod scheme;
@@ -35,6 +36,10 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
+pub use ground::{
+    BackgroundFit, BackgroundImage, MINIMUM_GROUND_ALPHA, WindowGround, background_uv_rect,
+    premultiplied_clear, set_window_ground, window_ground,
+};
 use rounded_rect::{
     rounded_rect_coverage, rounded_rect_halo_coverage, rounded_rect_shadow_coverage,
 };
@@ -870,6 +875,25 @@ struct MathVertex {
     /// are drawn from one buffer in one pass, and a uniform would mean either a
     /// bind group per mark or a draw call per mark.
     opacity: f32,
+}
+
+/// One corner of the window's ground quad — `docs/DESIGN.md` §7.1.6c-4b.
+///
+/// The ground colour and the two percentages ride on the vertex for
+/// [`MathVertex::opacity`]'s reason, sharpened: there are exactly six of these
+/// per frame, so a uniform buffer would be a bind group, a layout entry and a
+/// write per frame to carry twenty bytes that the vertex buffer is already
+/// carrying anyway.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BackgroundVertex {
+    position: [f32; 2],
+    /// Texture coordinates, which may exceed `0..1` — that is what Tile is, and
+    /// why this pipeline's sampler is the crate's only `Repeat` one.
+    uv: [f32; 2],
+    /// Linear RGB of the scheme's background, with the ground's alpha in `[3]`.
+    ground: [f32; 4],
+    image_opacity: f32,
 }
 
 struct MathTextureTile {
@@ -2157,6 +2181,19 @@ pub struct GpuContext {
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
     math_sampler: wgpu::Sampler,
+    background_pipeline: wgpu::RenderPipeline,
+    background_bind_group_layout: wgpu::BindGroupLayout,
+    background_sampler: wgpu::Sampler,
+    /// The window's ground picture, uploaded once and keyed by its content.
+    ///
+    /// **One slot and not an entry in `math_textures`**, for two reasons that
+    /// both come from it being one picture for the whole process. It never
+    /// competes: a wallpaper is tens of megabytes against a 64 MiB budget shared
+    /// with every formula, mark and preview on screen, and dropping it in there
+    /// would evict most of them once per frame and then be evicted itself.
+    /// And it never needs finding: there is at most one, so a hash lookup per
+    /// frame would be answering a question with one possible answer.
+    background_texture: Option<(String, wgpu::BindGroup)>,
     /// Content-keyed textures for math rasters, peek thumbnails, chrome marks
     /// and preview pictures. Shared with the device because the bytes are the
     /// same bytes whichever window asks for them.
@@ -2245,6 +2282,20 @@ pub struct SurfaceAlphaReport {
     pub target: WindowTargetKind,
     pub offered: Vec<wgpu::CompositeAlphaMode>,
     pub chosen: wgpu::CompositeAlphaMode,
+}
+
+impl SurfaceAlphaReport {
+    /// Whether this surface can carry a translucent ground (§7.1.6c-4b).
+    ///
+    /// A method rather than a comparison at the call site, so that `bt-app` never
+    /// has to name a `wgpu` enum to answer a question about its own settings
+    /// page — the same boundary `Theme` keeps against `ThemeModeV1`. It is also
+    /// the one place the equivalence "premultiplied ⇒ the ground may be
+    /// translucent" is written down.
+    #[must_use]
+    pub fn is_premultiplied(&self) -> bool {
+        self.chosen == wgpu::CompositeAlphaMode::PreMultiplied
+    }
 }
 
 /// The composite alpha mode a target **must** be configured with.
@@ -3191,6 +3242,8 @@ impl GpuContext {
         let rect_pipeline = create_rect_pipeline(&device, format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
             create_math_pipeline(&device, format);
+        let (background_pipeline, background_bind_group_layout, background_sampler) =
+            create_background_pipeline(&device, format);
         let render_resources_time = phase_started.elapsed();
         Ok(Self {
             instance,
@@ -3207,6 +3260,10 @@ impl GpuContext {
             math_pipeline,
             math_bind_group_layout,
             math_sampler,
+            background_pipeline,
+            background_bind_group_layout,
+            background_sampler,
+            background_texture: None,
             math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
             math_texture_evictions: 0,
             chrome_cap_height_ratio,
@@ -3296,6 +3353,75 @@ impl GpuContext {
     #[must_use]
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.max_texture_dimension_2d
+    }
+
+    /// Make sure the device holds this picture, and answer whether it does.
+    ///
+    /// Content-keyed and idempotent: the overwhelmingly common frame asks for
+    /// the key already in the slot and does nothing at all. A different key
+    /// replaces the slot outright — there is one ground, so keeping the old
+    /// texture around would be keeping a wallpaper nobody can reach.
+    ///
+    /// `None` when the picture will not fit this device: a single texture and
+    /// not the tiled path `upload_rgba_tiles` uses for formulas, because a
+    /// tiled ground would need per-tile UV rectangles under three fits and a
+    /// `Repeat` sampler that repeats the *tile* rather than the picture. The
+    /// caller's answer to `None` is to draw the plain clear, which is the same
+    /// answer it gives to "no picture chosen".
+    fn ensure_background_texture(&mut self, image: &ground::BackgroundImage) -> bool {
+        if self
+            .background_texture
+            .as_ref()
+            .is_some_and(|(key, _)| key == &image.key)
+        {
+            return true;
+        }
+        let expected = image.width_px as usize * image.height_px as usize * 4;
+        if image.width_px == 0
+            || image.height_px == 0
+            || image.width_px > self.max_texture_dimension_2d
+            || image.height_px > self.max_texture_dimension_2d
+            || image.rgba.len() != expected
+        {
+            self.background_texture = None;
+            return false;
+        }
+        let texture = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("window ground texture"),
+                size: wgpu::Extent3d {
+                    width: image.width_px,
+                    height: image.height_px,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &image.rgba,
+        );
+        let view = texture.create_view(&Default::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("window ground bind group"),
+            layout: &self.background_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.background_sampler),
+                },
+            ],
+        });
+        self.background_texture = Some((image.key.clone(), bind_group));
+        true
     }
 
     /// The sharing gate. `Ok` only when `format` is the one the atlas and both
@@ -4700,6 +4826,34 @@ impl WindowRenderer {
             SurfaceAcquisition::Offscreen(view) => (AcquiredFrame::Offscreen, view),
         };
         let surface_acquired_at = Instant::now();
+        // The window's ground picture — uploaded (at most once per file) and its
+        // quad measured here rather than inside the pass, because the pass holds
+        // a borrow of the device for its whole life. `None` for the ordinary
+        // window: no picture chosen, and then the clear is the entire ground.
+        let ground = ground::window_ground();
+        let ground_quad = ground.image.as_ref().and_then(|image| {
+            gpu.ensure_background_texture(image).then(|| {
+                let uv = ground::background_uv_rect(
+                    ground.fit,
+                    self.config.width,
+                    self.config.height,
+                    image.width_px,
+                    image.height_px,
+                );
+                let [r, g, b] = srgb_rgb_to_linear(default_background());
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("window ground quad"),
+                        contents: bytemuck::cast_slice(&background_quad_vertices(
+                            uv,
+                            [r as f32, g as f32, b as f32],
+                            ground.alpha,
+                            ground.image_opacity,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            })
+        });
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -4721,6 +4875,23 @@ impl WindowRenderer {
                 })],
                 ..Default::default()
             });
+            // The ground picture, before the first seat and after nothing: one
+            // quad over the whole surface, at the pass's default viewport. Its
+            // blend is `Replace`, so it supersedes the clear rather than sitting
+            // on top of it — the two write the same value for the same ground,
+            // and this one additionally carries the picture.
+            //
+            // Per window and not per pane: a split is two views of one place,
+            // and a picture cut at every divider would move every time one was
+            // dragged.
+            if let Some(buffer) = ground_quad.as_ref()
+                && let Some((_, bind_group)) = gpu.background_texture.as_ref()
+            {
+                pass.set_pipeline(&gpu.background_pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..6, 0..1);
+            }
             // Everything a terminal draws is in seat-local pixels; the
             // viewport/scissor pair opening each iteration is the entire
             // translation, and for a lone leaf the seat *is* the surface, so for
@@ -8464,9 +8635,19 @@ fn shape_attrs(key: &ShapeKey, family: Family<'static>) -> Attrs<'static> {
     attrs
 }
 
+/// The one whole-surface fill in this renderer, and therefore "the ground".
+///
+/// `rectangles()` emits a quad per cell only where the resolved background
+/// differs from the theme's default, so what a reader sees as the surface every
+/// pane sits on is this clear. Its alpha is the window's ground opacity
+/// (§7.1.6c-4b), premultiplied in linear light because the surface format is
+/// sRGB and wgpu encodes the clear value exactly once — the same reason this
+/// function has always linearised.
 fn theme_clear_color() -> wgpu::Color {
-    let [r, g, b] = srgb_rgb_to_linear(default_background());
-    wgpu::Color { r, g, b, a: 1.0 }
+    ground::premultiplied_clear(
+        srgb_rgb_to_linear(default_background()),
+        ground::window_ground().alpha,
+    )
 }
 
 #[cfg(test)]
@@ -8641,6 +8822,154 @@ fn create_math_pipeline(
         cache: None,
     });
     (pipeline, bind_group_layout, sampler)
+}
+
+/// The window's ground picture — one quad, its own pipeline.
+///
+/// Its own and not the math pipeline's, because it needs two things that
+/// pipeline cannot give and must not be taught:
+///
+/// - **a `Repeat` sampler.** Tile is `uv` running past 1.0, and the math
+///   sampler is `ClampToEdge` (the descriptor default) precisely so that a
+///   formula's last texel does not bleed round to its first.
+/// - **`Replace` blending.** This quad does not composite onto the clear, it
+///   supersedes it, writing the finished premultiplied ground including its
+///   alpha. `ALPHA_BLENDING` would leave the destination alpha at
+///   `src.a + dst.a·(1 − src.a)`, i.e. an opaque window wherever the picture is
+///   opaque, which is the whole feature inverted.
+fn create_background_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("window ground texture layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("window ground sampler"),
+        // Repeat on both axes: Tile is the only fit that reaches past the
+        // texture, and the other two never produce a `uv` outside `0..1`, so one
+        // sampler serves all three.
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        // Stretch and Fill scale the picture by whatever the window's size
+        // demands, which is almost never 1:1 — nearest sampling would show that
+        // as stair-stepping on every edge in the photograph.
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("window ground shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("background.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("window ground pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("window ground pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vertex"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<BackgroundVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 2,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32,
+                        offset: 32,
+                        shader_location: 3,
+                    },
+                ],
+            })],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fragment"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, bind_group_layout, sampler)
+}
+
+/// The six vertices of the ground quad, covering the whole surface.
+///
+/// Positions are the NDC corners outright rather than pixels converted the way
+/// [`math_quad_vertices`] does: this quad is always the entire target, so there
+/// is no viewport to divide by and no rounding to get wrong.
+fn background_quad_vertices(
+    uv: [f32; 4],
+    ground_linear_rgb: [f32; 3],
+    alpha: f32,
+    image_opacity: f32,
+) -> [BackgroundVertex; 6] {
+    let [u0, v0, u1, v1] = uv;
+    let ground = [
+        ground_linear_rgb[0],
+        ground_linear_rgb[1],
+        ground_linear_rgb[2],
+        alpha,
+    ];
+    let corner = |x: f32, y: f32, u: f32, v: f32| BackgroundVertex {
+        position: [x, y],
+        uv: [u, v],
+        ground,
+        image_opacity,
+    };
+    [
+        corner(-1.0, 1.0, u0, v0),
+        corner(-1.0, -1.0, u0, v1),
+        corner(1.0, -1.0, u1, v1),
+        corner(-1.0, 1.0, u0, v0),
+        corner(1.0, -1.0, u1, v1),
+        corner(1.0, 1.0, u1, v0),
+    ]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11330,6 +11659,15 @@ mod tests {
 
     #[test]
     fn srgb_theme_colors_are_linearized_at_clear_and_rect_upload_boundaries() {
+        // The clear now carries the window ground's alpha, which is process
+        // state — so this test takes the same lock every test that moves
+        // process colour takes, or it reads a ground another test is halfway
+        // through setting.
+        let _lock = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreGround(window_ground());
+        let _ = set_window_ground(WindowGround::opaque());
         let clear = theme_clear_color();
         // The transfer function itself, pinned at one known point so the
         // background can move without the linearization silently changing.
@@ -11625,6 +11963,145 @@ mod tests {
         fn drop(&mut self) {
             let _ = set_theme(self.0);
         }
+    }
+
+    /// The window ground is process-wide for the same reason the theme is, so it
+    /// is put back the same way.
+    struct RestoreGround(WindowGround);
+    impl Drop for RestoreGround {
+        fn drop(&mut self) {
+            let _ = set_window_ground(self.0.clone());
+        }
+    }
+
+    /// PIN (§7.1.6c-4b) — the ground's two percentages are clamped where the
+    /// ground is *set*, so no surface anywhere can be handed a value outside
+    /// its range, and a ground that did not move costs no revision.
+    ///
+    /// Clamped at the setter and not at the draw because there are two draws
+    /// (the clear and the quad) and one setter: a floor enforced at the draw is
+    /// a floor two places have to agree on, and the day they disagree is the day
+    /// the clear and the picture describe different windows.
+    #[test]
+    fn setting_the_window_ground_clamps_its_percentages_and_advances_the_revision() {
+        let _lock = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreGround(window_ground());
+        let _ = set_window_ground(WindowGround::opaque());
+
+        let before = theme_revision();
+        assert_eq!(
+            set_window_ground(WindowGround {
+                image: None,
+                fit: BackgroundFit::Tile,
+                image_opacity: 4.0,
+                alpha: 0.01,
+            }),
+            ThemeChange::Changed
+        );
+        let read = window_ground();
+        assert_eq!(read.image_opacity, 1.0);
+        assert_eq!(
+            read.alpha, MINIMUM_GROUND_ALPHA,
+            "there is no setting from which this window can be made unreadable"
+        );
+        assert_eq!(read.fit, BackgroundFit::Tile);
+        assert!(
+            theme_revision() > before,
+            "the ground rides the one revision channel that invalidates every \
+             theme-authored artefact — a second list would be a second thing to \
+             forget"
+        );
+
+        let settled = theme_revision();
+        assert_eq!(
+            set_window_ground(WindowGround {
+                image: None,
+                fit: BackgroundFit::Tile,
+                image_opacity: 1.0,
+                alpha: MINIMUM_GROUND_ALPHA,
+            }),
+            ThemeChange::Unchanged
+        );
+        assert_eq!(
+            theme_revision(),
+            settled,
+            "a settings write that did not touch the ground must cost nothing"
+        );
+    }
+
+    /// PIN (§7.1.6c-4b) — the ground's alpha reaches the clear, premultiplied,
+    /// and an opaque ground leaves the clear bit-identical to what §2.3 A2's
+    /// acceptance shots were taken against.
+    #[test]
+    fn the_grounds_alpha_reaches_the_clear_premultiplied() {
+        let _lock = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreGround(window_ground());
+
+        let _ = set_window_ground(WindowGround::opaque());
+        let opaque = theme_clear_color();
+        assert_eq!(opaque.a, 1.0);
+        let linear = srgb_channel_to_linear(default_background()[0]);
+        assert!((opaque.r - linear).abs() < 1e-12);
+
+        let _ = set_window_ground(WindowGround {
+            alpha: 0.6,
+            ..WindowGround::opaque()
+        });
+        let translucent = theme_clear_color();
+        assert!((translucent.a - 0.6).abs() < 1e-6);
+        assert!(
+            (translucent.r - linear * 0.6).abs() < 1e-6,
+            "a `PreMultiplied` swapchain given straight alpha draws a window \
+             that is too bright, and on a dark desktop nobody can see it"
+        );
+        assert!(
+            translucent.r < opaque.r,
+            "premultiplication darkens toward the desktop, never toward white"
+        );
+    }
+
+    /// PIN — the ground quad is the whole surface, six vertices, one opacity and
+    /// one ground colour on every one of them.
+    ///
+    /// The corners are NDC literals rather than pixels divided by a viewport,
+    /// because this quad is always the entire target: a rounding rule here would
+    /// be a rounding rule with nothing to round.
+    #[test]
+    fn the_ground_quad_covers_the_whole_surface_with_one_ground_on_every_corner() {
+        let uv = background_uv_rect(BackgroundFit::Tile, 1000, 700, 300, 300);
+        let quad = background_quad_vertices(uv, [0.1, 0.2, 0.3], 0.6, 0.45);
+        assert_eq!(quad.len(), 6, "two triangles");
+        for vertex in &quad {
+            assert_eq!(vertex.ground, [0.1, 0.2, 0.3, 0.6]);
+            assert_eq!(vertex.image_opacity, 0.45);
+            assert!(vertex.position.iter().all(|axis| axis.abs() == 1.0));
+        }
+        let xs: Vec<f32> = quad.iter().map(|vertex| vertex.position[0]).collect();
+        let ys: Vec<f32> = quad.iter().map(|vertex| vertex.position[1]).collect();
+        assert!(xs.contains(&-1.0) && xs.contains(&1.0));
+        assert!(ys.contains(&-1.0) && ys.contains(&1.0));
+        // The top-left corner samples the UV rectangle's origin, which is what
+        // makes Tile start at the window's top-left rather than anywhere else.
+        let top_left = quad
+            .iter()
+            .find(|vertex| vertex.position == [-1.0, 1.0])
+            .expect("the quad has a top-left corner");
+        assert_eq!(top_left.uv, [uv[0], uv[1]]);
+    }
+
+    /// PIN — the floor this crate clamps to is the floor the file format
+    /// declares, held in two crates by one number.
+    ///
+    /// `bt-render` does not depend on `bt-persist`, so the constant is written
+    /// twice on purpose; this is the nail that stops the two copies drifting
+    /// into a settings page whose lowest position the renderer refuses to draw.
+    #[test]
+    fn the_floor_here_is_the_floor_in_the_file_format() {
+        assert!((MINIMUM_GROUND_ALPHA - 0.3).abs() < f32::EPSILON);
     }
 
     /// PIN: a live selection changes colour the moment the theme does. The fill

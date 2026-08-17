@@ -176,6 +176,33 @@ pub fn reveal_arguments(path: &std::path::Path, is_directory: bool) -> std::ffi:
     arguments
 }
 
+/// The extensions this product will decode a picture from, lower case.
+///
+/// **One list, three readers.** It is the file chooser's filter
+/// ([`image_file_filter_spec`]), it is `validate_local_image_path`'s admission
+/// gate, and it is the same set `bt_term::has_admissible_image_extension`
+/// answers with — a chooser that offered a format the decoder refuses is a
+/// dialog that lets you pick a file and then says no, which is worse than not
+/// offering it. `svg` is on the list and does not go through the `image` crate;
+/// it is rasterised by `bt_math`, and that is the decoder's business rather than
+/// this list's.
+pub const IMAGE_FILE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "svg"];
+
+/// [`IMAGE_FILE_EXTENSIONS`] as a common-dialog filter — `*.png;*.jpg;…`.
+///
+/// Built rather than written out, so the filter cannot fall behind the list the
+/// decoder actually honours. One spec and not one per format: a chooser with
+/// six entries in its type dropdown asks the user to classify their own
+/// wallpaper before they can see it.
+#[must_use]
+pub fn image_file_filter_spec() -> String {
+    IMAGE_FILE_EXTENSIONS
+        .iter()
+        .map(|extension| format!("*.{extension}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 /// One monospaced family this machine has, named and located.
 ///
 /// **Both halves, and that is why the type exists.** A font picker needs the
@@ -285,8 +312,9 @@ mod windows_impl {
             IDWriteLocalizedStrings,
         },
         Graphics::Dwm::{
-            DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-            DwmSetWindowAttribute,
+            DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_AUTO, DWMSBT_NONE,
+            DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE,
+            DWMWCP_ROUND, DwmSetWindowAttribute,
         },
         Graphics::Gdi::{
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
@@ -316,17 +344,18 @@ mod windows_impl {
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::GetKeyboardLayout,
             Shell::{
-                DefSubclassProc, FOLDERID_Documents, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
-                FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, KF_FLAG_DEFAULT,
-                RemoveWindowSubclass, SHCreateItemFromParsingName, SHGetKnownFolderPath,
-                SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
+                Common::COMDLG_FILTERSPEC, DefSubclassProc, FOLDERID_Documents, FOS_FILEMUSTEXIST,
+                FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog,
+                IFileOpenDialog, IShellItem, KF_FLAG_DEFAULT, RemoveWindowSubclass,
+                SHCreateItemFromParsingName, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
+                SetWindowSubclass, ShellExecuteW,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
                 GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
                 HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
-                HTTOPLEFT, HTTOPRIGHT, IsIconic, IsZoomed, MF_STRING, MINMAXINFO,
-                NCCALCSIZE_PARAMS, PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
+                HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MF_STRING,
+                MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
                 SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
                 SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
@@ -354,8 +383,10 @@ mod windows_impl {
     const WHEEL_PAGESCROLL: u32 = u32::MAX;
     const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
     const DEFERRED_FOLDER_PICKER_MESSAGE: u32 = WM_APP + 0x4b8;
+    const DEFERRED_IMAGE_PICKER_MESSAGE: u32 = WM_APP + 0x4b9;
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
     const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
+    const IMAGE_PICKER_SUBCLASS_ID: usize = 0x4254_4950;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
     const CAPTION_BUTTON_COUNT: i32 = 4;
 
@@ -1122,10 +1153,8 @@ mod windows_impl {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| {
-                matches!(
-                    extension.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
-                )
+                let extension = extension.to_ascii_lowercase();
+                crate::IMAGE_FILE_EXTENSIONS.contains(&extension.as_str())
             });
         if !allowed_extension {
             return Err("local image path extension is not supported".to_owned());
@@ -1618,6 +1647,224 @@ mod windows_impl {
         }
     }
 
+    type ImagePickerState = DeferredState<Vec<u16>, Result<Option<PathBuf>, String>>;
+
+    /// The system's own file chooser, filtered to the pictures this product can
+    /// decode — [`FolderPicker`]'s twin, and every word of its doc comment
+    /// applies unchanged.
+    ///
+    /// A second subclass on the same window rather than a mode on the first,
+    /// because the deferral's whole contract is "one gesture in flight": a
+    /// picker that coalesced a wallpaper request into a pending folder request
+    /// would answer the wrong row. Two states, two private messages, two
+    /// subclass ids — and one dialog function underneath
+    /// ([`show_shell_picker`]), because the COM dance is the part that must not
+    /// be written twice.
+    pub struct ImagePicker {
+        hwnd: HWND,
+        state: Arc<ImagePickerState>,
+    }
+
+    impl ImagePicker {
+        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
+            let hwnd = HWND(hwnd.get() as *mut c_void);
+            let state = Arc::new(ImagePickerState::new());
+            // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
+            // keeps dwRefData live for the full installed interval; the callback takes its own
+            // temporary strong reference before entering the nested dialog loop.
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(image_picker_subclass),
+                    IMAGE_PICKER_SUBCLASS_ID,
+                    Arc::as_ptr(&state) as usize,
+                )
+            };
+            if !installed.as_bool() {
+                return Err(format!(
+                    "SetWindowSubclass(image picker) failed: {}",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(Self { hwnd, state })
+        }
+
+        /// Queue the chooser once, starting in `start` if that names a folder.
+        ///
+        /// `start` is a **folder** and not the picture currently chosen: a shell
+        /// item that is a file is not a place to open at, and the useful place
+        /// to open at is the one the last picture came from.
+        pub fn request(&self, start: Option<&Path>) -> Result<bool, String> {
+            let start = start
+                .map(|start| {
+                    let mut units = start.as_os_str().encode_wide().collect::<Vec<_>>();
+                    units.push(0);
+                    units
+                })
+                .unwrap_or_default();
+            if !self.state.begin_request(start) {
+                return Ok(false);
+            }
+            // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
+            // and never dispatches the subclass synchronously on this callback stack.
+            if let Err(error) = unsafe {
+                PostMessageW(
+                    Some(self.hwnd),
+                    DEFERRED_IMAGE_PICKER_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            } {
+                self.state.cancel_request();
+                return Err(format!("PostMessageW(image picker) failed: {error}"));
+            }
+            Ok(true)
+        }
+
+        /// The chosen picture, `None` for a cancelled dialog, or the reason the
+        /// chooser could not be shown — once, and only once the dialog is shut.
+        pub fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
+            self.state.take_result()
+        }
+    }
+
+    impl Drop for ImagePicker {
+        fn drop(&mut self) {
+            // SAFETY: this object is dropped on the same event-loop thread that installed the
+            // subclass. A callback already inside the dialog owns a temporary Arc, so nested
+            // CloseRequested teardown cannot invalidate its state.
+            let _ = unsafe {
+                RemoveWindowSubclass(
+                    self.hwnd,
+                    Some(image_picker_subclass),
+                    IMAGE_PICKER_SUBCLASS_ID,
+                )
+            };
+        }
+    }
+
+    unsafe extern "system" fn image_picker_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        if message != DEFERRED_IMAGE_PICKER_MESSAGE {
+            // SAFETY: forwarding untouched messages is the required subclass contract.
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        let state_pointer = reference_data as *const ImagePickerState;
+        if state_pointer.is_null() {
+            return LRESULT(0);
+        }
+        // SAFETY: the installed ImagePicker owns one Arc at callback entry. Incrementing before
+        // constructing the temporary Arc keeps state alive even if a nested CloseRequested drops
+        // the Runtime while the dialog is open.
+        unsafe { Arc::increment_strong_count(state_pointer) };
+        // SAFETY: the increment immediately above created the strong reference consumed here.
+        let state = unsafe { Arc::from_raw(state_pointer) };
+        if let Some(start) = state.begin_showing() {
+            state.complete(show_shell_picker(hwnd, &start, ShellPickKind::Image));
+        }
+        LRESULT(0)
+    }
+
+    /// Put this window above (or back among) the others — `HWND_TOPMOST` /
+    /// `HWND_NOTOPMOST`.
+    ///
+    /// The first caller in this crate to touch z-order at all: every other
+    /// `SetWindowPos` here passes `SWP_NOZORDER` because it is moving or
+    /// resizing and has no business reordering anything. This one is *only*
+    /// about order, so it passes neither a position nor a size.
+    ///
+    /// `SWP_NOACTIVATE`, because "stay in front" is not "come to the front now":
+    /// switching the row on while another window has the keyboard must not steal
+    /// it, and switching it off must not either.
+    pub fn set_window_topmost(hwnd: NonZeroIsize, topmost: bool) -> Result<(), String> {
+        let after = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
+        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle, and the insert-after
+        // handle is one of the two documented sentinels rather than a window we might outlive.
+        unsafe {
+            SetWindowPos(
+                HWND(hwnd.get() as *mut c_void),
+                Some(after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| format!("SetWindowPos(topmost={topmost}) failed: {error}"))
+    }
+
+    /// Ask DWM for (or withdraw) the acrylic system backdrop —
+    /// `DWMWA_SYSTEMBACKDROP_TYPE` = `DWMSBT_TRANSIENTWINDOW` / `DWMSBT_NONE`.
+    ///
+    /// `DWMSBT_TRANSIENTWINDOW` and not `DWMSBT_MAINWINDOW`: the two differ in
+    /// how much of what is behind survives the blur, and the transient one is
+    /// the stronger, more saturated recipe Windows uses for flyouts and command
+    /// palettes. A terminal with a picture behind it wants the one that still
+    /// shows you what is back there.
+    ///
+    /// Withdrawing is `DWMSBT_NONE` and not `DWMSBT_AUTO`: `AUTO` hands the
+    /// decision back to DWM, which is a different answer from "off" and would
+    /// leave a Mica-eligible window quietly wearing Mica after the row said no.
+    ///
+    /// Failure is returned rather than swallowed, unlike the corner-preference
+    /// call above it, because this one has a row on a settings page: a user who
+    /// switches it on is owed the reason it did not take, and
+    /// [`system_backdrop_available`] is that reason asked in advance.
+    pub fn set_system_backdrop(hwnd: NonZeroIsize, acrylic: bool) -> Result<(), String> {
+        let backdrop = if acrylic {
+            DWMSBT_TRANSIENTWINDOW
+        } else {
+            DWMSBT_NONE
+        };
+        // SAFETY: the pointer is to a live local of exactly the size passed, and DWM copies it
+        // before returning.
+        unsafe {
+            DwmSetWindowAttribute(
+                HWND(hwnd.get() as *mut c_void),
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                std::ptr::from_ref(&backdrop).cast::<c_void>(),
+                size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
+            )
+        }
+        .map_err(|error| format!("DwmSetWindowAttribute(system backdrop) failed: {error}"))
+    }
+
+    /// Whether this Windows knows what a system backdrop is.
+    ///
+    /// **Asked of DWM, not of a build number.** `DWMWA_SYSTEMBACKDROP_TYPE`
+    /// arrived in Windows 11 22H2 and every older Windows answers `E_INVALIDARG`
+    /// for an attribute it has never heard of — so setting the attribute to its
+    /// own default (`DWMSBT_AUTO`, which is what an untouched window already
+    /// has) both changes nothing and returns the exact fact the row needs. A
+    /// build-number gate would be this crate maintaining a table of which
+    /// Windows has which feature, which is a table that is wrong the moment
+    /// anybody backports anything.
+    #[must_use]
+    pub fn system_backdrop_available(hwnd: NonZeroIsize) -> bool {
+        let probe = DWMSBT_AUTO;
+        // SAFETY: as `set_system_backdrop`; the value written is the attribute's own default.
+        unsafe {
+            DwmSetWindowAttribute(
+                HWND(hwnd.get() as *mut c_void),
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                std::ptr::from_ref(&probe).cast::<c_void>(),
+                size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
+            )
+        }
+        .is_ok()
+    }
+
     unsafe extern "system" fn folder_picker_subclass(
         hwnd: HWND,
         message: u32,
@@ -1641,25 +1888,47 @@ mod windows_impl {
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
         if let Some(start) = state.begin_showing() {
-            state.complete(show_folder_picker(hwnd, &start));
+            state.complete(show_shell_picker(hwnd, &start, ShellPickKind::Folder));
         }
         LRESULT(0)
     }
 
-    /// Show `IFileOpenDialog` in its pick-a-folder guise and report what came
-    /// back.
+    /// A NUL-terminated UTF-16 copy, for the Win32 calls that take a `PCWSTR`
+    /// and read until the terminator.
+    fn wide_null(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Which of the two things `IFileOpenDialog` is being asked for.
+    ///
+    /// One dialog function and two guises rather than two functions, because
+    /// everything around the two lines that differ — the apartment, its balance,
+    /// the cancel/error split, the shell allocation nobody else frees — is
+    /// identical and is the part that is easy to get subtly wrong twice.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ShellPickKind {
+        Folder,
+        Image,
+    }
+
+    /// Show `IFileOpenDialog` and report what came back.
     ///
     /// `IFileOpenDialog` rather than the older `SHBrowseForFolder`, because the
     /// latter draws a tree from 1995 with no address bar, no typing, no
-    /// favourites and no resize — and this row exists precisely for the folders
-    /// the quick list above it could not name, which are the ones you need to
-    /// navigate to.
+    /// favourites and no resize — and the folder row exists precisely for the
+    /// folders the quick list above it could not name, which are the ones you
+    /// need to navigate to.
     ///
     /// `FOS_FORCEFILESYSTEM` is what keeps the answer a *path*: without it the
     /// dialog will happily return a shell namespace item — a library, a phone
     /// over MTP, a search results folder — that has no directory behind it for
-    /// anything here to enumerate.
-    fn show_folder_picker(hwnd: HWND, start: &[u16]) -> Result<Option<PathBuf>, String> {
+    /// anything here to enumerate. For a picture it does a second job: an image
+    /// on a phone over MTP has no path for the decoder to open.
+    fn show_shell_picker(
+        hwnd: HWND,
+        start: &[u16],
+        kind: ShellPickKind,
+    ) -> Result<Option<PathBuf>, String> {
         // SAFETY: every call below runs on the window's own GUI thread, reached only from the
         // posted-message subclass after winit's initiating callback has returned. The apartment
         // is initialized and balanced here, and each COM object is dropped by the `windows`
@@ -1685,9 +1954,38 @@ mod windows_impl {
                 let options = dialog
                     .GetOptions()
                     .map_err(|error| format!("IFileDialog::GetOptions: {error}"))?;
+                let options = match kind {
+                    ShellPickKind::Folder => {
+                        options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
+                    }
+                    // `FOS_FILEMUSTEXIST` and not `FOS_PATHMUSTEXIST` alone: the
+                    // answer is going straight to a decoder, and a name typed
+                    // into the box for a file that is not there would arrive as
+                    // a decode failure a second later, with the dialog already
+                    // gone and nothing on screen to connect the two.
+                    ShellPickKind::Image => {
+                        options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST
+                    }
+                };
                 dialog
-                    .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
+                    .SetOptions(options)
                     .map_err(|error| format!("IFileDialog::SetOptions: {error}"))?;
+                // The filter is built from the one extension list the decoder
+                // honours, so the chooser cannot offer a format that would be
+                // refused a moment after it was picked. Its own failure is not
+                // fatal — an unfiltered dialog still chooses a file, and the
+                // decoder is still the thing that decides.
+                let filter_name: Vec<u16>;
+                let filter_spec: Vec<u16>;
+                if kind == ShellPickKind::Image {
+                    filter_name = wide_null("Images");
+                    filter_spec = wide_null(&crate::image_file_filter_spec());
+                    let filters = [COMDLG_FILTERSPEC {
+                        pszName: PCWSTR(filter_name.as_ptr()),
+                        pszSpec: PCWSTR(filter_spec.as_ptr()),
+                    }];
+                    let _ = dialog.SetFileTypes(&filters);
+                }
                 // Where the column is already rooted, so the chooser opens where
                 // you are looking rather than wherever Windows last left it. Its
                 // failure is not this function's failure: a root that has since
@@ -1718,8 +2016,12 @@ mod windows_impl {
                 // The shell allocated it; the shell's allocator frees it. This is
                 // the one allocation in this function that Rust does not own.
                 CoTaskMemFree(Some(name.0.cast()));
+                let noun = match kind {
+                    ShellPickKind::Folder => "folder",
+                    ShellPickKind::Image => "picture",
+                };
                 path.map(|path| Some(PathBuf::from(path)))
-                    .map_err(|error| format!("the chosen folder's name is not UTF-16: {error}"))
+                    .map_err(|error| format!("the chosen {noun}'s name is not UTF-16: {error}"))
             })();
             if balance {
                 CoUninitialize();
@@ -1902,9 +2204,25 @@ mod windows_impl {
         })
     }
 
-    pub fn install_window_class_background(hwnd: NonZeroIsize, rgb: [u8; 3]) -> Result<(), String> {
-        let [r, g, b] = rgb;
-        let color = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
+    /// Paint this window's own background in `rgb`, or in **nothing** at all.
+    ///
+    /// `None` installs the null brush, and that is what a translucent ground is
+    /// made of (§7.1.6c-4b). The composition tree is created `topmost = true`,
+    /// which composites it **above** the window's own painting (§2.3 A2) — so
+    /// wherever the swapchain is translucent, what shows through is this brush
+    /// and not the desktop. An alpha on the clear alone therefore produces a
+    /// window that is see-through onto its own opaque background, which looks
+    /// exactly like a window that is not see-through at all. Removing the brush
+    /// is the other half of the feature.
+    ///
+    /// The cost is stated rather than hidden: with no brush, the band a resize
+    /// opens up before the swapchain reaches it shows the desktop instead of the
+    /// theme colour. That is the correct answer for a window the user has asked
+    /// to be see-through, and it is why the opaque case keeps its brush.
+    pub fn install_window_class_background(
+        hwnd: NonZeroIsize,
+        rgb: Option<[u8; 3]>,
+    ) -> Result<(), String> {
         let mut installed = WINDOW_CLASS_BACKGROUND
             .get_or_init(|| Mutex::new(None))
             .lock()
@@ -1914,26 +2232,38 @@ mod windows_impl {
         // the class brush; only after that succeeds do we delete the previous brush that *we* own.
         // The original winit brush returned on the first call is not ours and is never deleted here.
         unsafe {
-            let brush = CreateSolidBrush(color);
-            if brush.is_invalid() {
-                return Err(format!("CreateSolidBrush failed: {}", GetLastError().0));
-            }
+            let brush = match rgb {
+                Some([r, g, b]) => {
+                    let color = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
+                    let brush = CreateSolidBrush(color);
+                    if brush.is_invalid() {
+                        return Err(format!("CreateSolidBrush failed: {}", GetLastError().0));
+                    }
+                    Some(brush)
+                }
+                None => None,
+            };
 
             SetLastError(WIN32_ERROR(0));
             let previous = SetClassLongPtrW(
                 HWND(hwnd.get() as *mut c_void),
                 GCLP_HBRBACKGROUND,
-                brush.0 as isize,
+                brush.map_or(0, |brush| brush.0 as isize),
             );
             let error = GetLastError();
             if previous == 0 && error.0 != 0 {
-                let _ = DeleteObject(HGDIOBJ(brush.0));
+                if let Some(brush) = brush {
+                    let _ = DeleteObject(HGDIOBJ(brush.0));
+                }
                 return Err(format!(
                     "SetClassLongPtrW(GCLP_HBRBACKGROUND) failed: {}",
                     error.0
                 ));
             }
-            let old_owned = installed.replace(brush.0 as isize);
+            let old_owned = match brush {
+                Some(brush) => installed.replace(brush.0 as isize),
+                None => installed.take(),
+            };
             if let Some(old_owned) = old_owned {
                 let _ = DeleteObject(HGDIOBJ(old_owned as *mut c_void));
             }
@@ -2188,9 +2518,9 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, MathMenuState, compositor_failure,
-            names_a_program, primary_language_id, retry_open_clipboard, validate_local_image_path,
-            validate_openable_path,
+            CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
+            compositor_failure, names_a_program, primary_language_id, retry_open_clipboard,
+            validate_local_image_path, validate_openable_path, wide_null,
         };
         use std::path::{Path, PathBuf};
 
@@ -2335,6 +2665,103 @@ mod windows_impl {
             assert!(validate_local_image_path(Path::new(r"C:\tmp\image.svg")).is_ok());
             assert!(validate_local_image_path(Path::new(r"C:\tmp\image.bmp")).is_err());
             assert!(validate_local_image_path(Path::new("C:\\tmp\\bad\0.png")).is_err());
+        }
+
+        /// PIN (§7.1.6c-4b) — the picture chooser's filter and the bridge's
+        /// admission gate are one list read twice.
+        ///
+        /// The failure this forbids is a dialog that shows you a `.bmp`, lets
+        /// you double-click it, and is then told by the decoder that it does not
+        /// take those — with the dialog already closed and nothing left on
+        /// screen connecting the refusal to the choice. Every spelling the
+        /// filter offers must pass the gate, and the gate must admit nothing the
+        /// filter hides.
+        #[test]
+        fn the_pictures_filter_offers_exactly_what_the_bridge_admits() {
+            let spec = crate::image_file_filter_spec();
+            for extension in crate::IMAGE_FILE_EXTENSIONS {
+                assert!(
+                    spec.contains(&format!("*.{extension}")),
+                    "the filter must offer {extension}: {spec}"
+                );
+                assert!(
+                    validate_local_image_path(Path::new(&format!(r"C:\tmp\picture.{extension}")))
+                        .is_ok(),
+                    "the gate must admit {extension}"
+                );
+                assert!(
+                    validate_local_image_path(Path::new(&format!(
+                        r"C:\tmp\picture.{}",
+                        extension.to_ascii_uppercase()
+                    )))
+                    .is_ok(),
+                    "a chooser hands back whatever case the file system holds"
+                );
+            }
+            assert_eq!(
+                spec.matches('*').count(),
+                crate::IMAGE_FILE_EXTENSIONS.len(),
+                "one entry per extension and no extras: {spec}"
+            );
+            assert!(
+                !spec.contains("bmp") && validate_local_image_path(Path::new(r"C:\a.bmp")).is_err(),
+                "a format the decoder is not built with must be absent from both"
+            );
+        }
+
+        /// PIN — the picture chooser defers exactly the way the folder chooser
+        /// does, and the two do not share a queue.
+        ///
+        /// The second half is the interesting one: one state per gesture is what
+        /// stops a wallpaper request posted while a folder dialog is pending
+        /// from being coalesced away and answering the wrong row.
+        #[test]
+        fn the_picture_chooser_defers_on_its_own_state_and_not_the_folders() {
+            let folders = FolderPickerState::new();
+            let pictures = ImagePickerState::new();
+            let start: Vec<u16> = "C:\\Users\\me\\Pictures\0".encode_utf16().collect();
+
+            assert!(pictures.begin_request(start.clone()));
+            assert!(
+                folders.begin_request(Vec::new()),
+                "a pending picture request must not swallow a folder request"
+            );
+            assert!(
+                !pictures.begin_request(Vec::new()),
+                "a second ask for the same gesture is coalesced, not stacked"
+            );
+
+            assert_eq!(pictures.begin_showing(), Some(start));
+            assert_eq!(pictures.begin_showing(), None);
+            pictures.complete(Ok(Some(PathBuf::from(r"C:\Users\me\Pictures\ridge.jpg"))));
+            assert_eq!(
+                pictures.take_result(),
+                Some(Ok(Some(PathBuf::from(r"C:\Users\me\Pictures\ridge.jpg"))))
+            );
+            assert_eq!(pictures.take_result(), None);
+            assert_eq!(
+                folders.begin_showing(),
+                Some(Vec::new()),
+                "and the folder request is still sitting where it was left"
+            );
+        }
+
+        /// PIN — a NUL-terminated wide copy is what the shell reads, and it is
+        /// terminated exactly once.
+        #[test]
+        fn a_wide_string_for_win32_ends_at_its_terminator() {
+            let units = wide_null("*.png;*.jpg");
+            assert_eq!(units.last(), Some(&0));
+            assert_eq!(
+                units.iter().filter(|unit| **unit == 0).count(),
+                1,
+                "a second NUL would truncate the filter at the first one"
+            );
+            assert_eq!(
+                String::from_utf16_lossy(&units[..units.len() - 1]),
+                "*.png;*.jpg"
+            );
+            assert_eq!(wide_null(""), vec![0]);
         }
 
         /// PIN — the tree's bridge opens documents and refuses programs, and the
@@ -2663,12 +3090,13 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    Compositor, CustomWindowFrame, DirWatch, FolderPicker, ImeSystemCaret, MathContextMenu,
-    PROGRAM_REFUSED, client_area_animation_enabled, clipboard_text, documents_directory,
-    get_dpi_for_window, get_window_rect, get_work_area, install_window_class_background,
-    is_window_minimized, monospace_font_families, open_local_file, open_local_path, os_ui_language,
-    request_window_close, reveal_in_explorer, set_clipboard_text, set_window_outer_rect,
-    shell_execute, wheel_scroll_amount,
+    Compositor, CustomWindowFrame, DirWatch, FolderPicker, ImagePicker, ImeSystemCaret,
+    MathContextMenu, PROGRAM_REFUSED, client_area_animation_enabled, clipboard_text,
+    documents_directory, get_dpi_for_window, get_window_rect, get_work_area,
+    install_window_class_background, is_window_minimized, monospace_font_families, open_local_file,
+    open_local_path, os_ui_language, request_window_close, reveal_in_explorer, set_clipboard_text,
+    set_system_backdrop, set_window_outer_rect, set_window_topmost, shell_execute,
+    system_backdrop_available, wheel_scroll_amount,
 };
 
 /// The one test in this crate that talks to the kernel about a real directory.

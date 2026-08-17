@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 
 use bt_persist::{
-    DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1, PreviewLeafV1,
-    PreviewPaneV1, PreviewPoolEntryV1, PsReadLineInviteV1, ReadReport, RecentSeedV1,
+    BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
+    PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PsReadLineInviteV1, ReadReport, RecentSeedV1,
     SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
     SessionTabLayoutV1, SessionThemeV1, SessionV1, SettingsV1, SplitDirectionV1, TabPreviewV1,
     TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
@@ -560,7 +560,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 9,
+        SETTINGS_SCHEMA_VERSION, 10,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -568,7 +568,37 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          invitation's state the v7→v8 — three keys in one bump because all three \
          arrive with their readers in one change (§1.3) — and the two colour \
          schemes the v8→v9, two keys in one bump because they are one decision's \
-         two halves and `theme_mode` still decides which of them is in force"
+         two halves and `theme_mode` still decides which of them is in force — \
+         and the window's ground the v9→v10: a picture, its fit, how much of it \
+         comes through, how much of the desktop comes through behind it, whether \
+         Windows blurs that, and whether the window stays in front. Six keys in \
+         one bump because four of them describe one ground nobody can set a \
+         quarter of, and because a schema version is a file format rather than a \
+         changelog"
+    );
+    assert_eq!(
+        defaults.background_image, "",
+        "no picture, and the empty string is the value rather than a stand-in \
+         for one: there is no wallpaper this build could have meant"
+    );
+    assert_eq!(
+        defaults.background_fit,
+        BackgroundFitV1::Fill,
+        "the only fit that both covers the window and leaves the picture looking \
+         like itself; unreachable anyway until a picture is named"
+    );
+    assert_eq!(defaults.background_image_opacity, 100);
+    assert_eq!(
+        defaults.background_opacity, 100,
+        "an opaque window is what every build before v10 drew, and a default \
+         that made somebody's terminal see-through on upgrade would be this \
+         crate deciding something it was never asked"
+    );
+    assert!(!defaults.acrylic);
+    assert!(
+        !defaults.always_on_top,
+        "a window that arrives in front of everything else has taken a decision \
+         about the whole desktop on the strength of being launched"
     );
     assert!(
         defaults.display_formulas,
@@ -807,6 +837,111 @@ fn a_v9_settings_file_that_names_both_schemes_keeps_both_names() {
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, v9);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (the appearance pack, 2026-08-17) — a v9 settings file migrates to v10
+/// with the ground v9 already drew, and every one of the twelve older fields
+/// crosses untouched.
+///
+/// The fixture is non-default in all twelve (§1.3 rule 1), the two v9 scheme
+/// keys deliberately among them: they are the siblings added one version ago
+/// and therefore the ones a copy-paste of the step above would most plausibly
+/// reset while inserting its own six.
+///
+/// The half worth pinning is that **nothing visible changes**. Six keys appearing
+/// at once looks like `v3_to_v4`'s kind of step — a build filling in an answer
+/// on the user's behalf — and it is not: a v9 build drew no picture at an opaque
+/// ground with no backdrop and no topmost bit, so these six values are that
+/// behaviour recorded rather than a new one imposed. `background_fit` is the one
+/// exception and it is a safe one: a v9 build had no fit at all, and this one is
+/// unreachable until somebody names a picture.
+#[test]
+fn settings_v9_fixture_migrates_to_v10_with_the_ground_v9_drew_and_disturbs_nothing() {
+    let (v10, report) = read_settings(&fixture_path("settings_v9_ground_absent.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v10.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        v10.background_image, "",
+        "a v9 build never asked for a picture, so the migration must not invent \
+         one — and an empty name is also the state a file keeps while the drive \
+         its wallpaper lives on is unplugged"
+    );
+    assert_eq!(v10.background_fit, BackgroundFitV1::Fill);
+    assert_eq!(v10.background_image_opacity, 100);
+    assert_eq!(
+        v10.background_opacity, 100,
+        "the one value here whose wrong answer would be visible on every \
+         upgraded machine at once"
+    );
+    assert!(!v10.acrylic);
+    assert!(!v10.always_on_top);
+    assert_eq!(v10.theme_mode, ThemeModeV1::Dark);
+    assert!(!v10.display_formulas);
+    assert!(!v10.inline_formulas);
+    assert_eq!(v10.default_profile, "cmd");
+    assert!(!v10.git_panel);
+    assert_eq!(v10.split_direction, SplitDirectionV1::Right);
+    assert_eq!(v10.language, LanguageV1::English);
+    assert_eq!(v10.terminal_font_family, "Lucida Console");
+    assert_eq!(v10.terminal_font_size, 12);
+    assert_eq!(v10.psreadline_invite, PsReadLineInviteV1::Dismissed);
+    assert_eq!(v10.light_scheme, "One Half Light");
+    assert_eq!(
+        v10.dark_scheme, "Gruvbox Dark",
+        "v9→v10 is structural: every sibling crosses untouched"
+    );
+}
+
+/// PIN — a v10 file that describes a whole ground is loaded without migration
+/// and hands every part of it back exactly as written.
+///
+/// The companion to the migration test above, pinning the opposite failure:
+/// that one proves an unasked user is not answered for, this one proves an
+/// answered user is not overruled. The path in the fixture carries a space and
+/// Windows separators on purpose — a wallpaper lives wherever its owner keeps
+/// their pictures, and this crate stores the name it was given rather than a
+/// name it has tidied.
+#[test]
+fn a_v10_settings_file_that_describes_a_ground_keeps_every_part_of_it() {
+    let (v10, report) = read_settings(&fixture_path("settings_v10_pictured_ground.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v10.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(v10.background_image, r"D:\pictures\ridge line.jpg");
+    assert_eq!(v10.background_fit, BackgroundFitV1::Tile);
+    assert_eq!(v10.background_image_opacity, 45);
+    assert_eq!(v10.background_opacity, 65);
+    assert!(v10.acrylic);
+    assert!(v10.always_on_top);
+    assert_eq!(v10.light_scheme, "Solarized Light");
+    assert_eq!(v10.dark_scheme, "Dracula");
+    assert_eq!(v10.terminal_font_size, 22);
+
+    // And back out again, byte-for-byte in meaning: the ground a user chose is
+    // the ground the next launch reads.
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v10-ground-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &v10).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""background_image": "D:\\pictures\\ridge line.jpg""#),
+        "a picture is written as the path its owner gave, escaped for JSON and \
+         not rewritten: {on_disk}"
+    );
+    assert!(
+        on_disk.contains(r#""background_fit": "Tile""#)
+            && on_disk.contains(r#""background_image_opacity": 45"#)
+            && on_disk.contains(r#""background_opacity": 65"#),
+        "a percentage is a whole number on the wire, never a float whose last \
+         digit depends on which machine wrote it: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, v10);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

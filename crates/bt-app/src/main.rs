@@ -3829,6 +3829,37 @@ struct Runtime {
     /// while the dialog is open simply finds no seat to act on — both verbs ask
     /// for one before they do anything.
     folder_pick: Option<FolderPick>,
+    /// The system file chooser behind the Background image row's `Choose…`
+    /// (§7.1.6c-4b).
+    ///
+    /// Its own bridge and not a mode on [`Self::folder_picker`]: the deferral's
+    /// contract is one gesture in flight, and a wallpaper request coalesced into
+    /// a pending folder request would answer the wrong row.
+    image_picker: bt_platform::ImagePicker,
+    /// Whether a picture chooser is out. A `bool` and not a
+    /// [`FolderPick`]-shaped enum, because there is exactly one row that opens
+    /// this one and the answer has nowhere else to go.
+    image_pick_pending: bool,
+    /// The picture currently drawn behind this window, decoded.
+    ///
+    /// Held here rather than in the renderer's globals so that a re-decode is
+    /// visibly one event: the ground the renderer reads is set from this in
+    /// [`Self::apply_window_ground`], which is also the one place the two
+    /// percentages and the fit reach it.
+    background_picture: Option<Arc<bt_render::BackgroundImage>>,
+    /// Which slider the pointer is currently dragging, if any.
+    ///
+    /// A drag is the press that began it, asked again with a new `x` — see
+    /// `SettingsLayout::slider_at`. Cleared on release and whenever the dialog
+    /// shuts, because a button-up that arrives after the dialog is gone is a
+    /// button-up with nothing to end.
+    settings_slider_drag: Option<settings::SettingsRow>,
+    /// Whether this Windows knows what a system backdrop is, asked once
+    /// (`bt_platform::system_backdrop_available`).
+    acrylic_available: bool,
+    /// Whether this window's surface really is composited with premultiplied
+    /// alpha, read off the renderer's own `alpha_report` rather than assumed.
+    translucency_available: bool,
     custom_window_frame: bt_platform::CustomWindowFrame,
     /// The DirectComposition tree this window's picture is published through
     /// (multiwindow slice A2 / web-preview slice 1).
@@ -13986,6 +14017,16 @@ impl Runtime {
         let folder_picker = bt_platform::FolderPicker::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("install deferred folder chooser")?;
+        let image_picker = bt_platform::ImagePicker::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred picture chooser")?;
+        // Asked of DWM once, before anything reads the Acrylic row, by writing
+        // the attribute's own default: a Windows that has never heard of
+        // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
+        // A build-number table would be this program maintaining a list of which
+        // Windows has which feature, which is a list that is wrong the first time
+        // anybody backports anything.
+        let acrylic_available = bt_platform::system_backdrop_available(hwnd);
         // Only now, with the self-drawn frame owning WM_NCCALCSIZE, does "the
         // window's rectangle" mean one thing instead of two. Restate the geometry
         // as that one rectangle: what winit built is the saved size plus a native
@@ -14040,6 +14081,16 @@ impl Runtime {
             eprintln!("BT_STARTUP alpha offered={:?}", alpha.offered);
             eprintln!("BT_STARTUP alpha chosen={:?}", alpha.chosen);
         }
+        // What the Background opacity row is allowed to offer, taken from the
+        // surface that was actually configured rather than assumed (§7.1.6c-4b).
+        // Today `Compositor::new` and `choose_alpha_mode` between them mean a
+        // window that opened at all opened premultiplied — but the row's state
+        // has to be a *reading* and not a restatement of that argument, because
+        // the day a second window target exists is the day an assumption here
+        // draws a slider that moves and changes nothing.
+        let translucency_available = renderer
+            .alpha_report()
+            .is_some_and(bt_render::SurfaceAlphaReport::is_premultiplied);
         // **Before the first grid is measured**, which is the whole of why it is
         // here and not after the seats are solved: every rectangle below is
         // derived from `renderer.metrics()`, so a face applied afterwards would
@@ -14189,6 +14240,12 @@ impl Runtime {
             math_context_menu,
             folder_picker,
             folder_pick: None,
+            image_picker,
+            image_pick_pending: false,
+            background_picture: None,
+            settings_slider_drag: None,
+            acrylic_available,
+            translucency_available,
             custom_window_frame,
             compositor,
             window,
@@ -14362,6 +14419,29 @@ impl Runtime {
             lawful_client_size: None,
         };
         runtime.refresh_work_area();
+        // **The window's ground, before the first frame** (§7.1.6c-4b). The
+        // clear carries the ground's alpha, so a window that put this on after
+        // its first present would flash opaque; the picture is decoded here for
+        // the same reason. A missing or unreadable file costs a card and an
+        // ordinary window, never a failed launch.
+        runtime.reload_background_picture()?;
+        runtime.apply_window_ground()?;
+        // The two postures, re-applied because they are postures: a window that
+        // was told to stay in front last week is a window that stays in front
+        // today. Both are best-effort — neither is a reason to refuse to open —
+        // and the acrylic call is skipped outright on a Windows that has no such
+        // attribute, which is also what greys its row.
+        if runtime.settings_store.loaded().always_on_top
+            && let Err(error) = bt_platform::set_window_topmost(hwnd, true)
+        {
+            eprintln!("recoverable always-on-top failure: {error}");
+        }
+        if acrylic_available
+            && runtime.settings_store.loaded().acrylic
+            && let Err(error) = bt_platform::set_system_backdrop(hwnd, true)
+        {
+            eprintln!("recoverable system backdrop failure: {error}");
+        }
         // **The pinned tabs' preview panes ask for their files here**, and this
         // is the earliest they can: the worker is a field of the runtime, so
         // there is nothing to ask until the struct above exists. Every other
@@ -17902,7 +17982,36 @@ impl Runtime {
             profile_available: std::array::from_fn(|index| {
                 self.profile_programs.is_available(index)
             }),
+            background_image: !self.settings_store.loaded().background_image.is_empty(),
+            background_fit: settings::image_fit_index(self.settings_store.loaded().background_fit),
+            background_image_opacity: self.settings_store.loaded().background_image_opacity,
+            background_opacity: self.settings_store.loaded().background_opacity,
+            acrylic: self.settings_store.loaded().acrylic,
+            always_on_top: self.settings_store.loaded().always_on_top,
+            // Both asked of the machine once, at startup, and remembered — see
+            // `Runtime::acrylic_available` / `translucency_available`. Asking
+            // DWM per frame would be a syscall inside a hover repaint.
+            acrylic_available: self.acrylic_available,
+            translucency_available: self.translucency_available,
         }
+    }
+
+    /// The chosen picture's file name, for the button that carries it.
+    ///
+    /// The **name** and not the path: 118px of picker cannot hold
+    /// `C:\\Users\\…\\Pictures\\ridge line.jpg`, and a path ellipsised from the
+    /// right shows the part nobody needs. A file that has since been moved keeps
+    /// its name on the button, because the setting still names it — see
+    /// `bt_persist::DEFAULT_BACKGROUND_IMAGE` on why the path is not validated.
+    fn background_image_name(&self) -> String {
+        let stored = &self.settings_store.loaded().background_image;
+        if stored.is_empty() {
+            return String::new();
+        }
+        Path::new(stored)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| stored.clone())
     }
 
     /// Which profile the `+` starts, the window is titled after and the picker
@@ -17997,6 +18106,7 @@ impl Runtime {
             let focus = self.settings.focus_ring();
             let values = self.settings_values();
             let shortcuts = self.shortcuts.editor_rows();
+            let background_image = self.background_image_name();
             let recording = self.settings.recording_state();
             let recording =
                 recording.map(|(row, caps, hint)| (row, caps.to_vec(), hint.map(str::to_owned)));
@@ -18011,6 +18121,7 @@ impl Runtime {
                 focus,
                 values,
                 &shortcuts,
+                &background_image,
                 recording,
                 &mut measure,
             )
@@ -18823,6 +18934,25 @@ impl Runtime {
         if let Some(id) = settings::default_profile_requested(target) {
             self.apply_default_profile(id)?;
         }
+        if let Some(source) = settings::background_image_requested(target) {
+            match source {
+                settings::ImageSource::None => {
+                    self.apply_background_image(String::new())?;
+                }
+                // A verb, not a value: nothing is stored until the chooser comes
+                // back, and it may come back with nothing.
+                settings::ImageSource::Choose => self.browse_for_background_image(),
+            }
+        }
+        if let Some(fit) = settings::image_fit_requested(target) {
+            self.apply_image_fit(fit)?;
+        }
+        if let Some(enabled) = settings::acrylic_requested(target) {
+            self.apply_acrylic(enabled)?;
+        }
+        if let Some(enabled) = settings::always_on_top_requested(target) {
+            self.apply_always_on_top(enabled)?;
+        }
         // Tab layout is the one choice that changes which rows exist, and the
         // focus may be standing on the row it just deleted.
         let (rows, shortcuts) = self.settings_content();
@@ -18987,6 +19117,20 @@ impl Runtime {
         button: MouseButton,
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
+        // A release ends a slider drag wherever it lands, before the press gate
+        // below turns it away: a gesture that began on a track can finish
+        // anywhere, and a thumb that kept following the pointer after the button
+        // came up would be a control stuck to the hand.
+        if state == ElementState::Released && self.settings_slider_drag.take().is_some() {
+            if let Some(position) = self.pointer_position {
+                let hover = settings::hit(layout, self.settings_values(), position.x, position.y);
+                self.settings.set_hover(Some(hover));
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         if state != ElementState::Pressed || button != MouseButton::Left {
             return Ok(());
         }
@@ -19000,6 +19144,17 @@ impl Runtime {
             settings::SettingsTarget::Scrim => self.settings.close(),
             settings::SettingsTarget::Close => self.settings.close(),
             settings::SettingsTarget::Combo(row) => self.settings.toggle_menu(row),
+            // A press on a track is a jump to the pointer AND the first frame of
+            // a drag — one gesture, so one door (`SettingsLayout::slider_at`).
+            // Grabbing the thumb and not moving is a press that asked for the
+            // value it already had, which costs nothing.
+            settings::SettingsTarget::Slider(row) => {
+                self.settings.close_menu();
+                if let Some(value) = layout.slider_at(row, position.x) {
+                    self.apply_slider(row, value)?;
+                }
+                self.settings_slider_drag = Some(row);
+            }
             target @ settings::SettingsTarget::Choice(..) => {
                 self.settings.close_menu();
                 self.apply_settings_choice(target)?;
@@ -19439,6 +19594,239 @@ impl Runtime {
         }
         self.adopt_new_palette()?;
         Ok(true)
+    }
+
+    /// **The window's ground, put in force** (§7.1.6c-4b) — the one place the
+    /// picture, the fit and the two percentages reach the renderer.
+    ///
+    /// One function and not four, because they are one value: `set_window_ground`
+    /// takes the whole ground and answers `Unchanged` when nothing moved, so a
+    /// settings write that touched something else costs no revision and no
+    /// repaint. Every caller here (a row, a chooser, startup) goes through this,
+    /// which is what keeps "what is stored" and "what is drawn" one reading
+    /// rather than four that have to agree.
+    fn apply_window_ground(&mut self) -> Result<bool> {
+        let stored = self.settings_store.loaded();
+        let ground = bt_render::WindowGround {
+            image: self.background_picture.clone(),
+            fit: match stored.background_fit {
+                bt_persist::BackgroundFitV1::Stretch => bt_render::BackgroundFit::Stretch,
+                bt_persist::BackgroundFitV1::Fill => bt_render::BackgroundFit::Fill,
+                bt_persist::BackgroundFitV1::Tile => bt_render::BackgroundFit::Tile,
+            },
+            image_opacity: f32::from(stored.background_image_opacity) / 100.0,
+            // A machine whose surface is opaque draws an opaque ground whatever
+            // the file says. Not a clamp on the stored value — the file keeps
+            // what its owner wrote, and moving the profile to a machine that can
+            // honour it restores the window they set up.
+            alpha: if self.translucency_available {
+                f32::from(stored.background_opacity) / 100.0
+            } else {
+                1.0
+            },
+        };
+        if bt_render::set_window_ground(ground) == bt_render::ThemeChange::Unchanged {
+            return Ok(false);
+        }
+        // The clear colour moved, so the class background brush behind it has to
+        // as well — it is what shows in the band a resize opens up, and a window
+        // whose ground is half see-through must not flash an opaque rectangle
+        // there. `adopt_new_palette` is the same path a scheme change takes, and
+        // for the same reason: the ground rides `theme_revision`.
+        self.adopt_new_palette()?;
+        Ok(true)
+    }
+
+    /// Read the picture named in the settings, or clear it.
+    ///
+    /// **On the event thread, deliberately.** The decoder's worker lane is keyed
+    /// by `LeafId` and a wallpaper has no leaf; more to the point, the two
+    /// moments this runs are startup-with-a-picture-already-chosen and the
+    /// instant a modal chooser closed, and both already have somebody waiting.
+    /// The read is bounded to 8 MiB of file and the decode to 64 MiB of pixels
+    /// by the decoder's own gates.
+    ///
+    /// A file that will not decode leaves the **name in the settings** and the
+    /// window without a picture, and says so once in a card: a wallpaper on a
+    /// drive that is not plugged in today is the ordinary case, and quietly
+    /// erasing the setting would mean plugging the drive back in changed nothing.
+    fn reload_background_picture(&mut self) -> Result<()> {
+        let stored = self.settings_store.loaded().background_image.clone();
+        if stored.is_empty() {
+            self.background_picture = None;
+            return Ok(());
+        }
+        match bt_term::decode_inline_image(bt_term::InlineImageTask {
+            occurrence_id: 0,
+            source: bt_term::InlineImageSource::LocalPath(PathBuf::from(&stored)),
+        }) {
+            Ok(decoded) => {
+                self.background_picture = Some(Arc::new(bt_render::BackgroundImage {
+                    key: decoded.key,
+                    rgba: decoded.rgba,
+                    width_px: decoded.width_px,
+                    height_px: decoded.height_px,
+                }));
+            }
+            Err(error) => {
+                self.background_picture = None;
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    Some(i18n::Text::RowBackgroundImage.text().to_owned()),
+                    i18n::preview_failed(&error.to_string()),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The picture behind the window, chosen or cleared.
+    fn apply_background_image(&mut self, path: String) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.background_image = path;
+        if &settings == self.settings_store.loaded() {
+            return Ok(false);
+        }
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        self.reload_background_picture()?;
+        self.apply_window_ground()?;
+        Ok(true)
+    }
+
+    /// How the picture meets the window.
+    fn apply_image_fit(&mut self, fit: bt_persist::BackgroundFitV1) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.background_fit = fit;
+        if &settings == self.settings_store.loaded() {
+            return Ok(false);
+        }
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        self.apply_window_ground()?;
+        Ok(true)
+    }
+
+    /// A slider row, driven to a whole percentage by an arrow key or a drag.
+    ///
+    /// One function for both rows, because the two differ only in which field
+    /// they write — and one function for the keyboard and the pointer, because a
+    /// drag that persisted differently from an arrow press would be two settings
+    /// with one name.
+    fn apply_slider(&mut self, row: settings::SettingsRow, value: u8) -> Result<bool> {
+        let Some(range) = row.control().range() else {
+            return Ok(false);
+        };
+        let value = range.clamp(value);
+        let mut settings = self.settings_store.loaded().clone();
+        match row {
+            settings::SettingsRow::ImageOpacity => settings.background_image_opacity = value,
+            settings::SettingsRow::BackgroundOpacity => settings.background_opacity = value,
+            _ => return Ok(false),
+        }
+        if &settings == self.settings_store.loaded() {
+            return Ok(false);
+        }
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        // The ground is re-put whether or not it moved the clear: the picture's
+        // own percentage lives on the quad and not on the clear, and
+        // `set_window_ground` is the one thing that knows which of the two a
+        // given change touched.
+        self.apply_window_ground()?;
+        // A drag repaints every frame it moves, and a ground whose only change
+        // was the picture's opacity does not advance the revision — so the
+        // repaint has to be asked for here rather than left to
+        // `apply_window_ground`.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Windows' own blur behind the ground.
+    ///
+    /// Applied to the live window before it is stored, and **not** stored when
+    /// DWM refuses: a row that remembered On while the window wore nothing would
+    /// be a switch whose position is a claim about a thing that did not happen.
+    fn apply_acrylic(&mut self, enabled: bool) -> Result<bool> {
+        if !self.acrylic_available {
+            return Ok(false);
+        }
+        let hwnd = window_hwnd(&self.window)?;
+        if let Err(error) = bt_platform::set_system_backdrop(hwnd, enabled) {
+            eprintln!("recoverable system backdrop failure: {error}");
+            return Ok(false);
+        }
+        let mut settings = self.settings_store.loaded().clone();
+        settings.acrylic = enabled;
+        if &settings == self.settings_store.loaded() {
+            return Ok(false);
+        }
+        Ok(self.settings_store.store(settings))
+    }
+
+    /// Whether the window stays above other windows.
+    ///
+    /// Immediate, persisted, and re-applied at startup — the three halves of
+    /// "this is a posture and not a gesture". `SetWindowPos` here never
+    /// activates: switching the row on while another window has the keyboard
+    /// must not steal it.
+    fn apply_always_on_top(&mut self, enabled: bool) -> Result<bool> {
+        let hwnd = window_hwnd(&self.window)?;
+        if let Err(error) = bt_platform::set_window_topmost(hwnd, enabled) {
+            eprintln!("recoverable always-on-top failure: {error}");
+            return Ok(false);
+        }
+        let mut settings = self.settings_store.loaded().clone();
+        settings.always_on_top = enabled;
+        if &settings == self.settings_store.loaded() {
+            return Ok(false);
+        }
+        Ok(self.settings_store.store(settings))
+    }
+
+    /// `Choose…` on the Background image row: queue the system's chooser.
+    ///
+    /// It opens in the folder the current picture came from, which is where a
+    /// person changing their wallpaper is looking. A folder that has since gone
+    /// is not this function's failure — the dialog opens at the system's default
+    /// instead, exactly as the folder chooser's own start does.
+    fn browse_for_background_image(&mut self) {
+        let stored = self.settings_store.loaded().background_image.clone();
+        let start = (!stored.is_empty())
+            .then(|| Path::new(&stored).parent().map(Path::to_path_buf))
+            .flatten();
+        match self.image_picker.request(start.as_deref()) {
+            Ok(true) => self.image_pick_pending = true,
+            Ok(false) => {}
+            Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
+        }
+    }
+
+    /// Collect the picture chooser's answer, once, after its modal has shut.
+    fn apply_image_pick_result(&mut self) -> Result<()> {
+        let Some(result) = self.image_picker.take_result() else {
+            return Ok(());
+        };
+        if !self.image_pick_pending {
+            return Ok(());
+        }
+        self.image_pick_pending = false;
+        match result {
+            // Cancelled. The row keeps whatever it had, which is the only
+            // reading of Cancel that is not a clear.
+            Ok(None) => {}
+            Ok(Some(path)) => {
+                self.apply_background_image(path.to_string_lossy().into_owned())?;
+            }
+            Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
+        }
+        Ok(())
     }
 
     /// Say, once, which files in the scheme folder were skipped and why.
@@ -35105,6 +35493,16 @@ impl Runtime {
             return Ok(());
         }
         if let Some(layout) = self.settings_layout() {
+            // A drag owns the pointer: while a thumb is held the motion is the
+            // slider's, wherever it has wandered to, and the hover underneath is
+            // as old as the gesture. Every slider ever built keeps following the
+            // hand off its own track.
+            if let Some(row) = self.settings_slider_drag {
+                if let Some(value) = layout.slider_at(row, position.x) {
+                    self.apply_slider(row, value)?;
+                }
+                return Ok(());
+            }
             let hover = settings::hit(&layout, self.settings_values(), position.x, position.y);
             if self.settings.set_hover(Some(hover)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
@@ -39206,6 +39604,9 @@ impl Runtime {
                 settings::SettingsKeyVerdict::Chose(target) => {
                     self.apply_settings_choice(target)?;
                 }
+                settings::SettingsKeyVerdict::Adjusted(row, value) => {
+                    self.apply_slider(row, value)?;
+                }
                 settings::SettingsKeyVerdict::Closed => {
                     if let Some(position) = self.pointer_position {
                         self.update_chrome_hover(position)?;
@@ -40816,6 +41217,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        if let Err(error) = runtime.apply_image_pick_result() {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.drain_pty() {
             self.fail(event_loop, error);
             return;
@@ -42208,8 +42613,17 @@ fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {
     )
 }
 
+/// The window's own background — the theme colour, or **nothing** while the
+/// ground is translucent (§7.1.6c-4b).
+///
+/// Nothing, because the composition tree composites above the window's own
+/// painting (§2.3 A2): a translucent clear over an opaque class brush is a
+/// window that is see-through onto itself, which is indistinguishable from a
+/// window that is not see-through. Read from the ground rather than passed in,
+/// so the two callers (a theme flip and a ground change) cannot disagree.
 fn install_theme_class_background(window: &Window) -> Result<()> {
-    bt_platform::install_window_class_background(window_hwnd(window)?, background_rgb())
+    let opaque = bt_render::window_ground().alpha >= 1.0;
+    bt_platform::install_window_class_background(window_hwnd(window)?, opaque.then(background_rgb))
         .map_err(|error| anyhow!(error))
         .context("install theme-colored winit class background brush")
 }

@@ -1,0 +1,15 @@
+{
+  "theme_mode": "Dark",
+  "display_formulas": false,
+  "inline_formulas": false,
+  "default_profile": "cmd",
+  "git_panel": false,
+  "split_direction": "Right",
+  "language": "English",
+  "terminal_font_family": "Lucida Console",
+  "terminal_font_size": 12,
+  "psreadline_invite": "Dismissed",
+  "light_scheme": "One Half Light",
+  "dark_scheme": "Gruvbox Dark",
+  "schema_version": 9
+}

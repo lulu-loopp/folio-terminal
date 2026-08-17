@@ -1784,6 +1784,17 @@ pub fn set_schemes(light: ColourScheme, dark: ColourScheme) -> ThemeChange {
     ThemeChange::Changed
 }
 
+/// Advance [`theme_revision`] without changing a colour.
+///
+/// The door the window's ground comes through (`crate::ground`). A background
+/// picture and a ground alpha are theme-authored appearance that no palette
+/// describes, and they invalidate exactly the artefacts a palette change
+/// invalidates — so they ride the one revision channel rather than growing a
+/// second one nobody would remember to extend.
+pub(crate) fn bump_theme_revision() {
+    process_theme().refresh();
+}
+
 /// A seat title bar's height, in logical pixels (`.panehead { height: 30px }`).
 ///
 /// Twenty-eight until the 2026-08-12 ruling raised it to thirty. The font did

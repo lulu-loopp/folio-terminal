@@ -14402,10 +14402,21 @@ mod tests {
             ("the seat head", seat),
             ("the terminal", terminal),
         ] {
-            assert_eq!(
-                crate::settings::hit(&overlay, crate::settings::SettingsValues::sample(), x, y,),
-                crate::settings::SettingsTarget::Scrim,
-                "a modal means MODAL: {what} is behind the scrim"
+            // Scrim **or** Panel, and the pair is the whole answer: the dialog
+            // grew past these three points when the Appearance page took the
+            // window's ground (§7.1.6c-4b), so a chrome point that used to sit
+            // beside the dialog now sits under it. Both are "the modal owns this
+            // pixel" — the scrim closes on a press and the panel does nothing —
+            // and neither is the divider, the head or the terminal that
+            // `hit_chrome` just proved is really there.
+            let over =
+                crate::settings::hit(&overlay, crate::settings::SettingsValues::sample(), x, y);
+            assert!(
+                matches!(
+                    over,
+                    crate::settings::SettingsTarget::Scrim | crate::settings::SettingsTarget::Panel
+                ),
+                "a modal means MODAL: {what} answers the dialog and not the window ({over:?})"
             );
         }
     }
