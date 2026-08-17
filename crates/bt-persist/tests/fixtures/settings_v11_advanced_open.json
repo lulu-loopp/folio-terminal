@@ -1,0 +1,25 @@
+{
+  "theme_mode": "Light",
+  "display_formulas": false,
+  "inline_formulas": true,
+  "default_profile": "wsl",
+  "git_panel": false,
+  "split_direction": "Down",
+  "language": "Chinese",
+  "terminal_font_family": "Cascadia Mono",
+  "terminal_font_size": 22,
+  "psreadline_invite": "Installed",
+  "light_scheme": "Solarized Light",
+  "dark_scheme": "Dracula",
+  "background_image": "D:\\pictures\\ridge line.jpg",
+  "background_fit": "Tile",
+  "background_image_opacity": 45,
+  "background_opacity": 65,
+  "acrylic": true,
+  "always_on_top": true,
+  "schema_version": 11,
+  "advanced_open": [
+    "appearance",
+    "a-page-this-build-retired"
+  ]
+}

@@ -275,10 +275,20 @@ static PROBE: OnceLock<Probe> = OnceLock::new();
 
 /// Start the probe, once per process, on a thread of its own.
 ///
-/// Called when the first `Windows PowerShell` pane opens rather than at
-/// startup, which is the whole of the trigger: a user who only ever opens WSL
-/// pays nothing, and a process is not started to answer a question nobody is in
-/// a position to ask. Calling it again is free.
+/// **Two triggers, and both are "somebody is in a position to ask"**: the first
+/// `Windows PowerShell` pane opening, and — since §7.1.6c-5 — the settings
+/// dialog showing the page the answer is written on. A user who only ever opens
+/// WSL still pays nothing; a user who never opens a 5.1 pane used to read
+/// "Checking this machine's PSReadLine" forever, because the row was drawn by a
+/// probe that had never been started. Calling it again is free.
+///
+/// The window is woken through [`install_wake`] when the answer lands, and the
+/// wake belongs to the *process* rather than to whichever trigger happened to
+/// fire first. That is the whole reason it is not an argument here: the answer
+/// is a one-shot, so only the call that actually spawns the thread could carry
+/// a callback — and the caller that spawns it is the pane, while the caller that
+/// needs the repaint is the dialog, which may open minutes later while the probe
+/// is still running.
 pub fn begin_probe() {
     if PROBE.get().is_some() || probing_started() {
         return;
@@ -290,9 +300,33 @@ pub fn begin_probe() {
         bt_platform::ThreadPriority::BelowNormal,
         || {
             let _ = PROBE.set(run_probe());
+            // After the answer is published, never before: a wake that raced the
+            // `set` would send the loop to read a row that is still `Probing`,
+            // and there is no second wake coming.
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
         },
     )
     .ok();
+}
+
+/// Every answer this module publishes out of band is published on a thread with
+/// no window, so the window has to be told to come and read it.
+static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Teach the probe how to bring the event loop round when its answer lands
+/// (§7.1.6c-5).
+///
+/// Called once, at startup, beside [`install_probe_override`]: a settings dialog
+/// standing on the Terminal page while the probe is still out has a row reading
+/// "Checking this machine's PSReadLine", and nothing else in this window is
+/// going to produce a frame on its own to replace it — a modal is up, so there
+/// is no shell output, no hover and no keystroke coming.
+///
+/// A second call is ignored, which is what a process-lifetime answer means.
+pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKE.set(Box::new(wake));
 }
 
 static PROBE_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

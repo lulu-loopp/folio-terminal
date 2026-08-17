@@ -560,7 +560,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 10,
+        SETTINGS_SCHEMA_VERSION, 11,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -574,7 +574,13 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          Windows blurs that, and whether the window stays in front. Six keys in \
          one bump because four of them describe one ground nobody can set a \
          quarter of, and because a schema version is a file format rather than a \
-         changelog"
+         changelog — and the Advanced disclosure's own list the v10→v11, one key \
+         on its own day"
+    );
+    assert!(
+        defaults.advanced_open.is_empty(),
+        "progressive disclosure that arrived already disclosed would be a longer \
+         page with a triangle on it"
     );
     assert_eq!(
         defaults.background_image, "",
@@ -942,6 +948,69 @@ fn a_v10_settings_file_that_describes_a_ground_keeps_every_part_of_it() {
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, v10);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (§7.1.6c-5) — a v10 file migrates to v11 with every Advanced group shut,
+/// and a v11 file that names one keeps it.
+///
+/// Both halves in one test because they are the two ways one field can be got
+/// wrong. The migration half pins that nothing is disclosed on the user's
+/// behalf: a v10 build had no Advanced group at all, so the honest reading of
+/// its file is "no page has been opened" — and a step that wrote
+/// `["appearance"]` would greet every upgrading user with the eight rows the
+/// ruling exists to fold away. The v11 half pins the opposite failure, and the
+/// fixture carries a key this build has no page for on purpose: §5.4's
+/// per-leaf degradation says an unknown page is dropped and every page beside
+/// it still honoured, which is a claim about the reader in `bt-app` and, here,
+/// a claim that this crate hands the list over as written rather than tidying
+/// it.
+#[test]
+fn settings_v10_migrates_with_every_group_shut_and_v11_keeps_the_pages_it_names() {
+    let (v11, report) = read_settings(&fixture_path("settings_v10_pictured_ground.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v11.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        v11.advanced_open.is_empty(),
+        "a v10 build had no disclosure, so the migration must not open one: {:?}",
+        v11.advanced_open
+    );
+    assert_eq!(
+        v11.background_image, r"D:\pictures\ridge line.jpg",
+        "v10→v11 is structural: every sibling crosses untouched"
+    );
+    assert!(v11.acrylic && v11.always_on_top);
+    assert_eq!(v11.terminal_font_size, 22);
+
+    let (named, report) = read_settings(&fixture_path("settings_v11_advanced_open.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(named.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        named.advanced_open,
+        vec![
+            "appearance".to_owned(),
+            "a-page-this-build-retired".to_owned()
+        ],
+        "this crate stores the keys it was given; deciding which of them name a          page is the reader's job"
+    );
+
+    // And back out again: the pages a reader opened are the pages the next
+    // launch opens.
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v11-advanced-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &named).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""advanced_open""#) && on_disk.contains(r#""appearance""#),
+        "an open group is written as a list of page keys: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, named);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

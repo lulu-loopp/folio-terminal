@@ -575,6 +575,30 @@ pub enum Text {
     OptionFitStretch,
     OptionFitFill,
     OptionFitTile,
+
+    // ── the files column's own switch (§7.1.6c-5) ──────────────────────────
+    /// The `Files | Git` segmented control above a files column's body — the
+    /// last two bare literals in the chrome, printed straight into
+    /// `seats::push_files_seg` since the Git page was born.
+    ///
+    /// Two entries and not a reuse of [`Self::SeatFiles`], although the English
+    /// word is the same one: that string names a *kind of pane* in a head 13.5px
+    /// high, this one names a *page* in an 11.5px segmented control whose two
+    /// halves are measured against each other every frame. One literal serving
+    /// both would make shortening either of them a change to the other.
+    FilesViewFiles,
+    /// The second half, and the one entry in this table whose two columns are
+    /// the same string — see `UNTRANSLATED`.
+    FilesViewGit,
+
+    // ── the Advanced disclosure and its Reset (§7.1.6c-5) ──────────────────
+    /// The heading of the collapsed group at the foot of a page. Progressive
+    /// disclosure **per page** (user ruling 2026-08-17), so the word is a page's
+    /// own and not a switch the whole dialog shares.
+    AdvancedGroup,
+    /// The verb that ends every Advanced group: it puts that page's advanced
+    /// rows back, and nothing else on the page.
+    ResetAdvanced,
 }
 
 impl Text {
@@ -1001,6 +1025,17 @@ impl Text {
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
             Self::DragReplacePane => pick(lang, "Replace pane", "替换窗格"),
+
+            // ── the files column's own switch ──────────────────────────────
+            Self::FilesViewFiles => pick(lang, "Files", "文件"),
+            // A program's name, and the same three letters in a Chinese window
+            // as in an English one — `git` is already left untranslated inside
+            // every sentence in this table for exactly this reason.
+            Self::FilesViewGit => pick(lang, "Git", "Git"),
+
+            // ── the Advanced disclosure and its Reset ──────────────────────
+            Self::AdvancedGroup => pick(lang, "Advanced", "高级"),
+            Self::ResetAdvanced => pick(lang, "Reset to defaults", "恢复默认值"),
         }
     }
 
@@ -1016,7 +1051,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 152] = [
+    pub const ALL: [Self; 156] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1169,6 +1204,25 @@ impl Text {
         Self::OptionFitStretch,
         Self::OptionFitFill,
         Self::OptionFitTile,
+        Self::FilesViewFiles,
+        Self::FilesViewGit,
+        Self::AdvancedGroup,
+        Self::ResetAdvanced,
+    ];
+
+    /// The entries whose two columns are allowed to be the same string.
+    ///
+    /// Listed by hand, one line per reason, which is what the two pins below
+    /// promised when they were written: an entry that is *only* a name has
+    /// nothing to translate, and translating it would be inventing a word the
+    /// program is not called. Every entry not on this list must differ between
+    /// the columns and must carry Chinese in the Chinese one.
+    #[cfg(test)]
+    const UNTRANSLATED: [Self; 1] = [
+        // The program's name. It appears untranslated inside a dozen sentences
+        // in this table already; a tab that named it in Chinese would be naming
+        // something else.
+        Self::FilesViewGit,
     ];
 }
 
@@ -1313,6 +1367,21 @@ pub fn psreadline_remove_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Could not remove PSReadLine: {message}"),
         Lang::Chinese => format!("移除 PSReadLine 失败：{message}"),
+    }
+}
+
+/// What the card says after an Advanced group was reset (§7.1.6c-5).
+///
+/// **The page is a parameter and not a word in the sentence**, because the verb
+/// is a page's own: every category may grow an Advanced group, and a card that
+/// named `Appearance` in its literal would be a card that lies on the second
+/// page to grow one. The reset touches that page's advanced rows and nothing
+/// else, and saying which page is the whole of the report.
+#[must_use]
+pub fn advanced_reset_toast(page: &str) -> String {
+    match current() {
+        Lang::English => format!("{page} ▸ Advanced is back to its defaults"),
+        Lang::Chinese => format!("{page} ▸ 高级已恢复默认值"),
     }
 }
 
@@ -1530,6 +1599,9 @@ mod tests {
     #[test]
     fn no_entry_ships_the_english_word_as_its_own_translation() {
         for entry in Text::ALL {
+            if Text::UNTRANSLATED.contains(&entry) {
+                continue;
+            }
             let english = entry.in_lang(Lang::English);
             let chinese = entry.in_lang(Lang::Chinese);
             assert_ne!(
@@ -1547,6 +1619,9 @@ mod tests {
     #[test]
     fn every_chinese_entry_carries_at_least_one_han_character() {
         for entry in Text::ALL {
+            if Text::UNTRANSLATED.contains(&entry) {
+                continue;
+            }
             let chinese = entry.in_lang(Lang::Chinese);
             assert!(
                 chinese
