@@ -200,9 +200,12 @@ const FOCUS_RING_RADIUS_LOGICAL_PX: f32 = 6.0;
 //     the 6px every control in here wears, and its left padding is the picker
 //     button's own 12;
 //   * the selected ground is `--hover` (`dialog_hover`), which is the one lit
-//     state this dialog has;
-//   * the accent bar is 2px because that is the width of the focus ring, the one
-//     other 2px accent stroke in the file.
+//     state this dialog has; a *hovered* word that is not the selected one wears
+//     the same ground at half strength, so "where am I" and "what is under my
+//     finger" stay two readings without a second colour — **no accent bar**
+//     (user ruling 2026-08-17: in this house a selection is a ground and a
+//     brighter word, never a coloured stroke; the files tree and the tab strip
+//     say so already, and a bar would be a second vocabulary).
 
 /// The rail's own column, header excluded.
 const NAV_WIDTH_LOGICAL_PX: f32 = 168.0;
@@ -223,12 +226,10 @@ const NAV_ITEM_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
 /// Between `.group-label`'s 11 and `.row .title`'s 13.5: a rail is read at a
 /// glance like a heading and chosen from like a row.
 const NAV_ITEM_FONT_LOGICAL_PX: f32 = 12.5;
-/// The bar on the selected item's left edge — the focus ring's own width, which
-/// is the only other 2px accent stroke this dialog draws.
-const NAV_ACCENT_BAR_WIDTH_LOGICAL_PX: f32 = 2.0;
-/// How far the bar is held off the item's top and bottom, so it reads as a mark
-/// on the pill rather than as the pill's own left border.
-const NAV_ACCENT_BAR_INSET_Y_LOGICAL_PX: f32 = 7.0;
+/// How strongly a hovered word that is *not* the page shows the ground the
+/// selected word wears at full strength — the pointer's question, half as loud
+/// as the answer.
+const NAV_HOVER_GROUND_ALPHA: f32 = 0.5;
 
 // ── the shortcut page (born 2026-08-17) ────────────────────────────────────
 //
@@ -2015,8 +2016,6 @@ pub struct NavLayout {
     pub category: SettingsCategory,
     /// The pill: the ground a selected item wears and the box a press lands in.
     pub band: [f32; 4],
-    /// The 2px accent stroke on its left edge, drawn only for the selected item.
-    pub bar: [f32; 4],
     /// Where the word sits, one picker's-worth of padding inside the pill.
     pub label: [f32; 4],
 }
@@ -2847,13 +2846,6 @@ fn place_nav(items: &[SettingsCategory], nav: [f32; 4], scale: f32) -> Vec<NavLa
         .map(|category| {
             let band = [left, cursor, right, cursor + px(NAV_ITEM_HEIGHT_LOGICAL_PX)];
             cursor = band[3] + px(NAV_ITEM_GAP_LOGICAL_PX);
-            let inset = px(NAV_ACCENT_BAR_INSET_Y_LOGICAL_PX);
-            let bar = [
-                band[0],
-                band[1] + inset,
-                band[0] + px(NAV_ACCENT_BAR_WIDTH_LOGICAL_PX),
-                band[3] - inset,
-            ];
             let label = [
                 band[0] + px(NAV_ITEM_PADDING_LEFT_LOGICAL_PX),
                 band[1],
@@ -2863,7 +2855,6 @@ fn place_nav(items: &[SettingsCategory], nav: [f32; 4], scale: f32) -> Vec<NavLa
             NavLayout {
                 category: *category,
                 band,
-                bar,
                 label,
             }
         })
@@ -3128,23 +3119,21 @@ pub fn build(
     for item in &layout.nav_items {
         let selected = item.category == layout.category;
         let hovered = hover == Some(SettingsTarget::Nav(item.category));
+        // The selected word wears the ground whole; a hovered one that is not
+        // the page wears it at half strength. A hover is a question and a
+        // selection is an answer, and the two must read apart — but with a
+        // ground and a weight, not with a stroke (user ruling 2026-08-17).
         if selected || hovered {
             quads.extend(rounded_overlay_fill(
                 item.band,
                 px(NAV_ITEM_RADIUS_LOGICAL_PX),
                 palette.dialog_hover,
-                1.0,
+                if selected {
+                    1.0
+                } else {
+                    NAV_HOVER_GROUND_ALPHA
+                },
             ));
-        }
-        // The bar names the page that is up, never the word under the pointer:
-        // a hover is a question and a selection is an answer, and the accent in
-        // this house is the ink an answer is written in.
-        if selected {
-            quads.push(OverlayQuad {
-                rect: item.bar,
-                color: palette.accent,
-                alpha: 1.0,
-            });
         }
         if focus == Some(SettingsTarget::Nav(item.category)) {
             quads.extend(focus_ring(item.band, scale, palette.accent));
@@ -7476,32 +7465,26 @@ mod tests {
                     item.label[0] > item.band[0],
                     "the word sits inside its own pill"
                 );
-                assert!(
-                    (width(item.bar) - FOCUS_RING_WIDTH_LOGICAL_PX * scale).abs() < 0.5,
-                    "the accent bar is the focus ring's own 2px, and is stated                      against that constant rather than against its own - the                      derivation is the claim"
-                );
-                assert!(
-                    item.bar[1] > item.band[1] && item.bar[3] < item.band[3],
-                    "and is held off both ends, so it reads as a mark and not a border"
-                );
             }
         }
     }
 
-    /// Visual PIN — **the bar names the page that is up, and only that.**
+    /// Visual PIN — **the page that is up wears the ground whole; the word
+    /// under the pointer wears it at half.**
     ///
-    /// A selected word wears `--hover` and the accent stroke; a hovered one
-    /// wears the ground alone. Two lit states with one meaning between them would
-    /// be a rail where "where am I" and "what is under my finger" are the same
-    /// sentence.
+    /// Two lit states with two strengths and no stroke (user ruling
+    /// 2026-08-17): the selection is the answer and reads at full, the hover is
+    /// the question and reads at half, and neither is a bar. Mutation: draw the
+    /// hover at 1.0 and the two words become indistinguishable — the second
+    /// assertion goes red.
     #[test]
     fn the_rail_marks_the_page_that_is_up_and_lights_the_word_under_the_pointer() {
         let placed = open(1.0, false);
         let palette = chrome_palette();
-        let bar_of = |hover| {
+        let grounds_of = |hover| {
             quads_of(&placed, hover, values())
                 .into_iter()
-                .filter(|quad| quad.color == palette.accent)
+                .filter(|quad| quad.color == palette.dialog_hover)
                 .filter(|quad| quad.rect[2] <= placed.nav[2])
                 .collect::<Vec<_>>()
         };
@@ -7510,42 +7493,68 @@ mod tests {
             .iter()
             .find(|item| item.category == PAGE)
             .expect("the page that is up is in the rail");
-        let bars = bar_of(None);
-        assert_eq!(bars.len(), 1, "exactly one word is marked");
-        assert_eq!(bars[0].rect, selected.bar);
-
-        let other = SettingsCategory::Shortcuts;
-        let hovered = bar_of(Some(SettingsTarget::Nav(other)));
-        assert_eq!(
-            hovered.len(),
-            1,
-            "hovering another word does not move the mark"
-        );
-        assert_eq!(hovered[0].rect, selected.bar);
-
-        let grounds = quads_of(&placed, Some(SettingsTarget::Nav(other)), values())
-            .into_iter()
-            .filter(|quad| quad.color == palette.dialog_hover)
-            .filter(|quad| quad.rect[2] <= placed.nav[2])
-            .count();
+        let at_rest = grounds_of(None);
+        assert!(!at_rest.is_empty(), "the page that is up is lit");
+        // A rounded fill's corner bands carry their own partial alpha, so the
+        // strength of a ground is its strongest quad, not every quad.
         assert!(
-            grounds > 1,
-            "the hovered word takes the ground the selected one already has"
+            (at_rest
+                .iter()
+                .map(|quad| quad.alpha)
+                .fold(0.0_f32, f32::max)
+                - 1.0)
+                .abs()
+                < 0.001,
+            "and lit whole"
+        );
+        assert!(
+            at_rest
+                .iter()
+                .all(|quad| quad.rect[1] >= selected.band[1] - 0.5
+                    && quad.rect[3] <= selected.band[3] + 0.5),
+            "and only it"
+        );
+        // No accent stroke anywhere in the rail — the ruling's whole point.
+        assert!(
+            !quads_of(&placed, None, values())
+                .into_iter()
+                .filter(|quad| quad.rect[2] <= placed.nav[2])
+                .any(|quad| quad.color == palette.accent),
+            "no bar"
         );
 
-        let labels = labels_of(&placed, None, values());
-        for item in &placed.nav_items {
-            let word = labels
-                .iter()
-                .find(|label| label.text == item.category.nav_label())
-                .unwrap_or_else(|| panic!("{:?} is drawn", item.category));
-            let expected = if item.category == PAGE {
-                palette.dialog_title_text
-            } else {
-                palette.dialog_muted_text
-            };
-            assert_eq!(word.color, expected, "{:?}", item.category);
-        }
+        let hovered_item = placed
+            .nav_items
+            .iter()
+            .find(|item| item.category != PAGE)
+            .expect("a second word in the rail");
+        let other = hovered_item.category;
+        let with_hover = grounds_of(Some(SettingsTarget::Nav(other)));
+        let hover_alpha: Vec<f32> = with_hover
+            .iter()
+            .filter(|quad| {
+                quad.rect[1] >= hovered_item.band[1] - 0.5
+                    && quad.rect[3] <= hovered_item.band[3] + 0.5
+            })
+            .map(|quad| quad.alpha)
+            .collect();
+        assert!(!hover_alpha.is_empty(), "the hovered word is lit");
+        assert!(
+            (hover_alpha.iter().copied().fold(0.0_f32, f32::max) - NAV_HOVER_GROUND_ALPHA).abs()
+                < 0.001,
+            "at half strength, so it cannot be mistaken for the page that is up"
+        );
+        let selected_alpha: Vec<f32> = with_hover
+            .iter()
+            .filter(|quad| {
+                quad.rect[1] >= selected.band[1] - 0.5 && quad.rect[3] <= selected.band[3] + 0.5
+            })
+            .map(|quad| quad.alpha)
+            .collect();
+        assert!(
+            (selected_alpha.iter().copied().fold(0.0_f32, f32::max) - 1.0).abs() < 0.001,
+            "while the page that is up stays whole"
+        );
     }
 
     /// PIN (Q3 = A) — **one page at a time, and each page measures itself.**

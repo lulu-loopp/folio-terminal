@@ -2254,17 +2254,13 @@
     font-family: inherit; font-size: 12.5px;
     text-align: left; cursor: pointer;
   }
-  .nav-item:hover { background: var(--hover); color: var(--ink); }
-  .nav-item.selected { background: var(--hover); color: var(--ink); }
-  /* The bar names the page that is up, never the word under the pointer: a
-     hover is a question and a selection is an answer, and the accent is the ink
-     an answer is written in. 2px is the focus ring's own width — the only other
-     accent stroke in this dialog. */
-  .nav-item.selected::before {
-    content: ""; position: absolute;
-    left: 0; top: 7px; bottom: 7px; width: 2px;
-    border-radius: 1px; background: var(--accent);
-  }
+  /* A hover is a question and a selection is an answer: the selected word wears
+     --hover whole, a hovered word that is not the page wears it at half. No
+     accent bar (user ruling 2026-08-17): in this house a selection is a ground
+     and a brighter word — the files tree and the tab strip say so — never a
+     coloured stroke. */
+  .nav-item:hover { background: color-mix(in srgb, var(--hover) 50%, transparent); color: var(--ink); }
+  .nav-item.selected, .nav-item.selected:hover { background: var(--hover); color: var(--ink); }
   .settings-body .content { flex: 1; min-width: 0; }
   .settings-page { display: none; }
   .settings-page.shown { display: block; }
