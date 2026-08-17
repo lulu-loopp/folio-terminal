@@ -427,6 +427,29 @@ pub enum ChromeMark {
     /// arrowhead outlined at this size is three hairlines meeting, which reads as
     /// a smudge rather than as a direction.
     Refresh,
+    /// `#i-select` — **`Select all`**, on the terminal's own context menu
+    /// (ticket #62, mock-up 2373).
+    ///
+    /// Four corner brackets with a rule through the middle: the brackets are the
+    /// marquee a selection is drawn with everywhere, and the rule is the content
+    /// they have been drawn around. It is deliberately not a filled rectangle —
+    /// a solid block at fourteen pixels reads as a swatch, and the one thing
+    /// this mark has to say is *the edges are what moved*.
+    SelectAll,
+    /// `#i-broom` — **`Clear screen`** (mock-up 2374).
+    ///
+    /// A broom, and the reason it is a broom rather than a second eraser is the
+    /// ruling this pair of rows exists to make legible (§7.1.6): sweeping is
+    /// what you do to a surface, and the surface goes on being there afterwards.
+    /// The rows it sweeps scroll out into the transcript exactly as they always
+    /// did, which is precisely the difference from the row underneath it.
+    Broom,
+    /// `#i-clear` — **`Clear scrollback…`** (mock-up 2371).
+    ///
+    /// An eraser on its rubbing line: the one drawing in the sheet that means
+    /// *this is gone*, and it stands over the row that runs the full §3.1 ED3
+    /// deletion. The broom above it sweeps a surface; this rubs a record out.
+    Eraser,
     /// The mini graph's merge curve — a branch's history joining this line.
     ///
     /// The mock-up's own path (line 4933), in the mock-up's own `0 0 14 27` box,
@@ -540,6 +563,9 @@ impl ChromeMark {
             Self::Minus => "i-minus",
             Self::Tag => "i-tag",
             Self::Refresh => "i-refresh",
+            Self::SelectAll => "i-select",
+            Self::Broom => "i-broom",
+            Self::Eraser => "i-clear",
             Self::GitMergeCurve => "git-merge-curve",
             // One id for four mirrorings and every span, exactly as the chevron
             // has one id for every angle: `mark_key` adds the rest.
@@ -1332,6 +1358,9 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Minus => 29,
         ChromeMark::Tag => 34,
         ChromeMark::Refresh => 35,
+        ChromeMark::SelectAll => 36,
+        ChromeMark::Broom => 37,
+        ChromeMark::Eraser => 38,
         ChromeMark::GitMergeCurve => 30,
         ChromeMark::Split => 31,
         ChromeMark::SplitRight => 32,
@@ -1350,7 +1379,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 36] = [
+const SYMBOL_VIEW_BOX: [&str; 39] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1416,11 +1445,16 @@ const SYMBOL_VIEW_BOX: [&str; 36] = [
     // with `#i-file` has to be cut in the same units to sit at the same weight.
     "0 0 16 16",
     "0 0 16 16",
+    // `#i-select`, `#i-broom` and `#i-clear` — the terminal menu's three own
+    // marks (ticket #62), lifted from the sheet in the sheet's own sixteen.
+    "0 0 16 16",
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 36] = [
+const SYMBOL_BODY: [&str; 39] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1647,6 +1681,25 @@ const SYMBOL_BODY: [&str; 36] = [
     concat!(
         r#"<path d="M12.33 5.5a5 5 0 1 1-4.33-2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
         r#"<path d="M8 1.3 11 3 8 4.7z" fill="currentColor"/>"#,
+    ),
+    // `#i-select` — mock-up 2373, verbatim. Four corner brackets and the rule
+    // between them; the brackets are drawn as one path so the marquee reads as
+    // one gesture rather than as four ticks that happen to line up.
+    concat!(
+        r#"<path d="M2.4 4.4v-2h2M11.6 2.4h2v2M13.6 11.6v2h-2M4.4 13.6h-2v-2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>"#,
+        r#"<path d="M4.8 8h6.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+    ),
+    // `#i-broom` — mock-up 2374, verbatim: the handle, and the head splayed
+    // where it meets the floor.
+    concat!(
+        r#"<path d="M9.6 2.2l4.2 4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+        r#"<path d="M11.7 6.4L9.6 4.3 3.4 9.7c-.9.8-1.2 2-.8 3.1l.6 1.5 1.5.6c1.1.4 2.3.1 3.1-.8l3.9-4.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
+    ),
+    // `#i-clear` — mock-up 2371, verbatim: the eraser held at an angle, and the
+    // line it has been rubbing along.
+    concat!(
+        r#"<path d="M6.4 12.6H13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+        r#"<path d="M9.1 3.3l3.6 3.6c.4.4.4 1 0 1.4l-3.8 3.8c-.4.4-1 .4-1.4 0L3.9 8.5c-.4-.4-.4-1 0-1.4l3.8-3.8c.4-.4 1-.4 1.4 0z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
     ),
 ];
 
@@ -3074,6 +3127,51 @@ mod tests {
             0,
             "the arc is open where the head does not reach"
         );
+    }
+
+    /// PIN (ticket #62) — **the terminal menu's three marks draw, and they are
+    /// three different drawings.**
+    ///
+    /// Lifted from the mock-up's own sheet rather than struck here, so what this
+    /// test guards is the lift: a `viewBox` or a body copied into the wrong slot
+    /// of the two parallel tables would still compile, still rasterize, and put
+    /// a broom on the row that deletes a transcript. Comparing every pair's
+    /// pixels is what catches that — two rows wearing the same picture is
+    /// exactly the failure a wrong index produces.
+    ///
+    /// Red gate: swap any two of the three entries in `SYMBOL_BODY` and the
+    /// inequality that names them goes red; empty one and its ink mass does.
+    #[test]
+    fn the_terminal_menus_three_marks_are_struck_and_are_three_different_drawings() {
+        let ink = [0x7a, 0x99, 0xff];
+        let mut rasters = ChromeMarkRasters::default();
+        let marks = [
+            ("select", ChromeMark::SelectAll),
+            ("broom", ChromeMark::Broom),
+            ("eraser", ChromeMark::Eraser),
+        ];
+        let icons = rasters.resolve(
+            &marks
+                .iter()
+                .map(|(_, mark)| sprite(*mark, 32.0, 32.0, ink))
+                .collect::<Vec<_>>(),
+        );
+        for ((name, _), icon) in marks.iter().zip(icons.iter()) {
+            assert!(
+                ink_mass(icon) > 0,
+                "the {name} mark rasterized to nothing at all"
+            );
+            assert_eq!((icon.width_px, icon.height_px), (32, 32));
+        }
+        for first in 0..marks.len() {
+            for second in (first + 1)..marks.len() {
+                assert_ne!(
+                    icons[first].rgba, icons[second].rgba,
+                    "{} and {} are the same drawing, so one of them is in the wrong slot",
+                    marks[first].0, marks[second].0
+                );
+            }
+        }
     }
 
     /// PIN — ONE pin at ONE angle: 45°, head upper-right, needle lower-left

@@ -3544,6 +3544,434 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
     }]
 }
 
+// ── the terminal's own context menu (`#term-menu`, ticket #62) ──────────────
+//
+// The oldest menu in the mock-up and the last one to be built, which is why the
+// two menus above it read like siblings of something that was not there: the
+// file row's menu and the pane head's menu both cite "the terminal menu's own
+// rules" for anchoring at a point, and until this slice there was no terminal
+// menu to have any.
+//
+// **The row list is `docs/DESIGN.md` §7.1.6, literally** — 「Copy、Paste、
+// Select all、──、Clear screen、Clear scrollback…、Restart shell…」 — with the
+// one addition §7.1.5d's S3 landing note booked against this ticket: `Find…`,
+// after `Select all` and above the rule, because it belongs with the three verbs
+// that read the pane rather than with the two that destroy something in it.
+//
+// It is a **flat list with a fixed order**, unlike the git menus next door,
+// whose rows depend on what was pressed. That difference is the subject: a git
+// menu is raised on a row and asks what kind of row it is, while this one is
+// raised on a pane and every pane offers the same seven verbs. Which of them can
+// *answer* varies (see [`term_menu_row_available`]); which of them are *there*
+// does not, and a menu whose shape moved under the hand would be a menu nobody
+// could learn.
+
+/// One row of the terminal's context menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TermMenuRow {
+    /// The selection onto the clipboard — **through copy-on-select's own door**,
+    /// so the menu and the drag put the same bytes there and leave the selection
+    /// standing.
+    Copy,
+    /// The clipboard into the shell — the keyboard's paste, byte for byte:
+    /// bracketed when the shell asked for bracketing, chunked onto the one
+    /// synchronous writer, view back at the bottom.
+    Paste,
+    /// Everything this pane has ever printed, selected: frozen history, the
+    /// staged rows that have scrolled out but are not finalized, and the live
+    /// grid.
+    SelectAll,
+    /// §7.1.5d's capsule, on this pane — `Runtime::open_search`.
+    ///
+    /// The row S3 shipped without: the engine, the capsule, the rail's merge and
+    /// the keys all landed, and the *discoverable* door did not, because this
+    /// menu did not exist to hang it on. `Ctrl+F` was the only way in.
+    Find,
+    /// **ED2 and the cursor home, executed here** — nothing is written to the
+    /// PTY, the transcript and staging are not touched, and the rows that leave
+    /// the viewport scroll out into history the ordinary way, so they can still
+    /// be scrolled back to and searched (§7.1.6).
+    ClearScreen,
+    /// **The whole of §3.1's ED3 deletion** — history, staging, blocks, indexes,
+    /// caches, anchor degradation, tombstones — which is what makes it the one
+    /// row on this menu behind a confirmation.
+    ClearScrollback,
+    /// The shell is killed and a new one takes its place in the same seat, on
+    /// the same profile, in the last folder it reported
+    /// (`docs/M2-restart-shell-contract.md` §1).
+    RestartShell,
+}
+
+pub const TERM_MENU_COPY_TEXT: &str = "Copy";
+pub const TERM_MENU_PASTE_TEXT: &str = "Paste";
+pub const TERM_MENU_SELECT_ALL_TEXT: &str = "Select all";
+pub const TERM_MENU_FIND_TEXT: &str = "Find…";
+pub const TERM_MENU_CLEAR_SCREEN_TEXT: &str = "Clear screen";
+pub const TERM_MENU_CLEAR_SCROLLBACK_TEXT: &str = "Clear scrollback…";
+pub const TERM_MENU_RESTART_TEXT: &str = "Restart shell…";
+
+/// The menu, in §7.1.6's order.
+///
+/// A `const` list rather than a function that builds one, because there is
+/// nothing to decide: every terminal pane offers these seven verbs in this order,
+/// and the only thing a pane's own state changes is which of them are greyed.
+pub const TERM_MENU_ROWS: [TermMenuRow; 7] = [
+    TermMenuRow::Copy,
+    TermMenuRow::Paste,
+    TermMenuRow::SelectAll,
+    TermMenuRow::Find,
+    TermMenuRow::ClearScreen,
+    TermMenuRow::ClearScrollback,
+    TermMenuRow::RestartShell,
+];
+
+/// Where the one rule goes: **after the four rows that read the pane and before
+/// the three that change it.**
+///
+/// An index into [`TERM_MENU_ROWS`] rather than a property of a row, unlike
+/// [`GitMenuRow::writes`], and the difference is which fact each menu is
+/// dividing on. A git menu is built afresh per target, so its rule has to be
+/// *derived* or it would land in the wrong place on the next target; this list
+/// never changes, so the honest statement is the position itself. Deriving it
+/// from a `destroys()` predicate would be a second list agreeing with this one.
+pub const TERM_MENU_SEPARATOR_AFTER: usize = 3;
+
+/// What the pane under the menu can answer for (ticket #62, item 4).
+///
+/// Three facts and no pane, because none of the three is a *pointer* to
+/// anything: the menu is laid out and drawn from a snapshot taken when it was
+/// raised, exactly as the git menu carries its target by value, so that a shell
+/// printing under an open menu cannot move a row out from under the hand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TermMenuSubject {
+    /// Whether there is anything for `Copy` to put on the clipboard.
+    pub has_selection: bool,
+    /// Whether this seat is between shells.
+    ///
+    /// `Restart shell…` is greyed rather than hidden while one is under way, for
+    /// [`git_menu_row_available`]'s reason: a menu whose rows move is a menu you
+    /// cannot learn the shape of, and "the verb you just pressed is still
+    /// happening" is a thing worth saying rather than a row worth removing.
+    pub restart_in_flight: bool,
+    /// Whether the capsule can open on this pane at all.
+    ///
+    /// **False exactly on the alternate screen** (§7.1.5d, D-5/R3): §3.2 keeps
+    /// that screen's anchors in an isolated namespace, so there is nothing there
+    /// for a search to address and `Runtime::open_search` declines outright. A
+    /// `Find…` offered over `vim` would be a row that opens nothing, which is
+    /// worse than a greyed one — the reader would be entitled to think the
+    /// search had failed rather than that it does not go there.
+    ///
+    /// It is a field rather than a second reading of `has_selection`'s source
+    /// because the two are asked of different things: one is about what is
+    /// highlighted, the other about which screen is up.
+    pub can_search: bool,
+}
+
+impl Default for TermMenuSubject {
+    /// **An ordinary pane**: a shell on its primary screen, with nothing
+    /// highlighted and nothing being replaced.
+    ///
+    /// Written out rather than derived, because two of these three facts are
+    /// good news and `bool::default()` is `false`: a derived default would say
+    /// "this pane cannot be searched", which is the alternate screen — the rare
+    /// case — and every caller that reached for `..Default::default()` would
+    /// silently be describing `vim`.
+    fn default() -> Self {
+        Self {
+            has_selection: false,
+            restart_in_flight: false,
+            can_search: true,
+        }
+    }
+}
+
+/// Whether a row can do what it says, on this pane.
+///
+/// **`Paste` is not on this list, and that is a decision** (ticket #62, item 4):
+/// the row would be greyed on an empty clipboard *if asking were cheap*, and on
+/// this platform it is not. `bt_platform::clipboard_text` is the only wrapper
+/// there is and it opens the clipboard, reads the whole payload and closes it —
+/// a transaction that contends with every other application on the machine, run
+/// on every menu raise, to grey one row. `IsClipboardFormatAvailable` is the
+/// cheap question and nothing wraps it, so the honest answer is the ticket's own
+/// fallback: the row is always offered, and a paste with nothing to paste is
+/// already a no-op that says so to the log.
+///
+/// The other four are always available because they are always answerable: a
+/// pane with no selection still has a screen to clear, a scrollback to delete
+/// and a grid to select.
+#[must_use]
+pub fn term_menu_row_available(row: TermMenuRow, subject: TermMenuSubject) -> bool {
+    match row {
+        TermMenuRow::Copy => subject.has_selection,
+        // Not "there is nothing to find" — an empty transcript is searchable and
+        // answers `0/0`, which is a real answer. This is the one place a search
+        // cannot be *addressed*.
+        TermMenuRow::Find => subject.can_search,
+        TermMenuRow::RestartShell => !subject.restart_in_flight,
+        _ => true,
+    }
+}
+
+/// The row a keyboard step lands on, **skipping the ones that answer nothing** —
+/// [`git_menu_step`]'s rule and [`FileMenuRow::step`]'s clamp, on this list.
+#[must_use]
+pub fn term_menu_step(
+    current: Option<TermMenuRow>,
+    subject: TermMenuSubject,
+    forwards: bool,
+) -> Option<TermMenuRow> {
+    let walkable: Vec<TermMenuRow> = TERM_MENU_ROWS
+        .into_iter()
+        .filter(|row| term_menu_row_available(*row, subject))
+        .collect();
+    if walkable.is_empty() {
+        return None;
+    }
+    let Some(at) = current.and_then(|row| walkable.iter().position(|found| *found == row)) else {
+        return Some(if forwards {
+            walkable[0]
+        } else {
+            walkable[walkable.len() - 1]
+        });
+    };
+    let next = if forwards {
+        (at + 1).min(walkable.len() - 1)
+    } else {
+        at.saturating_sub(1)
+    };
+    Some(walkable[next])
+}
+
+impl TermMenuRow {
+    /// What the row says.
+    ///
+    /// **Three ellipses and no more**, which is the platform convention the git
+    /// menu's three prompts already keep: `Clear scrollback…` asks again before
+    /// it deletes anything, `Restart shell…` is the mock-up's own honest
+    /// renaming of what `Refresh` used to do, and `Find…` opens a field rather
+    /// than doing something. `Clear screen` has none because it does its whole
+    /// job the moment it is pressed and takes nothing away.
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Copy => TERM_MENU_COPY_TEXT,
+            Self::Paste => TERM_MENU_PASTE_TEXT,
+            Self::SelectAll => TERM_MENU_SELECT_ALL_TEXT,
+            Self::Find => TERM_MENU_FIND_TEXT,
+            Self::ClearScreen => TERM_MENU_CLEAR_SCREEN_TEXT,
+            Self::ClearScrollback => TERM_MENU_CLEAR_SCROLLBACK_TEXT,
+            Self::RestartShell => TERM_MENU_RESTART_TEXT,
+        }
+    }
+
+    /// The mark in the row's 14-pixel column.
+    ///
+    /// **`Find…` has none**, and it is the git menu's `Rename…` decision made a
+    /// second time for the same reason: the house's mark set is cut from the
+    /// mock-up's own sheet, that sheet has no magnifier in it, and the nearest
+    /// thing to one would be a mark that means something else. A wrong picture is
+    /// read faster than a missing one; the row's name says what it does.
+    #[must_use]
+    fn mark(self) -> Option<ChromeMark> {
+        match self {
+            Self::Copy => Some(ChromeMark::Copy),
+            Self::Paste => Some(ChromeMark::Paste),
+            Self::SelectAll => Some(ChromeMark::SelectAll),
+            Self::Find => None,
+            Self::ClearScreen => Some(ChromeMark::Broom),
+            Self::ClearScrollback => Some(ChromeMark::Eraser),
+            Self::RestartShell => Some(ChromeMark::Refresh),
+        }
+    }
+}
+
+/// Everything the terminal menu needs to lay itself out and draw.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TermMenuLook {
+    pub subject: TermMenuSubject,
+    pub hover: Option<TermMenuRow>,
+}
+
+/// Every rectangle the terminal's context menu draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TermMenuLayout {
+    scale: f32,
+    frame: [f32; 4],
+    items: Vec<TermMenuItem>,
+    separator: [f32; 4],
+}
+
+/// One laid-out row of the terminal menu.
+///
+/// Its own type rather than [`GitMenuItem`] with a different row in it, because
+/// the two lists hold different enums and a shared item would have to be generic
+/// over them — a type parameter bought for three fields that are copied out at
+/// the one call site each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TermMenuItem {
+    pub row: TermMenuRow,
+    pub rect: [f32; 4],
+    pub available: bool,
+}
+
+/// `.term-menu`'s own `min-width: 172px` (mock-up 659), which is narrower than
+/// the two menus above it declare — this list's longest row is two words.
+const TERM_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 172.0;
+
+/// Lay the menu out under the point it was raised at.
+///
+/// **A point, not a pane** — [`git_menu_layout`]'s ruling, and it matters here
+/// for a reason of its own: the pane under this menu is a *running shell*, so its
+/// rectangle can be re-solved by a split, a divider drag or a window resize while
+/// the menu stands, and a menu that re-found its pane every frame would walk
+/// across the window while the reader was reading it.
+#[must_use]
+pub fn term_menu_layout(
+    point: [f32; 2],
+    surface: (f32, f32),
+    scale: f32,
+    look: &TermMenuLook,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> TermMenuLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let padding = px(MENU_PADDING_LOGICAL_PX);
+    let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    let separator_block = 2.0 * separator_margin + separator_thickness;
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+
+    let row_width = |row: TermMenuRow, measure: &mut dyn FnMut(&str, f32) -> f32| {
+        px(ITEM_ICON_COLUMN_LOGICAL_PX)
+            + px(ITEM_GAP_LOGICAL_PX)
+            + measure(row.text(), px(ITEM_FONT_LOGICAL_PX))
+    };
+    let content = TERM_MENU_ROWS
+        .iter()
+        .fold(px(TERM_MENU_MIN_WIDTH_LOGICAL_PX) - chrome, |wide, row| {
+            wide.max(row_width(*row, measure))
+        });
+    #[allow(clippy::cast_precision_loss)]
+    let rows_height = TERM_MENU_ROWS.len() as f32 * item_height;
+    let height = 2.0f32
+        .mul_add(border + padding, rows_height + separator_block)
+        .round();
+    let width = (chrome + content).round();
+
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    let left = point[0].min(surface_width - width - edge).max(edge).round();
+    let top = point[1]
+        .min(surface_height - height - edge)
+        .max(edge)
+        .round();
+    let frame = [left, top, left + width, top + height];
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+
+    let mut items = Vec::with_capacity(TERM_MENU_ROWS.len());
+    let mut separator = [0.0_f32; 4];
+    for (at, row) in TERM_MENU_ROWS.iter().enumerate() {
+        items.push(TermMenuItem {
+            row: *row,
+            rect: [content_left, cursor, content_right, cursor + item_height],
+            available: term_menu_row_available(*row, look.subject),
+        });
+        cursor += item_height;
+        if at == TERM_MENU_SEPARATOR_AFTER {
+            separator = [
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ];
+            cursor += separator_block;
+        }
+    }
+    TermMenuLayout {
+        scale,
+        frame,
+        items,
+        separator,
+    }
+}
+
+/// What a point is over, with the same three answers every other menu gives: a
+/// row, the menu's own padding, or nothing at all.
+///
+/// A row that cannot do what it says is **not** offered — the pointer falls
+/// through it onto the menu's body, so it neither lights nor answers a press.
+#[must_use]
+pub fn term_menu_hit(layout: &TermMenuLayout, x: f64, y: f64) -> Option<Option<TermMenuRow>> {
+    let (x, y) = (x as f32, y as f32);
+    for item in &layout.items {
+        if item.available && contains(item.rect, x, y) {
+            return Some(Some(item.row));
+        }
+    }
+    contains(layout.frame, x, y).then_some(None)
+}
+
+/// The menu as one overlay layer.
+#[must_use]
+pub fn term_menu_build(layout: &TermMenuLayout, look: &TermMenuLook) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    for item in &layout.items {
+        push_row(
+            &Row {
+                rect: item.rect,
+                mark: item.row.mark(),
+                name: item.row.text(),
+                hint: None,
+                hint_ink: None,
+                hovered: look.hover == Some(item.row) && item.available,
+                available: item.available,
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
+    }
+    quads.push(OverlayQuad {
+        rect: layout.separator,
+        color: palette.menu_border,
+        alpha: separator_alpha(palette.menu_border),
+    });
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
 // ── the `⌄` open policy, shared by every chevron in the house ───────────────
 //
 // **User ruling, 2026-08-16.** There are two `⌄` in this window — the tab
@@ -9483,5 +9911,260 @@ mod tests {
         ] {
             assert!(!kind.placeholder().is_empty());
         }
+    }
+    // ── ticket #62: the terminal's own context menu ─────────────────────────
+
+    /// PIN (ticket #62) — **the row list is `docs/DESIGN.md` §7.1.6 plus S3's
+    /// `Find…`, in that order, with the rule in the one place it belongs.**
+    ///
+    /// The order is asserted as a whole list rather than as a set of neighbour
+    /// pairs, because the ruling is a sentence and not a collection of
+    /// constraints: 「Copy、Paste、Select all、──、Clear screen、Clear
+    /// scrollback…、Restart shell…」, with `Find…` booked in after `Select all`
+    /// by §7.1.5d's landing note. A list this test agreed with only pairwise
+    /// would let `Find…` slide below the rule and stay green.
+    ///
+    /// MUTATION: move `Find…` past the separator and the second assertion names
+    /// the row that is now standing among the destroyers.
+    #[test]
+    fn the_terminal_menus_rows_are_the_designs_order_with_find_above_the_rule() {
+        use TermMenuRow as R;
+        assert_eq!(
+            TERM_MENU_ROWS,
+            [
+                R::Copy,
+                R::Paste,
+                R::SelectAll,
+                R::Find,
+                R::ClearScreen,
+                R::ClearScrollback,
+                R::RestartShell,
+            ]
+        );
+        assert_eq!(
+            TERM_MENU_ROWS[TERM_MENU_SEPARATOR_AFTER],
+            R::Find,
+            "the rule falls after the last row that only reads the pane"
+        );
+        assert_eq!(
+            TERM_MENU_ROWS[TERM_MENU_SEPARATOR_AFTER + 1],
+            R::ClearScreen,
+            "and the first row below it is the first that changes something"
+        );
+        // The three that ask again before they act, and no others: the platform
+        // convention the git menu's prompts already keep.
+        for row in TERM_MENU_ROWS {
+            assert_eq!(
+                matches!(row, R::Find | R::ClearScrollback | R::RestartShell),
+                row.text().ends_with('\u{2026}'),
+                "{row:?} says {:?}",
+                row.text()
+            );
+        }
+        assert_eq!(R::Copy.text(), "Copy");
+        assert_eq!(R::Paste.text(), "Paste");
+        assert_eq!(R::SelectAll.text(), "Select all");
+        assert_eq!(R::ClearScreen.text(), "Clear screen");
+        // `Find…` is the one row with no mark, and it is a decision rather than
+        // an omission — see `TermMenuRow::mark`.
+        for row in TERM_MENU_ROWS {
+            assert_eq!(row.mark().is_none(), row == R::Find, "{row:?}");
+        }
+    }
+
+    /// PIN (ticket #62, item 4) — **three rows can be greyed and no others**:
+    /// `Copy` without a selection, `Find…` on the alternate screen, and `Restart
+    /// shell…` while a restart is in flight.
+    ///
+    /// `Paste` is asserted *available on an empty clipboard* rather than left
+    /// unmentioned, because "always enabled" is the decision this slice made and
+    /// not a gap in it: the cheap availability query is unwrapped on this
+    /// platform, so the row is offered and a paste with nothing to paste is a
+    /// no-op. A later slice that wraps `IsClipboardFormatAvailable` will have to
+    /// come here to change it.
+    ///
+    /// MUTATION: grey `Copy` on the wrong side of the bit and the first block
+    /// goes red; drop any of the three arms and the sweep below names the row
+    /// that has started answering for a pane it cannot answer for.
+    #[test]
+    fn only_copy_find_and_restart_are_ever_greyed_on_the_terminal_menu() {
+        use TermMenuRow as R;
+        let idle = TermMenuSubject::default();
+        let selected = TermMenuSubject {
+            has_selection: true,
+            ..idle
+        };
+        let restarting = TermMenuSubject {
+            restart_in_flight: true,
+            ..idle
+        };
+
+        let on_alt_screen = TermMenuSubject {
+            can_search: false,
+            ..idle
+        };
+
+        assert!(!term_menu_row_available(R::Copy, idle));
+        assert!(term_menu_row_available(R::Copy, selected));
+        assert!(term_menu_row_available(R::RestartShell, idle));
+        assert!(!term_menu_row_available(R::RestartShell, restarting));
+        // `Find…` is greyed on the one screen a search cannot be addressed to,
+        // and offered on every other pane — including an empty one, whose honest
+        // answer is `0/0` rather than "no".
+        assert!(term_menu_row_available(R::Find, idle));
+        assert!(!term_menu_row_available(R::Find, on_alt_screen));
+
+        // The sweep: the four rows nothing can grey stay offered on every pane
+        // this menu can be raised over, including the alternate screen.
+        for subject in [idle, selected, restarting, on_alt_screen] {
+            for row in TERM_MENU_ROWS {
+                if matches!(row, R::Copy | R::Find | R::RestartShell) {
+                    continue;
+                }
+                assert!(
+                    term_menu_row_available(row, subject),
+                    "{row:?} answers whatever the pane is doing"
+                );
+            }
+        }
+    }
+
+    /// PIN (ticket #62, item 5) — **the keyboard walk steps over the rows that
+    /// answer nothing, and clamps at both ends.**
+    ///
+    /// Clamped rather than cyclic, which is [`FileMenuRow::step`]'s ruling and
+    /// the tree's: one window must not hold two ideas of what the bottom of a
+    /// list does. From nowhere, a step forwards offers the first *available* row
+    /// — which on a pane with no selection is `Paste`, not the greyed `Copy` the
+    /// list starts with.
+    ///
+    /// MUTATION: walk `TERM_MENU_ROWS` instead of the filtered list and the walk
+    /// lands on a row a press would fall straight through.
+    #[test]
+    fn the_terminal_menus_walk_skips_the_greyed_rows_and_stops_at_both_ends() {
+        use TermMenuRow as R;
+        let idle = TermMenuSubject::default();
+        assert_eq!(term_menu_step(None, idle, true), Some(R::Paste));
+        assert_eq!(term_menu_step(None, idle, false), Some(R::RestartShell));
+        assert_eq!(
+            term_menu_step(Some(R::Paste), idle, false),
+            Some(R::Paste),
+            "the top of the walk is the top of what is walkable"
+        );
+        assert_eq!(
+            term_menu_step(Some(R::RestartShell), idle, true),
+            Some(R::RestartShell),
+            "and the bottom clamps rather than wrapping"
+        );
+
+        let mid_restart = TermMenuSubject {
+            has_selection: true,
+            restart_in_flight: true,
+            ..idle
+        };
+        assert_eq!(term_menu_step(None, mid_restart, true), Some(R::Copy));
+        assert_eq!(
+            term_menu_step(Some(R::ClearScrollback), mid_restart, true),
+            Some(R::ClearScrollback),
+            "a restart in flight makes Clear scrollback the last walkable row"
+        );
+        assert_eq!(
+            term_menu_step(None, mid_restart, false),
+            Some(R::ClearScrollback)
+        );
+    }
+
+    /// PIN (ticket #62) — **a menu raised in the corner is pulled back inside on
+    /// both axes, and its last row is still pressable.**
+    ///
+    /// The git menu's own test, on this list, and the second half is the half
+    /// that matters: a frame clamped into the window with rows still laid out
+    /// from the original point would be a menu that *looks* right and answers
+    /// presses seven rows away.
+    #[test]
+    fn a_terminal_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
+        let surface = (960.0, 600.0);
+        let look = TermMenuLook::default();
+        let layout = term_menu_layout([958.0, 599.0], surface, 1.0, &look, &mut fake_measure);
+        let frame = layout.frame;
+        assert!(frame[2] <= surface.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(frame[3] <= surface.1 - MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(frame[0] >= MENU_EDGE_MARGIN_LOGICAL_PX);
+        assert!(frame[1] >= MENU_EDGE_MARGIN_LOGICAL_PX);
+
+        let last = *layout.items.last().expect("the last row is laid out");
+        assert_eq!(last.row, TermMenuRow::RestartShell);
+        assert!(last.rect[3] <= frame[3], "the last row is inside the frame");
+        assert_eq!(
+            term_menu_hit(
+                &layout,
+                f64::from(last.rect[0] + 1.0),
+                f64::from((last.rect[1] + last.rect[3]) / 2.0),
+            ),
+            Some(Some(TermMenuRow::RestartShell))
+        );
+    }
+
+    /// PIN (ticket #62) — **the rule stands between the fourth row and the
+    /// fifth, and a greyed row is drawn but not offered.**
+    ///
+    /// The two facts are one test because they are the same claim about the
+    /// layout being the authority: what the hit test answers has to agree with
+    /// what the painter put there, and the separator's own band is the gap that
+    /// proves the rows below it were pushed down rather than merely drawn over.
+    ///
+    /// MUTATION: let `term_menu_hit` answer greyed rows and the pointer lights a
+    /// `Copy` that a press does nothing with.
+    #[test]
+    fn the_terminal_menus_rule_separates_the_two_halves_and_greyed_rows_are_not_offered() {
+        let look = TermMenuLook::default();
+        let layout = term_menu_layout(
+            [200.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            &look,
+            &mut fake_measure,
+        );
+        let row = |wanted: TermMenuRow| {
+            *layout
+                .items
+                .iter()
+                .find(|item| item.row == wanted)
+                .expect("every row is laid out")
+        };
+        let find = row(TermMenuRow::Find);
+        let clear = row(TermMenuRow::ClearScreen);
+        let rule = layout.separator;
+        assert!(
+            find.rect[3] <= rule[1] && rule[3] <= clear.rect[1],
+            "the rule stands in the gap between the two halves"
+        );
+
+        let copy = row(TermMenuRow::Copy);
+        assert!(!copy.available, "no selection, so Copy cannot answer");
+        assert_eq!(
+            term_menu_hit(
+                &layout,
+                f64::from(copy.rect[0] + 1.0),
+                f64::from((copy.rect[1] + copy.rect[3]) / 2.0),
+            ),
+            Some(None),
+            "the pointer falls through a greyed row onto the menu's own body"
+        );
+        assert_eq!(
+            term_menu_hit(&layout, 1.0, 1.0),
+            None,
+            "and misses the menu entirely outside it"
+        );
+
+        // Drawn all the same, which is the other half of "greyed, not hidden":
+        // one label per entry, whatever each of them can answer.
+        let layers = term_menu_build(&layout, &look);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(
+            layers[0].labels.len(),
+            TERM_MENU_ROWS.len(),
+            "every row is painted, including the ones that cannot answer"
+        );
     }
 }

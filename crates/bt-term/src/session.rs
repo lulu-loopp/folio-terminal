@@ -5782,12 +5782,23 @@ impl DualPlaneSession {
         })
     }
 
-    /// Extract the current semantic selection. Viewport-only reflow is intentionally absent from
-    /// this walk: soft physical wraps concatenate, while hard logical boundaries become CRLF.
-    /// Spaces and tabs at every copied hard-line end (and the final end) are trimmed.
-    pub fn selection_text(&self) -> Option<String> {
-        let selection = self.view_selection()?;
-        let (start, end) = ordered_selection(&selection)?;
+    /// Every row a copy can reach, oldest first — **the whole of what "everything" means here.**
+    ///
+    /// Three planes and not one, which is R7's rule read for the clipboard instead of for search:
+    /// frozen history, the staged rows that have scrolled out but are not finalized yet, and the
+    /// live grid. Two thirds of what is on the screen at any moment is not in the transcript, and a
+    /// walk that skipped either of the volatile planes would be a `Select all` that silently missed
+    /// the last screenful — the exact failure the search block wrote R7 to prevent.
+    ///
+    /// On the alternate screen the first two are absent by construction (§3.2 keeps that screen's
+    /// anchors in an isolated namespace with no ordering against the primary document), so what
+    /// "everything" means there is the grid the program drew, and nothing else.
+    ///
+    /// Split out of [`Self::selection_text`] rather than copied, because the list and the anchors
+    /// it hands back are exactly what [`Self::select_all_selection`] has to span: two walks would
+    /// be two opinions about where the transcript starts, and the copy would be cut with one of
+    /// them from a selection made with the other.
+    fn copyable_rows(&self) -> Vec<CopyRow> {
         let screen = if self.terminal.modes().alternate_screen {
             ScreenId::Alternate
         } else {
@@ -5813,6 +5824,49 @@ impl DualPlaneSession {
                 .visible_row(row)
                 .map(|cells| copy_row_from_live(&cells, row, screen, self.grid_generation))
         }));
+        rows
+    }
+
+    /// The selection `Select all` installs: **the first row's start to the last row's end.**
+    ///
+    /// Two anchors and not a flag, because that is what a selection *is* in this window — every
+    /// consumer of one (the copy, the projection's spans, the frame's rectangles) reads a pair of
+    /// [`ContentAnchor`]s, and a "select all" mode beside them would be a second kind of selection
+    /// for all three to learn. Stated this way it is also the same object a drag makes, so it
+    /// survives reflow, eviction and a resize on exactly the terms every other selection does.
+    ///
+    /// `None` when there is nothing at all to select, which for a live grid means every row of it
+    /// came back empty — the honest answer for a pane with no cells rather than a selection of
+    /// nothing.
+    #[must_use]
+    pub fn select_all_selection(&self) -> Option<ViewSelection> {
+        let rows = self.copyable_rows();
+        let first = rows.first()?;
+        let last = rows.last()?;
+        Some(ViewSelection {
+            start: first.start.clone(),
+            end: last.end.clone(),
+        })
+    }
+
+    /// How many rows an `ESC [ 3 J` would delete — **history and staging, and not the live grid.**
+    ///
+    /// The number the confirmation in front of `Clear scrollback…` names, and it counts exactly the
+    /// two planes that deletion empties (`LifecycleDirective::ClearHistoryAndStaging`): the frozen
+    /// lines, and the staged rows that have scrolled off the top but are not finalized yet. The
+    /// live grid is untouched by ED3 and is therefore not among what is lost.
+    #[must_use]
+    pub fn scrollback_line_count(&self) -> usize {
+        self.document.entries().len() + self.transcript.staged_rows().count()
+    }
+
+    /// Extract the current semantic selection. Viewport-only reflow is intentionally absent from
+    /// this walk: soft physical wraps concatenate, while hard logical boundaries become CRLF.
+    /// Spaces and tabs at every copied hard-line end (and the final end) are trimmed.
+    pub fn selection_text(&self) -> Option<String> {
+        let selection = self.view_selection()?;
+        let (start, end) = ordered_selection(&selection)?;
+        let rows = self.copyable_rows();
 
         let mut output = String::new();
         let mut copied_any_row = false;
@@ -16419,6 +16473,116 @@ mod tests {
         assert_eq!(session.selection_text().as_deref(), Some("中"));
         session.feed(b"x").unwrap();
         assert!(session.view_selection().is_none());
+    }
+
+    /// PIN (ticket #62) — **`Select all` reaches every plane, not the screenful in front of you.**
+    ///
+    /// Three rows are printed into a two-row grid, so one of them has already scrolled out into the
+    /// transcript by the time the selection is made. The selection the menu installs has to reach
+    /// it: a `Select all` that only covered the live grid would copy `two\r\nthree` from a pane
+    /// whose scrollback plainly says `one` above them, which is the copy-side form of exactly the
+    /// failure R7 was written about on the search side.
+    ///
+    /// Red gate: walk only the live rows in `copyable_rows` and the first line goes missing from
+    /// this copy.
+    #[test]
+    fn select_all_reaches_the_frozen_history_as_well_as_the_live_grid() {
+        let mut session = DualPlaneSession::new(nz(8), nz(2));
+        session.feed(b"one\r\ntwo\r\nthree").unwrap();
+        assert!(
+            session.scrollback_line_count() > 0,
+            "the fixture has to have pushed something out of the grid or it proves nothing"
+        );
+
+        let selection = session
+            .select_all_selection()
+            .expect("a pane with rows in it has something to select");
+        session.set_view_selection(Some(selection));
+        assert_eq!(
+            session.selection_text().as_deref(),
+            Some("one\r\ntwo\r\nthree")
+        );
+    }
+
+    /// PIN (ticket #62) — **the alternate screen's "everything" is the grid the program drew.**
+    ///
+    /// §3.2 keeps that screen's anchors in a namespace with no ordering against the primary
+    /// document, so the transcript is not reachable from there and must not be selected: a
+    /// `Select all` inside `vim` that came back with the shell's scrollback would be a copy of
+    /// text the reader cannot see, cut from a plane the frame is not showing.
+    #[test]
+    fn select_all_on_the_alternate_screen_leaves_the_transcript_alone() {
+        let mut session = DualPlaneSession::new(nz(8), nz(2));
+        session.feed(b"one\r\ntwo\r\nthree").unwrap();
+        session.feed(b"\x1b[?1049h").unwrap();
+        session.feed(b"alt").unwrap();
+
+        let selection = session
+            .select_all_selection()
+            .expect("the alternate grid is still a grid");
+        session.set_view_selection(Some(selection));
+        let copied = session.selection_text().unwrap_or_default();
+        assert!(
+            copied.contains("alt"),
+            "the alternate screen's own rows are what is selected: {copied:?}"
+        );
+        assert!(
+            !copied.contains("one"),
+            "the primary transcript is not reachable from the alternate screen: {copied:?}"
+        );
+    }
+
+    /// PIN (ticket #62) — **`Clear scrollback` empties the transcript and takes the command marks
+    /// with it, and `Clear screen` does neither.**
+    ///
+    /// The two rows of §7.1.6 that a reader is most likely to confuse, asserted against each other
+    /// in one test because the whole of what the design says about them is a *difference*: ED2
+    /// scrolls the viewport's rows out into history (so the count goes **up**), while ED3 runs the
+    /// §3.1 deletion pipeline over history and staging alike (so the count goes to zero, and the
+    /// marks go through the ledger with the lines they were anchored to).
+    ///
+    /// Red gate: send ED2 for the scrollback row and the transcript survives; delete the lines
+    /// without going through `delete_history` and the marks outlive their own output.
+    #[test]
+    fn clearing_the_screen_keeps_the_transcript_and_clearing_the_scrollback_takes_the_marks() {
+        let mut session = DualPlaneSession::new(nz(16), nz(4));
+        session
+            .feed(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07echo hi\x1b]133;C\x07\r\nhi\r\n\x1b]133;D;0\x07",
+            )
+            .unwrap();
+        session
+            .feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive")
+            .unwrap();
+        let before = session.scrollback_line_count();
+        assert!(before > 0, "the fixture froze nothing");
+        assert!(
+            !session.command_marks().is_empty(),
+            "the fixture recorded no command mark"
+        );
+
+        // ED2 and the cursor home — the terminal's own `Clear screen`.
+        session.feed(b"\x1b[2J\x1b[H").unwrap();
+        assert!(
+            session.scrollback_line_count() >= before,
+            "clearing the screen scrolls its rows out; it never deletes any"
+        );
+        assert!(
+            !session.command_marks().is_empty(),
+            "clearing the screen is not a deletion and takes no mark with it"
+        );
+
+        // ED3 — the whole of the §3.1 pipeline.
+        session.feed(b"\x1b[3J").unwrap();
+        assert_eq!(
+            session.scrollback_line_count(),
+            0,
+            "ED3 empties history and staging both"
+        );
+        assert!(
+            session.command_marks().is_empty(),
+            "the marks are anchored in the lines that went, and go with them through the ledger"
+        );
     }
 
     proptest! {

@@ -1001,6 +1001,15 @@ pub const GATE_DELETE_TEXT: &str = "Delete";
 pub const GATE_GIT_DELETE_BRANCH_TITLE: &str = "Delete this branch?";
 /// And over a `git tag -d`, which git never refuses.
 pub const GATE_GIT_DELETE_TAG_TITLE: &str = "Delete this tag?";
+/// The question over `Clear scrollback…` — the mock-up's own first line
+/// (8250), word for word.
+pub const GATE_CLEAR_SCROLLBACK_TITLE: &str = "Clear scrollback?";
+/// The word on the button that goes through with it.
+///
+/// The row's own verb, which is the rule [`GATE_DELETE_TEXT`] states: a gate
+/// headed "Clear scrollback?" whose only other button said `Discard` would be
+/// two words for one act.
+pub const GATE_CLEAR_TEXT: &str = "Clear";
 
 /// The gate's own sentence — the mock-up's `Discard unsaved changes to a.txt,
 /// b.md?` (3600), split into a title and a list because a `confirm()` string has
@@ -1080,6 +1089,21 @@ pub enum GateRequest {
         root: std::path::PathBuf,
         name: String,
     },
+    /// **Deleting one pane's transcript** — `Clear scrollback…` (ticket #62).
+    ///
+    /// Here for the reason [`Self::GitDiscard`] is here: everything a
+    /// confirmation *is* already lives in this machine and is correct, and the
+    /// mock-up's own `window.confirm("Clear scrollback?\nPast output is deleted
+    /// — search over it will find nothing.")` is exactly a title and a sentence
+    /// with a destructive button under them.
+    ///
+    /// It is the only request on this list whose subject is **not a document**,
+    /// and that is the whole of why §7.1.6 puts it behind a gate at all: what
+    /// goes is not a file you could open again but a record that exists nowhere
+    /// else on the machine — bt-app never writes a transcript to disk
+    /// (`docs/M2-persistence-schema-v1.md` §0), so the only copy of what a shell
+    /// said this session is the one this row deletes.
+    ClearScrollback(bt_layout::SeatId),
 }
 
 impl GateRequest {
@@ -1096,6 +1120,7 @@ impl GateRequest {
             } => GATE_GIT_DELETE_TITLE,
             Self::GitDeleteBranch { .. } => GATE_GIT_DELETE_BRANCH_TITLE,
             Self::GitDeleteTag { .. } => GATE_GIT_DELETE_TAG_TITLE,
+            Self::ClearScrollback(_) => GATE_CLEAR_SCROLLBACK_TITLE,
         }
     }
 
@@ -1111,6 +1136,7 @@ impl GateRequest {
                 GATE_DISCARD_TEXT
             }
             Self::GitDeleteBranch { .. } | Self::GitDeleteTag { .. } => GATE_DELETE_TEXT,
+            Self::ClearScrollback(_) => GATE_CLEAR_TEXT,
         }
     }
 
@@ -1147,6 +1173,18 @@ impl GateRequest {
             ),
             Self::GitDeleteTag { .. } => format!(
                 "Delete tag {}? The commit it names stays where it is.",
+                names.join(", ")
+            ),
+            // **By count, because there is no name** (§7.1.3's "by name, always"
+            // read for a subject that has none): every other request on this list
+            // names a file or a ref, and what this one deletes is a pane's own
+            // past, which is not called anything. The number is the honest
+            // substitute — it is the one thing about the transcript a reader
+            // cannot see from where they are standing, since the whole of what
+            // makes this row dangerous is the part that has scrolled out of
+            // sight. The second sentence is the mock-up's own (8250).
+            Self::ClearScrollback(_) => format!(
+                "{} of past output is deleted. Search over it will find nothing.",
                 names.join(", ")
             ),
         }

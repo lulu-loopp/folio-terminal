@@ -2890,6 +2890,77 @@ fn git_full_path(root: &Path, path: &str) -> PathBuf {
     root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
+/// **What a `Restart shell…` spawns** — `docs/M2-restart-shell-contract.md`
+/// §1.1, as a function of the leaf that is leaving.
+///
+/// A free function so the contract can be pinned without a window: the three
+/// things §1.1 says are kept are kept *here*, and every one of them is kept by
+/// being read off the dying leaf rather than looked up somewhere newer.
+///
+/// * **The profile is the seat's own**, not the current default. A seat
+///   restarted twice runs the same program both times, which is the whole of
+///   what "同一 seat 反复重启永远用同一个可执行文件" asks for; reading
+///   `settings.default_profile` here would turn a Git Bash pane into a
+///   PowerShell the first time somebody changed that setting.
+/// * **The directory is the last trusted OSC 7 report**, which is what
+///   `working_directory()` holds. The contract is explicit that this is 「最后
+///   已知」 and not 「当前」: a `cd` the old shell performed without announcing
+///   it is a `cd` the restart cannot see, and going to ask the process would be
+///   promising a freshness this window has no way to deliver.
+/// * **No folder at all is an absence, not a fallback.** `None` reaches
+///   `profiles::spawn_place`, which answers it with the profile's own starting
+///   directory — the same answer a brand-new pane on that profile gets.
+///
+/// The manual name is not here because it is not a fact about a shell: it is the
+/// tab's (`TabSeed::manual_name`), and a restart that never touches a tab keeps
+/// it by construction rather than by copying it.
+fn restart_seed(profile: usize, last_reported_cwd: Option<&Path>) -> LeafSeed {
+    LeafSeed {
+        profile,
+        cwd: last_reported_cwd.map(Path::to_path_buf),
+        // A running pane's profile is one this build has, by construction — it
+        // started a process from it.
+        unknown_profile_id: None,
+    }
+}
+
+/// `n lines`, and `1 line` for the one that is not plural.
+///
+/// A function rather than a `format!` at the call site because the singular is
+/// exactly the sort of thing that is right in the first sentence somebody writes
+/// and wrong in the second: this window says "1 line" in one place today and
+/// will say it in every gate, tip and card that ever counts rows.
+fn lines_phrase(lines: usize) -> String {
+    if lines == 1 {
+        "1 line".to_owned()
+    } else {
+        format!("{lines} lines")
+    }
+}
+
+/// A terminal pane's context menu while it is up (ticket #62).
+///
+/// [`GitMenuState`]'s shape with a seat in it, and self-contained for a reason of
+/// its own: what the menu is about is a *running shell*, so the pane can be
+/// re-solved, scrolled, printed into or split while the menu stands. The seat
+/// survives all of that (it is the leaf's identity, not its rectangle) and the
+/// snapshot beside it does not have to: a row greyed because there was no
+/// selection when the menu came up stays greyed, because the sentence the reader
+/// is answering was written when they pressed.
+#[derive(Clone, Copy, Debug)]
+struct TermMenuState {
+    /// Where it was raised, in physical pixels of the surface.
+    point: [f32; 2],
+    /// The pane the verbs are about — **not** whichever pane holds the keyboard.
+    /// A right press does not move the focus (`chrome_mouse_input` answers only
+    /// the left button), so a menu that ran its verbs on `focused_leaf` would
+    /// clear the scrollback of the pane next door.
+    seat: SeatId,
+    /// What the pane could answer for when the menu was raised.
+    subject: profiles::TermMenuSubject,
+    hover: Option<profiles::TermMenuRow>,
+}
+
 /// A file row's context menu while it is up (K143).
 #[derive(Clone, Debug)]
 struct FileMenuState {
@@ -4262,6 +4333,24 @@ struct Runtime {
     pane_menu: Option<PaneMenuState>,
     /// The git context menu, and everything it is about (v2 ④).
     git_menu: Option<GitMenuState>,
+    /// A terminal pane's own context menu (`#term-menu`, ticket #62).
+    term_menu: Option<TermMenuState>,
+    /// **The seat whose shell is being replaced**, for as long as it is.
+    ///
+    /// One at a time by construction — a restart is asked for from a menu, and
+    /// raising a menu is a gesture — so an `Option` rather than a set, and the
+    /// `Option` is what `Restart shell…` is greyed from (ticket #62, item 4).
+    ///
+    /// Today's teardown-and-spawn completes inside the call that starts it, so
+    /// nothing can read this between the two halves; it is a field rather than a
+    /// local because the contract's teardown is not finished. Per
+    /// `docs/M2-restart-shell-contract.md` §1.2 the old process is owed a gentle
+    /// exit signal and a **timeout** before it is killed outright, and a timeout
+    /// is a wait — the moment that lands, the greyed row is the only thing
+    /// standing between a reader and a second restart of a shell that has not
+    /// finished dying. Stating the rule where the wait will be is what keeps the
+    /// two from being written by different people.
+    restarting: Option<SeatId>,
     /// **The two `⌄` clocks** (user ruling, 2026-08-16) — one policy, two
     /// buttons, and a single struct so that there is nowhere for them to differ.
     chevrons: ChevronGates,
@@ -6087,6 +6176,36 @@ fn press_belongs_to_the_window(
     button == input::MouseProtocolButton::Left
         && target == PressedCellTarget::Ours
         && !modes.alternate_screen
+}
+
+/// Whether a right press inside a pane raises this window's own menu, or belongs
+/// to the program running in it (ticket #62, item 2).
+///
+/// **When nothing is tracking the mouse, a right press is ours.** That is the
+/// ordinary case and the one the menu exists for: the pane is showing a shell's
+/// output, nobody has asked for mouse reports, and right-click means what it
+/// means everywhere else on the platform.
+///
+/// **When something *is* tracking, the press is the program's, and the menu
+/// moves to `Shift`+right.** vim's own right-click menus, lazygit's panels and
+/// mc's drag selection are verbs a program wrote and asked for, and a terminal
+/// that swallowed them to show its own list would be a terminal you cannot run
+/// those programs in. Windows Terminal and VS Code both settle it this way, and
+/// `Shift` is already this window's word for "this press is mine" — it is the
+/// same modifier that hands a selection drag back from a tracking program
+/// ([`route_forwarded_mouse_button`]), so nothing new has to be learned.
+///
+/// **The alternate screen needs no line of its own here**, unlike
+/// [`press_belongs_to_the_window`]: a full-screen program that wants the mouse
+/// turns tracking on, and one that has not is a program with no use for a press
+/// this window could give it. The rule is about who asked for the mouse, not
+/// about which screen is up.
+///
+/// This is deliberately the exact complement of the forward test above for the
+/// right button, so the two can never both claim one press: `forward` is
+/// `!shift && tracking`, and this is `!tracking || shift`.
+fn right_press_raises_terminal_menu(modes: TerminalModes, modifiers: ModifiersState) -> bool {
+    modes.mouse_tracking == MouseTracking::Off || modifiers.shift_key()
 }
 
 fn route_forwarded_mouse_button(
@@ -9772,6 +9891,11 @@ struct OverlayStack {
     /// beside either of the two above it — [`Popup::ALL`] is the rule — so where
     /// it sits among them is bookkeeping.
     git_menu: Vec<marks::OverlayLayer>,
+    /// The terminal's own context menu (ticket #62), on the same level and by
+    /// the same argument a third time: it is raised over a pane and is about
+    /// that pane. [`Popup::ALL`] keeps it from ever being up beside the three
+    /// above it, so its place among them is bookkeeping.
+    term_menu: Vec<marks::OverlayLayer>,
     /// The notices (user ruling, 2026-08-16) — **above every menu and below the
     /// tip.**
     ///
@@ -9825,6 +9949,7 @@ impl OverlayStack {
             file_menu,
             pane_menu,
             git_menu,
+            term_menu,
             toast,
             tooltip,
             file_peek,
@@ -9842,6 +9967,7 @@ impl OverlayStack {
             file_menu,
             pane_menu,
             git_menu,
+            term_menu,
             toast,
             tooltip,
             file_peek,
@@ -12127,10 +12253,18 @@ enum Popup {
     /// variant per target would put six names on this list that could never be
     /// open at the same time as each other anyway.
     GitMenu,
+    /// **A terminal pane's own context menu** (`#term-menu`, ticket #62).
+    ///
+    /// The last of the mock-up's menus to be built and therefore the last name
+    /// on this list, and it is exactly the kind of popup the list exists for: it
+    /// is raised by a right press *inside a pane*, which is the one surface
+    /// every other popup in this window is drawn over, so without a line here it
+    /// would be the one menu that could come up underneath an open one.
+    TermMenu,
 }
 
 impl Popup {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Profile,
         Self::Root,
         Self::File,
@@ -12138,6 +12272,7 @@ impl Popup {
         Self::GraphFilter,
         Self::Preview,
         Self::GitMenu,
+        Self::TermMenu,
     ];
 
     /// What one opener has to put away: **every other popup, always.**
@@ -13830,6 +13965,8 @@ impl Runtime {
             preview_head_measures: BTreeMap::new(),
             file_menu: None,
             git_menu: None,
+            term_menu: None,
+            restarting: None,
             pane_menu: None,
             chevrons: ChevronGates::default(),
             graph_filter_menu: None,
@@ -17518,6 +17655,7 @@ impl Runtime {
         stack.file_menu = self.file_menu_layer();
         stack.pane_menu = self.pane_menu_layer();
         stack.git_menu = self.git_menu_layer();
+        stack.term_menu = self.term_menu_layer();
         stack.toast = self.toast_layer();
         stack.tooltip = self.tooltip_layer();
         stack.file_peek = self.file_peek_layer();
@@ -18120,6 +18258,7 @@ impl Runtime {
                 Popup::Pane => self.pane_menu = None,
                 Popup::GraphFilter => self.graph_filter_menu = None,
                 Popup::GitMenu => self.git_menu = None,
+                Popup::TermMenu => self.term_menu = None,
                 Popup::Preview => {
                     self.preview_menu.close();
                 }
@@ -20796,7 +20935,8 @@ impl Runtime {
                 || self.profile_menu.is_open()
                 || self.root_menu.seat().is_some()
                 || self.preview_menu.seat().is_some()
-                || self.graph_filter_menu.is_some(),
+                || self.graph_filter_menu.is_some()
+                || self.term_menu.is_some(),
             files_tree: self.files_keyboard_seat().is_some(),
             // The graph's search field, when it is the focused preview's and it
             // holds the keyboard.
@@ -26350,6 +26490,21 @@ impl Runtime {
             // never lets one of these through unasked.
             restore::GateRequest::GitDeleteBranch { name, .. }
             | restore::GateRequest::GitDeleteTag { name, .. } => vec![name.clone()],
+            // **An empty scrollback is asked nothing** (ticket #62), which is
+            // the emptiness rule this list was written for, applied to a fourth
+            // subject: `raise_dirty_gate` reads an empty list as "there is
+            // nothing to lose here" and lets the verb through, and a pane whose
+            // history and staging are both empty has nothing an ED3 could take.
+            // The clear still runs; it simply runs unasked, because a question
+            // whose only honest answer is "nothing happens either way" is not a
+            // question.
+            restore::GateRequest::ClearScrollback(seat) => self
+                .sessions
+                .get(seat)
+                .map(|leaf| leaf.session.scrollback_line_count())
+                .filter(|lines| *lines > 0)
+                .map(|lines| vec![lines_phrase(lines)])
+                .unwrap_or_default(),
         }
     }
 
@@ -26470,6 +26625,10 @@ impl Runtime {
                 };
                 self.issue_git_write(&origin, git::GitWriteVerb::DeleteTag { name }, Vec::new())
             }
+            // The gate stands *in front of* this one too (`GitDiscard`'s shape),
+            // so the confirmed answer is the deletion itself rather than a re-run
+            // of something that was interrupted.
+            restore::GateRequest::ClearScrollback(seat) => self.clear_pane_scrollback(seat),
         }
     }
 
@@ -27660,6 +27819,343 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    // ── the terminal's own context menu (`#term-menu`, ticket #62) ──────────
+
+    /// What the pane can answer for, as of now.
+    ///
+    /// Read once, when the menu is raised, and carried in [`TermMenuState`] from
+    /// then on — see that struct for why a snapshot rather than a live read: the
+    /// shell under an open menu goes on printing, and a row that greyed itself
+    /// out from under a descending hand would be worse than one that was greyed
+    /// from the start.
+    fn term_menu_subject(&self, seat: SeatId) -> profiles::TermMenuSubject {
+        profiles::TermMenuSubject {
+            // The same question `Copy` will ask when it runs: not "is there a
+            // pair of anchors" but "is there text between them", which is what
+            // `write_selection_text` refuses on. A collapsed selection — a bare
+            // click that never travelled — has anchors and no bytes, and a
+            // `Copy` offered for it would put nothing on the clipboard and say
+            // nothing about having done so.
+            has_selection: self
+                .sessions
+                .get(&seat)
+                .and_then(|leaf| leaf.session.selection_text())
+                .is_some_and(|text| !text.is_empty()),
+            restart_in_flight: self.restarting == Some(seat),
+            // The same question `Find…` will ask when it runs, asked of the same
+            // function: one door, so a greyed row and a declined verb can never
+            // disagree about which panes a search can be addressed to.
+            can_search: self.seat_can_search(seat),
+        }
+    }
+
+    /// Raise the menu a right press asked for.
+    ///
+    /// E61 first: the opener closes every other popup, which for this one is the
+    /// whole of what keeps a right press inside a pane from dropping a menu on
+    /// top of the pane-head menu already hanging over it.
+    fn open_term_menu_at(&mut self, seat: SeatId, position: PhysicalPosition<f64>) -> Result<()> {
+        self.close_popups_except(Popup::TermMenu);
+        self.term_menu = Some(TermMenuState {
+            point: [position.x as f32, position.y as f32],
+            seat,
+            subject: self.term_menu_subject(seat),
+            hover: None,
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Where the terminal menu is, if one is up.
+    ///
+    /// [`Runtime::git_menu_layout`]'s twin down to the borrow dance: the look is
+    /// a bundle of `Copy` scalars rather than borrows, so unlike the git menu it
+    /// needs no owned draw struct — the measure closure can hold the renderer
+    /// mutably while the look sits on the stack.
+    fn term_menu_layout(&mut self) -> Option<profiles::TermMenuLayout> {
+        let menu = self.term_menu.as_ref()?;
+        let (point, look) = (
+            menu.point,
+            profiles::TermMenuLook {
+                subject: menu.subject,
+                hover: menu.hover,
+            },
+        );
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        Some(profiles::term_menu_layout(
+            point,
+            (width as f32, height as f32),
+            scale,
+            &look,
+            &mut measure,
+        ))
+    }
+
+    /// The terminal menu's own level of the overlay stack.
+    fn term_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some(look) = self.term_menu.as_ref().map(|menu| profiles::TermMenuLook {
+            subject: menu.subject,
+            hover: menu.hover,
+        }) else {
+            return Vec::new();
+        };
+        let Some(layout) = self.term_menu_layout() else {
+            return Vec::new();
+        };
+        profiles::term_menu_build(&layout, &look)
+    }
+
+    fn close_term_menu(&mut self) -> Result<bool> {
+        if self.term_menu.take().is_none() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Spend a row.
+    ///
+    /// The menu is **taken** first, so every verb below runs with it already
+    /// gone: a row that raises a gate would otherwise leave a menu standing
+    /// behind the scrim, and a row that spawns a shell would leave one hanging
+    /// over a pane that is being rebuilt underneath it.
+    fn run_term_menu_row(&mut self, row: profiles::TermMenuRow) -> Result<()> {
+        let Some(menu) = self.term_menu.take() else {
+            return Ok(());
+        };
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        let seat = menu.seat;
+        match row {
+            // **Copy-on-select's own door**, so that the menu and the drag put
+            // the same bytes on the clipboard and both leave the selection
+            // standing. `Ctrl+C`'s door is the other one (`copy_selection`),
+            // which clears the selection afterwards — right for a keystroke that
+            // ends a gesture, wrong for a menu row that was reached by pointing
+            // at what is still highlighted.
+            profiles::TermMenuRow::Copy => {
+                self.copy_selection_on_release(seat);
+                Ok(())
+            }
+            profiles::TermMenuRow::Paste => self.paste_from_clipboard_into(seat),
+            profiles::TermMenuRow::SelectAll => self.select_all_in_pane(seat),
+            profiles::TermMenuRow::Find => self.open_search(seat),
+            profiles::TermMenuRow::ClearScreen => self.clear_pane_screen(seat),
+            // **The gate, and the verb behind it** — `GitDiscard`'s shape: the
+            // question stands in front of the deletion rather than behind an
+            // interrupted one, so it is asked here and answered in
+            // [`Runtime::answer_dirty_gate`]. A pane with nothing in its
+            // scrollback raises no gate (`gate_dirty_names` is empty) and the
+            // clear goes straight through, which is right: there is nothing to
+            // ask about when there is nothing to lose.
+            profiles::TermMenuRow::ClearScrollback => {
+                if self.raise_dirty_gate(restore::GateRequest::ClearScrollback(seat))? {
+                    return Ok(());
+                }
+                self.clear_pane_scrollback(seat)
+            }
+            profiles::TermMenuRow::RestartShell => self.restart_shell(seat),
+        }
+    }
+
+    /// One key, with the terminal menu holding the keyboard.
+    ///
+    /// The file menu's four rules verbatim — Esc closes, the arrows walk,
+    /// Enter/Space run, everything else is swallowed — because §7.1.3's
+    /// 「可键盘化」 is a promise about context menus rather than about file rows,
+    /// and a menu that could not be walked would be the one menu in this window
+    /// reachable only by a pointer.
+    fn term_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                if !event.repeat {
+                    self.close_term_menu()?;
+                }
+            }
+            // Repeats on the travel keys and nowhere else: holding an arrow down
+            // is one continuous "further", and holding Enter is not one
+            // continuous "again".
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
+                let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
+                if let Some(menu) = self.term_menu.as_mut() {
+                    menu.hover = profiles::term_menu_step(menu.hover, menu.subject, forwards);
+                }
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                if !event.repeat
+                    && let Some(row) = self.term_menu.as_ref().and_then(|menu| menu.hover)
+                {
+                    self.run_term_menu_row(row)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// `Select all` — **every plane this pane has**, not the screenful in front
+    /// of you.
+    ///
+    /// The anchors come from [`DualPlaneSession::select_all_selection`], which
+    /// walks the same three planes a copy is cut from, and they are installed
+    /// through [`TabState::set_leaf_selection`] — the one door that also drops
+    /// every other pane's selection, because this window holds one.
+    fn select_all_in_pane(&mut self, seat: SeatId) -> Result<()> {
+        let Some(selection) = self
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| leaf.session.select_all_selection())
+        else {
+            return Ok(());
+        };
+        self.set_pane_view_selection(seat, Some(selection));
+        self.repaint_pane_change(seat)
+    }
+
+    /// `Clear screen` — **ED2 and the cursor home, executed by the terminal**
+    /// (§7.1.6).
+    ///
+    /// Nothing is written to the PTY, which is the whole of the ruling's first
+    /// half: `cls` typed at a prompt is a *command*, and a menu row that typed
+    /// one for you would land in the middle of whatever half-finished line was
+    /// already there, would be refused outright by a program that is not a shell,
+    /// and would enter that shell's history. Feeding the escape into this
+    /// session's own parser is the terminal doing what the escape says, on the
+    /// screen the escape is about.
+    ///
+    /// The rows that leave the viewport **scroll out into history the ordinary
+    /// way** — `clear_viewport` pushes the occupied lines up rather than erasing
+    /// them — so everything cleared is still there to be scrolled back to and
+    /// still there to be searched. That is exactly what the row below it is not.
+    fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        leaf.session
+            .feed(b"\x1b[2J\x1b[H")
+            .context("clear one pane's screen locally")?;
+        // The live selection goes with the screen it was drawn on (§7.1.6). Not
+        // because the anchors would dangle — they name rows that are now in
+        // history — but because a highlight left standing over cleared cells is
+        // the window claiming a selection of what is no longer there.
+        self.clear_pane_selection(seat);
+        self.repaint_pane_change(seat)
+    }
+
+    /// `Clear scrollback` — **the whole of §3.1's ED3 pipeline**, on this pane.
+    ///
+    /// One escape and not a bespoke teardown, and that is the point: `ESC [ 3 J`
+    /// already runs transcript, staging, blocks, indexes, caches, anchor
+    /// degradation and tombstones through
+    /// `LifecycleDirective::ClearHistoryAndStaging`, and the command marks go
+    /// with it through the ledger (`retire_command_marks`) rather than through a
+    /// second list that would have to be remembered. A menu row that emptied
+    /// some of those by hand would be a second, shorter definition of what
+    /// deleting history means — and the first thing to fall off it would be
+    /// whichever structure the next slice adds.
+    fn clear_pane_scrollback(&mut self, seat: SeatId) -> Result<()> {
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        leaf.session
+            .feed(b"\x1b[3J")
+            .context("delete one pane's transcript locally")?;
+        // A selection that reached into the history it was cut from is a
+        // selection of lines that no longer exist.
+        self.clear_pane_selection(seat);
+        self.repaint_pane_change(seat)
+    }
+
+    /// `Restart shell…` — **the same seat, the same profile, the same folder**
+    /// (`docs/M2-restart-shell-contract.md` §1.1).
+    ///
+    /// The three things the contract says are kept are kept by being *read off
+    /// the leaf that is leaving*: its `profile` (the seat's own, decided when it
+    /// was created — never "the current default", so a seat restarted twice
+    /// starts the same program both times), and `working_directory()`, which is
+    /// the **last trusted OSC 7 report** and is explicitly not a reading of the
+    /// live process. The manual name is kept by not being touched: it is the
+    /// tab's (`TabSeed::manual_name`), and nothing here goes near a tab.
+    ///
+    /// **The tree is not rebuilt** (§1.1, last row): this replaces the runtime
+    /// state behind one leaf and moves no rectangle, so pin, tab and position all
+    /// survive by construction rather than by being restored.
+    ///
+    /// The old shell dies when its `LeafSession` is dropped — `PtySession::drop`
+    /// runs `shutdown`, which kills the child and joins its reader — and the new
+    /// one is spawned **first**, so a ConPTY that cannot be created leaves the
+    /// pane exactly as it was rather than empty. That ordering is `stand_in_terminal`'s
+    /// own and it is the reason this cannot half-succeed.
+    ///
+    /// **What this does not yet do**, and it is written down rather than
+    /// forgotten: the transcript is not carried across with a boundary record
+    /// (§1.3), the process tree is killed by handle rather than through a Job
+    /// Object (§1.2), and the busy confirmation (§1.6) is not asked — that one
+    /// needs the busy state machine of §7.1.5b, which this build does not have,
+    /// and a confirmation that guessed would be a dialog in front of a fact
+    /// nobody measured.
+    fn restart_shell(&mut self, seat: SeatId) -> Result<()> {
+        if self.restarting.is_some() {
+            return Ok(());
+        }
+        let Some(leaf) = self.sessions.get(&seat) else {
+            return Ok(());
+        };
+        let seed = restart_seed(leaf.profile, leaf.session.working_directory());
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+        else {
+            return Ok(());
+        };
+        let proxy = self.event_proxy.clone();
+        let wake: OutputWake = Arc::new(move || {
+            let _ = proxy.send_event(AppEvent::PtyOutput);
+        });
+        let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
+        self.restarting = Some(seat);
+        let spawned = create_leaf_session(
+            &self.renderer,
+            body,
+            wake,
+            None,
+            &seed,
+            &self.profile_programs,
+            formulas,
+        );
+        self.restarting = None;
+        // The old leaf is dropped **here**, by the insert: `PtySession::drop`
+        // takes the child with it, and it takes it only once the replacement is
+        // known to exist.
+        self.sessions.insert(seat, spawned?);
+        // **The window's frame slot held the pane that is gone.** `focus_pane_at`
+        // empties it for the same reason when the keyboard moves: leaving a
+        // frame there would let the next present assert a grid belonging to a
+        // session that no longer exists.
+        if seat == self.focused_leaf {
+            self.last_presented_frame = None;
+        }
+        // The capsule's hits were cut from a transcript that no longer exists,
+        // and so was the cache that decides whether to re-cut them: its key is a
+        // count and a pair of ids, and an empty transcript's key is the same
+        // whichever shell emptied it. Both go.
+        self.clear_search_highlights(seat);
+        self.search_scan = None;
+        self.settle_seat_set_change()?;
+        self.refresh_chrome();
+        self.repaint_pane_change(seat)
     }
 
     // ── the pane head's own menu (user rulings, 2026-08-15, 2026-08-16) ─────
@@ -33373,6 +33869,28 @@ impl Runtime {
                 return Ok(());
             }
         }
+        // And the terminal's own menu, the same three lines again — with the
+        // same care about a row lit by a key, and one line more: a row that
+        // cannot answer is not hovered, so `term_menu_hit` returning `Some(None)`
+        // over a greyed `Copy` puts the highlight out rather than leaving it on
+        // the row the hand has left.
+        if let Some(layout) = self.term_menu_layout() {
+            let over = profiles::term_menu_hit(&layout, position.x, position.y);
+            if let Some(row) = over
+                && let Some(menu) = self.term_menu.as_mut()
+                && menu.hover != row
+            {
+                menu.hover = row;
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+            }
+            if over.is_some() {
+                self.note_tooltip(None)?;
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
+        }
         // And the graph's branch filter, the same three lines a third time.
         if let Some(layout) = self.graph_filter_menu_layout() {
             let over = profiles::git_filter_menu_hit(&layout, position.x, position.y);
@@ -35819,6 +36337,28 @@ impl Runtime {
                 }
             }
         }
+        // The terminal's own menu, on the git menu's level and by its three
+        // rules — a row runs it, its padding swallows, and a press outside puts
+        // it away and then goes on being the press it was, which is how a second
+        // right press moves it from one pane to another.
+        if let (Some(layout), Some(position)) = (self.term_menu_layout(), self.pointer_position) {
+            match profiles::term_menu_hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed
+                        && button == MouseButton::Left
+                        && let Some(row) = row
+                    {
+                        self.run_term_menu_row(row)?;
+                    }
+                    return Ok(());
+                }
+                None => {
+                    if state == ElementState::Pressed {
+                        self.close_term_menu()?;
+                    }
+                }
+            }
+        }
         // The file menu, above the float and above the other two popups, for the
         // reason `refresh_overlay` gives: it is drawn over the floating window
         // because it is very often *about a row inside it*, and a press has to
@@ -36240,6 +36780,28 @@ impl Runtime {
         let Some((hit_seat, hit)) = self.pane_frame_hit() else {
             return Ok(());
         };
+        // **The terminal's own context menu** (ticket #62), above the forwarding
+        // below it and below every surface that can stand over a pane — which is
+        // every arm before this one.
+        //
+        // The modes are read off **the pane the press landed in** and not off
+        // `self.session`, which is the focused leaf: a right press does not move
+        // the focus (`chrome_mouse_input` answers only the left button), so
+        // asking the keyboard's pane whether *this* pane's program is tracking
+        // the mouse would answer a question about the wrong shell — a `vim` in
+        // the pane next door would take the menu away from a PowerShell, or fail
+        // to keep it away from itself.
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && let Some(position) = self.pointer_position
+            && let Some(modes) = self
+                .sessions
+                .get(&hit_seat)
+                .map(|leaf| leaf.session.terminal_modes())
+            && right_press_raises_terminal_menu(modes, self.modifiers)
+        {
+            return self.open_term_menu_at(hit_seat, position);
+        }
         let Some(protocol_button) = protocol_mouse_button(button) else {
             return Ok(());
         };
@@ -37229,6 +37791,15 @@ impl Runtime {
             self.git_menu_key(event)?;
             return Ok(());
         }
+        // **The terminal's own menu owns the keyboard on the same terms**
+        // (ticket #62), and here rather than lower for the reason the whole
+        // ladder is ordered by: the thing underneath it is a *terminal*, and
+        // every key that escapes this branch is a key typed into a shell whose
+        // view is behind a menu.
+        if self.term_menu.is_some() {
+            self.term_menu_key(event)?;
+            return Ok(());
+        }
         // **The file menu owns the keyboard outright while it is up**, which the
         // two popups below it deliberately do not.
         //
@@ -37603,18 +38174,39 @@ impl Runtime {
         )
     }
 
+    /// `Ctrl+V` / `Shift+Insert` — the keyboard's paste, into the shell the
+    /// keyboard is in.
     fn paste_from_clipboard(&mut self) -> Result<()> {
+        self.paste_from_clipboard_into(self.focused_leaf)
+    }
+
+    /// The same paste, **into one named pane**.
+    ///
+    /// One door and not two, which is the whole reason this took the seat as a
+    /// parameter rather than the menu growing a paste of its own: the bytes, the
+    /// bracketing, the chunking onto the single synchronous writer, the cleared
+    /// selection and the return to the bottom are all decisions this window has
+    /// already made once ([`paste_text`]), and a second paste path would be a
+    /// second place for the multi-line policy to be decided when it lands.
+    ///
+    /// The seat differs from `focused_leaf` for exactly one caller — the
+    /// terminal menu, which is raised by a right press, and a right press does
+    /// not move the focus.
+    fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
         let window = Arc::clone(&self.window);
         let active = self.active_tab;
         // Destructured rather than reached through three derefs: the paste needs
         // the shell's screen, its projection and its pipe held at once, and they
         // are three fields of one leaf.
-        let LeafSession {
+        let Some(LeafSession {
             pty,
             session,
             projection,
             ..
-        } = self.tabs[active].focused_mut();
+        }) = self.tabs[active].sessions.get_mut(&seat)
+        else {
+            return Ok(());
+        };
         if !paste_from_clipboard(
             session,
             projection,
@@ -37633,6 +38225,15 @@ impl Runtime {
             },
         )? {
             return Ok(());
+        }
+        // **The keyboard's clock is the keyboard's pane's.** A paste into the
+        // focused shell is a keystroke and is measured as one; a paste into the
+        // pane a menu was raised over is not, and stamping `pending_keyboard_at`
+        // for it would put a pointer gesture into the input-latency the caret's
+        // own pane is judged by. The other pane still has to reach the glass,
+        // which is exactly what `repaint_pane_change` is for.
+        if seat != self.focused_leaf {
+            return self.repaint_pane_change(seat);
         }
         self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
@@ -40781,6 +41382,7 @@ mod tests {
             file_menu: mark(6),
             pane_menu: mark(7),
             git_menu: mark(12),
+            term_menu: mark(15),
             toast: mark(8),
             tooltip: mark(9),
             file_peek: mark(10),
@@ -40793,9 +41395,10 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 13, 1, 2, 14, 3, 4, 5, 6, 7, 12, 8, 9, 10, 11],
+            vec![0, 13, 1, 2, 14, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11],
             "bottom to top: pane bars, command rails, rail, ground, search capsule, schematic, \
-             float, modal, file menu, pane menu, git menu, notices, tip, glance, ghost"
+             float, modal, file menu, pane menu, git menu, terminal menu, notices, tip, glance, \
+             ghost"
         );
         let at = |tag: u8| {
             order
@@ -50385,6 +50988,275 @@ mod tests {
         }
     }
 
+    /// PIN (ticket #62, item 2) — **a right press raises this window's menu
+    /// unless the program is tracking the mouse, and then `Shift`+right does.**
+    ///
+    /// The second half of the test is the load-bearing one: the two answers are
+    /// asserted to be *complementary* for the right button, against
+    /// [`route_forwarded_mouse_button`] itself rather than against a remembered
+    /// copy of its rule. One press can be claimed by exactly one of them, and
+    /// the failure this forbids is the silent one — a press that opens no menu
+    /// *and* sends no report, which reads to the user as a dead button.
+    ///
+    /// MUTATION: drop the `shift` arm and the tracking case never opens a menu
+    /// again; drop the `Off` arm and an idle shell's right-click goes down the
+    /// pipe as a mouse report nothing asked for.
+    #[test]
+    fn a_right_press_is_the_windows_unless_the_program_tracks_and_then_shift_takes_it_back() {
+        let mut idle =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        idle.feed(b"ready").unwrap();
+        assert_eq!(idle.terminal_modes().mouse_tracking, MouseTracking::Off);
+        assert!(right_press_raises_terminal_menu(
+            idle.terminal_modes(),
+            ModifiersState::empty()
+        ));
+
+        // Every screen a tracking program can be on, because the rule is about
+        // who asked for the mouse and not about which screen is up.
+        for enter_alt in [b"".as_slice(), b"\x1b[?1049h"] {
+            let mut tracking =
+                DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+            tracking.feed(enter_alt).unwrap();
+            tracking.feed(b"\x1b[?1000h\x1b[?1006h").unwrap();
+            let modes = tracking.terminal_modes();
+            assert_ne!(modes.mouse_tracking, MouseTracking::Off);
+
+            assert!(
+                !right_press_raises_terminal_menu(modes, ModifiersState::empty()),
+                "a bare right press belongs to the program that asked for it"
+            );
+            assert!(
+                right_press_raises_terminal_menu(modes, ModifiersState::SHIFT),
+                "and Shift is how the window takes it back (WT / VS Code)"
+            );
+
+            // Complementary, checked against the forwarder rather than restated:
+            // exactly one of the two claims each press.
+            for modifiers in [ModifiersState::empty(), ModifiersState::SHIFT] {
+                let mut route = None;
+                let forwarded = route_forwarded_mouse_button(
+                    &mut route,
+                    ElementState::Pressed,
+                    input::MouseProtocolButton::Right,
+                    bt_render::GridHit { row: 1, column: 2 },
+                    modes,
+                    modifiers,
+                    PressedCellTarget::Ordinary,
+                )
+                .is_some();
+                assert_ne!(
+                    forwarded,
+                    right_press_raises_terminal_menu(modes, modifiers),
+                    "a right press is the menu's or the program's, never both and never neither"
+                );
+            }
+        }
+
+        // And with nothing tracking, the forwarder declines whatever the
+        // modifiers say — so the menu is free to take every one of them.
+        for modifiers in [ModifiersState::empty(), ModifiersState::SHIFT] {
+            let mut route = None;
+            assert!(
+                route_forwarded_mouse_button(
+                    &mut route,
+                    ElementState::Pressed,
+                    input::MouseProtocolButton::Right,
+                    bt_render::GridHit { row: 1, column: 2 },
+                    idle.terminal_modes(),
+                    modifiers,
+                    PressedCellTarget::Ordinary,
+                )
+                .is_none()
+            );
+            assert!(right_press_raises_terminal_menu(
+                idle.terminal_modes(),
+                modifiers
+            ));
+        }
+    }
+
+    /// PIN (ticket #62) — **`Copy` on the menu is copy-on-select's own door: the
+    /// same bytes, and the selection is still there afterwards.**
+    ///
+    /// The contrast with `Ctrl+C`'s door is the content. A keystroke that ends a
+    /// gesture may reasonably clear the highlight; a menu row reached by
+    /// *pointing at the highlight* may not, because the thing the reader aimed at
+    /// would vanish as the reward for having used it. Both doors are exercised on
+    /// one selection here so the difference cannot be read as an accident of two
+    /// separate fixtures.
+    ///
+    /// MUTATION: point the `Copy` row at `copy_selection` and the second half of
+    /// this test goes red on the selection that is no longer standing.
+    #[test]
+    fn the_menus_copy_is_copy_on_selects_door_and_leaves_the_selection_standing() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed(b"copy me").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let selection = ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 6, Bias::After).unwrap().unwrap(),
+        };
+        session.set_view_selection(Some(selection.clone()));
+        projection.set_selection(Some(selection));
+
+        // The menu row's door, which is the one copy-on-select spends.
+        let mut menu_clipboard = String::new();
+        assert!(write_selection_text(&session, true, |text| {
+            menu_clipboard.push_str(text);
+            Ok(())
+        }));
+        assert_eq!(menu_clipboard, "copy me");
+        assert!(
+            session.view_selection().is_some(),
+            "the row was reached by pointing at this selection; it stays"
+        );
+        assert!(projection.selection().is_some());
+
+        // The keyboard's door, on the same selection, for the difference.
+        let mut keyboard_clipboard = String::new();
+        assert!(copy_selection(&mut session, &mut projection, |text| {
+            keyboard_clipboard.push_str(text);
+            Ok(())
+        }));
+        assert_eq!(
+            keyboard_clipboard, menu_clipboard,
+            "the two doors put the same bytes on the clipboard"
+        );
+        assert!(session.view_selection().is_none());
+    }
+
+    /// PIN (ticket #62) — **the menu's `Paste` is the keyboard's paste, and
+    /// there is only one of it.**
+    ///
+    /// What the row spends is `paste_from_clipboard_into`, which is what
+    /// `Ctrl+V` spends with the focused seat filled in — so the thing worth
+    /// pinning is the door itself, exercised here on the four promises every
+    /// caller inherits: the bytes are bracketed when the shell asked for
+    /// bracketing, `\r\n` is normalised the way a terminal delivers it, the
+    /// selection goes, and the view comes back to the bottom. A second paste
+    /// path would be a second place for the multi-line policy to be decided when
+    /// it lands (P2-6), which is the whole reason there is one.
+    ///
+    /// MUTATION: give the menu its own writer and the bracketing promise is the
+    /// first thing to drift — a `Paste` that skipped `ESC [ 200 ~` hands `bash`
+    /// a multi-line paste it runs a line at a time.
+    #[test]
+    fn the_menus_paste_is_the_keyboards_paste_door_and_leaves_the_view_at_the_bottom() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session
+            .feed(b"\x1b[?2004hone\r\ntwo\r\nthree\r\nfour")
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let selection = ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 2, Bias::After).unwrap().unwrap(),
+        };
+        session.set_view_selection(Some(selection.clone()));
+        projection.set_selection(Some(selection));
+        projection.scroll_by_subpixels(2 * projection.cell_height_subpixels().get());
+        assert!(
+            projection.is_scrolled(),
+            "the fixture has to be reading history or the return to the bottom proves nothing"
+        );
+
+        let mut written = Vec::new();
+        paste_text(&mut session, &mut projection, "a\r\nb\n", |chunk| {
+            written.extend_from_slice(chunk);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            written, b"\x1b[200~a\rb\r\x1b[201~",
+            "bracketed because the shell asked, with the breaks a terminal delivers"
+        );
+        assert!(session.view_selection().is_none());
+        assert!(projection.selection().is_none());
+        assert!(
+            !projection.is_scrolled(),
+            "typing returns the view to the live bottom, and a paste is typing"
+        );
+    }
+
+    /// PIN (ticket #62) — **the restart's inputs are the seat's own profile and
+    /// its last reported folder** (`docs/M2-restart-shell-contract.md` §1.1).
+    ///
+    /// Written as a test of the seed rather than of a spawn, because the seed is
+    /// the whole of what the contract constrains: what happens to it afterwards
+    /// is `create_leaf_session`'s, and it is the same path a split and a revived
+    /// tab already take. What could silently go wrong is the *reading* — a
+    /// profile taken from the current default, or a directory asked of the dying
+    /// process — and both of those are visible here and nowhere else.
+    ///
+    /// MUTATION: hand it a default profile instead of the leaf's and the first
+    /// assertion names the shell the pane would have come back as.
+    #[test]
+    fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
+        let profile = profiles::index_of_id("gitbash");
+        let reported = PathBuf::from(r"D:\Developer\BetterTerminal");
+
+        let seed = restart_seed(profile, Some(reported.as_path()));
+        assert_eq!(
+            seed.profile, profile,
+            "the seat's own profile, never the current default"
+        );
+        assert_eq!(seed.cwd.as_deref(), Some(reported.as_path()));
+        assert_eq!(
+            seed.unknown_profile_id, None,
+            "a pane that is running has a profile this build has"
+        );
+
+        // A shell that never said where it stood is an absence, not a fallback:
+        // `spawn_place` answers `None` with the profile's own starting
+        // directory, which is what a brand-new pane on that profile gets.
+        assert_eq!(restart_seed(profile, None).cwd, None);
+    }
+
+    /// PIN (ticket #62) — **`Clear scrollback…` asks by count, and asks nothing
+    /// when there is nothing to lose.**
+    ///
+    /// The gate names what goes, which for every other request on its list is a
+    /// file or a ref and for this one is a number: a transcript has no name, and
+    /// the part of it that makes the row dangerous is precisely the part that has
+    /// scrolled out of sight. `raise_dirty_gate` reads an empty name list as
+    /// "nothing to ask about", so an empty scrollback is cleared without a
+    /// dialog — the same shortcut a clean preview pool already takes.
+    ///
+    /// MUTATION: give the empty case a name and every `Clear scrollback…` on a
+    /// fresh pane raises a modal about deleting nothing.
+    #[test]
+    fn the_clear_scrollback_gate_counts_what_it_deletes_and_asks_nothing_for_none() {
+        let request = restore::GateRequest::ClearScrollback(bt_layout::SeatId(0));
+        assert_eq!(request.title(), "Clear scrollback?");
+        assert_eq!(
+            request.answer_text(),
+            "Clear",
+            "the button carries the row's own verb"
+        );
+        assert_eq!(
+            request.message(&[lines_phrase(1_284)]),
+            "1284 lines of past output is deleted. Search over it will find nothing.",
+            "the sentence leads with what is being lost, and keeps the mock-up's own warning"
+        );
+        assert!(request.message(&[lines_phrase(1)]).starts_with("1 line "));
+
+        assert_eq!(lines_phrase(1), "1 line");
+        assert_eq!(lines_phrase(2), "2 lines");
+        assert_eq!(lines_phrase(0), "0 lines");
+
+        // What the empty case looks like where it is actually decided: a pane
+        // whose history and staging are both empty offers the gate no name, and
+        // `raise_dirty_gate` lets the verb through unasked.
+        let session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        assert_eq!(session.scrollback_line_count(), 0);
+    }
+
     #[test]
     fn stationary_double_click_stays_strictly_paired_across_tui_repaints() {
         let mut session =
@@ -58442,8 +59314,8 @@ mod tests {
     fn opening_any_popup_closes_every_other_one() {
         assert_eq!(
             Popup::ALL.len(),
-            7,
-            "seven popups, and this list is the rule"
+            8,
+            "eight popups, and this list is the rule"
         );
         for keep in Popup::ALL {
             let closed: Vec<Popup> = keep.others().collect();
@@ -58473,6 +59345,11 @@ mod tests {
         // press, which is a gesture no other popup answers, so it is exactly the
         // one that could otherwise have come up on top of an open menu.
         assert!(Popup::ALL.contains(&Popup::GitMenu));
+        // And the terminal's own menu (ticket #62), which is the one raised
+        // *inside a pane* — the surface every other popup on this list is drawn
+        // over, and therefore the one that could otherwise have come up
+        // underneath an open menu rather than on top of it.
+        assert!(Popup::ALL.contains(&Popup::TermMenu));
     }
 
     /// PIN — **the `Split direction` setting decides every split that has no
