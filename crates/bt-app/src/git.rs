@@ -2059,14 +2059,27 @@ fn git_command(program: &Path, dir: &Path, arguments: &[&OsStr]) -> Command {
 /// Both pipes are drained concurrently because a child that fills one while we
 /// are blocked reading the other is a child that never exits — the classic
 /// deadlock, and the reason this is not two sequential reads.
+/// **In the worker's band, not the frame's.** A new thread starts at
+/// `THREAD_PRIORITY_NORMAL` whatever the thread that spawned it was running at,
+/// so these two — spawned by [`GitWorker`]'s own below-normal thread — would
+/// otherwise come back up to stand beside the window's loop every time a `git`
+/// runs, which is precisely while the page they are for is waiting.
 fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut buffer = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut buffer);
-        }
-        buffer
-    })
+    bt_platform::spawn_at_priority(
+        "bt-git-pipe",
+        bt_platform::ThreadPriority::BelowNormal,
+        move || {
+            let mut buffer = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buffer);
+            }
+            buffer
+        },
+    )
+    // `thread::spawn`, which this replaces, panics when the kernel will not give
+    // out a thread; the behaviour is kept rather than turned into a quiet
+    // half-drained pipe, which is a deadlock wearing a shrug.
+    .expect("spawn a git pipe reader")
 }
 
 /// Run one `git`, and never wait for it longer than `timeout`.
@@ -2104,15 +2117,23 @@ fn run_git_with_input(
         .map_err(|error| GitFault::GitMissing(format!("git.exe would not start: {error}")))?;
     if feeding {
         let mut pipe = child.stdin.take();
-        thread::spawn(move || {
-            if let Some(pipe) = pipe.as_mut() {
-                use std::io::Write as _;
-                let _ = pipe.write_all(&input);
-            }
-            // Dropped here, which is what closes the pipe and tells git the list
-            // has ended. Without it a child waits for a list that is complete.
-            drop(pipe);
-        });
+        // Below normal for the reason [`drain`] gives: a thread does not inherit
+        // the band of the thread that spawned it.
+        bt_platform::spawn_at_priority(
+            "bt-git-stdin",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
+                if let Some(pipe) = pipe.as_mut() {
+                    use std::io::Write as _;
+                    let _ = pipe.write_all(&input);
+                }
+                // Dropped here, which is what closes the pipe and tells git the
+                // list has ended. Without it a child waits for a list that is
+                // complete.
+                drop(pipe);
+            },
+        )
+        .expect("spawn a git stdin writer");
     }
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
@@ -3707,9 +3728,10 @@ impl GitWorker {
     pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<GitRequest>();
         let (response_tx, response_rx) = mpsc::channel::<GitResponse>();
-        thread::Builder::new()
-            .name("bt-git-worker".to_owned())
-            .spawn(move || {
+        bt_platform::spawn_at_priority(
+            "bt-git-worker",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
                 let program = crate::profiles::find_git(&bt_pty::SystemShellEnvironment);
                 run_git_worker(request_rx, |request| {
                     let answer = match program.as_deref() {
@@ -3731,8 +3753,9 @@ impl GitWorker {
                         let _ = proxy.send_event(AppEvent::GitReady);
                     }
                 });
-            })
-            .context("spawn git worker")?;
+            },
+        )
+        .context("spawn git worker")?;
         Ok(Self {
             requests: request_tx,
             responses: response_rx,

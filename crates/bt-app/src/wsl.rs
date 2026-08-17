@@ -230,7 +230,16 @@ pub fn start(program: Option<&OsStr>) {
     let probe = match program.map(OsStr::to_os_string) {
         Some(program) => WslProbe {
             answer: OnceLock::new(),
-            pending: Mutex::new(Some(std::thread::spawn(move || probe(&program)))),
+            // A `wsl.exe --status` is a question nobody is holding their breath
+            // for, so it runs in the workers' band.
+            pending: Mutex::new(Some(
+                bt_platform::spawn_at_priority(
+                    "bt-wsl-probe",
+                    bt_platform::ThreadPriority::BelowNormal,
+                    move || probe(&program),
+                )
+                .expect("spawn the WSL probe"),
+            )),
         },
         None => {
             let idle = WslProbe::default();

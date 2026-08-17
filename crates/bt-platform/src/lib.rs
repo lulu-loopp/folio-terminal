@@ -338,7 +338,11 @@ mod windows_impl {
             },
             IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-            Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects},
+            Threading::{
+                CreateEventW, GetCurrentThread, GetThreadPriority, INFINITE, ResetEvent, SetEvent,
+                SetThreadPriority, THREAD_PRIORITY, THREAD_PRIORITY_ABOVE_NORMAL,
+                THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL, WaitForMultipleObjects,
+            },
         },
         UI::{
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
@@ -366,8 +370,9 @@ mod windows_impl {
     };
 
     use super::{
-        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, WheelScrollAmount,
-        WindowRect, composition_visual_offset, custom_frame_hit_test, logical_px_for_dpi,
+        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, ThreadPriority,
+        WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
+        logical_px_for_dpi,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -3086,18 +3091,194 @@ mod windows_impl {
     fn win32_io_error(error: windows::core::Error) -> std::io::Error {
         std::io::Error::from_raw_os_error(error.code().0)
     }
+
+    /// Put the calling thread in one of the three bands. See [`ThreadPriority`].
+    ///
+    /// The answer is whether the kernel took it. There is exactly one way this
+    /// fails in practice — a job object or a policy that caps the process's
+    /// priority — and the honest response to that is to go on running at
+    /// whatever the machine allows, because a terminal that refused to start
+    /// because it could not be one step more important than a background thread
+    /// would be a worse program than a slightly slower one.
+    pub fn set_current_thread_priority(priority: ThreadPriority) -> bool {
+        // `GetCurrentThread` is a pseudo-handle — a constant meaning "me" — so
+        // there is nothing to close and nothing that can outlive the call.
+        unsafe { SetThreadPriority(GetCurrentThread(), win32_priority(priority)) }.is_ok()
+    }
+
+    /// Which band the calling thread is in, or `None` if it is in none of them.
+    ///
+    /// Exists so the spawn helper's contract can be *tested* rather than
+    /// asserted in a comment: a worker is a thread that reports
+    /// [`ThreadPriority::BelowNormal`] from inside itself.
+    #[must_use]
+    pub fn current_thread_priority() -> Option<ThreadPriority> {
+        let raw = unsafe { GetThreadPriority(GetCurrentThread()) };
+        match THREAD_PRIORITY(raw) {
+            THREAD_PRIORITY_ABOVE_NORMAL => Some(ThreadPriority::AboveNormal),
+            THREAD_PRIORITY_NORMAL => Some(ThreadPriority::Normal),
+            THREAD_PRIORITY_BELOW_NORMAL => Some(ThreadPriority::BelowNormal),
+            _ => None,
+        }
+    }
+
+    fn win32_priority(priority: ThreadPriority) -> THREAD_PRIORITY {
+        match priority {
+            ThreadPriority::AboveNormal => THREAD_PRIORITY_ABOVE_NORMAL,
+            ThreadPriority::Normal => THREAD_PRIORITY_NORMAL,
+            ThreadPriority::BelowNormal => THREAD_PRIORITY_BELOW_NORMAL,
+        }
+    }
+
+    /// Spawn a named thread that is already in its band before it does anything.
+    ///
+    /// **The band is set from inside the new thread, not from the spawner**, and
+    /// that is the whole reason this helper exists rather than a
+    /// `set_priority(&handle)` called after `spawn`: between a `spawn` and a
+    /// call on its `JoinHandle` the new thread is already running, and under the
+    /// exact saturation this is for, "already running" can mean "has already
+    /// decoded the image" — a worker that spends its first and busiest
+    /// milliseconds at the frame's priority. Here the first statement the thread
+    /// executes is the one that gets out of the frame's way.
+    pub fn spawn_at_priority<T: Send + 'static>(
+        name: &str,
+        priority: ThreadPriority,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<T>> {
+        std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                set_current_thread_priority(priority);
+                body()
+            })
+    }
+}
+
+/// The three scheduling bands this application's threads run in.
+///
+/// **A terminal under a saturated machine is a scheduling problem, not a
+/// throughput problem.** Every core busy with `cargo` means the window's own
+/// loop is one runnable thread among a hundred at the same priority, and the
+/// scheduler's answer is a fair share — which for a thread that must answer a
+/// wheel notch inside a frame is not the right answer at all. The window is not
+/// asking for more of the machine; it is asking to be the first of this
+/// process's threads to get whatever the machine hands it.
+///
+/// So the process is *ordered*, in three bands and no more:
+///
+/// * [`Self::AboveNormal`] — the one thread that owns the window: the event
+///   loop, which is also the render thread. One step, not two: `+1` is enough to
+///   put the loop ahead of every ordinary background thread on the machine, and
+///   it leaves the priority classes above it (`HIGHEST`, `TIME_CRITICAL`) to the
+///   things that genuinely cannot be late.
+/// * [`Self::Normal`] — the PTY readers. A reader that falls behind is a child
+///   process blocked on a full pipe, which is back-pressure reaching the wrong
+///   place; it is not the frame's competitor either, because it does nothing but
+///   move bytes into a ring.
+/// * [`Self::BelowNormal`] — every worker. A `git status`, a directory read, a
+///   PNG decode and a formula raster are all answers to questions nobody is
+///   holding their breath for, and none of them may ever be the reason a frame
+///   was late. This is the band that matters most under starvation: it is what
+///   stops the process from competing with itself.
+///
+/// **Not MMCSS.** `AvSetMmThreadCharacteristicsW("Window Manager")` was
+/// considered and declined. It pulls in `avrt.dll` and a revert that has to be
+/// paired with it on every exit path; it lands the thread in the multimedia
+/// scheduling class, whose boost is far larger than one step and would let the
+/// loop starve *this process's own* PTY readers and workers under exactly the
+/// saturation it is meant to survive; and MMCSS brings its own throttle — the
+/// registry's `SystemResponsiveness` reserves a slice of every period for
+/// non-multimedia work — so it can add latency as easily as remove it. One step
+/// of ordinary thread priority is the smallest change that answers the actual
+/// complaint, and it is a change this process can make about itself without
+/// making a claim about the machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThreadPriority {
+    AboveNormal,
+    Normal,
+    BelowNormal,
 }
 
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FolderPicker, ImagePicker, ImeSystemCaret,
     MathContextMenu, PROGRAM_REFUSED, client_area_animation_enabled, clipboard_text,
-    documents_directory, get_dpi_for_window, get_window_rect, get_work_area,
-    install_window_class_background, is_window_minimized, monospace_font_families, open_local_file,
-    open_local_path, os_ui_language, request_window_close, reveal_in_explorer, set_clipboard_text,
-    set_system_backdrop, set_window_outer_rect, set_window_topmost, shell_execute,
-    system_backdrop_available, wheel_scroll_amount,
+    current_thread_priority, documents_directory, get_dpi_for_window, get_window_rect,
+    get_work_area, install_window_class_background, is_window_minimized, monospace_font_families,
+    open_local_file, open_local_path, os_ui_language, request_window_close, reveal_in_explorer,
+    set_clipboard_text, set_current_thread_priority, set_system_backdrop, set_window_outer_rect,
+    set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
+    wheel_scroll_amount,
 };
+
+/// The bands, asked of the kernel rather than of the source.
+///
+/// These are here and not in `bt-app` because what is being pinned is the
+/// *syscall's* effect: that a thread started through [`spawn_at_priority`] is
+/// already out of the frame's way by the time its body runs, and that the band
+/// a caller names is the band the thread is actually in. Which crate spawns
+/// which worker is a separate question, tested where those spawns live.
+#[cfg(all(test, windows))]
+mod thread_priority_tests {
+    use super::{ThreadPriority, current_thread_priority, set_current_thread_priority};
+
+    /// PIN — a worker reports its band from *inside itself*.
+    ///
+    /// The bug this forecloses is the one the helper exists to prevent: setting
+    /// the priority on the `JoinHandle` after `spawn`, which leaves the thread's
+    /// first and busiest milliseconds — the decode, the `git status`, the
+    /// directory walk — running at the frame's priority. Asking the thread
+    /// itself, as its first act, is the only question whose answer distinguishes
+    /// the two.
+    #[test]
+    fn a_worker_is_already_below_normal_when_its_body_starts() {
+        let thread =
+            super::spawn_at_priority("bt-test-worker", ThreadPriority::BelowNormal, || {
+                current_thread_priority()
+            })
+            .expect("spawn a worker");
+        assert_eq!(
+            thread.join().expect("join the worker"),
+            Some(ThreadPriority::BelowNormal),
+            "a worker must be out of the frame's way before it does anything"
+        );
+    }
+
+    /// PIN — the three bands are three different answers, and each round-trips.
+    ///
+    /// A mapping that collapsed two of them would be a process that believes it
+    /// is ordered and is not, and nothing else in the tree would notice.
+    #[test]
+    fn every_band_round_trips_through_the_kernel() {
+        for band in [
+            ThreadPriority::AboveNormal,
+            ThreadPriority::Normal,
+            ThreadPriority::BelowNormal,
+        ] {
+            let thread = super::spawn_at_priority("bt-test-band", band, current_thread_priority)
+                .expect("spawn a thread in a band");
+            assert_eq!(
+                thread.join().expect("join the thread"),
+                Some(band),
+                "{band:?} did not survive the round trip"
+            );
+        }
+    }
+
+    /// PIN — the loop's own thread can raise itself, which is the half of the
+    /// design that has no spawn to hang off: `main` is handed its thread by the
+    /// runtime and has to ask for the band in place.
+    #[test]
+    fn a_thread_can_raise_itself_in_place() {
+        let raised = std::thread::spawn(|| {
+            let taken = set_current_thread_priority(ThreadPriority::AboveNormal);
+            (taken, current_thread_priority())
+        })
+        .join()
+        .expect("join the raised thread");
+        assert_eq!(raised, (true, Some(ThreadPriority::AboveNormal)));
+    }
+}
 
 /// The one test in this crate that talks to the kernel about a real directory.
 ///

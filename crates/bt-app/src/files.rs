@@ -29,7 +29,6 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -945,9 +944,10 @@ impl FilesWorker {
     pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<DirRequest>();
         let (response_tx, response_rx) = mpsc::channel::<DirResponse>();
-        thread::Builder::new()
-            .name("bt-files-worker".to_owned())
-            .spawn(move || {
+        bt_platform::spawn_at_priority(
+            "bt-files-worker",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
                 run_dir_worker(request_rx, |request| {
                     let outcome = read_directory(&request.path);
                     if response_tx
@@ -961,8 +961,9 @@ impl FilesWorker {
                         let _ = proxy.send_event(AppEvent::FilesReady);
                     }
                 });
-            })
-            .context("spawn directory reading worker")?;
+            },
+        )
+        .context("spawn directory reading worker")?;
         Ok(Self {
             requests: request_tx,
             responses: response_rx,

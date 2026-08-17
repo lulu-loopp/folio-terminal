@@ -84,6 +84,33 @@
 - **超时即抢占**：数学/SVG 渲染在可终止隔离单元（首选 worker 进程 + Job Object 限时限内存，超时 kill）。
 - 预算硬上限与不可信输入防护同 v3。
 
+### 1.4 CPU 饥饿下的韧性（perf-resilience 片，2026-08-17，已落地）
+
+用户报告：一台 24 核机器被并行 `cargo` 占满时，Folio「滚动几乎滚不动」。裁决是**机器的锅，但终端要更抗饿**——不是免疫，是在拿不到机器的时候**别把拿到的那点机器浪费掉**，并且**把它先给帧**。
+
+**测量口径。** `BT_PERF_TRACE` 新增一行 `present`：`event_to_present_us`（触发→提交给合成器）、`since_previous_us`（**两帧之间的间隔**——profiler 量的是一帧多贵，手感到的是两帧隔多远，饿的时候这两个数不再是一回事）、`composed`/`slot_overwrites`（排版了多少帧、其中多少帧被丢进只装一帧的槽里覆盖掉）、`wheel_events`/`wheel_routings`（平台给了多少格滚轮、真正走了几次路由）。载荷 = 在一个丢弃用的 `CARGO_TARGET_DIR` 里跑冷启动 `cargo build --release --workspace`（24 并发），窗口里先灌 6 万行输出、再以 6ms 一格注入 480 格滚轮（`scripts/dev/ui-probe.ps1` 同款 SendInput 路径）。
+
+**三处真问题（都不是「加缓存」，都是「别做白工」）。**
+
+1. **PTY 的唤醒是一个信号，不是一条队列**（`PtyWakeSignal`）。读线程每读到一块就 `send_event(PtyOutput)`，洪水时就是几千条投递消息；而 Win32 的 `WM_PAINT` **只在消息队列空了才合成**，于是读线程填队列比循环排空还快 → **present 被饿死**。改成一个原子位：抬起时才投一条，`drain_pty` 在开头放下它。不丢唤醒——`about_to_wait` 本来每一轮都排空所有 shell，那条消息唯一的职责就是打断 `Wait`。
+2. **`AppEvent::PtyOutput` 这条臂什么也不做**（与同文件 `GitChanged` 同款）。既然 `about_to_wait` 每轮都 drain，在 `user_event` 里再 drain 一次就是**一轮两次排版**，中间落进来的字节让第一帧必然被覆盖。
+3. **一轮循环只花一格滚轮**（`WheelBurst`）。滚轮按格到达，自由轮或饿住的循环会让好几格挤在一轮里；每格都排一整帧进只装一帧的槽 = N 次排版 1 次上屏。求和是**精确**的：所有路由对 delta 都是线性的，唯一非线性的图片缩放是 `s^a·s^b = s^(a+b)`。两种货币（行/像素）不相加，换货币时先把手里的花掉。
+
+**线程分三档**（`bt_platform::ThreadPriority` + `spawn_at_priority`，唯一的 `unsafe` 边界）：事件循环=渲染线程 `ABOVE_NORMAL`；PTY 读线程 `NORMAL`；**所有 worker `BELOW_NORMAL`**——files / git（连它自己起的两条管道线程，**线程不继承父线程优先级**）/ preview / math / image-scale / psreadline 探针 / wsl 探针。优先级在**新线程内部第一句**设置，不是 spawn 之后在 `JoinHandle` 上设——中间那段正是 worker 最忙的那几毫秒。**没有用 MMCSS**：`AvSetMmThreadCharacteristicsW("Window Manager")` 要多一个 `avrt.dll` 和一个必须配对的 revert，它给的提升远不止一档、会让循环在同样的饱和下饿死**本进程自己的** PTY 读线程与 worker，而且 MMCSS 自带 `SystemResponsiveness` 节流，可能反而加延迟。加一档是能回答这个抱怨的最小改动。
+
+**数字**（同一台机器、同一套注入；`before` = 39eba41 + 仅埋点，`after` = 本片全部）：
+
+| | idle before | idle after | 24 路 `cargo` before | 24 路 `cargo` after |
+|---|---|---|---|---|
+| 排版后被丢弃的帧 | 208/392 = **53.1%** | 3/269 = **1.1%** | 1209/1932 = **62.6%**（另一次 33.8%） | **1/765 = 0.1%** |
+| 7.5s 滚轮期间上屏帧数 | 168 | **231** | 151 / 233 | **243** |
+| 滚动时两帧间隔 p50 | 44.6ms | **32.0ms** | 48.0 / 43.9ms | **33.9ms** |
+| 滚动时两帧间隔 p95 | 65.2ms | **37.9ms** | 95.0 / 57.9ms | 113.0ms |
+| 滚动时两帧间隔 max | 92.0ms | **46.5ms** | **1254.5ms** | **201.3ms** |
+| 洪水期一帧从排好到上屏 max | — | — | **6.1s** | 0.19s |
+
+**诚实的留白**：冷启动 `cargo build` 不是平稳负载（早期几十个小 crate、后期几个大 crate），所以载荷下的 p95/p99 在**同一个二进制的两次运行之间**的差别，比两个二进制之间的差别还大——载荷下真正稳的结论是三个：白做的排版从 ~60% 掉到 ~0%、同一次手势上屏的帧数多六成、以及**「排好的一帧几秒钟上不了屏」这个病消失了**。24 个 PowerShell 空转进程复现不出用户报告的严重程度（前台线程有系统自带的 boost，且空转不抢内存带宽），必须用真实的 `cargo` 才复现得出来。
+
 ## 2. 渲染管线
 
 同 v3（cell 宽度权威在 bt-term；延迟指标事件→present 提交，60/120/144Hz 分测，洪水注入法；M-1 做一次光子侧基线校准）。
