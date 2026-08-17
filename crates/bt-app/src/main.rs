@@ -34427,10 +34427,23 @@ impl Runtime {
         if hit.is_none() {
             return Ok(());
         }
-        let Some(hit) = self.forwarded_mouse_hit() else {
+        // **The pane under the pointer, its modes and its child** (user report,
+        // 2026-08-17). A motion report is a sentence about where the hand is,
+        // and it can only be true of the pane the hand is over. This used to
+        // measure the cell in the pointer's pane and then read the *focused*
+        // pane's modes and write into the *focused* pane's PTY — so with a
+        // program tracking the mouse on the right and the pointer over the
+        // left, the right-hand program was told about coordinates from a grid
+        // it does not have, and lit a row nobody was pointing at. A drag that
+        // began as a forwarded press keeps its origin pane through
+        // `mouse_route`, which is why the button case still asks the route.
+        let Some((seat, _, _)) = self.pane_hit_context() else {
             return Ok(());
         };
-        let modes = self.session.terminal_modes();
+        let Some(hit) = self.forwarded_mouse_hit_in(seat) else {
+            return Ok(());
+        };
+        let modes = self.leaf_terminal_modes(seat);
         if self.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
             return Ok(());
         }
@@ -34451,11 +34464,7 @@ impl Runtime {
             hit.column,
             self.modifiers,
         );
-        self.send_user_input(
-            &bytes,
-            "forward SGR mouse motion to PTY",
-            UserInputKind::Mouse,
-        )
+        self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")
     }
 
     /// Advance a divider drag. Returns whether the pointer was consumed.
