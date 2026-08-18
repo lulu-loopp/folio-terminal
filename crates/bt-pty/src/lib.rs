@@ -972,7 +972,8 @@ mod tests {
             if !load_profile {
                 command = command.arg("-NoProfile");
             }
-            let command = command.arg("-NoExit").arg("-Command").arg(startup);
+            let command =
+                declare_probe_module_path(command.arg("-NoExit").arg("-Command").arg(startup));
             let session = PtySession::spawn(command, size(columns, rows), no_wake()).unwrap();
             let terminal = TerminalAdapter::new(nz32(columns), nz32(rows));
             Self {
@@ -1150,6 +1151,23 @@ mod tests {
 
     fn nz32(value: u16) -> NonZeroU32 {
         NonZeroU32::new(u32::from(value)).unwrap()
+    }
+
+    /// `BT_PSREADLINE_MODULE_PATH` names the `PSModulePath` the probed shell starts with, so a
+    /// probe can say which PSReadLine it is measuring instead of measuring whichever one happens
+    /// to be installed on the machine running it.
+    ///
+    /// It has to be a declaration on the command rather than an exported variable, and that is the
+    /// whole reason it exists: `portable_pty`'s `CommandBuilder` rebuilds every variable that the
+    /// machine or user registry defines from the registry, discarding this process's value, and
+    /// `PSModulePath` is one of those. Exporting it changes nothing and says nothing, which is the
+    /// worst shape a probe's lever can have — an A/B where both arms silently read the same
+    /// module and agree. An explicit declaration outranks the rebuilt value.
+    fn declare_probe_module_path(command: PtyCommand) -> PtyCommand {
+        match std::env::var("BT_PSREADLINE_MODULE_PATH") {
+            Ok(module_path) => command.env("PSModulePath", module_path),
+            Err(_) => command,
+        }
     }
 
     fn run_resize_cursor_oracle() -> CursorOracleEvidence {
@@ -2704,7 +2722,8 @@ mod tests {
             if !load_profile {
                 command = command.arg("-NoProfile");
             }
-            let command = command.arg("-NoExit").arg("-Command").arg(startup);
+            let command =
+                declare_probe_module_path(command.arg("-NoExit").arg("-Command").arg(startup));
             let pty = PtySession::spawn(command, size(columns, rows), no_wake()).unwrap();
             Self {
                 pty,

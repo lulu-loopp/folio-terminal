@@ -1,3 +1,8 @@
 # The bash integration script is read by POSIX shells and must keep LF endings
 # whatever `core.autocrlf` is set to — see `shell_integration::tests`.
 *.bash text eol=lf
+
+# The ref recordings are raw terminal byte streams. CR is data in them, not a line
+# ending: eight of them were committed with their CRs stripped, and the ref tests
+# failed on every fresh checkout while the tree they were normalised in kept passing.
+*.recording binary
