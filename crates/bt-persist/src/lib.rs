@@ -58,8 +58,8 @@ pub use migrate::{
     SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
 };
 pub use profiles::{
-    CandidateV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION, ProfileEntryV1, ProfilesV1,
-    ProgramV1, ResolutionV1, StartingDirV1,
+    CandidateV1, MarkV1, NamedStartAtV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION,
+    ProfileEntryV1, ProfilesV1, ProgramV1, ResolutionV1, StartAtV1, StartingDirV1,
 };
 pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme, write_scheme};
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};

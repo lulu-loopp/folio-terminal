@@ -41,9 +41,10 @@ use bt_render::{
 };
 
 use crate::i18n::Text;
-use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
+use crate::marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer};
 use crate::profiles;
 use crate::seats::{RailMode, TabLayoutMode};
+use crate::text_field::TextField;
 
 // ── `.settings`, `.overlay` ────────────────────────────────────────────────
 /// `.settings { width: min(720px, 92%) }` — the cap and the share.
@@ -497,6 +498,154 @@ const PROFILE_HIDDEN_MARK_OPACITY: f32 = 0.35;
 const BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
 
+// ── the profile editor (§7.1.6c-6b) ─────────────────────────────────────────
+//
+// Every number is `design/ui-mockup.html`'s own — the `.field`, `.field-pair`,
+// `.envtab`, `.pf-crumb` and `.pf-more` blocks, which were struck against the
+// dialog's existing recipes rather than beside them: a field borrows
+// `.combo > button`'s hairline, radius, size and padding exactly, because in
+// this house a control is a face and a hairline, and one that invented its own
+// would read as arriving from somewhere else.
+
+/// `.field` is `.combo > button`'s recipe, so it is that control's height.
+const FIELD_HEIGHT_LOGICAL_PX: f32 = COMBO_HEIGHT_LOGICAL_PX;
+/// `.field { font-size: 13px }`, and `.field.mono { font-size: 12.5px }` for the
+/// three that hold a path, an argument line and a variable — the same monospace
+/// register the mock-up puts them in, because those three are read character by
+/// character.
+const FIELD_FONT_LOGICAL_PX: f32 = 13.0;
+const FIELD_MONO_FONT_LOGICAL_PX: f32 = 12.5;
+/// `.field { padding: 5px 10px }` — where the text starts inside the box.
+const FIELD_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// `.row.stacked .text { margin-bottom: 8px }` — between a stacked row's
+/// sentence and the control under it.
+const STACKED_GAP_LOGICAL_PX: f32 = 8.0;
+/// `.field-pair { gap: 8px }` — between the `Program` field and its `Browse…`.
+const FIELD_PAIR_GAP_LOGICAL_PX: f32 = 8.0;
+/// `Browse…` is a `.btn` at the pair's own smaller type; wide enough for the
+/// word and its ellipsis in both languages.
+const BROWSE_WIDTH_LOGICAL_PX: f32 = 74.0;
+/// `.envtab { gap: 6px }` and `.envrow { gap: 6px }`.
+const ENVTAB_GAP_LOGICAL_PX: f32 = 6.0;
+/// `.envrow .field.k { flex: 0 0 170px }` — the name column, fixed, so that
+/// every value starts on one line down the table.
+const ENV_NAME_WIDTH_LOGICAL_PX: f32 = 170.0;
+/// `.env-del { width: 22px; height: 22px }`.
+const ENV_REMOVE_SIDE_LOGICAL_PX: f32 = 22.0;
+/// `.env-add { padding: 4px 10px; font-size: 12.5px }` — a `.btn` at the table's
+/// own size, standing at the table's leading edge because it adds to the bottom
+/// of the list rather than closing it.
+const ENV_ADD_WIDTH_LOGICAL_PX: f32 = 62.0;
+const ENV_ADD_HEIGHT_LOGICAL_PX: f32 = 24.0;
+/// **The three rows this terminal fills in on the reader's behalf** (plan §1.7,
+/// user ruling 2026-08-17 Q7) — what it already says to every session it starts.
+///
+/// Showing them is both the foolproof default (you can see what is being said on
+/// your behalf) and the honest one (there is no invisible second layer). They
+/// are drawn dashed and greyed and are not editable in this slice: a press that
+/// turned a ghost into a row of the reader's own is the plan's own next step and
+/// it belongs with the spawn wiring (5c), because a ghost the reader has adopted
+/// and nothing reads is a row that lies twice.
+const ENV_GHOSTS: [(&str, &str); 3] = [
+    ("TERM_PROGRAM", "Folio"),
+    ("COLORTERM", "truecolor"),
+    (FORCE_HYPERLINK_NAME, "1"),
+];
+/// `.pf-crumb { margin: 10px 0 2px }` around a line of the group label's own
+/// type — which is what it is: the editor's heading, wearing the heading's face.
+const CRUMB_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
+const CRUMB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 2.0;
+/// `.pf-crumb { gap: 6px }`, between `‹ Profiles`, the `›` and the name.
+const CRUMB_GAP_LOGICAL_PX: f32 = 6.0;
+/// The separator the breadcrumb draws between the way back and where you are.
+const CRUMB_SEPARATOR: &str = "\u{203a}";
+/// And the guillemet `‹ Profiles` opens with — the same character turned, so the
+/// pair reads as one direction and not as two glyphs that happen to point.
+const CRUMB_BACK_PREFIX: &str = "\u{2039} ";
+/// `.pf-more > button { width: 26px }` — the `⋯` trigger, which explicitly
+/// undoes `.combo > button`'s 118px floor, its hairline and its space-between,
+/// because every line of that recipe is wrong for a trigger one glyph wide.
+const ROW_MORE_GLYPH: &str = "\u{22ef}";
+/// `.pf-more .combo-menu { min-width: 150px }`.
+const ROW_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 150.0;
+/// `Delete profile` and `Restore all defaults`, the editor foot's two verbs —
+/// only ever one of them at a time.
+const DELETE_PROFILE_WIDTH_LOGICAL_PX: f32 = 124.0;
+/// `+ New profile`, the list's own foot verb.
+const NEW_PROFILE_WIDTH_LOGICAL_PX: f32 = 116.0;
+/// The `✕` that takes one of the reader's own environment rows out.
+const ENV_REMOVE_GLYPH: &str = "\u{2715}";
+/// How far the caret stops short of a field's inside edge, top and bottom, so
+/// that it reads as a caret in a line of text rather than as a second hairline.
+const FIELD_CARET_INSET_LOGICAL_PX: f32 = 5.0;
+/// How much of its hairline a ghost row keeps — `.envrow.ghost`'s dashed border
+/// said as strength rather than as a dash.
+const GHOST_ROW_ALPHA: f32 = 0.55;
+
+/// What one row's `⋯` offers, in the mock-up's order.
+///
+/// **Derived from the row rather than stated per press**, which is what lets the
+/// menu be a different length on a built-in than on a profile of the reader's
+/// own: `Delete` is simply not produced for a built-in, and the two refusals
+/// that have reasons are produced dark, carrying theirs. The order is the one
+/// the mock-up draws — the copy verb first because it is the commonest of the
+/// four, then the switch, then the two that change what the table means.
+#[must_use]
+pub fn row_menu_items(line: &crate::profiles::ProfileLine) -> Vec<RowMenuItem> {
+    let mut items = vec![RowMenuItem {
+        verb: RowVerb::Duplicate,
+        label: Text::ProfilesDuplicate.text(),
+        refusal: None,
+    }];
+    items.push(RowMenuItem {
+        verb: RowVerb::Hide,
+        label: if line.hidden {
+            Text::ProfilesShow.text()
+        } else {
+            Text::ProfilesHide.text()
+        },
+        // A hidden row can always be shown; only hiding is ever refused, and the
+        // two refusals are guards rather than politeness — hiding the default
+        // leaves no new tab to open, and hiding the floor puts a hole in the
+        // bottom of every degradation chain in the product.
+        refusal: (!line.hidden)
+            .then(|| {
+                if line.is_default {
+                    Some(Text::ProfilesCannotHideDefault.text())
+                } else if line.is_fallback {
+                    Some(Text::ProfilesCannotHideFallback.text())
+                } else {
+                    None
+                }
+            })
+            .flatten(),
+    });
+    // **Absent on a built-in, not present and dark.** A built-in cannot be
+    // deleted at all — a row that is missing looks exactly like a row that was
+    // never designed — and a menu is allowed to be shorter on one row than on
+    // another, which is precisely what a right-aligned run of verbs could not
+    // do without shifting its neighbours out of column.
+    if line.deletable {
+        items.push(RowMenuItem {
+            verb: RowVerb::Delete,
+            label: Text::ProfilesDelete.text(),
+            refusal: None,
+        });
+    }
+    items.push(RowMenuItem {
+        verb: RowVerb::SetDefault,
+        label: Text::ProfilesSetDefault.text(),
+        // The row that already is the default has nothing to set, which is the
+        // only refusal here: a profile this machine cannot start is a perfectly
+        // good default to choose — `default_profile` resolves it to the floor
+        // for as long as its cause lasts and deliberately does not rewrite the
+        // stored id, so choosing it now is what makes it take effect the day the
+        // program is installed.
+        refusal: line.is_default.then(|| Text::ProfilesAlreadyDefault.text()),
+    });
+    items
+}
+
 // ── the Advanced disclosure (§7.1.6c-5) ────────────────────────────────────
 //
 // **No global "show advanced settings" switch** (user ruling 2026-08-17):
@@ -621,6 +770,60 @@ pub const SPLIT_DIRECTION_OPTIONS: [SplitDirectionV1; 3] = [
     SplitDirectionV1::Right,
     SplitDirectionV1::Down,
 ];
+
+/// What the profile editor's `Starting directory` picker offers (§7.1.6c-6b).
+///
+/// **The third one is a verb**, exactly as `Choose…` is on the Background image
+/// row: pressing it opens the system's folder chooser, which may come back with
+/// nothing, so nothing is stored until it does. The first two are values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartAtChoice {
+    /// The folder the pane it was opened beside is standing in — what every tab
+    /// in this window has always done, and the answer a profile nobody has
+    /// edited carries.
+    Inherit,
+    /// This profile's own home, whatever was there to inherit.
+    Home,
+    /// Open the chooser and pin the profile to whatever comes back.
+    Choose,
+}
+
+pub const START_AT_OPTIONS: [StartAtChoice; 3] = [
+    StartAtChoice::Inherit,
+    StartAtChoice::Home,
+    StartAtChoice::Choose,
+];
+
+/// The three answers to `FORCE_HYPERLINK` — **and they are the environment
+/// table read as one question**, never a second field.
+///
+/// `Auto` is the profile saying nothing, so the terminal's own declaration
+/// stands (`hyperlink_declaration`'s existing behaviour, byte for byte); `On`
+/// and `Off` are a row in this profile's environment with that name. The mock-up
+/// gives it a row of its own "as well as a line in the table" because it is the
+/// one variable in there that is a question about this terminal rather than
+/// about the program.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForceHyperlink {
+    Auto,
+    On,
+    Off,
+}
+
+pub const HYPERLINK_OPTIONS: [ForceHyperlink; 3] = [
+    ForceHyperlink::Auto,
+    ForceHyperlink::On,
+    ForceHyperlink::Off,
+];
+
+/// The name this terminal's own `FORCE_HYPERLINK` declaration goes out under,
+/// and the name the [`ForceHyperlink`] row reads and writes in a profile's
+/// environment.
+///
+/// Named once here rather than spelled at the three places that touch it — the
+/// ghost row, the row's current value and the write — because a variable whose
+/// name is written three times is a variable that will one day be written twice.
+pub const FORCE_HYPERLINK_NAME: &str = "FORCE_HYPERLINK";
 /// The three answers to "which language is this window written in", in the order
 /// [`THEME_OPTIONS`] established and for its reason: the two named answers first,
 /// and the one that means "ask somebody else" after them.
@@ -898,6 +1101,22 @@ fn image_source_label(source: ImageSource) -> &'static str {
     match source {
         ImageSource::None => Text::OptionImageNone.text(),
         ImageSource::Choose => Text::OptionImageChoose.text(),
+    }
+}
+
+fn start_at_label(choice: StartAtChoice) -> &'static str {
+    match choice {
+        StartAtChoice::Inherit => Text::ProfilesInherit.text(),
+        StartAtChoice::Home => Text::ProfilesHome.text(),
+        StartAtChoice::Choose => Text::ProfilesChooseFolder.text(),
+    }
+}
+
+fn hyperlink_label(answer: ForceHyperlink) -> &'static str {
+    match answer {
+        ForceHyperlink::Auto => Text::ProfilesAuto.text(),
+        ForceHyperlink::On => Text::ProfilesOn.text(),
+        ForceHyperlink::Off => Text::ProfilesOff.text(),
     }
 }
 
@@ -1279,14 +1498,46 @@ impl SliderRange {
 pub enum SettingsControl {
     Combo,
     Slider(SliderRange),
+    /// One line of typed text — `.field`, born on the profile editor
+    /// (§7.1.6c-6b).
+    ///
+    /// This dialog had never taken a typed answer: every row until the editor
+    /// asked a question with a small named set of answers, and every one of them
+    /// is a picker. A profile's name and its arguments are neither, and a combo
+    /// of "every path on this machine" is not a control.
+    Field,
+    /// A field with a verb beside it — `.field-pair`, the `Program` row's
+    /// `Browse…`.
+    ///
+    /// One control in two parts rather than two controls: the button does not
+    /// answer a different question, it fills the field in for somebody who would
+    /// rather point than type.
+    FieldPair,
+    /// The environment table — `.envtab`, two fields and a `✕` per line over an
+    /// `Add`.
+    ///
+    /// **The one row in this dialog whose height depends on its content**, which
+    /// is why the "one height" ruling is stated the way it is: the frame is
+    /// locked to the tallest *page*, so a new variable makes this page scroll a
+    /// little further and never makes the dialog grow under the rail.
+    EnvTable,
+    /// No control at all — a row that reports rather than asks.
+    ///
+    /// The Shell integration row is one: its description *is* the capability
+    /// sentence, quoted from `docs/shell-integration.md`'s matrix through
+    /// `profiles::capability_text`, and choosing which script serves a profile is
+    /// slice 5c's (plan §5.2), which is where the `Auto` derivation it needs
+    /// lands. A row drawn with a picker that wrote nothing would be the
+    /// pretending this page exists to stop.
+    Sentence,
 }
 
 impl SettingsControl {
     #[must_use]
     pub const fn range(self) -> Option<SliderRange> {
         match self {
-            Self::Combo => None,
             Self::Slider(range) => Some(range),
+            _ => None,
         }
     }
 }
@@ -1570,6 +1821,53 @@ pub enum SettingsRow {
     /// spelled once for both the hit test and the draw, and the description
     /// carries the reason.
     PsReadLine,
+
+    // ── the profile editor's own rows (§7.1.6c-6b) ─────────────────────────
+    //
+    // **They are rows of the Profiles page and they are only ever drawn on its
+    // second view.** `SettingsContent::page_rows` hands them out while the
+    // editor is standing on a profile and hands out nothing while the list is
+    // up, which is what keeps one page's two views from being two pages: the
+    // rail keeps `Profiles` selected because that is where the reader is.
+    //
+    // They ride the ordinary row machinery — the column, the picker popups,
+    // `option_*`, the focus order, the hit test — rather than growing a parallel
+    // one beside it. What they add to that machinery is two shapes it did not
+    // have: a control that takes typed text, and a row that stacks its control
+    // under its sentence instead of beside it.
+    /// `display_title`, and never the string an announcement is compared against
+    /// (§G S103, plan §1.4). A built-in is renamed too (user ruling 2026-08-17,
+    /// Q2 = b) and keeps its shipped word invisibly.
+    ProfileName,
+    /// The executable a new tab of this profile starts, typed or browsed to.
+    ///
+    /// Stacked, because a path is not a small named value: at the column's 200px
+    /// `C:\Users\me\.local\bin\claude.exe` is an ellipsis with a drive letter in
+    /// front of it.
+    ProfileProgram,
+    /// Where a new tab of this profile opens — the three answers of
+    /// `profiles::StartAt`.
+    ProfileStartAt,
+    /// The mark that names this profile across the window: the eight struck
+    /// colours, and dark on a built-in with its sentence become the reason
+    /// (S98/S31 — Microsoft's blue and Ubuntu's orange are not this product's to
+    /// repaint).
+    ProfileColour,
+    /// The words handed to the program, split by the rule the row's own sentence
+    /// states.
+    ProfileArgs,
+    /// The environment table, ghosts and all.
+    ProfileEnv,
+    /// `FORCE_HYPERLINK`, as three answers rather than as a row of the table
+    /// above — **and it is the same storage read twice, not a second field**.
+    /// `Auto` is the profile saying nothing and letting the terminal's own
+    /// declaration stand; `On` and `Off` are a row in that table with this name.
+    /// The mock-up says so in as many words ("A ROW OF ITS OWN as well as a line
+    /// in the table").
+    ProfileHyperlink,
+    /// Which script serves this profile — **a sentence and not a picker in this
+    /// slice**. See [`SettingsControl::Sentence`].
+    ProfileIntegration,
 }
 
 impl SettingsRow {
@@ -1623,7 +1921,36 @@ impl SettingsRow {
             // hunting for it under a heading about looks would be hunting for the
             // wrong noun.
             Self::GitPanel | Self::DefaultProfile | Self::Language => SettingsCategory::General,
+            // The editor's eight, which are the Profiles page's second view.
+            Self::ProfileName
+            | Self::ProfileProgram
+            | Self::ProfileStartAt
+            | Self::ProfileColour
+            | Self::ProfileArgs
+            | Self::ProfileEnv
+            | Self::ProfileHyperlink
+            | Self::ProfileIntegration => SettingsCategory::Profiles,
         }
+    }
+
+    /// Whether this row stacks its control under its sentence instead of
+    /// standing it in the page's right-aligned column (§7.1.6c-6b).
+    ///
+    /// **The column is a ruling about pickers** (user ruling 2026-08-17):
+    /// controls that answer a question with one small named value, whose left
+    /// edges line up so a page can be scanned down. A path, an argument list and
+    /// a table of environment variables are none of those — pressed into 200px,
+    /// `C:\Users\me\.local\bin\claude.exe` and `FORCE_HYPERLINK` both ellipsise,
+    /// and a control that cannot say its own value is the exact bug the picker
+    /// floor was widened to fix earlier the same day. So those three stack, and
+    /// the column above and below them is undisturbed, because they were never
+    /// in it.
+    #[must_use]
+    pub fn stacked(self) -> bool {
+        matches!(
+            self,
+            Self::ProfileProgram | Self::ProfileArgs | Self::ProfileEnv
+        )
     }
 
     #[must_use]
@@ -1647,6 +1974,14 @@ impl SettingsRow {
             Self::LightScheme => Text::RowLightScheme.text(),
             Self::DarkScheme => Text::RowDarkScheme.text(),
             Self::PsReadLine => Text::RowPsReadLine.text(),
+            Self::ProfileName => Text::ProfilesRowName.text(),
+            Self::ProfileProgram => Text::ProfilesRowProgram.text(),
+            Self::ProfileStartAt => Text::ProfilesRowStartingDir.text(),
+            Self::ProfileColour => Text::ProfilesRowColour.text(),
+            Self::ProfileArgs => Text::ProfilesRowArgs.text(),
+            Self::ProfileEnv => Text::ProfilesRowEnv.text(),
+            Self::ProfileHyperlink => Text::ProfilesRowHyperlink.text(),
+            Self::ProfileIntegration => Text::ProfilesRowIntegration.text(),
             Self::BackgroundImage => Text::RowBackgroundImage.text(),
             Self::ImageFit => Text::RowImageFit.text(),
             Self::ImageOpacity => Text::RowImageOpacity.text(),
@@ -1732,6 +2067,32 @@ impl SettingsRow {
             // installed, and what that costs today. It is also where the reason
             // a greyed item is grey is written — see the variant.
             Self::PsReadLine => crate::psreadline::row_description(values.psreadline),
+            Self::ProfileName => Text::ProfilesRowNameDesc.text(),
+            Self::ProfileProgram => Text::ProfilesRowProgramDesc.text(),
+            Self::ProfileStartAt => Text::ProfilesRowStartingDirDesc.text(),
+            // **The row's sentence becomes the reason** on a built-in, which is
+            // this dialog's own idiom for a control that is not the reader's to
+            // press — the same line `psreadline::row_description` writes and the
+            // same line an unavailable row carries. The five identity colours
+            // are not this product's to repaint (S98/S31).
+            Self::ProfileColour => values.editor.map_or_else(
+                || Text::ProfilesRowColourDesc.text(),
+                |editor| {
+                    if editor.user {
+                        Text::ProfilesRowColourDesc.text()
+                    } else {
+                        editor.colour_reason
+                    }
+                },
+            ),
+            Self::ProfileArgs => Text::ProfilesRowArgsDesc.text(),
+            Self::ProfileEnv => Text::ProfilesRowEnvDesc.text(),
+            Self::ProfileHyperlink => Text::ProfilesRowHyperlinkDesc.text(),
+            // **The capability sentence, quoted** — `docs/shell-integration.md`'s
+            // own matrix read through `profiles::capability_text`, which is the
+            // very string the list's third line carries. One authority said
+            // twice, never a second table to drift from it.
+            Self::ProfileIntegration => values.editor.map_or("", |editor| editor.capability),
             Self::BackgroundImage => Text::DescBackgroundImage.text(),
             Self::ImageFit => Text::DescImageFit.text(),
             Self::ImageOpacity => Text::DescImageOpacity.text(),
@@ -1781,6 +2142,10 @@ impl SettingsRow {
                 min: bt_persist::MINIMUM_BACKGROUND_OPACITY,
                 max: 100,
             }),
+            Self::ProfileName | Self::ProfileArgs => SettingsControl::Field,
+            Self::ProfileProgram => SettingsControl::FieldPair,
+            Self::ProfileEnv => SettingsControl::EnvTable,
+            Self::ProfileIntegration => SettingsControl::Sentence,
             _ => SettingsControl::Combo,
         }
     }
@@ -1842,7 +2207,20 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::DefaultProfile
             | Self::Language
-            | Self::PsReadLine => false,
+            | Self::PsReadLine
+            // The everyday half of the editor, in the order somebody decides a
+            // profile: what it is called, what it runs, where it starts, what
+            // colour names it.
+            | Self::ProfileName
+            | Self::ProfileProgram
+            | Self::ProfileStartAt
+            | Self::ProfileColour => false,
+            // And the four the disclosure exists for — by the same measure that
+            // put `Customise scheme…` behind one.
+            Self::ProfileArgs
+            | Self::ProfileEnv
+            | Self::ProfileHyperlink
+            | Self::ProfileIntegration => true,
         }
     }
 
@@ -1863,6 +2241,13 @@ impl SettingsRow {
         match self {
             Self::Acrylic => values.acrylic_available,
             Self::BackgroundOpacity => values.translucency_available,
+            // **The five identity colours are not this product's to repaint**
+            // (S98/S31 — the blue is Microsoft's and the orange is Ubuntu's),
+            // and the row says so the way every unreachable row in this dialog
+            // says it: greyed whole, with its sentence become the reason. Spelled
+            // here rather than beside the hit test, so the draw and the press
+            // read one answer.
+            Self::ProfileColour => values.editor.is_none_or(|editor| editor.user),
             _ => true,
         }
     }
@@ -1873,6 +2258,16 @@ impl SettingsRow {
         match self.control() {
             SettingsControl::Combo => SettingsTarget::Combo(self),
             SettingsControl::Slider(_) => SettingsTarget::Slider(self),
+            // A field is focused as a field: the caret goes into it, and the
+            // ring is drawn round the same box a press lands in.
+            SettingsControl::Field | SettingsControl::FieldPair => SettingsTarget::Field(self),
+            // **Neither of these rows has *a* control.** The table's stops are
+            // its cells, its `✕`s and its `Add`, which `page_order` lists one by
+            // one; a row that reports has none at all. Both answer with the
+            // surface they are standing on, which is what makes a press on the
+            // table's own background — the gap between two lines — land nowhere
+            // instead of on whichever of its parts was named here.
+            SettingsControl::EnvTable | SettingsControl::Sentence => SettingsTarget::Panel,
         }
     }
 
@@ -1921,7 +2316,20 @@ impl SettingsRow {
             // `option_labels` is what the layout measures the control column
             // against, and the honest measurement of a control that never opens
             // a menu is no words at all.
-            Self::ImageOpacity | Self::BackgroundOpacity => 0,
+            Self::ProfileStartAt => START_AT_OPTIONS.len(),
+            Self::ProfileColour => MarkColour::ALL.len(),
+            Self::ProfileHyperlink => HYPERLINK_OPTIONS.len(),
+            // A field, a table and a sentence open no menu. Zero rather than a
+            // refusal, on the sliders' own ruling above: `option_labels` is what
+            // the control column is measured against, and the honest measurement
+            // of a control with no items is no words at all.
+            Self::ImageOpacity
+            | Self::BackgroundOpacity
+            | Self::ProfileName
+            | Self::ProfileProgram
+            | Self::ProfileArgs
+            | Self::ProfileEnv
+            | Self::ProfileIntegration => 0,
         }
     }
 
@@ -1968,7 +2376,51 @@ impl SettingsRow {
             Self::Acrylic | Self::AlwaysOnTop => {
                 FORMULA_OPTIONS.get(index).copied().map(on_off_label)
             }
-            Self::ImageOpacity | Self::BackgroundOpacity => None,
+            Self::ProfileStartAt => START_AT_OPTIONS.get(index).copied().map(start_at_label),
+            Self::ProfileColour => MarkColour::ALL
+                .get(index)
+                .copied()
+                .map(|colour| crate::i18n::colour_name(colour).text()),
+            Self::ProfileHyperlink => HYPERLINK_OPTIONS.get(index).copied().map(hyperlink_label),
+            Self::ImageOpacity
+            | Self::BackgroundOpacity
+            | Self::ProfileName
+            | Self::ProfileProgram
+            | Self::ProfileArgs
+            | Self::ProfileEnv
+            | Self::ProfileIntegration => None,
+        }
+    }
+
+    /// What the picker's *button* says, when that is not simply the word on the
+    /// item that is ticked.
+    ///
+    /// Two rows need it and both for the same reason: their current value is not
+    /// one of the words in their list. A fixed starting folder is a path, and a
+    /// control that answered `Choose a folder…` while standing on
+    /// `D:\Developer` would be a control that cannot say its own value; a
+    /// profile duplicated from a built-in wears that built-in's mark, which is
+    /// none of the eight struck colours and is telling the truth about what the
+    /// row is a copy of.
+    #[must_use]
+    pub fn value_text(self, values: &SettingsValues) -> Option<&'static str> {
+        let editor = values.editor?;
+        match self {
+            Self::ProfileStartAt => editor.fixed_folder,
+            // No tick is drawn either, because nothing in the list is what this
+            // row is on. Choosing one of the eight is a one-way door — the way
+            // back to a built-in's own mark is to duplicate the built-in again —
+            // and it is a small one, because the mark a copy inherits is a claim
+            // about where it came from rather than a colour anybody chose.
+            // Two rows wear no tick and two different facts sit behind that:
+            // a built-in's mark is its own and never was one of these eight,
+            // and a copy of one is wearing the mark it is a copy of.
+            Self::ProfileColour if !editor.user => Some(Text::ProfilesColourFixed.text()),
+            Self::ProfileColour => editor
+                .colour
+                .is_none()
+                .then(|| Text::ProfilesColourInherited.text()),
+            _ => None,
         }
     }
 
@@ -1991,6 +2443,16 @@ impl SettingsRow {
                 .get(index)
                 .copied()
                 .map(split_direction_mark),
+            // **The mark itself and not a swatch.** The mock-up draws a 12px
+            // well beside each name because a browser prototype has no profile
+            // marks to hand; this dialog does, and its picker already carries
+            // the `.ticon` column the default-profile row uses. Showing the
+            // chassis in the colour shows the thing that will appear on the
+            // strip, which is what the reader is choosing.
+            Self::ProfileColour => MarkColour::ALL
+                .get(index)
+                .copied()
+                .map(|colour| ChromeMark::ProfileGeneric { colour }),
             _ => None,
         }
     }
@@ -2089,7 +2551,16 @@ impl SettingsRow {
             Self::AlwaysOnTop => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.always_on_top),
-            Self::ImageOpacity | Self::BackgroundOpacity => None,
+            Self::ProfileStartAt => values.editor.map(|editor| editor.start_at),
+            Self::ProfileColour => values.editor.and_then(|editor| editor.colour),
+            Self::ProfileHyperlink => values.editor.map(|editor| editor.hyperlink),
+            Self::ImageOpacity
+            | Self::BackgroundOpacity
+            | Self::ProfileName
+            | Self::ProfileProgram
+            | Self::ProfileArgs
+            | Self::ProfileEnv
+            | Self::ProfileIntegration => None,
         }
     }
 }
@@ -2199,9 +2670,51 @@ pub struct SettingsContent<'a> {
     /// through [`Self::page_rows`], so none of them carries a second copy of the
     /// rule "a collapsed group's rows are not there".
     pub advanced: AdvancedOpen,
+    /// **The profile the editor sub-page is open on** (§7.1.6c-6b), or `None`
+    /// while the Profiles page is showing its list.
+    ///
+    /// It rides beside `advanced` for `advanced`'s own reason: it decides *which
+    /// rows the dialog is holding this frame*, which is exactly what this struct
+    /// is. The height, the Tab order, the hit test and the draw all read it
+    /// through [`Self::page_rows`], so none of them carries a second copy of the
+    /// rule "the list's rows and the editor's are never both on screen".
+    pub editor: Option<EditorSubject>,
 }
 
+/// The editor sub-page's rows, top to bottom — its whole page, since it has
+/// nothing but rows.
+///
+/// A constant rather than a filter over [`visible_rows`], because these rows are
+/// not *shown* by the Profiles page, they *are* its second view: `visible_rows`
+/// answers "what has this build got", and the answer for Profiles is a table of
+/// profiles. The order is the mock-up's — what it is called, what it runs, where
+/// it starts, what colour names it, and then the four the disclosure exists for.
+const EDITOR_ROWS: [SettingsRow; 8] = [
+    SettingsRow::ProfileName,
+    SettingsRow::ProfileProgram,
+    SettingsRow::ProfileStartAt,
+    SettingsRow::ProfileColour,
+    SettingsRow::ProfileArgs,
+    SettingsRow::ProfileEnv,
+    SettingsRow::ProfileHyperlink,
+    SettingsRow::ProfileIntegration,
+];
+
 impl SettingsContent<'_> {
+    /// Every row the Profiles page is holding, which is [`EDITOR_ROWS`] while
+    /// the editor is open and nothing at all while the list is.
+    ///
+    /// **Two views and not two pages** (mock-up, `.pf-view`): the edit view
+    /// *replaces* the list rather than opening inside it, which is §7.1.6c-2's
+    /// own argument said again about a different editor — an accordion would put
+    /// the profile being edited between the profiles that are not, in one
+    /// scroll, with an environment table in the middle of it.
+    fn editor_rows(&self, category: SettingsCategory) -> Vec<SettingsRow> {
+        if category != SettingsCategory::Profiles || self.editor.is_none() {
+            return Vec::new();
+        }
+        EDITOR_ROWS.to_vec()
+    }
     /// The rows of one page **that are showing**, in the order [`visible_rows`]
     /// put them.
     ///
@@ -2214,9 +2727,9 @@ impl SettingsContent<'_> {
     #[must_use]
     pub fn page_rows(&self, category: SettingsCategory) -> Vec<SettingsRow> {
         let open = self.advanced.is_open(category);
-        self.rows
-            .iter()
-            .copied()
+        self.editor_rows(category)
+            .into_iter()
+            .chain(self.rows.iter().copied())
             .filter(|row| row.category() == category && (open || !row.advanced()))
             .collect()
     }
@@ -2228,9 +2741,9 @@ impl SettingsContent<'_> {
     /// opening the disclosure moves no button above it.
     #[must_use]
     pub fn category_rows(&self, category: SettingsCategory) -> Vec<SettingsRow> {
-        self.rows
-            .iter()
-            .copied()
+        self.editor_rows(category)
+            .into_iter()
+            .chain(self.rows.iter().copied())
             .filter(|row| row.category() == category)
             .collect()
     }
@@ -2244,9 +2757,9 @@ impl SettingsContent<'_> {
     /// derivation must not produce.
     #[must_use]
     pub fn advanced_rows(&self, category: SettingsCategory) -> Vec<SettingsRow> {
-        self.rows
-            .iter()
-            .copied()
+        self.editor_rows(category)
+            .into_iter()
+            .chain(self.rows.iter().copied())
             .filter(|row| row.category() == category && row.advanced())
             .collect()
     }
@@ -2254,9 +2767,7 @@ impl SettingsContent<'_> {
     /// Whether this page grows an Advanced disclosure at all.
     #[must_use]
     pub fn has_advanced(&self, category: SettingsCategory) -> bool {
-        self.rows
-            .iter()
-            .any(|row| row.category() == category && row.advanced())
+        !self.advanced_rows(category).is_empty()
     }
 
     /// **The rail**, derived: every category with something on its page, in
@@ -2398,6 +2909,14 @@ pub struct SettingsValues {
     /// which is what a snapshot of every row's answer should have been once it
     /// stopped being four bools and a handful of scalars.
     pub profile_available: Vec<bool>,
+    /// The profile the editor is open on, or `None` while the Profiles page is
+    /// showing its list.
+    ///
+    /// **This is what makes the sub-page a view and not a page**: the rail keeps
+    /// `Profiles` selected because that is where the reader is, and every row of
+    /// the editor is a row of that category which `page_rows` hands out only
+    /// while this is `Some`.
+    pub editor: Option<EditorSubject>,
     /// Whether a picture is named — **not which one**. The name is a path and
     /// this struct is `Copy` + `Eq`; the button's caption comes through
     /// [`build`]'s own `background_image` argument, which is where a borrowed
@@ -2487,8 +3006,57 @@ impl SettingsValues {
             // A bundled scheme, which is what a fresh install wears: the tests
             // that are *about* the delete verb set this themselves.
             scheme_in_force_is_user_file: false,
+            // The list, which is where the Profiles page opens.
+            editor: None,
         }
     }
+}
+
+/// The profile the editor sub-page is standing on, as **answers rather than as a
+/// borrowed row** (§7.1.6c-6b).
+///
+/// Every field of `SettingsValues` is already a resolved index, a flag or a
+/// `&'static str` rather than a borrowed thing, which is what lets a geometry
+/// test build a dialog with no profile table under it. So the editor rides in
+/// the same shape: the index the writes go to, and the answers its pickers are
+/// standing on, resolved by the runtime through `profiles`' own doors before the
+/// dialog is laid out. It is `Copy` so that reading it off a borrowed
+/// `SettingsValues` costs nothing, which every `option_*` call does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditorSubject {
+    /// Which row of the profile table — the index every write in this sub-page
+    /// goes to, and never the position on the page: they are the same today and
+    /// they come apart the moment a filter arrives.
+    pub index: usize,
+    /// The name in the breadcrumb, which is [`profiles::title`]'s interned
+    /// answer and therefore the qualified one a tab would show.
+    pub title: &'static str,
+    /// Whether this is a profile of the reader's own — which decides three
+    /// things and only three: whether the colour row is theirs, whether the foot
+    /// deletes or restores, and whether the row menu offers `Delete` at all.
+    pub user: bool,
+    /// Which of the eight struck colours the mark wears, or `None` while it
+    /// wears one it inherited from the built-in it was copied from.
+    pub colour: Option<usize>,
+    /// Why the colour row is dark, when it is — the row's own sentence become
+    /// the reason, interned so this stays `Copy`.
+    pub colour_reason: &'static str,
+    /// Which of [`START_AT_OPTIONS`] the starting directory is on.
+    pub start_at: usize,
+    /// The fixed folder's own path, when the row is on one. It is what the
+    /// picker's button says, because `Choose a folder…` over `D:\Developer`
+    /// would be a control that cannot say its own value.
+    pub fixed_folder: Option<&'static str>,
+    /// Which of [`HYPERLINK_OPTIONS`] this profile's environment puts
+    /// `FORCE_HYPERLINK` on.
+    pub hyperlink: usize,
+    /// The capability sentence, which is the `Shell integration` row's whole
+    /// description and the same string the list's third line carries.
+    pub capability: &'static str,
+    /// How many environment rows the reader has of their own. The three ghosts
+    /// are constant and are not counted here — they are what this terminal says
+    /// to every session, not what this profile says.
+    pub env_rows: usize,
 }
 
 /// Whether the dialog is up, and what is open inside it.
@@ -2558,6 +3126,99 @@ pub struct SettingsPanel {
     /// finger was. So a pointer press moves the focus with the ring off, and any
     /// key press turns it on until the next pointer press.
     focus_visible: bool,
+    /// **The profile the editor sub-page is standing on** (§7.1.6c-6b), and what
+    /// its fields are holding.
+    ///
+    /// Nested state exactly as [`Self::menu`] is, and for the reason Esc unwinds
+    /// one layer per press: a row menu is open *inside* the list, a picker is
+    /// open *inside* the editor, and the ladder has to know which of the three
+    /// it is standing on. §7.1.5's rungs gain one here and it is booked as one:
+    /// editor → list → dialog closed.
+    editor: Option<ProfileEditor>,
+    /// Which row's `⋯` is open, by its index in the profile table.
+    row_menu: Option<usize>,
+}
+
+/// The editor sub-page's own state: which profile, and the text of its three
+/// fields plus its table.
+///
+/// **The fields hold text and the table holds the answer** — the table is
+/// written on every change (§7.1.6c-4a: no dirty gate, nothing to save), and
+/// these are what the reader is halfway through typing on the way there. They
+/// are seeded from the table when the editor opens and pushed back to it on
+/// every keystroke that the table will take; the one that it will not is a name
+/// another row already draws, which is why the refusal lives here too.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileEditor {
+    /// Which row of the profile table. **The table's index**, and it is re-read
+    /// rather than held across a reorder — see `Runtime::editor_subject`.
+    pub index: usize,
+    pub name: TextField,
+    pub program: TextField,
+    pub args: TextField,
+    /// The reader's own environment rows. The three the terminal fills in are
+    /// not here: they are what it says to every session, not what this profile
+    /// says, and a copy of them in editable state is the second layer plan §1.7
+    /// exists to abolish.
+    pub env: Vec<(TextField, TextField)>,
+    /// Why the name field is refusing, when it is.
+    pub refusal: Option<Text>,
+}
+
+impl ProfileEditor {
+    /// Which control the caret is in and the selection it holds, given where the
+    /// focus is standing.
+    ///
+    /// **Derived from the focus rather than stored**, because there is one
+    /// keyboard: the field with the caret is the field with the focus, and a
+    /// second copy of that fact is a second thing to keep in step. `None` for a
+    /// focus that is not a text control at all, which is every picker, verb and
+    /// row on the page.
+    #[must_use]
+    pub fn caret_of(
+        &self,
+        focus: Option<SettingsTarget>,
+    ) -> Option<(SettingsTarget, usize, usize)> {
+        let focus = focus?;
+        let field = self.field_of(focus)?;
+        let selection = field.selection();
+        Some((focus, selection.start, selection.end))
+    }
+
+    /// The field one target names, if it names one.
+    #[must_use]
+    pub fn field_of(&self, target: SettingsTarget) -> Option<&TextField> {
+        match target {
+            SettingsTarget::Field(SettingsRow::ProfileName) => Some(&self.name),
+            SettingsTarget::Field(SettingsRow::ProfileProgram) => Some(&self.program),
+            SettingsTarget::Field(SettingsRow::ProfileArgs) => Some(&self.args),
+            SettingsTarget::EnvName(index) => self.env.get(index).map(|(name, _)| name),
+            SettingsTarget::EnvValue(index) => self.env.get(index).map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// The same field, to type into.
+    #[must_use]
+    pub fn field_mut(&mut self, target: SettingsTarget) -> Option<&mut TextField> {
+        match target {
+            SettingsTarget::Field(SettingsRow::ProfileName) => Some(&mut self.name),
+            SettingsTarget::Field(SettingsRow::ProfileProgram) => Some(&mut self.program),
+            SettingsTarget::Field(SettingsRow::ProfileArgs) => Some(&mut self.args),
+            SettingsTarget::EnvName(index) => self.env.get_mut(index).map(|(name, _)| name),
+            SettingsTarget::EnvValue(index) => self.env.get_mut(index).map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// The reader's own environment rows as the table stores them.
+    #[must_use]
+    pub fn env_pairs(&self) -> Vec<(String, String)> {
+        self.env
+            .iter()
+            .map(|(name, value)| (name.text().to_owned(), value.text().to_owned()))
+            .collect()
+    }
 }
 
 /// A capture in progress: which line is listening, what it is showing, and what
@@ -2663,6 +3324,12 @@ impl SettingsPanel {
         self.menu = None;
         self.menu_scroll = 0.0;
         self.recording = None;
+        // **Pressing any other word of the rail leaves the sub-page** (plan
+        // §3.3). There is no dirty gate to route a question through — every
+        // choice in the editor was written the instant it was made — so there is
+        // nothing to save and nothing to ask.
+        self.editor = None;
+        self.row_menu = None;
         self.focus = Some(SettingsTarget::Nav(category));
         true
     }
@@ -2688,6 +3355,8 @@ impl SettingsPanel {
         self.hover = None;
         self.recording = None;
         self.focus_visible = false;
+        self.editor = None;
+        self.row_menu = None;
         self.category = content.first_category();
         self.focus = self
             .open
@@ -2714,11 +3383,32 @@ impl SettingsPanel {
             self.focus = Some(SettingsTarget::Record(capture.row));
             return true;
         }
+        // **A row's `⋯` is a rung above its own list**, on the picker's terms
+        // one line down: it is the innermost thing open, and closing it hands
+        // the keyboard back to the trigger it hangs from.
+        if let Some(index) = self.row_menu.take() {
+            self.hover = None;
+            self.focus = Some(SettingsTarget::ProfileMore(index));
+            return true;
+        }
         if let Some(row) = self.menu {
             self.menu = None;
             self.menu_scroll = 0.0;
             self.hover = None;
             self.focus = Some(SettingsTarget::Combo(row));
+            return true;
+        }
+        // **The new rung** (§7.1.5 amendment, plan §3.5, ruling 8): the editor
+        // sub-page is a layer, so Esc leaves it for the list before it leaves the
+        // dialog. Three presses, three states.
+        //
+        // The alternative — the sub-page reachable out of only by `‹ Profiles`,
+        // with Esc closing the whole dialog — was refused because somebody who
+        // has just typed a path into a field and presses Esc out of habit would
+        // lose the entire dialog rather than the page they are on.
+        if let Some(editor) = self.editor.take() {
+            self.hover = None;
+            self.focus = Some(SettingsTarget::ProfileRow(editor.index));
             return true;
         }
         if self.open {
@@ -2737,6 +3427,56 @@ impl SettingsPanel {
         self.recording = None;
         self.focus = None;
         self.focus_visible = false;
+        self.editor = None;
+        self.row_menu = None;
+    }
+
+    /// The editor sub-page's state, or `None` while the list is the view.
+    #[must_use]
+    pub fn editor(&self) -> Option<&ProfileEditor> {
+        self.editor.as_ref()
+    }
+
+    #[must_use]
+    pub fn editor_mut(&mut self) -> Option<&mut ProfileEditor> {
+        self.editor.as_mut()
+    }
+
+    /// Which row's `⋯` is open.
+    #[must_use]
+    pub fn row_menu(&self) -> Option<usize> {
+        self.row_menu
+    }
+
+    /// A press on a row's `⋯`: open it, or shut the one already open on this
+    /// row — [`Self::toggle_menu`]'s own shape, because it is the same gesture.
+    pub fn toggle_row_menu(&mut self, index: usize) {
+        self.row_menu = (self.row_menu != Some(index)).then_some(index);
+    }
+
+    pub fn close_row_menu(&mut self) {
+        self.row_menu = None;
+    }
+
+    /// Open the editor on one profile, seeded from the table, with the focus on
+    /// the name — which is the field somebody who has just made a profile is
+    /// about to type into.
+    pub fn open_editor(&mut self, editor: ProfileEditor) {
+        self.row_menu = None;
+        self.menu = None;
+        self.menu_scroll = 0.0;
+        self.focus = Some(SettingsTarget::Field(SettingsRow::ProfileName));
+        self.editor = Some(editor);
+    }
+
+    /// Leave the editor for the list, putting the keyboard back on the row that
+    /// was being edited — `‹ Profiles`, and the first press of Esc.
+    pub fn close_editor(&mut self) {
+        self.menu = None;
+        self.menu_scroll = 0.0;
+        if let Some(editor) = self.editor.take() {
+            self.focus = Some(SettingsTarget::ProfileRow(editor.index));
+        }
     }
 
     /// Shut whichever picker is open, leaving the dialog up — what choosing an
@@ -2805,6 +3545,18 @@ impl SettingsPanel {
         {
             self.recording = None;
         }
+        // The row menu's click-away, which is the pickers' own: a press
+        // anywhere that is not this menu or its trigger closes it, and a press
+        // *on* the trigger is `toggle_row_menu`'s job rather than this one's.
+        if self.row_menu.is_some_and(|index| {
+            !matches!(
+                target,
+                SettingsTarget::ProfileMore(open) | SettingsTarget::ProfileMoreItem(open, _)
+                    if open == index
+            )
+        }) {
+            self.row_menu = None;
+        }
         match target {
             SettingsTarget::Close
             | SettingsTarget::Combo(_)
@@ -2819,11 +3571,33 @@ impl SettingsPanel {
             | SettingsTarget::ProfileUp(_)
             | SettingsTarget::ProfileDown(_)
             | SettingsTarget::ProfileDuplicate(_)
+            | SettingsTarget::ProfileEdit(_)
+            | SettingsTarget::ProfileMore(_)
+            | SettingsTarget::ProfileNew
+            // The editor's own controls, every one of which is a place the next
+            // key can go — which is the whole test for whether the ring belongs
+            // on it.
+            | SettingsTarget::EditorBack
+            | SettingsTarget::Field(_)
+            | SettingsTarget::EditorBrowse
+            | SettingsTarget::EnvName(_)
+            | SettingsTarget::EnvValue(_)
+            | SettingsTarget::EnvRemove(_)
+            | SettingsTarget::EnvAdd
+            | SettingsTarget::EditorRestore
+            | SettingsTarget::EditorDelete
+            // A row of the list is a stop now that `Enter` on it opens the
+            // editor (§7.1.6c-6b). It was not one while there was nothing for
+            // `Enter` to do, because a ring on a thing that cannot be activated
+            // is a ring that lies.
+            | SettingsTarget::ProfileRow(_)
             | SettingsTarget::DeleteScheme => self.focus = Some(target),
-            // A press on a row's own band moves nothing and focuses nothing:
-            // there is no verb on it yet, and a ring on a thing `Enter` cannot
-            // open is a ring that lies.
-            SettingsTarget::ProfileRow(_) => {}
+            // An item of a row's `⋯` focuses the trigger it hangs from, exactly
+            // as a picker's item focuses its row: the menu is about to close,
+            // and the ring belongs on the thing that stays.
+            SettingsTarget::ProfileMoreItem(index, _) => {
+                self.focus = Some(SettingsTarget::ProfileMore(index));
+            }
             // An item's own row is what the keyboard lands on: the menu is about
             // to close, and a focus naming an item of a shut picker names
             // nothing.
@@ -3210,6 +3984,67 @@ impl SettingsPanel {
                 SettingsKeyVerdict::Inert
             }
             Some(target @ SettingsTarget::DeleteScheme) => SettingsKeyVerdict::Chose(target),
+            // **`Enter` on a row of the Profiles list opens its editor** (plan
+            // §3.5). `Space` does not, and the asymmetry is the point: a row is
+            // not a switch, and the key that toggles things everywhere else in
+            // this dialog must not half-open a page here.
+            Some(SettingsTarget::ProfileRow(index)) => {
+                SettingsKeyVerdict::Chose(SettingsTarget::ProfileEdit(index))
+            }
+            // The `⋯` opens where the picker beside it opens — here, because
+            // opening a menu changes nothing outside this dialog — and the ring
+            // lands on its first item so the arrows have somewhere to start.
+            Some(SettingsTarget::ProfileMore(index)) => {
+                let Some(line) = content.profiles.get(index) else {
+                    return SettingsKeyVerdict::Inert;
+                };
+                let Some(first) = row_menu_items(line).into_iter().next() else {
+                    return SettingsKeyVerdict::Inert;
+                };
+                self.row_menu = Some(index);
+                self.focus = Some(SettingsTarget::ProfileMoreItem(index, first.verb));
+                SettingsKeyVerdict::Moved
+            }
+            // An item with a reason refuses `Enter` exactly as a greyed picker
+            // item does: the ring may stand on it and its reason may be read.
+            Some(target @ SettingsTarget::ProfileMoreItem(index, verb)) => {
+                let refused = content
+                    .profiles
+                    .get(index)
+                    .and_then(|line| {
+                        row_menu_items(line)
+                            .into_iter()
+                            .find(|item| item.verb == verb)
+                            .map(|item| item.refusal.is_some())
+                    })
+                    .unwrap_or(true);
+                if refused {
+                    return SettingsKeyVerdict::Inert;
+                }
+                self.row_menu = None;
+                SettingsKeyVerdict::Chose(target)
+            }
+            // The editor's verbs all leave through `Chose` for the reason the
+            // disclosure does: every one of them writes `profiles.json`, and
+            // this type has no way to reach a file.
+            Some(
+                target @ (SettingsTarget::ProfileEdit(_)
+                | SettingsTarget::ProfileNew
+                | SettingsTarget::EditorBack
+                | SettingsTarget::EditorBrowse
+                | SettingsTarget::EnvRemove(_)
+                | SettingsTarget::EnvAdd
+                | SettingsTarget::EditorRestore
+                | SettingsTarget::EditorDelete),
+            ) => SettingsKeyVerdict::Chose(target),
+            // A field has already taken its own `Enter` before the walk got
+            // here (`Runtime::settings_field_key`), so reaching this arm means
+            // the field is not the focus after all.
+            Some(
+                SettingsTarget::Field(_)
+                | SettingsTarget::EnvName(_)
+                | SettingsTarget::EnvValue(_),
+            ) => SettingsKeyVerdict::Inert,
             _ => SettingsKeyVerdict::Inert,
         }
     }
@@ -3229,6 +4064,26 @@ impl SettingsPanel {
         values: &SettingsValues,
         delta: isize,
     ) -> bool {
+        // An open row menu owns the arrows for the reason an open picker does:
+        // while you are *inside* a control, the arrows are the control's.
+        if let (Some(open), Some(SettingsTarget::ProfileMoreItem(index, verb))) =
+            (self.row_menu, self.focus)
+            && open == index
+        {
+            let Some(line) = content.profiles.get(index) else {
+                return false;
+            };
+            let items = row_menu_items(line);
+            let Some(at) = items.iter().position(|item| item.verb == verb) else {
+                return false;
+            };
+            let next = at.saturating_add_signed(delta).min(items.len() - 1);
+            if next == at {
+                return false;
+            }
+            self.focus = Some(SettingsTarget::ProfileMoreItem(index, items[next].verb));
+            return true;
+        }
         match (self.menu, self.focus) {
             (Some(menu), Some(SettingsTarget::Choice(row, index))) if menu == row => {
                 self.step_option(row, values, index, delta)
@@ -3523,41 +4378,79 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
         }
         return order;
     }
-    if category == SettingsCategory::Profiles {
+    // The Profiles page's **list** view. Its editor is rows, so it falls through
+    // to the ordinary walk below.
+    if category == SettingsCategory::Profiles && content.editor.is_none() {
         // **A dark button is still a stop**, unlike the shortcut page's absent
         // `↺`, and the two rules do not disagree: a `↺` that is not drawn is not
         // there at all, while the first row's `↑` *is* drawn — greyed, with its
         // reason on it — because a row missing a button shifts every button
         // beside it out of column. Something a reader can see and be told about
         // is something the ring must be able to reach.
-        return content
-            .profiles
-            .iter()
-            .enumerate()
-            .flat_map(|(index, _)| {
-                [
-                    SettingsTarget::ProfileUp(index),
-                    SettingsTarget::ProfileDown(index),
-                    SettingsTarget::ProfileDuplicate(index),
-                ]
-            })
-            .collect();
+        //
+        // The row itself is a stop before its own verbs, which is plan §3.5's
+        // order: Tab walks `New profile`, then each row, then that row's buttons
+        // in the order the eye reads them. `Enter` on the row opens the editor,
+        // so a reader who never leaves the home row can still edit a profile.
+        let mut order = vec![SettingsTarget::ProfileNew];
+        order.extend(content.profiles.iter().enumerate().flat_map(|(index, _)| {
+            [
+                SettingsTarget::ProfileRow(index),
+                SettingsTarget::ProfileUp(index),
+                SettingsTarget::ProfileDown(index),
+                SettingsTarget::ProfileEdit(index),
+                SettingsTarget::ProfileMore(index),
+            ]
+        }));
+        return order;
     }
     // The same walk the boxes are placed from, so the ring visits the page in
     // the order the page is drawn and never lands on something that is not
     // there: a collapsed group's rows are already out of `page_items`, and its
     // `Reset` with them.
+    let env_rows = content.editor.map_or(0, |editor| editor.env_rows);
     page_items(content, category)
         .into_iter()
-        .filter_map(|item| match item {
-            PageItem::Row(row) => Some(row.control_target()),
+        .flat_map(|item| match item {
+            // A row with more than one control contributes all of them, in the
+            // order they are drawn: the `Program` field then its `Browse…`, and
+            // the environment table cell by cell before its `Add`. Written as a
+            // flat map rather than as a second pass so that a control which is
+            // not placed is not a stop either.
+            PageItem::Row(SettingsRow::ProfileProgram) => vec![
+                SettingsTarget::Field(SettingsRow::ProfileProgram),
+                SettingsTarget::EditorBrowse,
+            ],
+            PageItem::Row(SettingsRow::ProfileEnv) => (0..env_rows)
+                .flat_map(|index| {
+                    [
+                        SettingsTarget::EnvName(index),
+                        SettingsTarget::EnvValue(index),
+                        SettingsTarget::EnvRemove(index),
+                    ]
+                })
+                .chain(std::iter::once(SettingsTarget::EnvAdd))
+                .collect(),
+            // A row that only reports is not a stop: the ring answers "where
+            // will the next key go", and nothing goes there.
+            PageItem::Row(SettingsRow::ProfileIntegration) => Vec::new(),
+            PageItem::Row(row) => vec![row.control_target()],
             // **The disclosure is a focus stop** (user ruling 2026-08-17): Enter
             // and Space turn it, which is the whole of "keyboard focusable".
-            PageItem::Disclosure(_) => Some(SettingsTarget::Advanced(category)),
-            PageItem::Customise => Some(SettingsTarget::CustomiseScheme),
-            PageItem::Delete => Some(SettingsTarget::DeleteScheme),
-            PageItem::Reset => Some(SettingsTarget::ResetAdvanced(category)),
-            PageItem::Heading(_) => None,
+            PageItem::Disclosure(_) => vec![SettingsTarget::Advanced(category)],
+            PageItem::Customise => vec![SettingsTarget::CustomiseScheme],
+            PageItem::Delete => vec![SettingsTarget::DeleteScheme],
+            PageItem::Reset => vec![SettingsTarget::ResetAdvanced(category)],
+            // `‹ Profiles` opens the editor's Tab order, which is plan §3.5's
+            // own: the way back first, then the fields, then the disclosure and
+            // what it holds, then the foot.
+            PageItem::Crumb => vec![SettingsTarget::EditorBack],
+            PageItem::EditorFoot => vec![if content.editor.is_some_and(|editor| editor.user) {
+                SettingsTarget::EditorDelete
+            } else {
+                SettingsTarget::EditorRestore
+            }],
+            PageItem::Heading(_) => Vec::new(),
         })
         .collect()
 }
@@ -3577,6 +4470,35 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
 /// category rail, a shortcut-editing panel and a profile page; each of those
 /// brings focusable things that are not a row's picker, and each arrives as a
 /// variant here and a line in [`focus_order`] — not as a parallel focus type.
+/// One verb behind a row's `⋯` (§7.1.6c-6b).
+///
+/// **A closed list rather than an index into whatever the menu happens to be
+/// showing**, for the reason `files::TreeCommand` is one: which items a row
+/// offers depends on the row — a built-in has no `Delete`, a hidden row says
+/// `Show` where a visible one says `Hide` — so an ordinal would name a different
+/// verb on the row above. Named, the same press means the same thing on every
+/// row, and a test can ask for it without building a menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowVerb {
+    /// Copy this row, mark and all. It joined the menu when `Edit` took the open
+    /// slot (mock-up: "when 5b lands Edit / Hide / Delete / Set as default,
+    /// `Edit` takes the open slot, `Duplicate` joins the other three").
+    Duplicate,
+    /// Keep it out of the pickers, or put it back. One item and two words,
+    /// because it is one switch: a row that offered both would be asking which
+    /// of two states the reader wanted to be in rather than what to do next.
+    Hide,
+    /// **Absent on a built-in**, not present and dark: a built-in cannot be
+    /// deleted at all, and the menu is allowed to be shorter on one row than on
+    /// another, which is exactly what a right-aligned run of verbs could not do.
+    Delete,
+    /// The default is still *chosen* in one place — General's own row — and this
+    /// is that same choice made from the table it is a fact about (user ruling
+    /// 2026-08-17, Q4). The `default` badge on the row remains a report and not a
+    /// control.
+    SetDefault,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTarget {
     /// The dimmed world behind the dialog. A press here closes.
@@ -3631,14 +4553,53 @@ pub enum SettingsTarget {
     ProfileDuplicate(usize),
     /// One row of the Profiles page, away from its verbs.
     ///
-    /// **A hover target and not yet a focus stop.** The action run is revealed
-    /// by the pointer resting anywhere on the row — the tab strip's folder
-    /// button and the pane head's run are shown the same way — and a reveal that
-    /// only triggered on the buttons themselves would be a set of buttons you
-    /// have to already be on to see. Pressing here does nothing in this slice;
-    /// the row becomes a stop that `Enter` opens the editor from when there is
-    /// an editor to open.
+    /// **A hover target and a focus stop** (§7.1.6c-6b). The action run is
+    /// revealed by the pointer resting anywhere on the row — the tab strip's
+    /// folder button and the pane head's run are shown the same way — and a
+    /// reveal that only triggered on the buttons themselves would be a set of
+    /// buttons you have to already be on to see. `Enter` on the row opens the
+    /// editor, which is the plan's own keyboard model (§3.5); `Space` does
+    /// nothing, so that a row is never confused with a switch.
     ProfileRow(usize),
+    /// `Edit` on one row — the one verb in the open, and what a person came to
+    /// this list to do.
+    ProfileEdit(usize),
+    /// The `⋯` on one row: the trigger, which opens the menu rather than doing
+    /// anything itself.
+    ProfileMore(usize),
+    /// One item of an open row menu. **The row and the verb**, because the menu
+    /// is not the same length on every row — a built-in has no `Delete` at all,
+    /// which is the geometric dividend of putting the rare verbs behind a menu
+    /// rather than in a right-aligned run where a missing one would shift its
+    /// neighbours out of column.
+    ProfileMoreItem(usize, RowVerb),
+    /// The list's foot — `+ New profile`.
+    ProfileNew,
+    /// The editor's breadcrumb, `‹ Profiles`. The only way back that is a
+    /// control; `Esc` is the other.
+    EditorBack,
+    /// One of the editor's text fields, by the row it belongs to.
+    ///
+    /// The row and not an ordinal, for [`Self::Combo`]'s reason: a field is a
+    /// row's control, and a number would name a different one the day a row
+    /// moved.
+    Field(SettingsRow),
+    /// `Browse…`, the verb beside the `Program` field.
+    EditorBrowse,
+    /// One cell of the environment table. The `usize` is the row's place among
+    /// **the reader's own** variables — the three ghosts are not addressable,
+    /// because they are what this terminal says and not what this profile does.
+    EnvName(usize),
+    EnvValue(usize),
+    /// The `✕` that takes one of the reader's rows out.
+    EnvRemove(usize),
+    /// The `Add` under the table.
+    EnvAdd,
+    /// The editor's foot: `Restore all defaults` on a built-in, `Delete profile`
+    /// on a profile of the reader's own. **Never both** — they are the same
+    /// place answering the same question about two different kinds of row.
+    EditorRestore,
+    EditorDelete,
     /// One page's **Advanced** disclosure — the heading row with the triangle
     /// (§7.1.6c-5).
     ///
@@ -3785,7 +4746,77 @@ pub struct ProfileLineLayout {
     pub caps: Option<[[f32; 4]; 2]>,
     pub up: [f32; 4],
     pub down: [f32; 4],
-    pub duplicate: [f32; 4],
+    /// The one verb in the open — `Edit` (§7.1.6c-6b). It took this slot from
+    /// `Duplicate` the moment there was an editor to open, which is the mock-up's
+    /// own instruction: "when 5b lands Edit / Hide / Delete / Set as default,
+    /// `Edit` takes the open slot, `Duplicate` joins the other three behind the
+    /// `⋯`, and the picture above is the picture again".
+    pub edit: [f32; 4],
+    /// The `⋯` that opens the rest.
+    pub more: [f32; 4],
+}
+
+/// One line of a row's `⋯` menu — which verb, and whether it can be pressed.
+///
+/// A menu **may legitimately be shorter on one row than on another**, which is
+/// the geometric dividend of putting the rare verbs behind it: a built-in's
+/// `Delete` is *absent* rather than present and dark, where a right-aligned run
+/// of verbs would have had to keep the slot to stop its neighbours shifting out
+/// of column. A refusal that has a reason — `Hide` on the default, `Hide` on the
+/// fallback floor — stays in the menu greyed with its reason instead, which is
+/// the register `Restart shell…` already uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowMenuItem {
+    pub verb: RowVerb,
+    /// The word, which is `Hide` or `Show` on one and the same item.
+    pub label: &'static str,
+    /// Why it is dark, or `None` when it is live. The reason is the whole point
+    /// of leaving it in the list.
+    pub refusal: Option<&'static str>,
+}
+
+/// One row's open `⋯` menu, placed (§7.1.6c-6b).
+///
+/// It borrows `.combo`'s popup whole — the same face, the same 8px round, the
+/// same 4px padding, the same right-edge anchoring, the same click-away and the
+/// same Escape — through [`menu_layout`], which is the function the pickers' own
+/// popups come from. What it does not borrow is the tick column: nothing in it
+/// is a current value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowMenuLayout {
+    /// Which profile row it hangs from.
+    pub index: usize,
+    pub frame: [f32; 4],
+    /// The items, top to bottom, paired with their boxes.
+    pub items: Vec<([f32; 4], RowMenuItem)>,
+}
+
+/// One line of the environment table, placed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvRowLayout {
+    /// Where this line sits among **the reader's own** rows; `None` for one of
+    /// the three the terminal fills in on their behalf.
+    pub index: Option<usize>,
+    pub name: [f32; 4],
+    pub value: [f32; 4],
+    /// The `✕`. Reserved on a ghost row too and simply not drawn, exactly as the
+    /// mock-up hides rather than removes it (`.envrow.ghost .env-del {
+    /// visibility: hidden }`) — a column that disappeared on three rows would
+    /// shorten those rows' value fields and bend the table's right edge.
+    pub remove: [f32; 4],
+}
+
+/// The editor's breadcrumb, placed — `‹ Profiles › <NAME>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrumbLayout {
+    /// The whole line, which is what the heading's band would have been.
+    pub band: [f32; 4],
+    /// `‹ Profiles`, the only way back that is a control.
+    pub back: [f32; 4],
+    /// The `›`.
+    pub separator: [f32; 4],
+    /// The profile's own name, which reports and is not a control.
+    pub name: [f32; 4],
 }
 
 /// Every rectangle the overlay draws and hit-tests, in physical pixels of the
@@ -3831,8 +4862,25 @@ pub struct SettingsLayout {
     rows: Vec<RowLayout>,
     /// The shortcut page's own lines. Empty on every other page.
     shortcuts: Vec<ShortcutLineLayout>,
-    /// The Profiles page's own rows. Empty on every other page.
+    /// The Profiles page's own rows. Empty on every other page, and empty on
+    /// that page while the editor is the view that is up.
     profiles: Vec<ProfileLineLayout>,
+    /// The list's foot — `+ New profile`. `None` on every other view.
+    new_profile: Option<[f32; 4]>,
+    /// The open row menu, or `None`. At most one, for the reason at most one
+    /// picker is open: this dialog unwinds one layer per `Esc`.
+    row_menu: Option<RowMenuLayout>,
+    /// The editor's breadcrumb, when the editor is up.
+    crumb: Option<CrumbLayout>,
+    /// `Browse…`, the verb beside the `Program` field.
+    browse: Option<[f32; 4]>,
+    /// The environment table's lines, ghosts first, in the order they are drawn.
+    env_rows: Vec<EnvRowLayout>,
+    /// The `Add` under the table.
+    env_add: Option<[f32; 4]>,
+    /// The editor's foot verb — `Restore all defaults` on a built-in, `Delete
+    /// profile` on a profile of the reader's own, and never both.
+    editor_foot: Option<[f32; 4]>,
     /// The shortcut page's `Restore all defaults`.
     restore_all: Option<[f32; 4]>,
     /// This page's Advanced disclosure, when it has advanced rows to disclose.
@@ -4045,11 +5093,28 @@ impl SettingsLayout {
             SettingsTarget::ProfileUp(index)
             | SettingsTarget::ProfileDown(index)
             | SettingsTarget::ProfileDuplicate(index)
+            | SettingsTarget::ProfileEdit(index)
+            | SettingsTarget::ProfileMore(index)
+            | SettingsTarget::ProfileMoreItem(index, _)
             | SettingsTarget::ProfileRow(index) => self
                 .profiles
                 .iter()
                 .find(|line| line.index == index)
                 .map(|line| line.band),
+            SettingsTarget::ProfileNew => self.new_profile,
+            // Every control of the editor is inside a row, so the row's band is
+            // what has to be brought into view — the field alone would leave its
+            // own title cut off above it.
+            SettingsTarget::Field(row) => self.row(row).map(|placed| placed.band),
+            SettingsTarget::EditorBrowse => self
+                .row(SettingsRow::ProfileProgram)
+                .map(|placed| placed.band),
+            SettingsTarget::EnvName(_)
+            | SettingsTarget::EnvValue(_)
+            | SettingsTarget::EnvRemove(_)
+            | SettingsTarget::EnvAdd => self.row(SettingsRow::ProfileEnv).map(|placed| placed.band),
+            SettingsTarget::EditorBack => self.crumb.map(|crumb| crumb.band),
+            SettingsTarget::EditorRestore | SettingsTarget::EditorDelete => self.editor_foot,
             SettingsTarget::Advanced(_) => self.advanced.map(|group| group.band),
             SettingsTarget::ResetAdvanced(_) => self.reset_advanced,
             SettingsTarget::CustomiseScheme => self.customise_scheme,
@@ -4553,6 +5618,7 @@ pub fn layout_for_menu(
     surface_height: f32,
     scale: f32,
     menu_kind: Option<SettingsRow>,
+    row_menu: Option<usize>,
     content_of: SettingsContent<'_>,
     category: SettingsCategory,
     scroll: f32,
@@ -4569,11 +5635,14 @@ pub fn layout_for_menu(
         } else {
             &[]
         };
-    let profile_lines: &[crate::profiles::ProfileLine] = if category == SettingsCategory::Profiles {
-        content_of.profiles
-    } else {
-        &[]
-    };
+    // **The editor replaces the list**, so a frame holding both would be a frame
+    // drawing both — the two views of one page are never on screen together.
+    let profile_lines: &[crate::profiles::ProfileLine] =
+        if category == SettingsCategory::Profiles && content_of.editor.is_none() {
+            content_of.profiles
+        } else {
+            &[]
+        };
     let width = px(DIALOG_MAX_WIDTH_LOGICAL_PX)
         .min(surface_width * DIALOG_WIDTH_RATIO)
         .round();
@@ -4719,6 +5788,11 @@ pub fn layout_for_menu(
     let mut placed_groups: Vec<GroupLayout> = Vec::new();
     let mut placed_rows: Vec<RowLayout> = Vec::new();
     let mut placed_advanced: Option<AdvancedLayout> = None;
+    let mut placed_crumb: Option<CrumbLayout> = None;
+    let mut placed_browse: Option<[f32; 4]> = None;
+    let mut placed_env: Vec<EnvRowLayout> = Vec::new();
+    let mut placed_env_add: Option<[f32; 4]> = None;
+    let mut editor_foot: Option<[f32; 4]> = None;
     let mut reset_advanced: Option<[f32; 4]> = None;
     let mut customise_scheme: Option<[f32; 4]> = None;
     let mut delete_scheme: Option<[f32; 4]> = None;
@@ -4736,6 +5810,98 @@ pub fn layout_for_menu(
                 cursor = label[3] + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
                 placed_groups.push(GroupLayout { group, label });
             }
+            // **A stacked row is the same row with its control moved.** The
+            // title and the sentence keep the row's own paddings and take the
+            // whole width; the control takes the whole width beneath them.
+            // Placed in this loop rather than in a second one so that the boxes
+            // drawn, the boxes hit-tested and the height reserved stay three
+            // readings of one derivation (R8).
+            PageItem::Row(row) if row.stacked() => {
+                let height = metrics.stacked_height(row, content_of.editor);
+                let band = [row_left, cursor, row_right, cursor + height];
+                let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
+                cursor += height;
+                let title = [
+                    row_left,
+                    top,
+                    row_right,
+                    top + px(ROW_TITLE_LINE_LOGICAL_PX),
+                ];
+                let desc = [
+                    row_left,
+                    title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
+                    row_right,
+                    title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
+                ];
+                let control_top = desc[3] + px(STACKED_GAP_LOGICAL_PX);
+                let field_height = px(FIELD_HEIGHT_LOGICAL_PX);
+                let control = match row.control() {
+                    // The field gives way inside the pair, because the pair is
+                    // one control in two parts and the verb's width is fixed.
+                    SettingsControl::FieldPair => {
+                        let browse = [
+                            row_right - px(BROWSE_WIDTH_LOGICAL_PX),
+                            control_top,
+                            row_right,
+                            control_top + field_height,
+                        ];
+                        placed_browse = Some(browse);
+                        [
+                            row_left,
+                            control_top,
+                            browse[0] - px(FIELD_PAIR_GAP_LOGICAL_PX),
+                            control_top + field_height,
+                        ]
+                    }
+                    SettingsControl::EnvTable => {
+                        let mut line = control_top;
+                        let ghosts = ENV_GHOSTS.len();
+                        let mine = content_of.editor.map_or(0, |editor| editor.env_rows);
+                        for ordinal in 0..ghosts + mine {
+                            let remove_side = px(ENV_REMOVE_SIDE_LOGICAL_PX);
+                            let remove_left = row_right - remove_side;
+                            let name = [
+                                row_left,
+                                line,
+                                row_left + px(ENV_NAME_WIDTH_LOGICAL_PX),
+                                line + field_height,
+                            ];
+                            placed_env.push(EnvRowLayout {
+                                index: ordinal.checked_sub(ghosts),
+                                name,
+                                value: [
+                                    name[2] + px(ENVTAB_GAP_LOGICAL_PX),
+                                    line,
+                                    remove_left - px(ENVTAB_GAP_LOGICAL_PX),
+                                    line + field_height,
+                                ],
+                                remove: [
+                                    remove_left,
+                                    (2.0 * line + field_height - remove_side) / 2.0,
+                                    row_right,
+                                    (2.0 * line + field_height + remove_side) / 2.0,
+                                ],
+                            });
+                            line += field_height + px(ENVTAB_GAP_LOGICAL_PX);
+                        }
+                        placed_env_add = Some([
+                            row_left,
+                            line,
+                            row_left + px(ENV_ADD_WIDTH_LOGICAL_PX),
+                            line + px(ENV_ADD_HEIGHT_LOGICAL_PX),
+                        ]);
+                        [row_left, control_top, row_right, band[3]]
+                    }
+                    _ => [row_left, control_top, row_right, control_top + field_height],
+                };
+                placed_rows.push(RowLayout {
+                    row,
+                    band,
+                    title,
+                    desc,
+                    combo: control,
+                });
+            }
             PageItem::Row(row) => {
                 let band = [row_left, cursor, row_right, cursor + metrics.row_height];
                 let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
@@ -4752,7 +5918,16 @@ pub fn layout_for_menu(
                 // (`COMBO_MAX_ROW_SHARE`) is what keeps this column off zero. The
                 // sentence that does not fit what is left is ellipsised and never
                 // allowed to run under the button: see `build`.
-                let text_column_right = combo[0] - px(ROW_GAP_LOGICAL_PX);
+                // **A row with no control gets the whole row for its words.**
+                // The column is a reserve for a control, and reserving it under a
+                // sentence that is the row's entire content would cut the one
+                // thing the row is there to say — which for `Shell integration`
+                // is the capability sentence, quoted from one authority.
+                let text_column_right = if placed_control(row) {
+                    combo[0] - px(ROW_GAP_LOGICAL_PX)
+                } else {
+                    row_right
+                };
                 let title = [
                     row_left,
                     top,
@@ -4845,6 +6020,67 @@ pub fn layout_for_menu(
                     right,
                     cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
                 ]);
+            }
+            // The editor's heading, in the heading's own slot and wearing its
+            // type. It is not a second rail: the rail keeps `Profiles` selected,
+            // because that is where the reader is.
+            PageItem::Crumb => {
+                cursor += px(CRUMB_MARGIN_TOP_LOGICAL_PX);
+                let line = px(GROUP_LABEL_LINE_LOGICAL_PX);
+                let band = [text_left, cursor, text_right, cursor + line];
+                let font = px(GROUP_LABEL_FONT_LOGICAL_PX);
+                // **The heading's own word, measured with the heading's own
+                // tracking.** It stands in the `.group-label` slot and wears that
+                // label's face, and a width measured without the letter-spacing
+                // that face carries is a width one glyph short — which is exactly
+                // far enough for the `›` to sit on the last letter.
+                let back_word = format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text());
+                let tracked = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
+                    measure(text, font)
+                        + font * GROUP_LABEL_TRACKING_EM * text.chars().count() as f32
+                };
+                let back = [
+                    band[0],
+                    band[1],
+                    band[0] + tracked(&back_word, measure),
+                    band[3],
+                ];
+                let separator = [
+                    back[2] + px(CRUMB_GAP_LOGICAL_PX),
+                    band[1],
+                    back[2] + px(CRUMB_GAP_LOGICAL_PX) + tracked(CRUMB_SEPARATOR, measure),
+                    band[3],
+                ];
+                placed_crumb = Some(CrumbLayout {
+                    band,
+                    back,
+                    separator,
+                    name: [
+                        separator[2] + px(CRUMB_GAP_LOGICAL_PX),
+                        band[1],
+                        band[2],
+                        band[3],
+                    ],
+                });
+                cursor = band[3] + px(CRUMB_MARGIN_BOTTOM_LOGICAL_PX);
+            }
+            // One verb and never two: a built-in drops its overrides, a profile
+            // of the reader's own is deleted, and the two are the same place
+            // answering the same question about two different kinds of row.
+            PageItem::EditorFoot => {
+                cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
+                let width = if content_of.editor.is_some_and(|editor| editor.user) {
+                    px(DELETE_PROFILE_WIDTH_LOGICAL_PX)
+                } else {
+                    px(RESTORE_ALL_WIDTH_LOGICAL_PX)
+                };
+                editor_foot = Some([
+                    row_right - width,
+                    cursor,
+                    row_right,
+                    cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
+                ]);
+                cursor += px(BUTTON_HEIGHT_LOGICAL_PX);
             }
             PageItem::Reset => {
                 if customise_scheme.is_none() {
@@ -4944,6 +6180,7 @@ pub fn layout_for_menu(
         ]);
     }
     let mut placed_profiles: Vec<ProfileLineLayout> = Vec::with_capacity(profile_lines.len());
+    let mut new_profile: Option<[f32; 4]> = None;
     if !profile_lines.is_empty() {
         cursor += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
         let label = [
@@ -4972,19 +6209,31 @@ pub fn layout_for_menu(
             // Laid out the other way a row would move its arrows whenever its
             // neighbour's word changed length.
             let act = px(PROFILE_ACT_SIDE_LOGICAL_PX);
-            let word = measure(
-                crate::i18n::Text::ProfilesDuplicate.text(),
-                px(PROFILE_ACT_FONT_LOGICAL_PX),
-            );
-            let duplicate_width = (word + 2.0 * px(PROFILE_ACT_PADDING_X_LOGICAL_PX)).max(act);
-            let duplicate = [
-                row_right - duplicate_width,
+            // **`⋯` is the trailing edge and `Edit` stands against it**, which is
+            // the mock-up's own run once the editor exists: one verb in the open
+            // and the rest behind the menu. `Edit` is the only word here, so it
+            // is the only box whose width is measured; everything else is the
+            // 26px square the design gives a glyph.
+            let more = [
+                row_right - act,
                 middle - act / 2.0,
                 row_right,
                 middle + act / 2.0,
             ];
+            let word = measure(
+                crate::i18n::Text::ProfilesEdit.text(),
+                px(PROFILE_ACT_FONT_LOGICAL_PX),
+            );
+            let edit_width = (word + 2.0 * px(PROFILE_ACT_PADDING_X_LOGICAL_PX)).max(act);
+            let edit_right = more[0] - px(PROFILE_ACT_GAP_LOGICAL_PX);
+            let edit = [
+                edit_right - edit_width,
+                middle - act / 2.0,
+                edit_right,
+                middle + act / 2.0,
+            ];
             let separator_right =
-                duplicate[0] - px(PROFILE_ACT_GAP_LOGICAL_PX + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX);
+                edit[0] - px(PROFILE_ACT_GAP_LOGICAL_PX + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX);
             let down_right = separator_right
                 - px(1.0 + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX + PROFILE_ACT_GAP_LOGICAL_PX);
             let down = [
@@ -5056,9 +6305,23 @@ pub fn layout_for_menu(
                 caps,
                 up,
                 down,
-                duplicate,
+                edit,
+                more,
             });
         }
+        // **The list's foot, and the same `.sc-foot` every other page's verbs
+        // stand on** — right-aligned, one button, the air above it the shortcut
+        // page's own. `+ New profile` copies the default rather than opening a
+        // blank one: a profile with no program is a row that cannot start, and
+        // this block's default state is meant to be foolproof.
+        cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
+        let width = px(NEW_PROFILE_WIDTH_LOGICAL_PX);
+        new_profile = Some([
+            row_right - width,
+            cursor,
+            row_right,
+            cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
+        ]);
     }
     // A picker hangs off a row's button, so a picker named for a row this page
     // is not holding has nothing to hang from and is not open. That is not a
@@ -5087,8 +6350,40 @@ pub fn layout_for_menu(
             border,
             row.option_count(),
             widest_option(row, scale, measure) + option_icon_advance(row, scale),
+            true,
             menu_scroll,
         )
+    });
+    // The row menu hangs off the `⋯` that opened it, on exactly the terms a
+    // picker's popup hangs off its button: a trigger the page has scrolled out
+    // from under its own menu is a trigger the menu cannot honestly hang from.
+    let row_menu = row_menu.and_then(|index| {
+        let placed = placed_profiles
+            .iter()
+            .find(|placed| placed.index == index)
+            .filter(|placed| placed.band[1] >= clip[1] && placed.band[3] <= clip[3])?;
+        let items = row_menu_items(profile_lines.get(index)?);
+        let font = px(COMBO_FONT_LOGICAL_PX);
+        let widest = items
+            .iter()
+            .map(|item| measure(item.label, font))
+            .fold(px(ROW_MENU_MIN_WIDTH_LOGICAL_PX), f32::max);
+        let geometry = menu_layout(
+            placed.more,
+            surface_width,
+            surface_height,
+            scale,
+            border,
+            items.len(),
+            widest,
+            false,
+            0.0,
+        );
+        Some(RowMenuLayout {
+            index,
+            frame: geometry.frame,
+            items: geometry.items.into_iter().zip(items).collect(),
+        })
     });
     Some(SettingsLayout {
         scale,
@@ -5106,6 +6401,13 @@ pub fn layout_for_menu(
         rows: placed_rows,
         shortcuts: placed_lines,
         profiles: placed_profiles,
+        new_profile,
+        row_menu,
+        crumb: placed_crumb,
+        browse: placed_browse,
+        env_rows: placed_env,
+        env_add: placed_env_add,
+        editor_foot,
         restore_all,
         advanced: placed_advanced,
         reset_advanced,
@@ -5148,6 +6450,17 @@ enum PageItem {
     /// `Reset to defaults`, which only an open group has: a verb inside a
     /// collapsed group is a verb nobody can see.
     Reset,
+    /// The editor sub-page's breadcrumb (§7.1.6c-6b) — `‹ Profiles › <NAME>`,
+    /// which stands where that page's `.group-label` would otherwise be.
+    ///
+    /// Instead of the heading and not above it: it *is* the heading, wearing the
+    /// group label's own type, and a page that carried both would name itself
+    /// twice one line apart. The rail keeps `Profiles` selected under it,
+    /// because that is where the reader is.
+    Crumb,
+    /// The editor's own foot: `Restore all defaults` on a built-in, `Delete
+    /// profile` on a profile of the reader's own.
+    EditorFoot,
 }
 
 /// Everything one page stacks, top to bottom.
@@ -5161,11 +6474,20 @@ enum PageItem {
 /// so.
 fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<PageItem> {
     let rows = content.page_rows(category);
-    let mut items = Vec::with_capacity(rows.len() + 3);
+    let mut items = Vec::with_capacity(rows.len() + 4);
     // The heading, derived exactly as it always was — by walking the rows and
     // noticing where the category changes — so a page holding one category
     // produces one heading and a page holding none produces none.
+    //
+    // The editor's breadcrumb takes that slot rather than standing above it (see
+    // [`PageItem::Crumb`]), which is why `previous` is seeded here: the walk
+    // below then finds the category already named and emits no second heading.
+    let editing = content.editor.is_some() && category == SettingsCategory::Profiles;
     let mut previous: Option<SettingsCategory> = None;
+    if editing {
+        items.push(PageItem::Crumb);
+        previous = Some(category);
+    }
     for row in rows.iter().copied().filter(|row| !row.advanced()) {
         if previous != Some(row.category()) {
             items.push(PageItem::Heading(row.category()));
@@ -5202,6 +6524,9 @@ fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<P
             items.push(PageItem::Reset);
         }
     }
+    if editing {
+        items.push(PageItem::EditorFoot);
+    }
     items
 }
 
@@ -5227,6 +6552,11 @@ struct StackMetrics {
     foot_advance: f32,
     /// The muted line a scheme foot puts above its verbs.
     foot_hint_advance: f32,
+    /// `.row .text`'s two stacked line boxes alone, without the control beside
+    /// them — what a stacked row puts its control *under*.
+    text_height: f32,
+    /// The breadcrumb's margin, line box and margin (§7.1.6c-6b).
+    crumb_advance: f32,
 }
 
 impl StackMetrics {
@@ -5255,14 +6585,42 @@ impl StackMetrics {
             disclosure_height: px(DISCLOSURE_HEIGHT_LOGICAL_PX),
             foot_advance: px(FOOT_MARGIN_TOP_LOGICAL_PX) + px(BUTTON_HEIGHT_LOGICAL_PX),
             foot_hint_advance: px(FOOT_HINT_LINE_LOGICAL_PX),
+            text_height,
+            crumb_advance: px(CRUMB_MARGIN_TOP_LOGICAL_PX)
+                + px(GROUP_LABEL_LINE_LOGICAL_PX)
+                + px(CRUMB_MARGIN_BOTTOM_LOGICAL_PX),
         }
     }
 
+    /// What a row whose control leaves the column costs: the two paddings, the
+    /// title and its sentence, the gap the mock-up puts under them, and the
+    /// control's own height across the row's whole width.
+    ///
+    /// **The one row in this dialog whose height depends on its content** is the
+    /// environment table, and that is why the "one height" ruling is stated over
+    /// *pages*: the frame is locked to the tallest page, measured when the dialog
+    /// opens and when a disclosure turns, so adding a variable makes this page
+    /// scroll a little further and never makes the dialog grow under the rail.
+    fn stacked_height(self, row: SettingsRow, editor: Option<EditorSubject>) -> f32 {
+        let px = |value: f32| value * self.scale;
+        let control = if row == SettingsRow::ProfileEnv {
+            let rows = ENV_GHOSTS.len() + editor.map_or(0, |editor| editor.env_rows);
+            rows as f32 * (px(FIELD_HEIGHT_LOGICAL_PX) + px(ENVTAB_GAP_LOGICAL_PX))
+                + px(ENV_ADD_HEIGHT_LOGICAL_PX)
+        } else {
+            px(FIELD_HEIGHT_LOGICAL_PX)
+        };
+        2.0 * px(ROW_PADDING_Y_LOGICAL_PX) + self.text_height + px(STACKED_GAP_LOGICAL_PX) + control
+    }
+
     /// What one item of the stack advances the cursor by.
-    fn advance(self, item: PageItem) -> f32 {
+    fn advance(self, item: PageItem, editor: Option<EditorSubject>) -> f32 {
         match item {
             PageItem::Heading(_) => self.heading_advance,
+            PageItem::Crumb => self.crumb_advance,
+            PageItem::Row(row) if row.stacked() => self.stacked_height(row, editor),
             PageItem::Row(_) => self.row_height,
+            PageItem::EditorFoot => self.foot_advance,
             PageItem::Disclosure(_) => self.disclosure_height,
             PageItem::Reset => self.foot_advance,
             // The hint line the scheme verbs stand under, and nothing else: the
@@ -5283,14 +6641,20 @@ impl StackMetrics {
         let px = |value: f32| value * self.scale;
         let mut stack: f32 = page_items(content, category)
             .into_iter()
-            .map(|item| self.advance(item))
+            .map(|item| self.advance(item, content.editor))
             .sum();
         if category == SettingsCategory::Shortcuts && !content.shortcuts.is_empty() {
             stack += self.heading_advance;
             stack += content.shortcuts.len() as f32 * self.row_height;
             stack += self.foot_advance;
         }
-        if category == SettingsCategory::Profiles && !content.profiles.is_empty() {
+        // The list's own rows, and **only while the list is the view that is
+        // up**: the editor replaces it, so a page measured with both would
+        // reserve a page and a half for a page that shows half of it.
+        if category == SettingsCategory::Profiles
+            && content.editor.is_none()
+            && !content.profiles.is_empty()
+        {
             stack += self.heading_advance;
             // **Every row is the same height, capability line or not.** A page
             // whose rows changed height with what is installed would be a
@@ -5300,6 +6664,15 @@ impl StackMetrics {
         }
         px(CONTENT_PADDING_TOP_LOGICAL_PX) + stack + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX)
     }
+}
+
+/// Whether this row puts anything in the page's control column.
+///
+/// One predicate rather than a `matches!` at each of the four places that ask —
+/// the layout, the draw, the hit test and the focus walk — because a row that is
+/// drawn without a control and hit-tested with one is a target nobody can see.
+fn placed_control(row: SettingsRow) -> bool {
+    !matches!(row.control(), SettingsControl::Sentence)
 }
 
 /// The widest label this row's picker will draw, in the face that will draw it.
@@ -5477,17 +6850,28 @@ fn menu_layout(
     border: f32,
     option_count: usize,
     widest_option: f32,
+    ticks: bool,
     menu_scroll: f32,
 ) -> MenuGeometry {
     let px = |value: f32| value * scale;
     // Everything an item spends before and after its own glyphs: the menu's two
     // borders and its padding on both sides, then the item's left padding, the
     // fixed tick column, the gap after it, and the item's right padding.
+    //
+    // **A row's `⋯` menu has no tick column** and says so here rather than by
+    // drawing over one: nothing in it is a current value, so a column reserved
+    // for a check mark would be ten pixels of indent explaining a state the menu
+    // does not have. Everything else about the popup is the pickers' own — the
+    // face, the round, the padding, the flip-up, the click-away and the Escape —
+    // which is what R9 asked for: reuse the layer, do not grow a second one.
     let chrome = 2.0 * border
         + 2.0 * px(MENU_PADDING_LOGICAL_PX)
         + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX)
-        + px(TICK_WIDTH_LOGICAL_PX)
-        + px(ITEM_GAP_LOGICAL_PX);
+        + if ticks {
+            px(TICK_WIDTH_LOGICAL_PX) + px(ITEM_GAP_LOGICAL_PX)
+        } else {
+            0.0
+        };
     let width = (combo[2] - combo[0]).max((chrome + widest_option).ceil());
     let item_height = px(ITEM_HEIGHT_LOGICAL_PX);
     let shown = option_count.min(MENU_MAX_VISIBLE_ITEMS);
@@ -5559,6 +6943,27 @@ fn menu_layout(
 #[must_use]
 pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> SettingsTarget {
     let (x, y) = (x as f32, y as f32);
+    // **The row menu first**, on the pickers' own terms one line down: a popup
+    // is over everything the page is holding, and a press inside its frame that
+    // fell through would reach a row the menu is standing on.
+    if let Some(menu) = &layout.row_menu {
+        for (box_, item) in &menu.items {
+            if contains(*box_, x, y) {
+                // An item with a reason is `Menu`: nothing happened, the menu
+                // stays open, and the press belongs to the surface the item is
+                // standing on — which is the same answer a greyed picker item
+                // gives, spelled once for the hit test and the draw alike.
+                return if item.refusal.is_some() {
+                    SettingsTarget::ProfileMore(menu.index)
+                } else {
+                    SettingsTarget::ProfileMoreItem(menu.index, item.verb)
+                };
+            }
+        }
+        if contains(menu.frame, x, y) {
+            return SettingsTarget::ProfileMore(menu.index);
+        }
+    }
     if let (Some(menu), Some(row)) = (layout.menu, layout.menu_kind) {
         for (index, item) in layout.items.iter().enumerate() {
             // **An item the cap scrolled out of the body is menu body**, which
@@ -5618,12 +7023,65 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
                 SettingsTarget::ProfileDown(placed.index)
             };
         }
-        if contains(placed.duplicate, x, y) {
-            return SettingsTarget::ProfileDuplicate(placed.index);
+        if contains(placed.edit, x, y) {
+            return SettingsTarget::ProfileEdit(placed.index);
+        }
+        if contains(placed.more, x, y) {
+            return SettingsTarget::ProfileMore(placed.index);
         }
         if contains(placed.band, x, y) {
             return SettingsTarget::ProfileRow(placed.index);
         }
+    }
+    if let Some(new_profile) = layout.new_profile
+        && layout.shows(new_profile)
+        && contains(new_profile, x, y)
+    {
+        return SettingsTarget::ProfileNew;
+    }
+    if let Some(crumb) = layout.crumb
+        && layout.shows(crumb.band)
+        && contains(crumb.back, x, y)
+    {
+        return SettingsTarget::EditorBack;
+    }
+    if let Some(browse) = layout.browse
+        && layout.shows(browse)
+        && contains(browse, x, y)
+    {
+        return SettingsTarget::EditorBrowse;
+    }
+    for line in &layout.env_rows {
+        // A ghost is what this terminal says on the reader's behalf and not a
+        // control: it is drawn, it is not pressable, and its `✕` is reserved and
+        // never struck — a column that disappeared on three rows would bend the
+        // table's right edge (mock-up, `.envrow.ghost .env-del`).
+        let Some(index) = line.index else { continue };
+        if layout.shows(line.name) && contains(line.name, x, y) {
+            return SettingsTarget::EnvName(index);
+        }
+        if layout.shows(line.value) && contains(line.value, x, y) {
+            return SettingsTarget::EnvValue(index);
+        }
+        if layout.shows(line.remove) && contains(line.remove, x, y) {
+            return SettingsTarget::EnvRemove(index);
+        }
+    }
+    if let Some(add) = layout.env_add
+        && layout.shows(add)
+        && contains(add, x, y)
+    {
+        return SettingsTarget::EnvAdd;
+    }
+    if let Some(foot) = layout.editor_foot
+        && layout.shows(foot)
+        && contains(foot, x, y)
+    {
+        return if values.editor.is_some_and(|editor| editor.user) {
+            SettingsTarget::EditorDelete
+        } else {
+            SettingsTarget::EditorRestore
+        };
     }
     for placed in &layout.rows {
         if layout.shows(placed.combo) && contains(placed.combo, x, y) {
@@ -5731,6 +7189,10 @@ pub fn build(
     // [`SettingsValues`] for the reason that struct is `Copy`: a path is not.
     background_image: &str,
     recording: Option<(usize, &[String], Option<&str>)>,
+    // What the editor's fields are holding, when the editor is the view that is
+    // up. Beside `background_image` and for its reason: these are `String`s the
+    // reader is typing, and `SettingsValues` holds no strings.
+    editor: Option<EditorInk<'_>>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -5937,9 +7399,21 @@ pub fn build(
         // survive one line at 720px would be copy to shorten, not a rule to
         // change.
         let desc_font = px(ROW_DESC_FONT_LOGICAL_PX);
+        // **A refusal replaces the sentence**, which is this dialog's own idiom
+        // for a control that cannot act — the same line `psreadline` writes on
+        // its greyed row and the same line an unavailable profile carries. The
+        // name field keeps what was typed while it says so, because the refusal
+        // is a state the reader is standing in and not an error they submitted.
+        let description = editor
+            .and_then(|ink| {
+                (placed.row == SettingsRow::ProfileName)
+                    .then_some(ink.refusal)
+                    .flatten()
+            })
+            .unwrap_or_else(|| placed.row.description(values));
         content_stack.labels.push(ChromeLabel {
             text: ellipsized(
-                placed.row.description(values),
+                description,
                 placed.desc[2] - placed.desc[0],
                 desc_font,
                 measure,
@@ -5970,11 +7444,17 @@ pub fn build(
                     if placed.row == SettingsRow::BackgroundImage && !background_image.is_empty() {
                         background_image
                     } else {
-                        placed
-                            .row
-                            .selected_index(values)
-                            .and_then(|index| placed.row.option_label(index))
-                            .unwrap_or_default()
+                        // Two rows of the editor answer with something that is
+                        // not one of their own items — a fixed folder's path, and
+                        // a mark inherited from the built-in a profile was copied
+                        // from. See `SettingsRow::value_text`.
+                        placed.row.value_text(values).unwrap_or_else(|| {
+                            placed
+                                .row
+                                .selected_index(values)
+                                .and_then(|index| placed.row.option_label(index))
+                                .unwrap_or_default()
+                        })
                     };
                 push_combo(
                     &mut content_stack.quads,
@@ -6006,6 +7486,32 @@ pub fn build(
                     palette,
                 );
             }
+            SettingsControl::Field | SettingsControl::FieldPair => {
+                let target = SettingsTarget::Field(placed.row);
+                push_field(
+                    &mut content_stack,
+                    placed.combo,
+                    editor.map_or("", |ink| ink.text_of(placed.row)),
+                    None,
+                    false,
+                    // A path and an argument line are read character by
+                    // character, which is what the mock-up's `.field.mono` says
+                    // and why a name — a word — is not in it.
+                    placed.row != SettingsRow::ProfileName,
+                    hover == Some(target),
+                    editor.and_then(|ink| ink.caret_in(target)),
+                    scale,
+                    border,
+                    palette,
+                    measure,
+                );
+            }
+            // The table draws itself below, with its ghosts; the row's own box
+            // is the area it occupies and carries no face of its own.
+            SettingsControl::EnvTable => {}
+            // A row that reports has drawn everything it has: its title and the
+            // sentence under it, which is the capability line.
+            SettingsControl::Sentence => {}
         }
         // After the control it names, because a ring is a fill and a layer draws
         // its fills in order — pushed before, the control's own face would cover
@@ -6016,6 +7522,18 @@ pub fn build(
                 .extend(focus_ring(placed.combo, scale, palette.accent));
         }
     }
+    push_editor_page(
+        &mut content_stack,
+        layout,
+        editor,
+        hover,
+        focus,
+        values,
+        scale,
+        border,
+        palette,
+        measure,
+    );
     push_advanced_group(
         &mut content_stack,
         layout,
@@ -6046,6 +7564,7 @@ pub fn build(
         hover,
         focus,
         scale,
+        border,
         palette,
         measure,
     );
@@ -6180,6 +7699,85 @@ pub fn build(
         }
         if let Some(bar) = layout.menu_bar {
             push_menu_bar(&mut popup.quads, bar, palette);
+        }
+    }
+    // **The row's own menu, on the same layer and through the same door.** It
+    // borrows the pickers' popup whole — the face, the 8px round, the padding,
+    // the right-edge anchoring, the flip-up — and what it does not borrow is the
+    // tick column, because nothing in it is a current value (R9: reuse the
+    // layer, do not grow a second one). It never scrolls: four items is the most
+    // any row offers, and a cap that could not be reached is a cap that would
+    // only ever be a second thing to keep in step.
+    if let Some(menu) = &layout.row_menu {
+        push_float_window(
+            &mut popup.quads,
+            menu.frame,
+            px(MENU_RADIUS_LOGICAL_PX),
+            border,
+            px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+            palette.menu_surface,
+            palette.menu_shadow,
+            alpha(palette.menu_popup_shadow_inner_alpha),
+            alpha(palette.menu_popup_shadow_outer_alpha),
+            palette.menu_border,
+            alpha(palette.menu_border_alpha),
+        );
+        for (box_, item) in &menu.items {
+            let live = item.refusal.is_none();
+            let hovered =
+                live && hover == Some(SettingsTarget::ProfileMoreItem(menu.index, item.verb));
+            if hovered {
+                popup.quads.extend(rounded_overlay_fill(
+                    *box_,
+                    px(ITEM_RADIUS_LOGICAL_PX),
+                    palette.menu_item_hover,
+                    1.0,
+                ));
+            }
+            let font = px(COMBO_FONT_LOGICAL_PX);
+            let inset = px(ITEM_PADDING_X_LOGICAL_PX);
+            popup.labels.push(ChromeLabel {
+                text: item.label.to_owned(),
+                rect: [box_[0] + inset, box_[1], box_[2] - inset, box_[3]],
+                font_size_px: font,
+                color: if !live {
+                    palette.menu_item_hint_text
+                } else if hovered {
+                    palette.menu_item_text_selected
+                } else {
+                    palette.menu_item_text
+                },
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+            // **A refusal that has a reason stays in the menu, greyed, carrying
+            // it** — the register `Restart shell…` already uses. The reason
+            // stands at the item's trailing edge, in the ink a hint wears,
+            // because it is the same line the word is on and there is nowhere
+            // else on a menu item to put a second sentence.
+            if let Some(reason) = item.refusal {
+                popup.labels.push(ChromeLabel {
+                    text: ellipsized(
+                        reason,
+                        (box_[2] - inset) - (box_[0] + inset + measure(item.label, font) + inset),
+                        px(ROW_DESC_FONT_LOGICAL_PX),
+                        measure,
+                    ),
+                    rect: [box_[0] + inset, box_[1], box_[2] - inset, box_[3]],
+                    font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
+                    color: palette.menu_item_hint_text,
+                    align_right: true,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                });
+            }
         }
     }
 
@@ -6395,6 +7993,7 @@ fn push_profile_page(
     hover: Option<SettingsTarget>,
     focus: Option<SettingsTarget>,
     scale: f32,
+    border: f32,
     palette: bt_render::ChromePalette,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) {
@@ -6554,7 +8153,7 @@ fn push_profile_page(
         }
         // The hairline between "move this row" and "change this profile". Two
         // verbs acting on different things must not read as one run.
-        let separator_middle = (placed.down[2] + placed.duplicate[0]) / 2.0;
+        let separator_middle = (placed.down[2] + placed.edit[0]) / 2.0;
         let thickness = scale.round().max(1.0);
         let height = px(PROFILE_SEPARATOR_HEIGHT_LOGICAL_PX);
         let middle_y = (placed.band[1] + placed.band[3]) / 2.0;
@@ -6568,21 +8167,447 @@ fn push_profile_page(
             color: palette.menu_border,
             alpha: f32::from(palette.menu_border_alpha) / 255.0,
         });
-        push_glyph_verb(
-            stack,
-            placed.duplicate,
-            Text::ProfilesDuplicate.text(),
-            hover == Some(SettingsTarget::ProfileDuplicate(placed.index)),
-            true,
-            scale,
-            palette,
-        );
-        if focus == Some(SettingsTarget::ProfileDuplicate(placed.index)) {
-            stack
-                .quads
-                .extend(focus_ring(placed.duplicate, scale, palette.accent));
+        // **One verb in the open and the rest behind the `⋯`** — `Edit` is what
+        // a person came to this list to do, and duplicating, hiding, deleting
+        // and setting a default are the rarer four. The row applies this block's
+        // own progressive-disclosure rule to itself.
+        for (box_, word, target) in [
+            (
+                placed.edit,
+                Text::ProfilesEdit.text(),
+                SettingsTarget::ProfileEdit(placed.index),
+            ),
+            (
+                placed.more,
+                ROW_MORE_GLYPH,
+                SettingsTarget::ProfileMore(placed.index),
+            ),
+        ] {
+            push_glyph_verb(
+                stack,
+                box_,
+                word,
+                hover == Some(target),
+                true,
+                scale,
+                palette,
+            );
+            if focus == Some(target) {
+                stack.quads.extend(focus_ring(box_, scale, palette.accent));
+            }
         }
     }
+    // **`+ New profile` copies the default** rather than opening a blank one: a
+    // profile with no program is a row that cannot start, and this block's
+    // default state is meant to be foolproof. It is not a menu of templates
+    // either — every row's `Duplicate` already is that, and one verb behind two
+    // doors is the thing this house keeps deleting.
+    if let Some(new_profile) = layout.new_profile {
+        push_button(
+            &mut stack.quads,
+            &mut stack.labels,
+            new_profile,
+            Text::ProfilesNew.text(),
+            hover == Some(SettingsTarget::ProfileNew),
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if focus == Some(SettingsTarget::ProfileNew) {
+            stack
+                .quads
+                .extend(focus_ring(new_profile, scale, palette.accent));
+        }
+    }
+}
+
+/// What the profile editor's fields are holding this frame (§7.1.6c-6b).
+///
+/// **Text and a caret, and nothing about profiles.** The dialog's geometry is
+/// solved from [`SettingsValues`], which holds no strings because it is compared
+/// for equality every frame; what a reader is halfway through typing is a string
+/// and belongs here, beside the chosen picture's file name and the shortcut
+/// table's caps, for exactly that reason.
+#[derive(Clone, Copy, Debug)]
+pub struct EditorInk<'a> {
+    pub name: &'a str,
+    pub program: &'a str,
+    pub args: &'a str,
+    /// The reader's own environment rows, in the order the table draws them
+    /// under the three the terminal fills in.
+    pub env: &'a [(String, String)],
+    /// Which control the caret is in, and the selection it is holding as byte
+    /// offsets into that control's own text. Both ends equal is a bare caret.
+    ///
+    /// One answer for every field rather than a caret per field, because there
+    /// is one keyboard: the field with the caret is the field with the focus,
+    /// and a second copy of that fact is a second thing to keep in step.
+    pub caret: Option<(SettingsTarget, usize, usize)>,
+    /// Why the `Name` field is refusing, when it is — an exact duplicate of
+    /// another row's name, or nothing at all. It replaces the row's sentence,
+    /// which is this dialog's own idiom for a control that cannot act.
+    pub refusal: Option<&'static str>,
+}
+
+impl<'a> EditorInk<'a> {
+    /// What one of the three text rows is holding.
+    #[must_use]
+    fn text_of(self, row: SettingsRow) -> &'a str {
+        match row {
+            SettingsRow::ProfileName => self.name,
+            SettingsRow::ProfileProgram => self.program,
+            SettingsRow::ProfileArgs => self.args,
+            _ => "",
+        }
+    }
+
+    /// The selection this control is holding, if the caret is in it.
+    #[must_use]
+    fn caret_in(self, target: SettingsTarget) -> Option<(usize, usize)> {
+        self.caret
+            .filter(|(held, _, _)| *held == target)
+            .map(|(_, from, to)| (from, to))
+    }
+}
+
+/// The editor sub-page's own furniture: the breadcrumb, the `Browse…` beside the
+/// program, the environment table with its ghosts, and the one foot verb.
+///
+/// A pass of its own beside [`push_shortcut_page`] and [`push_profile_page`],
+/// for their reason: these are the parts of a page that are not rows, and a row
+/// loop that grew arms for them would be a loop that is really four loops.
+#[allow(clippy::too_many_arguments)]
+fn push_editor_page(
+    stack: &mut OverlayLayer,
+    layout: &SettingsLayout,
+    editor: Option<EditorInk<'_>>,
+    hover: Option<SettingsTarget>,
+    focus: Option<SettingsTarget>,
+    values: &SettingsValues,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |value: f32| value * scale;
+    let Some(ink) = editor else { return };
+    if let Some(crumb) = layout.crumb {
+        let font = px(GROUP_LABEL_FONT_LOGICAL_PX);
+        // `‹ Profiles` is the way back and wears the ink a control wears under
+        // the pointer; the `›` and the name after it report and stay muted.
+        for (rect, text, muted, align_right) in [
+            (
+                crumb.back,
+                format!("{CRUMB_BACK_PREFIX}{}", Text::CategoryProfiles.text()),
+                hover != Some(SettingsTarget::EditorBack),
+                false,
+            ),
+            (crumb.separator, CRUMB_SEPARATOR.to_owned(), true, false),
+            (
+                crumb.name,
+                values
+                    .editor
+                    .map_or_else(String::new, |subject| subject.title.to_owned()),
+                false,
+                false,
+            ),
+        ] {
+            stack.labels.push(ChromeLabel {
+                text: ellipsized(&text, rect[2] - rect[0], font, measure),
+                rect,
+                font_size_px: font,
+                color: if muted {
+                    palette.dialog_muted_text
+                } else {
+                    palette.dialog_title_text
+                },
+                align_right,
+                align_center: false,
+                letter_spacing_em: GROUP_LABEL_TRACKING_EM,
+                weight: ChromeLabelWeight::Medium,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
+        if focus == Some(SettingsTarget::EditorBack) {
+            stack
+                .quads
+                .extend(focus_ring(crumb.back, scale, palette.accent));
+        }
+    }
+    if let Some(browse) = layout.browse {
+        push_button(
+            &mut stack.quads,
+            &mut stack.labels,
+            browse,
+            Text::ProfilesBrowse.text(),
+            hover == Some(SettingsTarget::EditorBrowse),
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if focus == Some(SettingsTarget::EditorBrowse) {
+            stack
+                .quads
+                .extend(focus_ring(browse, scale, palette.accent));
+        }
+    }
+    // **The ghosts are the table's first rows by construction**, which is why
+    // the ordinal is enough to name them: the layout pushes `ENV_GHOSTS` and
+    // then the reader's own, in that order, and `EnvRowLayout::index` is `None`
+    // for exactly the first three.
+    for (ordinal, line) in layout.env_rows.iter().enumerate() {
+        // **A ghost is what this terminal already says on the reader's behalf**
+        // (plan §1.7): drawn, muted, and not pressable. Its `✕` keeps its column
+        // and is simply not struck, exactly as the mock-up hides rather than
+        // removes it — a column that vanished on three rows would shorten those
+        // rows' value fields and bend the table's right edge.
+        let (name, value, index) = match line.index {
+            None => {
+                let (name, value) = ENV_GHOSTS[ordinal.min(ENV_GHOSTS.len() - 1)];
+                (name.to_owned(), value.to_owned(), None)
+            }
+            Some(index) => {
+                let held = ink.env.get(index);
+                (
+                    held.map(|(name, _)| name.clone()).unwrap_or_default(),
+                    held.map(|(_, value)| value.clone()).unwrap_or_default(),
+                    Some(index),
+                )
+            }
+        };
+        for (rect, text, target, placeholder) in [
+            (
+                line.name,
+                name,
+                index.map(SettingsTarget::EnvName),
+                Text::ProfilesEnvName.text(),
+            ),
+            (
+                line.value,
+                value,
+                index.map(SettingsTarget::EnvValue),
+                Text::ProfilesEnvValue.text(),
+            ),
+        ] {
+            push_field(
+                stack,
+                rect,
+                &text,
+                // A ghost's boxes are never empty, so the placeholder is the
+                // reader's own row's alone.
+                index.map(|_| placeholder),
+                index.is_none(),
+                true,
+                target.is_some_and(|target| hover == Some(target)),
+                target.and_then(|target| ink.caret_in(target)),
+                scale,
+                border,
+                palette,
+                measure,
+            );
+            if let Some(target) = target
+                && focus == Some(target)
+            {
+                stack.quads.extend(focus_ring(rect, scale, palette.accent));
+            }
+        }
+        if let Some(index) = index {
+            let target = SettingsTarget::EnvRemove(index);
+            push_glyph_verb(
+                stack,
+                line.remove,
+                ENV_REMOVE_GLYPH,
+                hover == Some(target),
+                true,
+                scale,
+                palette,
+            );
+            if focus == Some(target) {
+                stack
+                    .quads
+                    .extend(focus_ring(line.remove, scale, palette.accent));
+            }
+        }
+    }
+    if let Some(add) = layout.env_add {
+        push_button(
+            &mut stack.quads,
+            &mut stack.labels,
+            add,
+            Text::ProfilesEnvAdd.text(),
+            hover == Some(SettingsTarget::EnvAdd),
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if focus == Some(SettingsTarget::EnvAdd) {
+            stack.quads.extend(focus_ring(add, scale, palette.accent));
+        }
+    }
+    if let Some(foot) = layout.editor_foot {
+        let user = values.editor.is_some_and(|subject| subject.user);
+        let target = if user {
+            SettingsTarget::EditorDelete
+        } else {
+            SettingsTarget::EditorRestore
+        };
+        push_button(
+            &mut stack.quads,
+            &mut stack.labels,
+            foot,
+            if user {
+                Text::ProfilesDeleteBtn.text()
+            } else {
+                Text::ProfilesRestoreAll.text()
+            },
+            hover == Some(target),
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if focus == Some(target) {
+            stack.quads.extend(focus_ring(foot, scale, palette.accent));
+        }
+    }
+}
+
+/// One `.field`: the pickers' own face and hairline, a selection behind the
+/// text, and a caret in it (§7.1.6c-6b).
+///
+/// It borrows `.combo > button`'s recipe exactly — hairline, radius 6, 13px, the
+/// same padding — because in this house a control is a face and a hairline, and
+/// a field that invented its own would read as arriving from somewhere else.
+///
+/// **The text is cut from the left when the caret is past the right edge**,
+/// which is what makes a field holding a long path usable at all: the part being
+/// typed is the part that has to be on screen. Cut and then laid out left to
+/// right, so there is no bidi algorithm to fight — the same honest native
+/// equivalent [`ellipsized_left`] is.
+#[allow(clippy::too_many_arguments)]
+fn push_field(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    text: &str,
+    // What an empty box says it is for. The two cells of a fresh environment row
+    // are otherwise two blank rectangles, and the mock-up names them in as many
+    // words (`aria-label="Name"` / `aria-label="Value"`) — this is that name,
+    // drawn, because a native field has no accessible-name channel to hide it in.
+    placeholder: Option<&str>,
+    // **What this terminal already says on the reader's behalf**, rather than
+    // what this profile says: drawn in the ink an unavailable thing wears, on a
+    // hairline at the same reduced strength. It is the native equivalent of the
+    // mock-up's `color: var(--ink3); border-style: dashed` — a dashed hairline is
+    // not a shape this rasterizer draws, and the register those two declarations
+    // are *for* is "present, and not yours", which the ink carries on its own.
+    ghost: bool,
+    mono: bool,
+    hovered: bool,
+    caret: Option<(usize, usize)>,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |value: f32| value * scale;
+    let radius = px(COMBO_RADIUS_LOGICAL_PX);
+    stack.quads.extend(rounded_overlay_fill(
+        rect,
+        radius,
+        palette.menu_border,
+        f32::from(palette.menu_border_alpha) / 255.0 * if ghost { GHOST_ROW_ALPHA } else { 1.0 },
+    ));
+    stack.quads.extend(rounded_overlay_fill(
+        [
+            rect[0] + border,
+            rect[1] + border,
+            rect[2] - border,
+            rect[3] - border,
+        ],
+        radius - border,
+        if hovered {
+            palette.dialog_hover
+        } else {
+            palette.dialog_surface
+        },
+        1.0,
+    ));
+    let font = px(if mono {
+        FIELD_MONO_FONT_LOGICAL_PX
+    } else {
+        FIELD_FONT_LOGICAL_PX
+    });
+    let left = rect[0] + border + px(FIELD_PADDING_X_LOGICAL_PX);
+    let right = rect[2] - border - px(FIELD_PADDING_X_LOGICAL_PX);
+    let width = (right - left).max(0.0);
+    // How far into the text the view has been pushed, so that the caret is
+    // always inside the box. Zero whenever the whole string fits, which is every
+    // field on the page until somebody types a path into one.
+    let offset = caret
+        .map(|(_, to)| measure(&text[..to.min(text.len())], font))
+        .filter(|caret_x| *caret_x > width)
+        .map_or(0.0, |caret_x| caret_x - width);
+    if let Some((from, to)) = caret {
+        let (from, to) = (from.min(to).min(text.len()), from.max(to).min(text.len()));
+        if from < to {
+            let start = left + measure(&text[..from], font) - offset;
+            let end = left + measure(&text[..to], font) - offset;
+            stack.quads.push(OverlayQuad {
+                rect: [
+                    start.max(left),
+                    rect[1] + border,
+                    end.min(right),
+                    rect[3] - border,
+                ],
+                color: palette.accent,
+                alpha: 0.30,
+            });
+        }
+        // The caret itself: one physical pixel of accent, full height inside the
+        // hairline. It is drawn at the *caret* end of the selection rather than
+        // at its start, because that is the end that moves.
+        let caret_x = (left + measure(&text[..to], font) - offset).clamp(left, right);
+        let thickness = scale.round().max(1.0);
+        stack.quads.push(OverlayQuad {
+            rect: [
+                caret_x,
+                rect[1] + border + px(FIELD_CARET_INSET_LOGICAL_PX),
+                caret_x + thickness,
+                rect[3] - border - px(FIELD_CARET_INSET_LOGICAL_PX),
+            ],
+            color: palette.accent,
+            alpha: 1.0,
+        });
+    }
+    let empty = text.is_empty();
+    stack.labels.push(ChromeLabel {
+        text: if empty {
+            placeholder.unwrap_or_default().to_owned()
+        } else {
+            text.to_owned()
+        },
+        rect: [left - offset, rect[1], right, rect[3]],
+        font_size_px: font,
+        color: if empty || ghost {
+            palette.menu_item_hint_text
+        } else {
+            palette.dialog_title_text
+        },
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        // The box the glyphs are cut to, which is not the box they are laid out
+        // from: a field scrolled to keep its caret in view starts drawing to the
+        // left of its own inside edge, and without this the overflow would run
+        // under the hairline and out into the row.
+        clip: Some([left, rect[1], right, rect[3]]),
+    });
 }
 
 /// One sentence over two lines of `width`, broken between words.
@@ -7403,6 +9428,9 @@ mod tests {
             shortcuts,
             profiles: &[],
             advanced,
+            // The list, which is where the Profiles page opens. The pins that
+            // are about the editor open it themselves.
+            editor: None,
         }
     }
 
@@ -7447,6 +9475,7 @@ mod tests {
             (SURFACE.1 * scale).round(),
             scale,
             menu_open.then_some(SettingsRow::Theme),
+            None,
             content(&rows, &[]),
             PAGE,
             scroll,
@@ -7544,6 +9573,7 @@ mod tests {
             SURFACE.1 * scale,
             scale,
             menu,
+            None,
             content(&rows, &shortcuts),
             category,
             scroll,
@@ -7612,6 +9642,7 @@ mod tests {
             SURFACE.1,
             1.0,
             menu,
+            None,
             content_with(&rows, &lines, advanced),
             category,
             scroll,
@@ -7650,6 +9681,7 @@ mod tests {
                     surface.0,
                     surface.1,
                     1.0,
+                    None,
                     None,
                     content(&rows, &lines),
                     category,
@@ -7700,6 +9732,7 @@ mod tests {
             SURFACE.1,
             1.0,
             None,
+            None,
             content(&rows, &lines),
             SettingsCategory::Terminal,
             UNSCROLLED,
@@ -7725,6 +9758,7 @@ mod tests {
             SURFACE.0,
             SURFACE.1,
             1.0,
+            None,
             None,
             content(&rows, &lines),
             SettingsCategory::Shortcuts,
@@ -8052,6 +10086,7 @@ mod tests {
             SURFACE.1,
             1.0,
             Some(long),
+            None,
             content(&flat_rows(), &shortcut_lines()),
             SettingsCategory::Appearance,
             UNSCROLLED,
@@ -8119,6 +10154,7 @@ mod tests {
                     surface_height,
                     1.0,
                     Some(row),
+                    None,
                     content(&rows, &lines),
                     SettingsCategory::Appearance,
                     UNSCROLLED,
@@ -8194,6 +10230,7 @@ mod tests {
             SURFACE.1,
             1.0,
             Some(row),
+            None,
             content(&flat_rows(), &shortcut_lines()),
             SettingsCategory::Appearance,
             UNSCROLLED,
@@ -8228,6 +10265,7 @@ mod tests {
                 SURFACE.1,
                 1.0,
                 Some(row),
+                None,
                 content(&flat_rows(), &shortcut_lines()),
                 SettingsCategory::Appearance,
                 UNSCROLLED,
@@ -8830,6 +10868,7 @@ mod tests {
             800.0,
             1.0,
             None,
+            None,
             content(&rows, &[]),
             PAGE,
             UNSCROLLED,
@@ -9202,6 +11241,7 @@ mod tests {
             260.0,
             1.0,
             Some(SettingsRow::Theme),
+            None,
             content(&rows, &[]),
             PAGE,
             UNSCROLLED,
@@ -9258,6 +11298,7 @@ mod tests {
             SURFACE.0,
             SURFACE.1,
             1.0,
+            None,
             None,
             content_with(rows, &[], advanced),
             PAGE,
@@ -9416,6 +11457,7 @@ mod tests {
             SURFACE.1,
             1.0,
             Some(SettingsRow::Theme),
+            None,
             content(&rows, &[]),
             PAGE,
             UNSCROLLED,
@@ -9432,6 +11474,7 @@ mod tests {
             SURFACE.1,
             1.0,
             Some(SettingsRow::Theme),
+            None,
             content(&rows, &[]),
             PAGE,
             anchored.max_scroll(),
@@ -9866,6 +11909,7 @@ mod tests {
                 height,
                 1.0,
                 None,
+                None,
                 content(&rows, &[]),
                 PAGE,
                 UNSCROLLED,
@@ -9971,6 +12015,7 @@ mod tests {
             &[],
             "",
             recording,
+            None,
             &mut measure,
         )
     }
@@ -10729,6 +12774,7 @@ mod tests {
                         &lines
                     },
                     advanced: AdvancedOpen::default(),
+                    editor: None,
                 };
                 assert!(
                     !thinner.nav_items().contains(&absent),
@@ -10791,6 +12837,7 @@ mod tests {
             shortcuts: &lines,
             profiles: &[],
             advanced: AdvancedOpen::default(),
+            editor: None,
         };
         for category in SettingsCategory::ALL {
             assert!(
@@ -11170,6 +13217,7 @@ mod tests {
             800.0,
             1.0,
             Some(SettingsRow::Theme),
+            None,
             content(&rows, &[]),
             PAGE,
             UNSCROLLED,
@@ -11387,6 +13435,7 @@ mod tests {
             SURFACE.0,
             SURFACE.1,
             1.0,
+            None,
             None,
             content(&rows, &[]),
             PAGE,
@@ -11806,6 +13855,7 @@ mod tests {
             &lines,
             &[],
             "ridge.jpg",
+            None,
             None,
             &mut measure,
         )
@@ -12239,6 +14289,7 @@ mod tests {
             SURFACE.0,
             320.0,
             1.0,
+            None,
             None,
             content(&rows, &[]),
             PAGE,
@@ -13502,6 +15553,7 @@ mod tests {
                 SURFACE.1,
                 1.0,
                 None,
+                None,
                 content(&rows, &lines),
                 SettingsCategory::Shortcuts,
                 scroll,
@@ -13583,6 +15635,7 @@ mod tests {
                 SURFACE.1,
                 1.0,
                 None,
+                None,
                 content(&rows, &lines),
                 SettingsCategory::Shortcuts,
                 scroll,
@@ -13600,6 +15653,7 @@ mod tests {
                 &lines,
                 &[],
                 "",
+                None,
                 None,
                 &mut measure,
             )
@@ -13802,6 +15856,7 @@ mod tests {
             2_400.0,
             1.0,
             None,
+            None,
             content(&rows, &lines),
             SettingsCategory::Shortcuts,
             UNSCROLLED,
@@ -13822,6 +15877,7 @@ mod tests {
             &[],
             "",
             Some((0, &waiting, None)),
+            None,
             &mut measure,
         );
         let labels: Vec<ChromeLabel> = drawn
@@ -13862,6 +15918,7 @@ mod tests {
             &[],
             "",
             Some((0, &waiting, Some(crate::shortcuts::HINT_ALTGR_ZONE))),
+            None,
             &mut measure,
         );
         let hint = refused
@@ -13884,6 +15941,7 @@ mod tests {
             &[],
             "",
             Some((0, &waiting, None)),
+            None,
             &mut measure,
         );
         assert!(
@@ -14055,6 +16113,8 @@ mod tests {
                 command: "pwsh.exe -NoLogo".to_owned(),
                 capability: Some(Text::CapPowerShell.text()),
                 is_default: true,
+                is_fallback: false,
+                deletable: false,
                 hidden: false,
                 available: true,
             },
@@ -14065,6 +16125,8 @@ mod tests {
                 command: "wsl.exe --cd ~".to_owned(),
                 capability: Some(Text::CapWslBash.text()),
                 is_default: false,
+                is_fallback: false,
+                deletable: false,
                 hidden: false,
                 available: true,
             },
@@ -14075,6 +16137,8 @@ mod tests {
                 command: "Git Bash is not installed".to_owned(),
                 capability: None,
                 is_default: false,
+                is_fallback: false,
+                deletable: false,
                 hidden: false,
                 available: false,
             },
@@ -14085,6 +16149,8 @@ mod tests {
                 command: "cmd.exe".to_owned(),
                 capability: Some(Text::CapCmd.text()),
                 is_default: false,
+                is_fallback: false,
+                deletable: false,
                 hidden: true,
                 available: true,
             },
@@ -14101,6 +16167,7 @@ mod tests {
             shortcuts,
             profiles,
             advanced: every_group_open(),
+            editor: None,
         }
     }
 
@@ -14112,6 +16179,7 @@ mod tests {
             SURFACE.0,
             SURFACE.1,
             1.0,
+            None,
             None,
             profiles_content(&rows, &shortcuts, profiles),
             SettingsCategory::Profiles,
@@ -14141,6 +16209,7 @@ mod tests {
             &lines,
             profiles,
             "",
+            None,
             None,
             &mut measure,
         )
@@ -14309,6 +16378,489 @@ mod tests {
         assert_eq!(profile_action_requested(target), None);
     }
 
+    // ── the editor sub-page (§7.1.6c-6b) ─────────────────────────────────────
+
+    /// One profile for the editor to stand on: a copy of the reader's own,
+    /// which is the case the mock-up pictures.
+    fn editor_subject(user: bool) -> EditorSubject {
+        EditorSubject {
+            index: 1,
+            title: "Claude",
+            user,
+            colour: Some(3),
+            colour_reason: "PowerShell 7's mark is its own",
+            start_at: 0,
+            fixed_folder: None,
+            hyperlink: 0,
+            capability: Text::CapNone.text(),
+            env_rows: 1,
+        }
+    }
+
+    fn editing_content<'a>(
+        rows: &'a [SettingsRow],
+        profiles: &'a [crate::profiles::ProfileLine],
+        subject: EditorSubject,
+    ) -> SettingsContent<'a> {
+        SettingsContent {
+            rows,
+            shortcuts: &[],
+            profiles,
+            advanced: every_group_open(),
+            editor: Some(subject),
+        }
+    }
+
+    fn editing_values(subject: EditorSubject) -> SettingsValues {
+        SettingsValues {
+            editor: Some(subject),
+            ..values()
+        }
+    }
+
+    fn editor_page(subject: EditorSubject) -> SettingsLayout {
+        editor_page_scrolled(subject, UNSCROLLED)
+    }
+
+    /// The same page, scrolled this far down — which the two claims about the
+    /// foot and the environment table need, because the editor is taller than
+    /// the dialog's 600px cap and both of them live under the fold.
+    fn editor_page_scrolled(subject: EditorSubject, scroll: f32) -> SettingsLayout {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let lines = profile_lines();
+        layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            editing_content(&rows, &lines, subject),
+            SettingsCategory::Profiles,
+            scroll,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("this window can host the dialog")
+    }
+
+    /// The page scrolled until `band_of` is wholly inside the scrollport.
+    fn editor_page_showing(
+        subject: EditorSubject,
+        band_of: impl Fn(&SettingsLayout) -> [f32; 4],
+    ) -> SettingsLayout {
+        let reference = editor_page(subject);
+        let scroll = scroll_showing(&reference, band_of(&reference));
+        editor_page_scrolled(subject, scroll)
+    }
+
+    /// PIN — **the edit view replaces the list; the two are never both there.**
+    ///
+    /// §7.1.6c-2's own argument said again about a different editor: an
+    /// accordion would put the profile being edited between the profiles that
+    /// are not, in one scroll, with an environment table in the middle of it.
+    #[test]
+    fn the_editor_replaces_the_list_rather_than_opening_inside_it() {
+        let lines = profile_lines();
+        let list = profiles_page(&lines);
+        assert_eq!(list.profiles.len(), lines.len());
+        assert!(list.crumb.is_none());
+        assert!(list.new_profile.is_some(), "the list has a foot");
+
+        let editing = editor_page(editor_subject(true));
+        assert!(
+            editing.profiles.is_empty(),
+            "the list is not laid out at all"
+        );
+        assert!(editing.new_profile.is_none());
+        assert!(editing.crumb.is_some(), "and the breadcrumb is its heading");
+        assert_eq!(
+            editing.groups.len(),
+            0,
+            "the breadcrumb takes the heading's slot rather than standing under it"
+        );
+        for row in EDITOR_ROWS {
+            assert!(editing.row(row).is_some(), "{row:?} is on the page");
+        }
+    }
+
+    /// PIN — **Esc walks editor → list → closed: three presses, three states**
+    /// (§7.1.5's ladder, one rung longer — plan §3.5, user ruling Q8).
+    ///
+    /// The alternative — the sub-page reachable out of only by `‹ Profiles` —
+    /// was refused because somebody who has just typed a path into a field and
+    /// presses Esc out of habit would lose the whole dialog rather than the page
+    /// they are on.
+    #[test]
+    fn escape_walks_the_editor_then_the_list_then_the_dialog() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let lines = profile_lines();
+        let subject = editor_subject(true);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(editing_content(&rows, &lines, subject));
+        panel.select_category(SettingsCategory::Profiles);
+        panel.open_editor(ProfileEditor {
+            index: 1,
+            ..ProfileEditor::default()
+        });
+        assert!(panel.editor().is_some());
+
+        assert!(panel.close_one_layer(), "first press: back to the list");
+        assert!(panel.editor().is_none());
+        assert!(panel.is_open());
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::ProfileRow(1)),
+            "and the keyboard is on the row that was being edited"
+        );
+
+        assert!(panel.close_one_layer(), "second press: the dialog");
+        assert!(!panel.is_open());
+        assert!(!panel.close_one_layer(), "and there is no third layer");
+    }
+
+    /// PIN — **a row's `⋯` is a rung above its own list**, so Esc closes the
+    /// menu before it closes anything else and hands the keyboard back to the
+    /// trigger.
+    #[test]
+    fn escape_closes_a_row_menu_before_it_leaves_the_page() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let lines = profile_lines();
+        let mut panel = SettingsPanel::default();
+        panel.toggle(profiles_content(&rows, &[], &lines));
+        panel.select_category(SettingsCategory::Profiles);
+        panel.toggle_row_menu(2);
+        assert_eq!(panel.row_menu(), Some(2));
+
+        assert!(panel.close_one_layer());
+        assert_eq!(panel.row_menu(), None);
+        assert!(panel.is_open(), "the page is still up");
+        assert_eq!(panel.focus(), Some(SettingsTarget::ProfileMore(2)));
+    }
+
+    /// PIN — **a built-in's menu has no `Delete` at all**, and the two refusals
+    /// that have reasons stay in it, greyed, carrying theirs.
+    ///
+    /// The absence is the geometric dividend of putting the rare verbs behind a
+    /// menu: a right-aligned run would have had to keep the slot to stop its
+    /// neighbours shifting out of column, and a menu may legitimately be shorter
+    /// on one row than on another.
+    #[test]
+    fn a_builtins_menu_is_shorter_and_a_refusal_keeps_its_reason() {
+        let mut lines = profile_lines();
+        let items = row_menu_items(&lines[0]);
+        assert!(
+            !items.iter().any(|item| item.verb == RowVerb::Delete),
+            "a built-in is hidden, never deleted: {items:?}"
+        );
+        let hide = items
+            .iter()
+            .find(|item| item.verb == RowVerb::Hide)
+            .expect("every row can be hidden or shown");
+        assert_eq!(
+            hide.refusal,
+            Some(Text::ProfilesCannotHideDefault.text()),
+            "the default profile stays in the picker, and the item says so"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.verb == RowVerb::SetDefault)
+                .and_then(|item| item.refusal),
+            Some(Text::ProfilesAlreadyDefault.text())
+        );
+
+        lines[1].is_fallback = true;
+        assert_eq!(
+            row_menu_items(&lines[1])
+                .iter()
+                .find(|item| item.verb == RowVerb::Hide)
+                .and_then(|item| item.refusal),
+            Some(Text::ProfilesCannotHideFallback.text()),
+            "every fallback lands on this profile"
+        );
+
+        lines[3].deletable = true;
+        let mine = row_menu_items(&lines[3]);
+        assert!(mine.iter().any(|item| item.verb == RowVerb::Delete));
+        assert_eq!(
+            mine.iter()
+                .find(|item| item.verb == RowVerb::Hide)
+                .map(|item| item.label),
+            Some(Text::ProfilesShow.text()),
+            "a hidden row says `Show`, and one item says both"
+        );
+    }
+
+    /// PIN — **the three stacked rows put their control across the row and keep
+    /// the column above and below them undisturbed** (R8).
+    ///
+    /// A path, an argument list and a table of environment variables are not
+    /// small named values: pressed into the 200px column they ellipsise, which
+    /// is a control that cannot say its own value. So they leave it — and the
+    /// pickers that did not leave it still line up with each other, before and
+    /// after the disclosure turns.
+    #[test]
+    fn a_stacked_rows_control_takes_the_row_and_the_column_stays_a_column() {
+        let placed = editor_page(editor_subject(true));
+        let row_left = placed
+            .row(SettingsRow::ProfileName)
+            .expect("the name row")
+            .band[0];
+        for row in [
+            SettingsRow::ProfileProgram,
+            SettingsRow::ProfileArgs,
+            SettingsRow::ProfileEnv,
+        ] {
+            let placed_row = placed.row(row).expect("a stacked row");
+            assert_eq!(
+                placed_row.combo[0], row_left,
+                "{row:?} starts at the row's own left edge"
+            );
+            assert!(
+                placed_row.combo[1] > placed_row.desc[3],
+                "{row:?} stands under its sentence rather than beside it"
+            );
+        }
+        let column: Vec<f32> = [
+            SettingsRow::ProfileStartAt,
+            SettingsRow::ProfileColour,
+            SettingsRow::ProfileHyperlink,
+        ]
+        .into_iter()
+        .map(|row| placed.row(row).expect("a picker row").combo[0])
+        .collect();
+        assert!(
+            column.windows(2).all(|pair| pair[0] == pair[1]),
+            "one control column per page: {column:?}"
+        );
+    }
+
+    /// PIN — **an environment row makes the page taller and the dialog exactly
+    /// as tall as it was** (plan §3.4, red gate 8).
+    ///
+    /// The frame is locked to the tallest *page*, measured when the dialog opens
+    /// and when a disclosure turns; adding a variable makes this page scroll a
+    /// little further and never makes the dialog grow under the rail.
+    #[test]
+    fn a_new_environment_row_scrolls_the_page_and_never_grows_the_dialog() {
+        let one = editor_page(editor_subject(true));
+        let eight = editor_page(EditorSubject {
+            env_rows: 8,
+            ..editor_subject(true)
+        });
+        assert_eq!(
+            one.frame, eight.frame,
+            "the dialog is one height, taken over every page"
+        );
+        let taller = eight.row(SettingsRow::ProfileEnv).expect("the table").band;
+        let shorter = one.row(SettingsRow::ProfileEnv).expect("the table").band;
+        assert!(
+            taller[3] - taller[1] > shorter[3] - shorter[1],
+            "the row is the one thing on this page whose height is its content"
+        );
+        assert!(
+            eight.max_scroll() > one.max_scroll(),
+            "which the page pays for in scroll"
+        );
+        assert_eq!(
+            eight.env_rows.len(),
+            ENV_GHOSTS.len() + 8,
+            "three the terminal fills in, and the reader's own under them"
+        );
+    }
+
+    /// PIN — **the three ghosts are drawn and are not controls** (plan §1.7,
+    /// user ruling Q7).
+    ///
+    /// Showing them is both the foolproof default — you can see what is being
+    /// said on your behalf — and the honest one: there is no invisible second
+    /// layer. They are not pressable in this slice, because a ghost the reader
+    /// has adopted and nothing reads is a row that lies twice.
+    #[test]
+    fn the_terminals_own_declarations_are_shown_and_cannot_be_pressed() {
+        let subject = editor_subject(true);
+        let placed = editor_page_showing(subject, |page| {
+            page.row(SettingsRow::ProfileEnv).expect("the table").band
+        });
+        let values = editing_values(subject);
+        let ghosts: Vec<&EnvRowLayout> = placed
+            .env_rows
+            .iter()
+            .filter(|line| line.index.is_none())
+            .collect();
+        assert_eq!(ghosts.len(), ENV_GHOSTS.len());
+        for ghost in ghosts {
+            let centre = (
+                f64::from((ghost.name[0] + ghost.name[2]) / 2.0),
+                f64::from((ghost.name[1] + ghost.name[3]) / 2.0),
+            );
+            assert_eq!(
+                hit(&placed, &values, centre.0, centre.1),
+                SettingsTarget::Panel,
+                "a ghost is what this terminal says, not what this profile does"
+            );
+        }
+        let mine = placed
+            .env_rows
+            .iter()
+            .find(|line| line.index == Some(0))
+            .expect("the reader's own row");
+        let centre = (
+            f64::from((mine.value[0] + mine.value[2]) / 2.0),
+            f64::from((mine.value[1] + mine.value[3]) / 2.0),
+        );
+        assert_eq!(
+            hit(&placed, &values, centre.0, centre.1),
+            SettingsTarget::EnvValue(0)
+        );
+    }
+
+    /// PIN — **a built-in's `Colour` is dark, its sentence becomes the reason,
+    /// and a press on it lands on the dialog** (S98/S31).
+    ///
+    /// Those five colours are not this product's to repaint — the same ruling
+    /// that stopped a custom scheme repainting them — and the refusal is spelled
+    /// once, for the hit test and the draw alike.
+    #[test]
+    fn a_builtins_colour_row_is_dark_and_says_why() {
+        let subject = editor_subject(false);
+        let placed = editor_page(subject);
+        let values = editing_values(subject);
+        let row = placed
+            .row(SettingsRow::ProfileColour)
+            .expect("the colour row");
+        let centre = (
+            f64::from((row.combo[0] + row.combo[2]) / 2.0),
+            f64::from((row.combo[1] + row.combo[3]) / 2.0),
+        );
+        assert_eq!(
+            hit(&placed, &values, centre.0, centre.1),
+            SettingsTarget::Panel
+        );
+        assert_eq!(
+            SettingsRow::ProfileColour.description(&values),
+            subject.colour_reason
+        );
+
+        assert!(
+            !SettingsRow::ProfileColour.available(&values),
+            "greyed whole, which is how every unreachable row here says it"
+        );
+        assert_eq!(
+            SettingsRow::ProfileColour.value_text(&values),
+            Some(Text::ProfilesColourFixed.text()),
+            "and the button says the mark came with the product"
+        );
+
+        let mine = editing_values(editor_subject(true));
+        assert_eq!(
+            SettingsRow::ProfileColour.description(&mine),
+            Text::ProfilesRowColourDesc.text(),
+            "a profile of the reader's own is theirs to repaint"
+        );
+        assert!(SettingsRow::ProfileColour.available(&mine));
+        let placed = editor_page(editor_subject(true));
+        assert_eq!(
+            hit(&placed, &mine, centre.0, centre.1),
+            SettingsTarget::Combo(SettingsRow::ProfileColour)
+        );
+    }
+
+    /// PIN — **the foot carries one verb and never two**: a built-in drops its
+    /// overrides, a profile of the reader's own is deleted.
+    #[test]
+    fn the_editors_foot_deletes_for_one_kind_of_row_and_restores_for_the_other() {
+        for user in [true, false] {
+            let subject = EditorSubject {
+                user,
+                ..editor_subject(user)
+            };
+            let placed = editor_page_showing(subject, |page| {
+                page.editor_foot.expect("the editor has a foot")
+            });
+            let values = editing_values(subject);
+            let foot = placed.editor_foot.expect("the editor has a foot");
+            let centre = (
+                f64::from((foot[0] + foot[2]) / 2.0),
+                f64::from((foot[1] + foot[3]) / 2.0),
+            );
+            assert_eq!(
+                hit(&placed, &values, centre.0, centre.1),
+                if user {
+                    SettingsTarget::EditorDelete
+                } else {
+                    SettingsTarget::EditorRestore
+                }
+            );
+        }
+    }
+
+    /// PIN — **two rows say a value that is not one of their own items**, and
+    /// both say it rather than the word of an item they are not on.
+    ///
+    /// A control that cannot say its own value is the exact bug the picker floor
+    /// was widened to fix.
+    #[test]
+    fn a_fixed_folder_and_an_inherited_mark_are_said_by_the_button() {
+        let values = editing_values(EditorSubject {
+            start_at: 2,
+            fixed_folder: Some(r"D:\Developer"),
+            colour: None,
+            ..editor_subject(true)
+        });
+        assert_eq!(
+            SettingsRow::ProfileStartAt.value_text(&values),
+            Some(r"D:\Developer")
+        );
+        assert_eq!(
+            SettingsRow::ProfileColour.value_text(&values),
+            Some(Text::ProfilesColourInherited.text()),
+            "a copy of a built-in wears the mark it really is a copy of"
+        );
+
+        let ordinary = editing_values(editor_subject(true));
+        assert_eq!(SettingsRow::ProfileStartAt.value_text(&ordinary), None);
+        assert_eq!(SettingsRow::ProfileColour.value_text(&ordinary), None);
+    }
+
+    /// PIN — **the editor's Tab order is the page read downwards**, `‹ Profiles`
+    /// first and the foot last, with the environment table's cells walked one by
+    /// one (plan §3.5).
+    #[test]
+    fn the_keyboard_walks_the_editor_from_the_way_back_to_the_foot() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let lines = profile_lines();
+        let subject = editor_subject(true);
+        let order = focus_order(
+            editing_content(&rows, &lines, subject),
+            SettingsCategory::Profiles,
+        );
+        assert_eq!(order[0], SettingsTarget::Close);
+        assert_eq!(order[1], SettingsTarget::Nav(SettingsCategory::Profiles));
+        assert_eq!(
+            &order[2..],
+            &[
+                SettingsTarget::EditorBack,
+                SettingsTarget::Field(SettingsRow::ProfileName),
+                SettingsTarget::Field(SettingsRow::ProfileProgram),
+                SettingsTarget::EditorBrowse,
+                SettingsTarget::Combo(SettingsRow::ProfileStartAt),
+                SettingsTarget::Combo(SettingsRow::ProfileColour),
+                SettingsTarget::Advanced(SettingsCategory::Profiles),
+                SettingsTarget::Field(SettingsRow::ProfileArgs),
+                SettingsTarget::EnvName(0),
+                SettingsTarget::EnvValue(0),
+                SettingsTarget::EnvRemove(0),
+                SettingsTarget::EnvAdd,
+                SettingsTarget::Combo(SettingsRow::ProfileHyperlink),
+                // `Shell integration` reports and is not a stop: the ring
+                // answers "where will the next key go", and nothing goes there.
+                SettingsTarget::ResetAdvanced(SettingsCategory::Profiles),
+                SettingsTarget::EditorDelete,
+            ][..]
+        );
+    }
+
     /// PIN — **the action run is revealed, and is absent until it is.**
     ///
     /// The tab strip's folder button and the pane head's run are shown exactly
@@ -14322,7 +16874,7 @@ mod tests {
             profiles_drawn(&placed, &lines, hover, focus)
                 .into_iter()
                 .flat_map(|layer| layer.labels)
-                .filter(|label| label.text == Text::ProfilesDuplicate.text())
+                .filter(|label| label.text == Text::ProfilesEdit.text())
                 .count()
         };
         assert_eq!(words(None, None), 0, "at rest the row is only its words");
@@ -14372,8 +16924,12 @@ mod tests {
             SettingsTarget::ProfileUp(last)
         );
         assert_eq!(
-            press(placed.profiles[1].duplicate),
-            SettingsTarget::ProfileDuplicate(1)
+            press(placed.profiles[1].edit),
+            SettingsTarget::ProfileEdit(1)
+        );
+        assert_eq!(
+            press(placed.profiles[1].more),
+            SettingsTarget::ProfileMore(1)
         );
 
         // Drawn, both of them, and in the same column as every other row's.
@@ -14403,15 +16959,25 @@ mod tests {
         assert_eq!(order[0], SettingsTarget::Close);
         assert_eq!(order[1], SettingsTarget::Nav(SettingsCategory::Profiles));
         assert_eq!(
-            &order[2..],
+            order[2],
+            SettingsTarget::ProfileNew,
+            "the page's own verb opens its walk"
+        );
+        assert_eq!(
+            &order[3..],
             &(0..lines.len())
                 .flat_map(|index| [
+                    // The row itself is a stop before its verbs (plan §3.5), so
+                    // a reader who never leaves the home row can still open the
+                    // editor with one `Enter`.
+                    SettingsTarget::ProfileRow(index),
                     SettingsTarget::ProfileUp(index),
                     SettingsTarget::ProfileDown(index),
-                    SettingsTarget::ProfileDuplicate(index),
+                    SettingsTarget::ProfileEdit(index),
+                    SettingsTarget::ProfileMore(index),
                 ])
                 .collect::<Vec<_>>()[..],
-            "up, down, duplicate — the run's own visual order, row by row"
+            "the row, then up, down, Edit and the `⋯` — the run's own visual              order, row by row"
         );
     }
 

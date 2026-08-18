@@ -4107,7 +4107,14 @@ struct Runtime {
     /// Whether a picture chooser is out. A `bool` and not a
     /// [`FolderPick`]-shaped enum, because there is exactly one row that opens
     /// this one and the answer has nowhere else to go.
-    image_pick_pending: bool,
+    /// **Which row asked**, or `None` when nothing did.
+    ///
+    /// A named verb rather than a flag, on `folder_pick`'s own precedent one
+    /// bridge over: the chooser is a single posted-message channel to Windows —
+    /// it has to be, because two nested modal loops on one thread is not a thing
+    /// a window survives — so which row asked is remembered on this side and
+    /// spent when the answer arrives.
+    image_pick_pending: Option<FilePick>,
     /// The picture currently drawn behind this window, decoded.
     ///
     /// Held here rather than in the renderer's globals so that a re-decode is
@@ -4126,6 +4133,19 @@ struct Runtime {
     /// shuts, because a button-up that arrives after the dialog is gone is a
     /// button-up with nothing to end.
     settings_slider_drag: Option<settings::SettingsRow>,
+    /// **The profile a standing card can put back** — which card it belongs to,
+    /// the row itself, and where it was (§7.1.6c-6b).
+    ///
+    /// The whole row and not a recipe for rebuilding one, because the thing that
+    /// must survive is its `profile_id`: every seed on disk naming it points at
+    /// that string, and a row rebuilt with a fresh suffix would leave all of them
+    /// degraded to the floor.
+    ///
+    /// The card's id is here so that a second deletion — which replaces this —
+    /// cannot be undone by a verb pressed on the first card. A verb whose id no
+    /// longer matches does nothing, which is the honest answer: the thing it
+    /// offered to undo is no longer the thing that would come back.
+    profile_undo: Option<(toast::ToastId, profiles::Profile, usize)>,
     /// How far into the open picker's thumb the hand took hold, while it is
     /// holding it (§7.1.6c-5).
     ///
@@ -13158,12 +13178,23 @@ const PANE_CHEVRON_TIP: &str = "Split and more";
 /// so it is written down when the dialog is queued and spent when the answer
 /// arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilePick {
+    /// The Appearance page's `Choose…`: the window's ground picture.
+    BackgroundImage,
+    /// The profile editor's `Browse…`: this profile's own shell (§7.1.6c-6b).
+    ProfileProgram,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FolderPick {
     /// `Browse…` on a files column's root menu (E55): point this column at it.
     Reroot(SeatId),
     /// `New terminal in folder…` on a pane's menu (2026-08-16): split this pane,
     /// with the chosen folder as the arriving shell's directory.
     SplitInto(SeatId),
+    /// `Choose a folder…` in the profile editor's starting-directory picker: pin
+    /// this profile to a fixed place (§7.1.6c-6b).
+    ProfileStart(usize),
 }
 
 /// **What the shell a split seats is to be**, said by the call site.
@@ -15040,7 +15071,7 @@ impl Runtime {
             folder_picker,
             folder_pick: None,
             image_picker,
-            image_pick_pending: false,
+            image_pick_pending: None,
             background_picture: None,
             background_decode: BackgroundDecodeMailbox::default(),
             settings_slider_drag: None,
@@ -15125,6 +15156,7 @@ impl Runtime {
             search_revision: 0,
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
+            profile_undo: None,
             settings_scroll: 0.0,
             profile_menu: profiles::ProfileMenu::default(),
             profile_programs,
@@ -16832,6 +16864,7 @@ impl Runtime {
             anchor,
             title,
             body,
+            None,
             self.motion == Motion::Reduced,
             Instant::now(),
         );
@@ -16923,7 +16956,43 @@ impl Runtime {
         layers
     }
 
-    /// Which card and which `×` the pointer is on, for the reveal ladder.
+    /// Raise a card that carries a verb, and answer which card it is.
+    ///
+    /// **A deletion is immediate and its way back is a button on the notice**
+    /// (plan §2.3, user ruling 2026-08-17 Q3): this dialog has no dirty gate to
+    /// route a confirmation through and every choice in it is written the instant
+    /// it is made, so what an irreversible one is owed is not a second question
+    /// but an undo — the register `Ctrl+Shift+T` already struck in this product.
+    /// A confirmation would be its first modal over a modal.
+    ///
+    /// The id comes back because the caller has to remember which card its undo
+    /// belongs to: a second deletion while the first card is still standing
+    /// replaces the pending undo, and a verb pressed on a card that is no longer
+    /// the one holding it must do nothing rather than undo the wrong thing.
+    fn toast_with_verb(
+        &mut self,
+        kind: toast::ToastKind,
+        anchor: toast::ToastAnchor,
+        body: impl Into<String>,
+        verb: &str,
+    ) -> Result<toast::ToastId> {
+        let id = self.toasts.raise(
+            kind,
+            anchor,
+            None,
+            body,
+            Some(verb.to_owned()),
+            self.motion == Motion::Reduced,
+            Instant::now(),
+        );
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(id)
+    }
+
+    /// Which card, which `×` and which verb the pointer is on, for the reveal
+    /// ladder.
     fn toast_pointer(&self, layouts: &[toast::ToastLayout]) -> toast::ToastPointer {
         let Some(position) = self.pointer_position else {
             return toast::ToastPointer::default();
@@ -16932,10 +17001,17 @@ impl Runtime {
             Some(toast::ToastHit::Close(id)) => toast::ToastPointer {
                 card: Some(id),
                 close: Some(id),
+                action: None,
+            },
+            Some(toast::ToastHit::Action(id)) => toast::ToastPointer {
+                card: Some(id),
+                close: None,
+                action: Some(id),
             },
             Some(toast::ToastHit::Card(id)) => toast::ToastPointer {
                 card: Some(id),
                 close: None,
+                action: None,
             },
             None => toast::ToastPointer::default(),
         }
@@ -16970,7 +17046,9 @@ impl Runtime {
     fn drive_toast_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let hit = toast::at(&self.toast_layouts, position.x as f32, position.y as f32);
         let card = hit.map(|hit| match hit {
-            toast::ToastHit::Close(id) | toast::ToastHit::Card(id) => id,
+            toast::ToastHit::Close(id)
+            | toast::ToastHit::Card(id)
+            | toast::ToastHit::Action(id) => id,
         });
         // Two questions, and both have to be asked: the clock stops for the card
         // under the pointer, and the ladder's rung changes when the pointer
@@ -16992,6 +17070,16 @@ impl Runtime {
         let Some(hit) = toast::at(&self.toast_layouts, position.x as f32, position.y as f32) else {
             return Ok(false);
         };
+        // The verb first: pressing it does the thing and sends the card away,
+        // because a card whose verb has been taken is a card whose sentence is
+        // no longer true.
+        if let toast::ToastHit::Action(id) = hit {
+            self.take_profile_undo(id)?;
+            if self.toasts.dismiss(id, Instant::now()) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            return Ok(true);
+        }
         if let toast::ToastHit::Close(id) = hit
             && self.toasts.dismiss(id, Instant::now())
             && self.refresh_overlay()
@@ -18799,6 +18887,7 @@ impl Runtime {
             height as f32,
             scale,
             menu,
+            self.settings.row_menu(),
             content,
             category,
             scroll,
@@ -18853,7 +18942,66 @@ impl Runtime {
             shortcuts,
             profiles,
             advanced: self.advanced_open(),
+            editor: self.editor_subject(),
         }
+    }
+
+    /// What the editor sub-page is standing on, resolved out of the profile
+    /// table — or `None` while the Profiles page is showing its list.
+    ///
+    /// **Re-read every frame rather than held**, which is what makes it safe for
+    /// the editor to hold nothing but an index: a reorder or an Undo moves rows
+    /// under it, and a copy of the profile taken when the page opened would be a
+    /// page drawing a row that is no longer there. The index itself is kept in
+    /// step by the verbs that move it.
+    fn editor_subject(&self) -> Option<settings::EditorSubject> {
+        let editor = self.settings.editor()?;
+        let index = editor.index;
+        if index >= profiles::count() {
+            return None;
+        }
+        let user = profiles::is_user(index);
+        let start_at = profiles::start_at(index);
+        let env = profiles::env(index);
+        Some(settings::EditorSubject {
+            index,
+            title: profiles::title(index),
+            user,
+            colour: match profiles::mark(index) {
+                marks::ChromeMark::ProfileGeneric { colour } => {
+                    marks::MarkColour::ALL.iter().position(|it| *it == colour)
+                }
+                // A profile of the reader's own that still wears the mark it was
+                // duplicated with is on none of the eight, and its picker says
+                // so rather than ticking a colour it is not.
+                _ => None,
+            },
+            colour_reason: profiles::mark_is_its_own(index),
+            start_at: match start_at {
+                profiles::StartAt::Inherit => 0,
+                profiles::StartAt::Home => 1,
+                profiles::StartAt::Fixed(_) => 2,
+            },
+            fixed_folder: match &start_at {
+                profiles::StartAt::Fixed(path) => Some(profiles::intern_path(path)),
+                _ => None,
+            },
+            hyperlink: match env
+                .iter()
+                .find(|(name, _)| name == settings::FORCE_HYPERLINK_NAME)
+                .map(|(_, value)| value.as_str())
+            {
+                // Nothing said is `Auto`: the terminal's own declaration stands,
+                // which is `hyperlink_declaration`'s behaviour byte for byte.
+                None => 0,
+                Some("0") => 2,
+                Some(_) => 1,
+            },
+            capability: profiles::capability_of(index).text(),
+            // The three ghosts are not the reader's and are not counted: they
+            // are what this terminal says to every session.
+            env_rows: editor.env.len(),
+        })
     }
 
     /// Which pages have their Advanced group open, as the settings file says.
@@ -18895,6 +19043,7 @@ impl Runtime {
             profile_available: (0..profiles::count())
                 .map(|index| self.profile_programs.is_available(index))
                 .collect(),
+            editor: self.editor_subject(),
             background_image: !self.settings_store.loaded().background_image.is_empty(),
             background_fit: settings::image_fit_index(self.settings_store.loaded().background_fit),
             background_image_opacity: self.settings_store.loaded().background_image_opacity,
@@ -19058,6 +19207,31 @@ impl Runtime {
             let recording = recording
                 .as_ref()
                 .map(|(row, caps, hint)| (*row, caps.as_slice(), hint.as_deref()));
+            // **The caret follows the focus and not the ring**: a field
+            // somebody clicked into has the keyboard, whether or not the ring is
+            // showing.
+            let focus_for_caret = self.settings.focus();
+            // The fields' own text, and the selection the caret is holding in
+            // whichever one has the focus. Hoisted with the recorder's caps and
+            // for its reason: they are `String`s owned by the panel, and the
+            // renderer is borrowed mutably below them.
+            let editor = self.settings.editor();
+            let editor_env: Vec<(String, String)> = editor.map_or_else(Vec::new, |editor| {
+                editor
+                    .env
+                    .iter()
+                    .map(|(name, value)| (name.text().to_owned(), value.text().to_owned()))
+                    .collect()
+            });
+            let editor_caret = editor.and_then(|editor| editor.caret_of(focus_for_caret));
+            let editor = editor.map(|editor| settings::EditorInk {
+                name: editor.name.text(),
+                program: editor.program.text(),
+                args: editor.args.text(),
+                env: &editor_env,
+                caret: editor_caret,
+                refusal: editor.refusal.map(i18n::Text::text),
+            });
             let renderer = &mut self.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             settings::build(
@@ -19069,6 +19243,7 @@ impl Runtime {
                 &profile_lines,
                 &background_image,
                 recording,
+                editor,
                 &mut measure,
             )
         } else if let Some(layout) = self.restore_layout() {
@@ -19825,6 +20000,7 @@ impl Runtime {
         if let Some(action) = settings::profile_action_requested(target) {
             self.apply_profile_action(action)?;
         }
+        self.apply_editor_choice(target)?;
         if let Some(mode) = settings::theme_requested(target) {
             self.apply_theme_mode(mode)?;
         }
@@ -20037,7 +20213,19 @@ impl Runtime {
             | Row::GitPanel
             | Row::DefaultProfile
             | Row::Language
-            | Row::PsReadLine => {}
+            | Row::PsReadLine
+            // The editor's own advanced rows are put back by the page's own foot
+            // verb — `Restore all defaults` on a built-in — which restores the
+            // whole profile rather than four of its fields. A second verb that
+            // reset a subset would be two answers to "put this back".
+            | Row::ProfileName
+            | Row::ProfileProgram
+            | Row::ProfileStartAt
+            | Row::ProfileColour
+            | Row::ProfileArgs
+            | Row::ProfileEnv
+            | Row::ProfileHyperlink
+            | Row::ProfileIntegration => {}
         }
         Ok(())
     }
@@ -20160,6 +20348,522 @@ impl Runtime {
         };
         if !moved {
             return Ok(());
+        }
+        self.store_profiles()
+    }
+
+    /// One key press into whichever of the editor's fields has the focus, and
+    /// whether it was the field's.
+    ///
+    /// **Above the dialog's own focus walk and below its Esc**, which is where a
+    /// text control belongs in a ladder: while the caret is in a box the letters
+    /// are the box's, but `Tab` still walks and `Esc` still climbs a rung, so
+    /// nothing in the dialog becomes unreachable from a field. It is the shape
+    /// `search_field_key` already has one surface over, and the arrows are the
+    /// field's for the reason a focused slider's are the slider's — you are
+    /// *inside* a control.
+    ///
+    /// Every edit is written straight through to the table
+    /// ([`Self::write_editor_field`]), because this dialog has no commit: what
+    /// you typed is what is stored, at the keystroke.
+    fn settings_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
+        use text_field::TextMove;
+        let Some(target) = self.settings.focus() else {
+            return Ok(false);
+        };
+        if self.settings.menu().is_some() || self.settings.row_menu().is_some() {
+            return Ok(false);
+        }
+        if self
+            .settings
+            .editor()
+            .and_then(|editor| editor.field_of(target))
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let shift = self.modifiers.shift_key();
+        let control = self.modifiers.control_key();
+        let paste = matches!(&event.logical_key, Key::Character(text)
+            if control && matches!(text.as_str(), "v" | "V"));
+        let pasted = paste.then(|| {
+            window_hwnd(&self.window)
+                .ok()
+                .and_then(|hwnd| bt_platform::clipboard_text(hwnd).ok())
+                .unwrap_or_default()
+        });
+        let Some(editor) = self.settings.editor_mut() else {
+            return Ok(false);
+        };
+        let Some(field) = editor.field_mut(target) else {
+            return Ok(false);
+        };
+        let mut edited = false;
+        match &event.logical_key {
+            // **Enter writes and keeps the focus** (plan §3.5). The write has
+            // already happened — every change went through on its own keystroke
+            // — so what is left is that the key belongs to the field and must
+            // not fall through to the focus walk's `activate`.
+            Key::Named(NamedKey::Enter) => {}
+            Key::Named(NamedKey::Backspace) => edited = field.backspace(),
+            Key::Named(NamedKey::Delete) => edited = field.delete(),
+            Key::Named(NamedKey::ArrowLeft) => field.step(
+                if control {
+                    TextMove::WordLeft
+                } else {
+                    TextMove::Left
+                },
+                shift,
+            ),
+            Key::Named(NamedKey::ArrowRight) => field.step(
+                if control {
+                    TextMove::WordRight
+                } else {
+                    TextMove::Right
+                },
+                shift,
+            ),
+            Key::Named(NamedKey::Home) => field.step(TextMove::Home, shift),
+            Key::Named(NamedKey::End) => field.step(TextMove::End, shift),
+            Key::Named(NamedKey::Space) => {
+                field.insert(" ");
+                edited = true;
+            }
+            Key::Character(_) if control => {
+                match pasted {
+                    // A path is the one value in this dialog nobody types out,
+                    // and the clipboard is where it comes from. Newlines are
+                    // dropped rather than turned into a second line: the field
+                    // holds one.
+                    Some(text) if !text.is_empty() => {
+                        field.insert(&text.replace(['\r', '\n'], ""));
+                        edited = true;
+                    }
+                    Some(_) => {}
+                    None => {
+                        if let Key::Character(letter) = &event.logical_key
+                            && matches!(letter.as_str(), "a" | "A")
+                        {
+                            field.select_all();
+                        }
+                    }
+                }
+            }
+            // Whatever the keyboard produced, which is the layout's answer and
+            // not this build's: a French `é` and a Chinese IME's commit arrive
+            // the same way.
+            _ => {
+                let Some(text) = event.text.as_ref() else {
+                    return Ok(false);
+                };
+                let text: String = text.chars().filter(|glyph| !glyph.is_control()).collect();
+                if text.is_empty() {
+                    return Ok(false);
+                }
+                field.insert(&text);
+                edited = true;
+            }
+        }
+        if edited {
+            self.write_editor_field(target)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **Everything the Profiles page's editor does to the table**, whichever
+    /// door it came through — a press or an `Enter` on the ring.
+    ///
+    /// One function for both, which is `apply_settings_choice`'s founding rule:
+    /// a verb reachable two ways whose body lives on one of them is a verb that
+    /// half works. Every arm that changes the table goes through
+    /// [`Self::store_profiles`], the one door the file, the programs probe and
+    /// the window's measurements move through together.
+    fn apply_editor_choice(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        let editor_index = self.settings.editor().map(|editor| editor.index);
+        match target {
+            settings::SettingsTarget::ProfileEdit(index) => {
+                return self.open_profile_editor(index);
+            }
+            settings::SettingsTarget::ProfileMoreItem(index, verb) => {
+                return self.apply_row_verb(index, verb);
+            }
+            // **New copies the default rather than opening a blank one**, and
+            // then opens on it with the name selected: a profile with no program
+            // is a row that cannot start, and the first thing anybody does with a
+            // new one is call it something.
+            settings::SettingsTarget::ProfileNew => {
+                let Some(made) = profiles::create(self.default_profile()) else {
+                    return Ok(());
+                };
+                self.store_profiles()?;
+                return self.open_profile_editor(made);
+            }
+            settings::SettingsTarget::EditorBack => {
+                self.settings.close_editor();
+                self.settings_scroll = 0.0;
+                return Ok(());
+            }
+            settings::SettingsTarget::EditorBrowse => {
+                self.browse_for_program();
+                return Ok(());
+            }
+            settings::SettingsTarget::EnvAdd => {
+                if let Some(editor) = self.settings.editor_mut() {
+                    editor.env.push(Default::default());
+                    // The caret goes into the row that just appeared, which is
+                    // what somebody who pressed `Add` is about to type in.
+                    let index = editor.env.len() - 1;
+                    self.settings
+                        .press(settings::SettingsTarget::EnvName(index));
+                }
+                // Nothing reaches the table: an empty pair is not a variable, and
+                // it becomes one the moment it is named.
+                return Ok(());
+            }
+            settings::SettingsTarget::EnvRemove(row) => {
+                let Some(index) = editor_index else {
+                    return Ok(());
+                };
+                let Some(editor) = self.settings.editor_mut() else {
+                    return Ok(());
+                };
+                if row >= editor.env.len() {
+                    return Ok(());
+                }
+                editor.env.remove(row);
+                let env = editor.env_pairs();
+                profiles::set_env(index, env);
+                return self.store_profiles();
+            }
+            // **Put every field of this built-in back to the table this build
+            // ships** — its position and its hidden flag excepted, because both
+            // are decisions about the *list* rather than about this profile.
+            settings::SettingsTarget::EditorRestore => {
+                let Some(index) = editor_index else {
+                    return Ok(());
+                };
+                if !profiles::restore_defaults(index) {
+                    return Ok(());
+                }
+                self.store_profiles()?;
+                return self.open_profile_editor(index);
+            }
+            settings::SettingsTarget::EditorDelete => {
+                let Some(index) = editor_index else {
+                    return Ok(());
+                };
+                return self.delete_profile(index);
+            }
+            _ => {}
+        }
+        let Some(index) = editor_index else {
+            return Ok(());
+        };
+        if let settings::SettingsTarget::Choice(row, item) = target {
+            match row {
+                settings::SettingsRow::ProfileStartAt => {
+                    match settings::START_AT_OPTIONS.get(item).copied() {
+                        Some(settings::StartAtChoice::Inherit) => {
+                            profiles::set_start_at(index, profiles::StartAt::Inherit);
+                        }
+                        Some(settings::StartAtChoice::Home) => {
+                            profiles::set_start_at(index, profiles::StartAt::Home);
+                        }
+                        // A verb and not a value: nothing is stored until the
+                        // chooser comes back, and it may come back with nothing.
+                        Some(settings::StartAtChoice::Choose) => {
+                            self.browse_for_start_folder();
+                            return Ok(());
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                settings::SettingsRow::ProfileColour => {
+                    let Some(colour) = marks::MarkColour::ALL.get(item).copied() else {
+                        return Ok(());
+                    };
+                    if !profiles::set_colour(index, colour) {
+                        return Ok(());
+                    }
+                }
+                // **The same storage read twice, not a second field**: `Auto` is
+                // this profile saying nothing about `FORCE_HYPERLINK`, so the
+                // terminal's own declaration stands; `On` and `Off` are a row in
+                // this profile's environment with that name.
+                settings::SettingsRow::ProfileHyperlink => {
+                    let Some(answer) = settings::HYPERLINK_OPTIONS.get(item).copied() else {
+                        return Ok(());
+                    };
+                    let mut env = profiles::env(index);
+                    env.retain(|(name, _)| name != settings::FORCE_HYPERLINK_NAME);
+                    match answer {
+                        settings::ForceHyperlink::Auto => {}
+                        settings::ForceHyperlink::On => {
+                            env.push((settings::FORCE_HYPERLINK_NAME.to_owned(), "1".to_owned()))
+                        }
+                        settings::ForceHyperlink::Off => {
+                            env.push((settings::FORCE_HYPERLINK_NAME.to_owned(), "0".to_owned()))
+                        }
+                    }
+                    profiles::set_env(index, env);
+                    // The table under the row changed too, so the editor's own
+                    // rows are re-seeded from it rather than left describing what
+                    // the environment used to hold.
+                    self.store_profiles()?;
+                    return self.reseed_editor_env(index);
+                }
+                _ => return Ok(()),
+            }
+            return self.store_profiles();
+        }
+        Ok(())
+    }
+
+    /// Re-read the environment table's rows out of the profile.
+    ///
+    /// One place, because two rows write that table — the table itself and the
+    /// `Force hyperlinks` picker above it — and a picker that changed the
+    /// storage without the table noticing would leave two pictures of one fact.
+    fn reseed_editor_env(&mut self, index: usize) -> Result<()> {
+        let env = profiles::env(index);
+        if let Some(editor) = self.settings.editor_mut() {
+            editor.env = env
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        text_field::TextField::holding(&name),
+                        text_field::TextField::holding(&value),
+                    )
+                })
+                .collect();
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Open the editor sub-page on one profile, seeded from the table.
+    ///
+    /// **Seeded and not bound**: the fields hold text and the table holds the
+    /// answer, and every keystroke that the table will take is pushed straight
+    /// through to it (§7.1.6c-4a — this dialog writes on change, there is
+    /// nothing to save). What the fields exist for is the moment in between,
+    /// where a name is half typed and a path is being pasted.
+    fn open_profile_editor(&mut self, index: usize) -> Result<()> {
+        if index >= profiles::count() {
+            return Ok(());
+        }
+        let program = profiles::program_text(index, self.profile_programs.program(index));
+        self.settings.open_editor(settings::ProfileEditor {
+            index,
+            name: text_field::TextField::holding(&profiles::display_title(index)),
+            program: text_field::TextField::holding(&program),
+            args: text_field::TextField::holding(&profiles::join_arguments(&profiles::args(index))),
+            env: profiles::env(index)
+                .into_iter()
+                // The three the terminal fills in are not here: they are what it
+                // says to every session, and a copy of them in editable state is
+                // the invisible second layer plan §1.7 exists to abolish.
+                .map(|(name, value)| {
+                    (
+                        text_field::TextField::holding(&name),
+                        text_field::TextField::holding(&value),
+                    )
+                })
+                .collect(),
+            refusal: None,
+        });
+        self.settings_scroll = 0.0;
+        Ok(())
+    }
+
+    /// One verb from a row's `⋯`.
+    ///
+    /// Every one of them writes the table and then goes through
+    /// [`Self::store_profiles`], which is the single door the file, the programs
+    /// probe and the window's own measurements move through.
+    fn apply_row_verb(&mut self, index: usize, verb: settings::RowVerb) -> Result<()> {
+        self.settings.close_row_menu();
+        match verb {
+            settings::RowVerb::Duplicate => {
+                if profiles::duplicate(index).is_none() {
+                    return Ok(());
+                }
+            }
+            settings::RowVerb::Hide => {
+                let hidden = profiles::hidden(index);
+                if !profiles::set_hidden(index, !hidden, self.default_profile()) {
+                    return Ok(());
+                }
+            }
+            settings::RowVerb::Delete => return self.delete_profile(index),
+            // The default is still *chosen* in one place — the picker on the
+            // General page — and this is that same choice made from the table it
+            // is a fact about (user ruling 2026-08-17, Q4). It goes through that
+            // row's own applier, so the two doors cannot mean two things.
+            settings::RowVerb::SetDefault => {
+                let id = profiles::id(index);
+                self.apply_default_profile(&id)?;
+                return Ok(());
+            }
+        }
+        self.store_profiles()
+    }
+
+    /// Take one profile out of the table, and put a card up that can put it back.
+    ///
+    /// **Immediate, with an undo, and no confirmation** (plan §2.3): this dialog
+    /// has no dirty gate to route a question through and every choice in it is
+    /// written the instant it is made, so what an irreversible one is owed is a
+    /// way back rather than a second question.
+    ///
+    /// The card names one fact and it is a fact this window holds: how many panes
+    /// in it are running the profile, and that they keep running. It does not
+    /// count seeds on disk — a number read out of a session file at delete time
+    /// can be wrong by the day it matters, and the honest place for that is the
+    /// degrade banner the restarting seat already prints.
+    fn delete_profile(&mut self, index: usize) -> Result<()> {
+        let title = profiles::title(index).to_owned();
+        let panes = self
+            .sessions
+            .values()
+            .filter(|leaf| leaf.profile == index)
+            .count();
+        let Some(removed) = profiles::delete(index) else {
+            return Ok(());
+        };
+        // The editor was standing on the row that has gone, so the page it was
+        // showing is not there any more. Back to the list, which is where a
+        // reader who has just deleted something is looking.
+        if self
+            .settings
+            .editor()
+            .is_some_and(|editor| editor.index == index)
+        {
+            self.settings.close_editor();
+        }
+        self.store_profiles()?;
+        let id = self.toast_with_verb(
+            toast::ToastKind::Info,
+            toast::ToastAnchor::Window,
+            i18n::profile_deleted(&title, panes),
+            i18n::Text::ProfilesUndo.text(),
+        )?;
+        self.profile_undo = Some((id, removed, index));
+        Ok(())
+    }
+
+    /// The card's verb: put the row back where it was, with its own id.
+    ///
+    /// A verb pressed on a card that is no longer the one holding the undo does
+    /// nothing — see [`Self::profile_undo`].
+    fn take_profile_undo(&mut self, card: toast::ToastId) -> Result<()> {
+        let Some((id, profile, at)) = self.profile_undo.take() else {
+            return Ok(());
+        };
+        if id != card {
+            self.profile_undo = Some((id, profile, at));
+            return Ok(());
+        }
+        profiles::reinsert(profile, at);
+        self.store_profiles()
+    }
+
+    /// `Browse…` beside the program field: pick an executable, and point the
+    /// profile at it.
+    ///
+    /// The same door the background picture's `Choose…` goes through
+    /// (`bt_platform::pick_file`), and it may come back with nothing — in which
+    /// case nothing is written, because a chooser that was cancelled has not
+    /// said anything.
+    fn browse_for_program(&mut self) {
+        let start = self
+            .settings
+            .editor()
+            .map(|editor| PathBuf::from(editor.program.text()))
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .filter(|parent| parent.as_os_str().len() > 1);
+        match self
+            .image_picker
+            .request(bt_platform::FilePickKind::Program, start.as_deref())
+        {
+            Ok(true) => self.image_pick_pending = Some(FilePick::ProfileProgram),
+            // Already queued or already open: a second press while one is up is
+            // one dialog, not two, and whoever asked first keeps the answer.
+            Ok(false) => {}
+            Err(error) => eprintln!("recoverable program chooser failure: {error}"),
+        }
+    }
+
+    /// `Choose a folder…` in the starting-directory picker.
+    fn browse_for_start_folder(&mut self) {
+        let Some(index) = self.settings.editor().map(|editor| editor.index) else {
+            return;
+        };
+        let start = match profiles::start_at(index) {
+            profiles::StartAt::Fixed(path) => Some(path),
+            _ => None,
+        };
+        match self.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.folder_pick = Some(FolderPick::ProfileStart(index)),
+            Ok(false) => {}
+            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+        }
+    }
+
+    /// Push whichever of the editor's fields has just been typed into back to
+    /// the table.
+    ///
+    /// **On every change, which is this dialog's own rule** (§7.1.6c-4a): there
+    /// is no commit and nothing to save. The one write that can be refused is the
+    /// name — an exact duplicate of another row's — and the refusal is a state
+    /// the reader is standing in rather than an error they submitted, so the
+    /// field keeps what they typed and the row says why it is not the table's
+    /// answer yet.
+    fn write_editor_field(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        let Some(editor) = self.settings.editor() else {
+            return Ok(());
+        };
+        let index = editor.index;
+        match target {
+            settings::SettingsTarget::Field(settings::SettingsRow::ProfileName) => {
+                let verdict = profiles::rename(index, editor.name.text());
+                if let Some(editor) = self.settings.editor_mut() {
+                    editor.refusal = match verdict {
+                        profiles::NameVerdict::Written => None,
+                        profiles::NameVerdict::Blank => Some(i18n::Text::ProfilesNameBlank),
+                        profiles::NameVerdict::Taken => Some(i18n::Text::ProfilesNameTaken),
+                    };
+                }
+                if verdict != profiles::NameVerdict::Written {
+                    // Nothing reached the table, so nothing is owed the file —
+                    // but the row's own sentence changed, so the frame is.
+                    if self.refresh_chrome() {
+                        self.present_chrome_change()?;
+                    }
+                    return Ok(());
+                }
+            }
+            settings::SettingsTarget::Field(settings::SettingsRow::ProfileProgram) => {
+                let path = PathBuf::from(editor.program.text());
+                if path.as_os_str().is_empty() {
+                    return Ok(());
+                }
+                profiles::set_program_path(index, &path);
+            }
+            settings::SettingsTarget::Field(settings::SettingsRow::ProfileArgs) => {
+                let args = profiles::split_arguments(editor.args.text());
+                profiles::set_args(index, args);
+            }
+            settings::SettingsTarget::EnvName(_) | settings::SettingsTarget::EnvValue(_) => {
+                let env = editor.env_pairs();
+                profiles::set_env(index, env);
+            }
+            _ => return Ok(()),
         }
         self.store_profiles()
     }
@@ -20366,10 +21070,33 @@ impl Runtime {
             // mock-up closes on the scrim and on the `×`, and nothing else.
             settings::SettingsTarget::Panel => {}
             settings::SettingsTarget::Menu(_) => {}
-            // A press on a profile row is a press on the row and not on a verb:
-            // the run's three buttons are the page's verbs in this slice, and
-            // the row itself becomes one the day there is an editor to open.
+            // A press on a row's band is a press on the row and not on a verb.
+            // It moves the focus (see `SettingsPanel::press`) so that `Enter`
+            // opens the editor from where the finger left the keyboard, and does
+            // nothing else: a single click that opened a sub-page would make the
+            // row a button, and the row is a row with buttons on it.
             settings::SettingsTarget::ProfileRow(_) => {}
+            settings::SettingsTarget::ProfileMore(index) => {
+                self.settings.toggle_row_menu(index);
+            }
+            target @ (settings::SettingsTarget::ProfileEdit(_)
+            | settings::SettingsTarget::ProfileMoreItem(..)
+            | settings::SettingsTarget::ProfileNew
+            | settings::SettingsTarget::EditorBack
+            | settings::SettingsTarget::EditorBrowse
+            | settings::SettingsTarget::EnvRemove(_)
+            | settings::SettingsTarget::EnvAdd
+            | settings::SettingsTarget::EditorRestore
+            | settings::SettingsTarget::EditorDelete) => {
+                self.settings.close_menu();
+                self.apply_settings_choice(target)?;
+            }
+            // A press into a field puts the caret there and nothing more: the
+            // field already holds the table's own value, and this dialog writes
+            // on change rather than on commit.
+            settings::SettingsTarget::Field(_)
+            | settings::SettingsTarget::EnvName(_)
+            | settings::SettingsTarget::EnvValue(_) => self.settings.close_menu(),
         }
         if let Some(position) = self.pointer_position {
             let hover = self.settings_layout().map(|layout| {
@@ -21114,8 +21841,11 @@ impl Runtime {
         let start = (!stored.is_empty())
             .then(|| Path::new(&stored).parent().map(Path::to_path_buf))
             .flatten();
-        match self.image_picker.request(start.as_deref()) {
-            Ok(true) => self.image_pick_pending = true,
+        match self
+            .image_picker
+            .request(bt_platform::FilePickKind::Image, start.as_deref())
+        {
+            Ok(true) => self.image_pick_pending = Some(FilePick::BackgroundImage),
             Ok(false) => {}
             Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
         }
@@ -21126,18 +21856,37 @@ impl Runtime {
         let Some(result) = self.image_picker.take_result() else {
             return Ok(());
         };
-        if !self.image_pick_pending {
+        let Some(asked) = self.image_pick_pending.take() else {
             return Ok(());
-        }
-        self.image_pick_pending = false;
-        match result {
+        };
+        let path = match result {
             // Cancelled. The row keeps whatever it had, which is the only
             // reading of Cancel that is not a clear.
-            Ok(None) => {}
-            Ok(Some(path)) => {
+            Ok(None) => return Ok(()),
+            Ok(Some(path)) => path,
+            Err(error) => {
+                eprintln!("recoverable file chooser failure: {error}");
+                return Ok(());
+            }
+        };
+        match asked {
+            FilePick::BackgroundImage => {
                 self.apply_background_image(path.to_string_lossy().into_owned())?;
             }
-            Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
+            // **The row is asked for again**, because a chooser can stand open
+            // for a minute and the table can move in that minute: a reorder or an
+            // Undo would otherwise land somebody's program on the row that has
+            // taken the index.
+            FilePick::ProfileProgram => {
+                let Some(index) = self.settings.editor().map(|editor| editor.index) else {
+                    return Ok(());
+                };
+                if let Some(editor) = self.settings.editor_mut() {
+                    editor.program = text_field::TextField::holding(&path.to_string_lossy());
+                }
+                profiles::set_program_path(index, &path);
+                self.store_profiles()?;
+            }
         }
         Ok(())
     }
@@ -30106,6 +30855,15 @@ impl Runtime {
             // with the folder as the arriving shell's own. The pane is asked for
             // again because a chooser can stand open for a minute and the shell
             // behind it can exit in that minute.
+            // **The row is asked for again**, because a chooser can stand open
+            // for a minute and the table can move in that minute.
+            FolderPick::ProfileStart(index) => {
+                if index < profiles::count() {
+                    profiles::set_start_at(index, profiles::StartAt::Fixed(path));
+                    self.store_profiles()?;
+                }
+                return Ok(());
+            }
             FolderPick::SplitInto(seat) => {
                 if self.sessions.contains_key(&seat) {
                     self.split_seat(
@@ -40365,6 +41123,28 @@ impl Runtime {
             }
             return Ok(());
         }
+        // **A notice takes its own presses** (user ruling, 2026-08-16), and it
+        // takes them **before the modal family** (§7.1.6c-6b, 2026-08-18).
+        //
+        // The 2026-08-16 ordering put the cards after the modal on one premise —
+        // "the two surfaces that are painted over it are surfaces that cannot be
+        // open while it is" — and slice 5b makes that premise false: deleting a
+        // profile is a verb *of* the settings dialog, and the card it raises
+        // carries the only way back. A card painted over the scrim, showing a
+        // verb, that answers no press would be worse than the thing the modal
+        // rule was protecting: the scrim exists so that nothing *behind* it
+        // answers, and a card is not behind it.
+        //
+        // Nothing else moves. The scrim still swallows every press that lands on
+        // it, the caption run included; what changed is that a surface drawn
+        // above the scrim is now hit-tested above it too, which is the two
+        // saying one thing rather than two.
+        if let Some(position) = self.pointer_position
+            && state == ElementState::Pressed
+            && self.press_toast(position)?
+        {
+            return Ok(());
+        }
         // A modal means MODAL. Ahead of the chrome router, so the caption run —
         // the gear included — is behind the scrim like everything else, and no
         // press reaches a divider, a seat, the terminal's selection or a peek.
@@ -40383,21 +41163,6 @@ impl Runtime {
             {
                 self.answer_restore_prompt(answer)?;
             }
-            return Ok(());
-        }
-        // **A notice takes its own presses** (user ruling, 2026-08-16), after the
-        // modal family and before everything a card can stand over.
-        //
-        // After the modal family for [`OverlayStack::modal`]'s own reason — a
-        // modal means MODAL, and nothing behind the scrim answers a press,
-        // whatever is painted over it. Before the seats for the reason the card
-        // exists: it hangs over the top of a files column, which is a list of
-        // rows with a verb on each, and a press that fell through it would stage
-        // whatever the card you were reaching for happened to be covering.
-        if let Some(position) = self.pointer_position
-            && state == ElementState::Pressed
-            && self.press_toast(position)?
-        {
             return Ok(());
         }
         // The git context menu, on the file menu's own level and answered by the
@@ -41965,6 +42730,18 @@ impl Runtime {
                     return Ok(());
                 }
                 return self.record_settings_key(event);
+            }
+            // **A field takes its own keys, and only its own** (§7.1.6c-6b).
+            // Below `Escape`, which is the ladder's, and below the recorder,
+            // which takes everything: `settings_key_of` maps `Escape` to its own
+            // verdict and the walk below still owns `Tab`, so a caret in a box
+            // can always be left.
+            if !matches!(
+                event.logical_key,
+                Key::Named(NamedKey::Escape | NamedKey::Tab)
+            ) && self.settings_field_key(event)?
+            {
+                return Ok(());
             }
             let key = settings_key_of(&event.logical_key, self.modifiers, event.repeat);
             let before = self.settings.category();
@@ -50938,6 +51715,7 @@ mod tests {
             shortcuts: &[],
             profiles: &[],
             advanced: settings::AdvancedOpen::default(),
+            editor: None,
         });
         assert!(panel.is_open(), "the gear's verb is 'open the dialog'");
         assert_eq!(

@@ -36,6 +36,92 @@ pub enum Corner {
     BottomRight,
 }
 
+/// The eight colours a profile of the user's own can be struck in.
+///
+/// **Eight fixed hexes and not a colour picker.** §7.1.6c-4a already ruled that
+/// this dialog has no colour picker and is not going to grow one, and a 15px
+/// identity mark is the case that ruling was written for: the mark's whole job
+/// is to be recognised across a strip at a glance, and a continuous colour space
+/// is exactly how somebody ends up with two blues they cannot tell apart.
+///
+/// They are **struck values and not scheme colours** (mock-up line 2148): a mark
+/// carries its own colours and does not turn over with the theme, so each of
+/// these was measured to hold its silhouette on both grounds — the same
+/// constraint that made `#p-cmd` charcoal rather than console black.
+///
+/// The list is `design/ui-mockup.html`'s own `data-combo="pfcolour"`, in its
+/// order. **It is not the plan's list**: plan §1.5 wrote `Orange` where the
+/// mock-up struck `Magenta`, and the mock-up is the contract — it landed after
+/// the plan and its eight were measured on both grounds, while an orange one
+/// place along from Ubuntu's own would have been a ninth profile wearing a
+/// brand's colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MarkColour {
+    Blue,
+    Teal,
+    Green,
+    Amber,
+    Red,
+    Magenta,
+    Violet,
+    Slate,
+}
+
+impl MarkColour {
+    /// Every colour, in the combo's own order.
+    pub const ALL: [Self; 8] = [
+        Self::Blue,
+        Self::Teal,
+        Self::Green,
+        Self::Amber,
+        Self::Red,
+        Self::Magenta,
+        Self::Violet,
+        Self::Slate,
+    ];
+
+    /// What the mark is filled with — the mock-up's own hex, to the digit.
+    #[must_use]
+    pub fn hex(self) -> [u8; 3] {
+        match self {
+            Self::Blue => [0x2f, 0x6f, 0xb5],
+            Self::Teal => [0x1f, 0x7a, 0x6b],
+            Self::Green => [0x3f, 0x7d, 0x3a],
+            Self::Amber => [0xb0, 0x7a, 0x16],
+            Self::Red => [0xa8, 0x3a, 0x3a],
+            Self::Magenta => [0xa0, 0x3a, 0x78],
+            Self::Violet => [0x6b, 0x4e, 0x9e],
+            Self::Slate => [0x4a, 0x55, 0x68],
+        }
+    }
+
+    /// The word `profiles.json` writes.
+    ///
+    /// Lower case and English, on `mark_from_file`'s own ruling one module over:
+    /// this file is read by people, and a wire word is not a Rust spelling.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Amber => "amber",
+            Self::Red => "red",
+            Self::Magenta => "magenta",
+            Self::Violet => "violet",
+            Self::Slate => "slate",
+        }
+    }
+
+    /// One of [`Self::wire`]'s words, or `None` for anything else — a colour
+    /// this build does not know is a key the reader skips, not a file it
+    /// refuses.
+    #[must_use]
+    pub fn from_wire(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|colour| colour.wire() == word)
+    }
+}
+
 /// One mark the chrome can wear. Every variant except [`ChromeMark::ActiveTab`]
 /// is a `<symbol>` lifted straight out of the mock-up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +222,31 @@ pub enum ChromeMark {
     /// not be the same colour as either — which is why this is `#3A3A3A` inside
     /// a `#606060` hairline and why nobody may "fix" it back to black.
     ProfileCmd,
+    /// `#p-shell` — the chassis a profile of the user's own wears, in one of
+    /// [`MarkColour`]'s eight.
+    ///
+    /// `#p-pwsh` and `#p-cmd` are already the same drawing twice — one rounded
+    /// panel, one chevron, one underline — differing only in what they are
+    /// filled with. So this is that drawing a third time, and it reads as "a
+    /// shell of your own" rather than as a brand nobody owns: a profile drawn
+    /// from nothing has no logo to inherit, and inventing one for it would be
+    /// this list asserting a provenance the row does not have. A profile
+    /// *duplicated* from a built-in is the other case and keeps the built-in's
+    /// own mark, because a copy of a PowerShell really is a PowerShell.
+    ///
+    /// **No letter in it.** The house rule is that a profile icon is a MARK and
+    /// not a character — "认出 PowerShell 靠的是那块蓝,不是读字形" — and an
+    /// initial in a box is exactly the thing that rule refuses. The mock-up
+    /// states it at `#p-shell` in as many words, so that nobody adds one later
+    /// on the argument that a nameless panel is anonymous: what tells two of
+    /// these apart is the colour, which is what the eight are for.
+    ///
+    /// The panel takes the colour as a **literal hex** and the chevron stays
+    /// white, which is why this variant's body is generated rather than quoted
+    /// from `SYMBOL_BODY`: a constant cannot carry a parameter, and running the
+    /// fill through `currentColor` would have handed the mark to the theme —
+    /// see [`Self::takes_current_color`], which a profile mark answers `false`.
+    ProfileGeneric { colour: MarkColour },
     /// `#i-file`.
     File,
     /// `#i-folder`.
@@ -526,6 +637,10 @@ impl ChromeMark {
             Self::ProfileUbuntu => "p-ubuntu",
             Self::ProfileGit => "p-git",
             Self::ProfileCmd => "p-cmd",
+            // One id for all eight colours, exactly as `Self::Chevron` has one
+            // id for every angle: there is one chassis, and what tells two of
+            // them apart is a parameter `mark_key` adds.
+            Self::ProfileGeneric { .. } => "p-shell",
             Self::File => "i-file",
             Self::Folder => "i-folder",
             Self::FolderOpen => "i-folder-open",
@@ -613,7 +728,14 @@ impl ChromeMark {
     fn takes_current_color(self) -> bool {
         !matches!(
             self,
-            Self::ProfilePowerShell | Self::ProfileUbuntu | Self::ProfileGit | Self::ProfileCmd
+            Self::ProfilePowerShell
+                | Self::ProfileUbuntu
+                | Self::ProfileGit
+                | Self::ProfileCmd
+                // The chassis is struck in one of eight fixed hexes and carries
+                // it the way the other four carry theirs — the mark states its
+                // own colour, which is precisely what this match is a list of.
+                | Self::ProfileGeneric { .. }
         )
     }
 
@@ -931,6 +1053,14 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     if let ChromeMark::ControlPill { radius_px } = sprite.mark {
         let _ = write!(key, ":r{radius_px}");
     }
+    // The colour is the only thing that tells one chassis from another — one
+    // id, one box, eight different fills. It cannot ride in on `sprite.color`'s
+    // hex below, because a profile mark does not take the caller's colour at
+    // all (`takes_current_color`), so the three bytes there are the same for
+    // all eight and would collapse them into one cache slot.
+    if let ChromeMark::ProfileGeneric { colour } = sprite.mark {
+        let _ = write!(key, ":{}", colour.wire());
+    }
     // The corner is the only thing that tells one card corner from another —
     // one id, one box, one colour, four different bites.
     if let ChromeMark::CardCorner { radius_px, corner } = sprite.mark {
@@ -1138,6 +1268,34 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 format!("0 0 {width_px} {height_px}"),
                 format!(
                     r#"<path fill="none" stroke="currentColor" stroke-width="{stroke_px}" stroke-linecap="round" d="M{dot_x} {dot_y} Q{lane_x} {dot_y} {lane_x} {lane_y}"/>"#
+                ),
+            )
+        }
+        // The chassis, filled from the eight. The panel's hex is written into
+        // the document rather than handed to the `currentColor` substitution
+        // below, because that substitution is what a mark following the theme
+        // goes through and this one does not follow it — see
+        // `ChromeMark::takes_current_color`. The chevron and the underline stay
+        // `#fff`, which is what `#p-pwsh` and `#p-shell` both draw and what
+        // keeps the glyph legible on all eight grounds.
+        ChromeMark::ProfileGeneric { colour } => {
+            let [r, g, b] = colour.hex();
+            (
+                PROFILE_CHASSIS_VIEW_BOX.to_owned(),
+                format!(
+                    // The three parts are concatenated rather than written as
+                    // one long literal to keep them one line each, as their
+                    // quoted siblings in `SYMBOL_BODY` are — which costs the
+                    // implicit `{r}` capture, because a `concat!` is not a
+                    // literal to `format!` and only a literal supports it.
+                    concat!(
+                        r##"<rect x="1" y="2.5" width="14" height="11" rx="1.8" fill="#{r:02x}{g:02x}{b:02x}"/>"##,
+                        r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#fff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
+                        r##"<path d="M8.5 10.9h3.2" stroke="#fff" stroke-width="1.35" stroke-linecap="round"/>"##,
+                    ),
+                    r = r,
+                    g = g,
+                    b = b,
                 ),
             )
         }
@@ -1380,8 +1538,17 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
         ChromeMark::GraphCurve { .. } => 8,
+        ChromeMark::ProfileGeneric { .. } => 8,
     }
 }
+
+/// The profile marks' own box, and the chassis's — `#p-shell` is `#p-pwsh` and
+/// `#p-cmd`'s drawing a third time, so it is drawn in their coordinates.
+///
+/// Named rather than spelled inside the format string because the chassis's body
+/// is generated and its siblings' are quoted, and two spellings of one box is
+/// how a generated glyph comes to sit a pixel off the ones beside it.
+const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
 const SYMBOL_VIEW_BOX: [&str; 39] = [
     "0 0 24 24",
@@ -2321,6 +2488,18 @@ mod tests {
             (ChromeMark::ProfileGit, (8.0, 3.6), [0xf0, 0x50, 0x33]),
             // The charcoal panel — *not* console black, by the mock-up's ruling.
             (ChromeMark::ProfileCmd, (3.0, 8.0), [0x3a, 0x3a, 0x3a]),
+            // The chassis a profile of the user's own wears: the same panel
+            // again, filled from the eight. It joins this list because it is a
+            // profile mark and the rule is stated over the *family* — a mark
+            // struck in Amber that quietly took the accent instead would be the
+            // very bug this case's second half describes.
+            (
+                ChromeMark::ProfileGeneric {
+                    colour: MarkColour::Amber,
+                },
+                (3.0, 8.0),
+                [0xb0, 0x7a, 0x16],
+            ),
         ];
         for (mark, (x, y), expected) in cases {
             let inks = [[0x7a, 0x99, 0xff], [0xff, 0x00, 0x00]];
@@ -2372,6 +2551,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// PIN — **eight colours are eight rasters under one id**, and each panel is
+    /// the hex the mock-up struck while the chevron over it stays white.
+    ///
+    /// Two red gates in one case, and they fail in opposite directions.
+    ///
+    /// Leave the colour out of [`mark_key`] and all eight collapse into one
+    /// cache slot: the first profile drawn wins, and every other profile of the
+    /// user's own wears its colour for the rest of the process — silently,
+    /// because nothing about the drawing is wrong, only which drawing was kept.
+    /// That is the same failure `ProgressRing` and `CardCorner` add their own
+    /// parameters to the key to avoid.
+    ///
+    /// Send the fill through the `currentColor` substitution instead of writing
+    /// the hex into the document, and the mark follows the theme — which is the
+    /// one thing a profile mark is forbidden to do (mock-up line 2148), and
+    /// which `takes_current_color` answering `false` for this variant is what
+    /// prevents.
+    ///
+    /// The white chevron is asserted because it is the part the eight have in
+    /// common: a chassis that tinted its glyph as well as its panel would go
+    /// illegible on the pale end of the palette, and would stop being the
+    /// drawing `#p-pwsh` and `#p-cmd` already are twice.
+    #[test]
+    fn the_chassis_a_profile_of_your_own_wears_is_eight_panels_under_one_white_chevron() {
+        const SIDE: f32 = 32.0;
+        let unit = |u: f32| (u * SIDE / 16.0) as u32;
+        let ink = [0x7a, 0x99, 0xff];
+        let mut rasters = ChromeMarkRasters::default();
+        let sprites: Vec<_> = MarkColour::ALL
+            .iter()
+            .map(|colour| {
+                sprite(
+                    ChromeMark::ProfileGeneric { colour: *colour },
+                    SIDE,
+                    SIDE,
+                    ink,
+                )
+            })
+            .collect();
+        let icons = rasters.resolve(&sprites);
+        let keys: std::collections::HashSet<_> = icons.iter().map(|icon| &icon.key).collect();
+        assert_eq!(
+            keys.len(),
+            MarkColour::ALL.len(),
+            "eight colours, eight rasters: {keys:?}"
+        );
+        for key in &keys {
+            assert!(
+                key.contains("p-shell"),
+                "and all eight are the one chassis: {key}"
+            );
+        }
+        for (colour, icon) in MarkColour::ALL.iter().zip(&icons) {
+            // Left of the chevron, which starts at x=4.4: solid panel.
+            assert_eq!(
+                rgb_at(icon, unit(3.0), unit(8.0)),
+                colour.hex(),
+                "{colour:?}'s panel must be its own struck hex"
+            );
+            // The underline at y=10.9 runs x=8.5..11.7 — white, on every one.
+            assert_eq!(
+                rgb_at(icon, unit(10.0), unit(10.9)),
+                [0xff, 0xff, 0xff],
+                "{colour:?}'s glyph must stay white"
+            );
+        }
+    }
+
+    /// PIN — the wire words and the drawing agree, both ways, for all eight.
+    ///
+    /// Red gate: add a ninth colour to [`MarkColour::ALL`] and forget one of the
+    /// four `match` arms, or spell a wire word twice. Either leaves a colour a
+    /// `profiles.json` can name but the window cannot draw, or two colours the
+    /// file cannot tell apart.
+    #[test]
+    fn every_struck_colour_can_be_written_down_and_read_back() {
+        let mut seen = std::collections::HashSet::new();
+        for colour in MarkColour::ALL {
+            assert!(seen.insert(colour.wire()), "{colour:?} shares a wire word");
+            assert_eq!(MarkColour::from_wire(colour.wire()), Some(colour));
+            assert!(
+                colour
+                    .wire()
+                    .chars()
+                    .all(|glyph| glyph.is_ascii_lowercase()),
+                "{colour:?}: the drawn word and the written one are one name"
+            );
+        }
+        assert_eq!(
+            MarkColour::from_wire("chartreuse"),
+            None,
+            "a colour this build has not struck is a key to skip, not a file to refuse"
+        );
     }
 
     /// PIN (tab shape): the active tab is round on top, square-cut at the

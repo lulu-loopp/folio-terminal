@@ -160,6 +160,26 @@ pub const TOAST_CLOSE_LOGICAL_PX: f32 = 18.0;
 pub const TOAST_CLOSE_RADIUS_LOGICAL_PX: f32 = 5.0;
 /// The `×` inside that box.
 pub const TOAST_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
+/// The verb's own type — the body's 12px, because it stands under the body and
+/// a second size would read as a second voice.
+pub const TOAST_ACTION_FONT_LOGICAL_PX: f32 = 12.0;
+/// How far the verb's row stands off the last line of the body.
+///
+/// Six and not the eight two cards stand apart: the verb belongs to the sentence
+/// above it, and a gap as wide as the one between two separate notices would
+/// have made it look like a second card that lost its box.
+pub const TOAST_ACTION_MARGIN_TOP_LOGICAL_PX: f32 = 6.0;
+/// The padding either side of the verb, which is what its pressable box is
+/// wider than its word by.
+///
+/// `.gact`'s register carried onto a word instead of a glyph: the `×` gets an
+/// 18px box round an 8px mark, and this gets the same five pixels of air on the
+/// axis a word actually grows along.
+pub const TOAST_ACTION_PADDING_X_LOGICAL_PX: f32 = 6.0;
+/// `.gact { border-radius: 5px }`, the dismiss verb's own pill — one round for
+/// the two pressable things on a card.
+pub const TOAST_ACTION_RADIUS_LOGICAL_PX: f32 = 5.0;
+
 /// The most lines of body text a card will show before it stops.
 ///
 /// Six, and the seventh is not shown but *reported* — the last line kept ends in
@@ -272,6 +292,22 @@ pub struct Toast {
     anchor: ToastAnchor,
     title: Option<String>,
     body: String,
+    /// The one verb this card offers, if it offers one — `Undo`.
+    ///
+    /// **A card grows an action only where the thing it reports is
+    /// irreversible.** A notice saying a branch was switched has nothing to
+    /// offer: the reader can switch it back through the surface that switched
+    /// it. A notice saying a profile was deleted has, because the row it names
+    /// is gone from the list the reader would have used. Plan §2.3 and the
+    /// ruling behind it are explicit that what deletion is owed is an *undo*
+    /// and not a confirmation: this dialog writes every choice the instant it
+    /// is made and has no dirty gate to route a question through, so a
+    /// confirmation here would be the first modal over a modal in this product,
+    /// while an undo is a precedent it already struck as `Ctrl+Shift+T`.
+    ///
+    /// One verb and not a list. A card is a notice, and a notice with two
+    /// things to press is a dialog that forgot to say it was one.
+    action: Option<String>,
     /// When it arrived. The epoch for the entrance *and* for the life.
     born: Instant,
     /// Time already spent under the pointer, which the life does not count.
@@ -415,12 +451,31 @@ impl ToastHost {
     /// animation in this window does when the system asks for stillness. It is
     /// spelled by moving `born` back past the entrance rather than by a flag,
     /// so that exactly one code path computes an opacity.
+    ///
+    /// `action` is the one verb the card offers, or `None` for the ordinary
+    /// notice that offers none — see [`Toast::action`]. It does **not** get a
+    /// clock of its own: a card with an undo on it lives exactly as long as a
+    /// card of its kind without one, and the reason is that this file already
+    /// has the mechanism a longer deadline would be reaching for. The life is
+    /// suspended while the pointer is on the card ([`Self::hover`]), and a
+    /// reader deciding whether to undo is a reader whose pointer is on the card
+    /// — so the four seconds are four seconds of *not* reaching for it. A
+    /// second clock keyed on "does this one have a verb" would be a second
+    /// answer to how long a notice stands, and the first answer is a reading
+    /// time that the verb does not change.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a card is a notice, an anchor, three strings and two instants; \
+                  bundling them into a struct would put a builder in front of the \
+                  one call this module exists to serve"
+    )]
     pub fn raise(
         &mut self,
         kind: ToastKind,
         anchor: ToastAnchor,
         title: Option<String>,
         body: impl Into<String>,
+        action: Option<String>,
         still: bool,
         now: Instant,
     ) -> ToastId {
@@ -451,6 +506,7 @@ impl ToastHost {
             anchor,
             title,
             body: body.into(),
+            action,
             born: if still { now - TOAST_ENTER } else { now },
             held: Duration::ZERO,
             hover_since: None,
@@ -572,6 +628,20 @@ pub struct ToastLayout {
     pub title: Option<([f32; 4], String)>,
     /// One row per body line, in order.
     pub lines: Vec<([f32; 4], String)>,
+    /// The action verb's pressable box and its word, when the card has one.
+    ///
+    /// **A row of its own, under the body, right-aligned on the text column's
+    /// own trailing edge.** Two things follow from that and both are the reason
+    /// for it. It cannot collide with the body, because a verb tucked after the
+    /// last wrapped line would land somewhere different on every card and
+    /// nowhere at all on a card whose last line is full — so the card never has
+    /// to grow wider to fit the two side by side, which is a width this layout
+    /// does not get to choose (an anchored card takes its body's width). And it
+    /// cannot collide with the `×`, because the `×` has a column of its own
+    /// reserved for the card's whole height and this verb stops at
+    /// `text_right`, one gap short of it — pinned by
+    /// `the_two_pressable_things_on_a_card_never_share_a_pixel`.
+    pub action: Option<([f32; 4], String)>,
 }
 
 /// What a press on a card means.
@@ -579,6 +649,13 @@ pub struct ToastLayout {
 pub enum ToastHit {
     /// The `×`.
     Close(ToastId),
+    /// The card's one verb — `Undo`.
+    ///
+    /// What it *does* is not this module's to know: a card carries a word and a
+    /// rectangle, and the runtime that raised it is the only thing that knows
+    /// what pressing it undoes. That is [`ToastAnchor`]'s own division kept —
+    /// identity here, meaning at the door.
+    Action(ToastId),
     /// Anywhere else on the card — which is **not** nothing: a toast is not
     /// click-through, and a press that fell past it onto the rows underneath
     /// would stage a file because the card you were dismissing was in the way.
@@ -597,8 +674,18 @@ pub fn at(layouts: &[ToastLayout], x: f32, y: f32) -> Option<ToastHit> {
         if !contains(layout.frame, x, y) {
             return None;
         }
+        // The two boxes are disjoint by construction (see
+        // `ToastLayout::action`), so the order of these two arms is a reading
+        // order and not a precedence — but they are still asked before the card
+        // itself, because the card is what is left over.
         Some(if contains(layout.close, x, y) {
             ToastHit::Close(layout.id)
+        } else if layout
+            .action
+            .as_ref()
+            .is_some_and(|(rect, _)| contains(*rect, x, y))
+        {
+            ToastHit::Action(layout.id)
         } else {
             ToastHit::Card(layout.id)
         })
@@ -711,6 +798,9 @@ impl ToastLayout {
         for (rect, _) in &mut self.lines {
             slide(rect);
         }
+        if let Some((rect, _)) = self.action.as_mut() {
+            slide(rect);
+        }
     }
 }
 
@@ -742,11 +832,18 @@ fn lay_one(
 
     let wrapped = wrap_body(&toast.body, text_right - text_left, body_font, measure);
 
+    let action_font = px(TOAST_ACTION_FONT_LOGICAL_PX);
+    let action_line = (action_font * CHROME_LINE_HEIGHT).round();
+    let action_margin = px(TOAST_ACTION_MARGIN_TOP_LOGICAL_PX);
+
     let mut height = 2.0 * (border + pad_y);
     if toast.title.is_some() {
         height += title_line;
     }
     height += wrapped.len() as f32 * body_line;
+    if toast.action.is_some() {
+        height += action_margin + action_line;
+    }
     // A one-line card is shorter than its own dismiss button; the button is what
     // sets the floor, because a verb hanging out of the card it belongs to is
     // not a smaller card.
@@ -760,7 +857,7 @@ fn lay_one(
         row
     });
     let first_body_top = y;
-    let lines = wrapped
+    let lines: Vec<([f32; 4], String)> = wrapped
         .into_iter()
         .map(|line| {
             let row = ([text_left, y, text_right, y + body_line], line);
@@ -768,6 +865,26 @@ fn lay_one(
             row
         })
         .collect();
+
+    // The verb's box hugs its word and hangs off the text column's trailing
+    // edge, which is one whole gap short of the `×`'s column — so the two
+    // pressable things on a card can never share a pixel however long the word
+    // is. Held off `text_left` rather than allowed to run past it: in a column
+    // dragged narrower than a single word the verb takes the whole text column
+    // and the label clips, which is the same ground the body's own wrap gives
+    // when it runs out of room.
+    let action = toast.action.as_ref().map(|word| {
+        y += action_margin;
+        let wanted =
+            measure(word, action_font).round() + 2.0 * px(TOAST_ACTION_PADDING_X_LOGICAL_PX);
+        let width = wanted.min(text_right - text_left);
+        let row = (
+            [text_right - width, y, text_right, y + action_line],
+            word.clone(),
+        );
+        y += action_line;
+        row
+    });
 
     // The mark is centred on the first line of *text*, whichever kind of line
     // that is: a card with a title leads with the title, and a mark that sat
@@ -801,6 +918,7 @@ fn lay_one(
         ],
         title,
         lines,
+        action,
     }
 }
 
@@ -842,6 +960,14 @@ pub struct ToastPointer {
     pub card: Option<ToastId>,
     /// The `×` under the pointer.
     pub close: Option<ToastId>,
+    /// The action verb under the pointer.
+    ///
+    /// It takes the `×`'s lit pill and **not** its reveal ladder: the dismiss
+    /// verb may hide while the pointer is elsewhere because a card dismisses
+    /// itself anyway, and an undo may not, because the card's own expiry is the
+    /// deadline for pressing it. A verb you have to find by hovering is a verb
+    /// that is gone by the time you have found it.
+    pub action: Option<ToastId>,
 }
 
 /// Paint the cards — **one layer each**, so each carries its own fade.
@@ -964,6 +1090,39 @@ pub fn build(
                 clip: Some(card.frame),
             });
         }
+        // The one verb, always drawn — see `ToastPointer::action`. It is struck
+        // at the surface's full ink and Medium, which is the register the title
+        // wears, because on a card those two are the same claim: this line is
+        // not the prose. Under the pointer it takes the `×`'s own lit pill, so
+        // that the two pressable things on a card answer a hand the same way.
+        if let Some((rect, word)) = &card.action {
+            if pointer.action == Some(toast.id) {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: px(TOAST_ACTION_RADIUS_LOGICAL_PX).round().max(1.0) as u32,
+                    },
+                    *rect,
+                    palette.menu_item_hover,
+                ));
+            }
+            labels.push(ChromeLabel {
+                text: word.clone(),
+                rect: [
+                    rect[0] + px(TOAST_ACTION_PADDING_X_LOGICAL_PX),
+                    rect[1],
+                    rect[2] - px(TOAST_ACTION_PADDING_X_LOGICAL_PX),
+                    rect[3],
+                ],
+                font_size_px: px(TOAST_ACTION_FONT_LOGICAL_PX),
+                color: palette.menu_item_text_selected,
+                align_right: false,
+                align_center: true,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Medium,
+                tabular_numerals: false,
+                clip: Some(card.frame),
+            });
+        }
 
         layers.push(OverlayLayer {
             quads,
@@ -999,7 +1158,7 @@ mod tests {
 
     fn host_with(kind: ToastKind, anchor: ToastAnchor, now: Instant) -> (ToastHost, ToastId) {
         let mut host = ToastHost::default();
-        let id = host.raise(kind, anchor, None, "git said no", false, now);
+        let id = host.raise(kind, anchor, None, "git said no", None, false, now);
         (host, id)
     }
 
@@ -1106,7 +1265,17 @@ mod tests {
         let mut host = ToastHost::default();
         let column = ToastAnchor::FilesColumn(SEAT);
         let ids: Vec<ToastId> = (0..3)
-            .map(|n| host.raise(ToastKind::Error, column, None, format!("{n}"), false, start))
+            .map(|n| {
+                host.raise(
+                    ToastKind::Error,
+                    column,
+                    None,
+                    format!("{n}"),
+                    None,
+                    false,
+                    start,
+                )
+            })
             .collect();
         // A card on another anchor is not part of this crowd.
         let elsewhere = host.raise(
@@ -1114,13 +1283,22 @@ mod tests {
             ToastAnchor::PreviewSeat(SEAT),
             None,
             "graph",
+            None,
             false,
             start,
         );
         assert!(host.toasts().iter().all(|toast| !toast.leaving()));
 
         let fourth = start + Duration::from_millis(500);
-        let last = host.raise(ToastKind::Error, column, None, "fourth", false, fourth);
+        let last = host.raise(
+            ToastKind::Error,
+            column,
+            None,
+            "fourth",
+            None,
+            false,
+            fourth,
+        );
         let leaving: Vec<ToastId> = host
             .toasts()
             .iter()
@@ -1178,6 +1356,7 @@ mod tests {
             ToastAnchor::Window,
             None,
             "no",
+            None,
             true,
             start,
         );
@@ -1250,6 +1429,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             None,
             "one",
+            None,
             false,
             start,
         );
@@ -1258,6 +1438,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             None,
             "two",
+            None,
             false,
             start,
         );
@@ -1298,6 +1479,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             None,
             "one",
+            None,
             false,
             start,
         );
@@ -1306,6 +1488,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             None,
             "two",
+            None,
             false,
             start,
         );
@@ -1366,6 +1549,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             None,
             words.join(" "),
+            None,
             false,
             start,
         );
@@ -1401,6 +1585,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             Some("Git".to_owned()),
             "fatal: no",
+            None,
             false,
             start,
         );
@@ -1446,6 +1631,116 @@ mod tests {
         );
         assert_eq!(at(&laid, card.frame[0] - 1.0, cy), None);
         assert_eq!(at(&laid, cx, card.frame[3] + 1.0), None);
+        assert!(
+            card.action.is_none(),
+            "a card that was raised without a verb has no box for one"
+        );
+    }
+
+    /// PIN — **the two pressable things on a card never share a pixel**, and
+    /// the verb never reaches the `×`'s column however long its word is.
+    ///
+    /// Red gate: right-align the verb on the card's own inner edge rather than
+    /// on the text column's, and the two boxes overlap on every card — at which
+    /// point the hit test's arm order silently becomes a precedence, and a press
+    /// meant for `Undo` dismisses the only thing that could have undone it.
+    ///
+    /// The long word is not decoration either: it is what proves the clamp is a
+    /// clamp. A verb wider than the column it hangs in gives ground at its
+    /// *leading* edge, exactly as the wrapped body does, rather than growing out
+    /// of the card.
+    #[test]
+    fn the_two_pressable_things_on_a_card_never_share_a_pixel() {
+        let start = Instant::now();
+        for word in [
+            "Undo",
+            "Undo this deletion and put the row back where it was",
+        ] {
+            let mut host = ToastHost::default();
+            let id = host.raise(
+                ToastKind::Info,
+                ToastAnchor::FilesColumn(SEAT),
+                None,
+                "PowerShell 7 copy is gone.",
+                Some(word.to_owned()),
+                false,
+                start,
+            );
+            let laid = placed(&host, Some([0.0, 0.0, 300.0, 400.0]));
+            let card = &laid[0];
+            let (action, drawn) = card.action.as_ref().expect("a verb");
+            assert_eq!(drawn, word);
+            assert!(
+                action[2] <= card.close[0],
+                "{word:?}: the verb ends at {} and the × begins at {}",
+                action[2],
+                card.close[0]
+            );
+            assert!(
+                action[0] >= card.frame[0] && action[3] <= card.frame[3],
+                "{word:?}: the verb stays inside the card it belongs to"
+            );
+            assert!(
+                action[1] >= card.lines.last().expect("a body").0[3],
+                "{word:?}: and it stands under the sentence, not across it"
+            );
+
+            let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+            let (ax, ay) = middle(*action);
+            assert_eq!(at(&laid, ax, ay), Some(ToastHit::Action(id)));
+            let (cx, cy) = middle(card.close);
+            assert_eq!(at(&laid, cx, cy), Some(ToastHit::Close(id)));
+            assert_eq!(
+                at(&laid, action[0] - 2.0, ay),
+                Some(ToastHit::Card(id)),
+                "{word:?}: beside the verb is the card, and the card is not click-through"
+            );
+        }
+    }
+
+    /// PIN — **a card grows by exactly one row for its verb, and a card without
+    /// one is laid out as it was before this slice existed.**
+    ///
+    /// Red gate: add the verb's height unconditionally, and every notice in the
+    /// product — none of which has a verb — gains a band of empty card under its
+    /// last line.
+    #[test]
+    fn a_verb_costs_one_row_and_a_card_without_one_costs_nothing() {
+        let start = Instant::now();
+        let body = Some([0.0, 0.0, 300.0, 400.0]);
+        let mut plain = ToastHost::default();
+        plain.raise(
+            ToastKind::Info,
+            ToastAnchor::FilesColumn(SEAT),
+            None,
+            "PowerShell 7 copy is gone.",
+            None,
+            false,
+            start,
+        );
+        let mut verbed = ToastHost::default();
+        verbed.raise(
+            ToastKind::Info,
+            ToastAnchor::FilesColumn(SEAT),
+            None,
+            "PowerShell 7 copy is gone.",
+            Some("Undo".to_owned()),
+            false,
+            start,
+        );
+        let plain = placed(&plain, body).remove(0);
+        let verbed = placed(&verbed, body).remove(0);
+        assert_eq!(
+            plain.lines, verbed.lines,
+            "the sentence falls in the same place either way"
+        );
+        let row = (TOAST_ACTION_FONT_LOGICAL_PX * CHROME_LINE_HEIGHT).round()
+            + TOAST_ACTION_MARGIN_TOP_LOGICAL_PX;
+        assert!(
+            ((verbed.frame[3] - verbed.frame[1]) - (plain.frame[3] - plain.frame[1]) - row).abs()
+                < 0.001,
+            "one row taller and no more: {plain:?} against {verbed:?}"
+        );
     }
 
     // ── the paint ──────────────────────────────────────────────────────────
@@ -1462,6 +1757,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             Some("Git".to_owned()),
             "fatal: no",
+            None,
             true,
             start,
         );
@@ -1470,6 +1766,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             None,
             "done",
+            None,
             false,
             start,
         );
@@ -1480,6 +1777,7 @@ mod tests {
             ToastPointer {
                 card: Some(first),
                 close: Some(first),
+                action: None,
             },
             &palette,
             SCALE,
@@ -1521,7 +1819,7 @@ mod tests {
         let start = Instant::now();
         for kind in [ToastKind::Error, ToastKind::Ok, ToastKind::Info] {
             let mut host = ToastHost::default();
-            host.raise(kind, ToastAnchor::Window, None, "x", true, start);
+            host.raise(kind, ToastAnchor::Window, None, "x", None, true, start);
             let laid = placed(&host, None);
             let layers = build(
                 &laid,
@@ -1570,6 +1868,7 @@ mod tests {
         let over_card = sprites(ToastPointer {
             card: Some(id),
             close: None,
+            action: None,
         });
         assert_eq!(over_card.len(), 2);
         assert!(
@@ -1579,6 +1878,7 @@ mod tests {
         let over_button = sprites(ToastPointer {
             card: Some(id),
             close: Some(id),
+            action: None,
         });
         assert_eq!(over_button.len(), 3, "and it gains a pill of its own");
         assert!((over_button[2].opacity - 1.0).abs() < 0.001);
@@ -1606,6 +1906,7 @@ mod tests {
             ToastAnchor::FilesColumn(SEAT),
             Some("Git".to_owned()),
             words,
+            None,
             false,
             start,
         );

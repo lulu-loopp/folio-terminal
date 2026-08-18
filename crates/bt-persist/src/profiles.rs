@@ -64,7 +64,9 @@ pub const PROFILES_SCHEMA_VERSION: u32 = 1;
 ///     { "id": "cmd", "hidden": true },
 ///     { "id": "claude-7f3a", "display_title": "Claude",
 ///       "program": "C:\\Users\\me\\.local\\bin\\claude.exe",
-///       "env": { "FORCE_HYPERLINK": "1" } }
+///       "env": { "FORCE_HYPERLINK": "1" },
+///       "start_at": { "fixed": "D:\\Developer" },
+///       "mark": { "chassis": "shell", "colour": "amber" } }
 ///   ]
 /// }
 /// ```
@@ -136,18 +138,34 @@ pub struct ProfileEntryV1 {
     /// happened to build it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, String>>,
-    /// Where a tab of this profile opens when nothing is inherited.
+    /// Where this profile's *home* is, and how its launcher is told about it.
+    ///
+    /// **A machine fact and not a preference** — see [`StartAtV1`], which is the
+    /// key the editor writes. A Windows shell is handed a working directory and
+    /// `wsl.exe` is handed `--cd ~`, and which of the two applies is a property
+    /// of the program rather than an answer anybody should be able to pick
+    /// wrongly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starting_dir: Option<StartingDirV1>,
+    /// Whether a new tab of this profile takes the folder it was opened beside,
+    /// its own home, or one fixed place.
+    ///
+    /// Absent means [`NamedStartAtV1::Inherit`], which is what every shipped
+    /// profile is and what this terminal has always done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<StartAtV1>,
     /// The mark that names this profile across the window.
     ///
-    /// A bare string here, naming one of the shipped marks, because in this
-    /// slice the only way to make a profile is to duplicate a built-in and a
-    /// duplicate inherits the mark it really is. The editor's eight struck
-    /// colours are the next slice's, and they arrive as an *object* form beside
-    /// this one rather than by redefining it.
+    /// A bare string names one of the shipped marks, which is what a *duplicate*
+    /// of a built-in wears — a copy of a PowerShell really is a PowerShell, and
+    /// the mark is telling the truth. A profile drawn from nothing has no
+    /// shipped logo to inherit, so it wears the neutral chassis in one of the
+    /// editor's eight struck colours, and that arrives as the **object** form:
+    /// the promise this field's own comment made a slice ago — "they arrive as
+    /// an *object* form beside this one rather than by redefining it" — kept
+    /// exactly, so that no file the previous slice wrote reads differently now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mark: Option<String>,
+    pub mark: Option<MarkV1>,
     /// Which shell-integration script serves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<String>,
@@ -223,6 +241,87 @@ pub enum NamedStartingDirV1 {
     WindowsHome,
 }
 
+/// Which folder a new tab of this profile opens in — **the editor's own
+/// question**, and the three answers its combo offers.
+///
+/// # Why this is a second key and not a fourth variant of [`StartingDirV1`]
+///
+/// The two answer different questions, and only one of them is anybody's to
+/// choose. [`StartingDirV1`] says *where this profile's home is and how its
+/// launcher is told about it*: a Windows shell takes a working directory handed
+/// to `CreateProcess`, while `wsl.exe` is a launcher standing somewhere its
+/// shell is not and takes `--cd ~` instead — one directory that has no Windows
+/// spelling at all. That is a property of the program, derived from the shipped
+/// table, and a reader who picked it wrongly would get a WSL tab opening at
+/// `/mnt/c/Users/…`: a real directory, and not the one a shell opens in when you
+/// start it yourself.
+///
+/// This key says what the reader actually decides, in the mock-up's own three
+/// items: does a new tab take the folder of the pane it was opened beside, does
+/// it always open at the profile's own home whatever that pane was standing in,
+/// or does it always open at one fixed place. Folding the two into one enum
+/// would have put "which flag does the launcher take" into a list somebody picks
+/// from.
+///
+/// **Absent is [`NamedStartAtV1::Inherit`]**, which is what this terminal has
+/// always done and what every shipped profile is: an untouched built-in still
+/// writes one key, and nothing moves for anybody who never opens the editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StartAtV1 {
+    /// `"inherit"` or `"home"`.
+    Named(NamedStartAtV1),
+    /// `{ "fixed": "D:\\Developer" }` — this place, always.
+    ///
+    /// An object rather than a bare string, because a bare string here would be
+    /// ambiguous against the two words above the moment somebody named a folder
+    /// `home` — and because the untagged reader would have to guess which of the
+    /// two a string was.
+    Fixed { fixed: String },
+}
+
+/// The string forms of [`StartAtV1`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedStartAtV1 {
+    /// The folder of the pane this tab was opened beside, and the profile's own
+    /// home when there was none. Today's behaviour, and the default.
+    Inherit,
+    /// The profile's own home, whatever the pane it was opened beside was
+    /// standing in.
+    Home,
+}
+
+/// The mark that names a profile across the window.
+///
+/// Two shapes because there are two kinds of answer, and the difference is
+/// whose colour it is. A *duplicate of a built-in* wears the built-in's own
+/// mark — a copy of a PowerShell is a PowerShell, and the blue is Microsoft's,
+/// so it is named and never re-stated as pixels. A profile drawn from nothing
+/// has no logo to inherit and must not borrow one, so it wears the neutral
+/// chassis in one of the editor's eight struck colours: the same rounded panel
+/// `p-pwsh` and `p-cmd` are already the same drawing of, differing only in what
+/// it is filled with.
+///
+/// **A built-in's own row never writes this key at all.** The five identity
+/// colours are not this product's to repaint (S98/S31 — the ruling that also
+/// stopped a custom colour scheme repainting them), so the file cannot say what
+/// the dialog will not offer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MarkV1 {
+    /// `"powershell"` — one of the shipped marks, named.
+    Named(String),
+    /// `{ "chassis": "shell", "colour": "amber" }` — the neutral chassis, tinted.
+    ///
+    /// `chassis` is carried rather than assumed even though there is exactly one
+    /// of them today, because the alternative — a bare `"colour"` key — would
+    /// have to grow a second key the day a second chassis is struck, and a
+    /// reader hand-editing this file would then be looking at two spellings of
+    /// one idea.
+    Generic { chassis: String, colour: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,7 +387,13 @@ mod tests {
                         "1".to_owned(),
                     )])),
                     starting_dir: Some(StartingDirV1::Named(NamedStartingDirV1::WindowsHome)),
-                    mark: Some("powershell".to_owned()),
+                    start_at: Some(StartAtV1::Fixed {
+                        fixed: r"D:\Developer".to_owned(),
+                    }),
+                    mark: Some(MarkV1::Generic {
+                        chassis: "shell".to_owned(),
+                        colour: "amber".to_owned(),
+                    }),
                     integration: Some("powershell_opt_in".to_owned()),
                     hidden: false,
                 },
@@ -340,6 +445,78 @@ mod tests {
             serde_json::from_value::<ProgramV1>(wire).unwrap(),
             seven,
             "the shipped resolutions are named, not spelled out as a path"
+        );
+    }
+
+    /// PIN — **a bare `mark` string still names a shipped mark**, which is the
+    /// whole of the compatibility promise the object form was added under.
+    ///
+    /// Red gate: replace the untagged pair with a struct-only shape — every
+    /// `profiles.json` the previous slice wrote for a duplicated built-in would
+    /// stop parsing, and the profile would come back wearing the neutral chassis
+    /// instead of the logo it is a copy of.
+    #[test]
+    fn a_mark_written_as_a_string_still_names_a_shipped_mark() {
+        let read: ProfileEntryV1 =
+            serde_json::from_str(r#"{ "id": "x", "mark": "powershell" }"#).unwrap();
+        assert_eq!(read.mark, Some(MarkV1::Named("powershell".to_owned())));
+        assert_eq!(
+            serde_json::to_value(&read).unwrap()["mark"],
+            serde_json::Value::from("powershell"),
+            "and it writes back as the same bare string it was read from"
+        );
+    }
+
+    /// PIN — **the eight struck colours arrive as an object**, chassis and
+    /// colour, and round trip whole.
+    #[test]
+    fn a_profile_drawn_from_nothing_wears_a_chassis_and_a_colour() {
+        let read: ProfileEntryV1 = serde_json::from_str(
+            r#"{ "id": "claude-7f3a", "mark": { "chassis": "shell", "colour": "amber" } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read.mark,
+            Some(MarkV1::Generic {
+                chassis: "shell".to_owned(),
+                colour: "amber".to_owned(),
+            })
+        );
+        let wire = serde_json::to_value(&read).unwrap();
+        assert_eq!(wire["mark"]["chassis"], serde_json::Value::from("shell"));
+        assert_eq!(wire["mark"]["colour"], serde_json::Value::from("amber"));
+    }
+
+    /// PIN — **`start_at` is three answers and absence is the first of them**.
+    ///
+    /// Red gate: give the field a `#[serde(default)]` that is `Some(Inherit)` —
+    /// every untouched built-in would start writing a key stating the behaviour
+    /// it already had, and `an_untouched_builtin_is_its_id_and_nothing_else`
+    /// would go red beside it.
+    #[test]
+    fn where_a_tab_opens_is_inherit_home_or_one_fixed_place() {
+        let inherit: ProfileEntryV1 =
+            serde_json::from_str(r#"{ "id": "x", "start_at": "inherit" }"#).unwrap();
+        assert_eq!(
+            inherit.start_at,
+            Some(StartAtV1::Named(NamedStartAtV1::Inherit))
+        );
+        let home: ProfileEntryV1 =
+            serde_json::from_str(r#"{ "id": "x", "start_at": "home" }"#).unwrap();
+        assert_eq!(home.start_at, Some(StartAtV1::Named(NamedStartAtV1::Home)));
+        let fixed: ProfileEntryV1 =
+            serde_json::from_str(r#"{ "id": "x", "start_at": { "fixed": "D:\\Developer" } }"#)
+                .unwrap();
+        assert_eq!(
+            fixed.start_at,
+            Some(StartAtV1::Fixed {
+                fixed: r"D:\Developer".to_owned(),
+            })
+        );
+        let silent: ProfileEntryV1 = serde_json::from_str(r#"{ "id": "x" }"#).unwrap();
+        assert_eq!(
+            silent.start_at, None,
+            "a file that says nothing means inherit, and says nothing"
         );
     }
 
