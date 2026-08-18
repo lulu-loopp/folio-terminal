@@ -13,10 +13,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1, ReadReport,
-    SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel,
-    read_keybindings, read_session, read_settings, remove_sentinel, write_keybindings_atomic,
-    write_session_atomic, write_settings_atomic,
+    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1, ProfilesV1,
+    ReadReport, SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel,
+    probe_sentinel, read_keybindings, read_profiles, read_session, read_settings, remove_sentinel,
+    write_keybindings_atomic, write_profiles_atomic, write_session_atomic, write_settings_atomic,
 };
 
 /// docs/M2-persistence-schema-v1.md §5.1 rules "debounce roughly 1-2 seconds
@@ -281,6 +281,89 @@ impl KeybindingsStore {
         {
             // §5.3: one alert per failure streak, not one per attempt.
             eprintln!("BT_PERSIST could not write {KEYBINDINGS_FILE_NAME}: {error}");
+        }
+        true
+    }
+}
+
+/// The name the profile file wears on disk, which is also what a notice about it
+/// has to say out loud.
+pub const PROFILES_FILE_NAME: &str = "profiles.json";
+
+/// `profiles.json` — the profile table's departures from the shipped five, and
+/// when they reach the disk.
+///
+/// [`KeybindingsStore`]'s shape, deliberately: two files with the same job —
+/// hold a list a person may also edit by hand — should not have two different
+/// stores behind them. No debouncer for the same reason, sharpened: a reorder or
+/// a duplicate happens because somebody pressed a button and watched a list move,
+/// and a quiet window is a window in which exactly that can be lost.
+///
+/// **Nothing is written until something changes.** A machine that has never
+/// touched a profile has no such file, and gets none: a feature does not announce
+/// itself by putting an empty document in everybody's `%APPDATA%`
+/// (`schemes.rs`'s judgment, and the same one).
+pub struct ProfilesStore {
+    path: PathBuf,
+    loaded: ProfilesV1,
+    /// Why the file on disk was not usable, if it was not.
+    fault: Option<String>,
+    failures: WriteFailureTracker,
+}
+
+impl ProfilesStore {
+    /// Read `profiles.json`, falling back to *no departures* on every failure.
+    pub fn open() -> Self {
+        let dir = storage_dir();
+        let path = dir.join(PROFILES_FILE_NAME);
+        let _ = std::fs::create_dir_all(&dir);
+        let (file, report) = read_profiles(&path);
+        // §5.4 case 1 — no file — is the ordinary state of nearly every machine
+        // and must not alert. Everything else must, naming the file (§5.3).
+        let fault = match &report {
+            ReadReport::FellBackToDefaults { reason } => {
+                eprintln!("BT_PERSIST {PROFILES_FILE_NAME} fell back to defaults: {reason:?}");
+                Some(format!(
+                    "{PROFILES_FILE_NAME} could not be read; the profiles this build ships are in \
+                     force"
+                ))
+            }
+            ReadReport::NotFound | ReadReport::Loaded => None,
+        };
+        Self {
+            path,
+            loaded: file,
+            fault,
+            failures: WriteFailureTracker::new(),
+        }
+    }
+
+    /// The table as it was read.
+    pub fn loaded(&self) -> &ProfilesV1 {
+        &self.loaded
+    }
+
+    /// Take the read fault, so a notice about it is raised once and not once a
+    /// frame.
+    pub fn take_fault(&mut self) -> Option<String> {
+        self.fault.take()
+    }
+
+    /// Record the table as it stands now and put it on disk.
+    ///
+    /// Returns whether anything changed, so a caller can skip the write when a
+    /// press moved nothing.
+    pub fn store(&mut self, file: ProfilesV1) -> bool {
+        if self.loaded == file {
+            return false;
+        }
+        self.loaded = file;
+        let result = write_profiles_atomic(&self.path, &self.loaded);
+        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
+            && let Err(error) = &result
+        {
+            // §5.3: one alert per failure streak, not one per attempt.
+            eprintln!("BT_PERSIST could not write {PROFILES_FILE_NAME}: {error}");
         }
         true
     }

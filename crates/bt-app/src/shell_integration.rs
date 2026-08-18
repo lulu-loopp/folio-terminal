@@ -34,7 +34,7 @@ use bt_pty::ShellEnvironment;
 
 use crate::{
     persist,
-    profiles::{self, Integration, PROFILES, windows_to_wsl},
+    profiles::{self, Integration, windows_to_wsl},
     wsl::WslFacts,
 };
 
@@ -175,8 +175,7 @@ pub fn shell_command(
     environment: &dyn ShellEnvironment,
 ) -> ShellCommand {
     let own = || {
-        PROFILES[profile]
-            .args
+        profiles::args(profile)
             .iter()
             .map(OsString::from)
             .chain(place_arguments.iter().cloned())
@@ -184,7 +183,7 @@ pub fn shell_command(
     };
     let mut command = shell_command_for(profile, place_arguments, script, wsl, environment, &own);
     command.environment.extend(hyperlink_declaration(
-        PROFILES[profile].integration,
+        profiles::integration(profile),
         environment,
     ));
     command
@@ -198,8 +197,8 @@ fn shell_command_for(
     environment: &dyn ShellEnvironment,
     own: &dyn Fn() -> Vec<OsString>,
 ) -> ShellCommand {
-    match (PROFILES[profile].integration, script) {
-        (Integration::BashInitFile, Some(script)) => match PROFILES[profile].paths {
+    match (profiles::integration(profile), script) {
+        (Integration::BashInitFile, Some(script)) => match profiles::paths(profile) {
             // Git Bash: bash *is* the program, and takes the flag directly. The
             // profile's own `--login -i` is dropped — the script puts the login
             // chain back itself, which is the trade `--init-file` demands.
@@ -574,7 +573,7 @@ mod tests {
         for id in ["pwsh", "winps"] {
             let profile = index_of_id(id);
             assert_eq!(
-                PROFILES[profile].integration,
+                profiles::integration(profile),
                 Integration::PowerShellOptIn,
                 "{id}: PowerShell's script is the user's to install"
             );
@@ -587,8 +586,7 @@ mod tests {
             );
             assert_eq!(
                 command.arguments,
-                PROFILES[profile]
-                    .args
+                profiles::args(profile)
                     .iter()
                     .map(OsString::from)
                     .collect::<Vec<_>>(),

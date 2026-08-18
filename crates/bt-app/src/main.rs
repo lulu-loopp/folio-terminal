@@ -4967,6 +4967,11 @@ struct Runtime {
     cli_refusals: Vec<cli::CliRefusal>,
     /// A document named on the command line, until there is a pane to put it in.
     cli_preview: Option<PathBuf>,
+    profiles_store: persist::ProfilesStore,
+    /// The sentence a damaged or partly refused `profiles.json` owes the user,
+    /// until it has been said — [`Self::keybindings_fault`]'s twin, for its
+    /// reason.
+    profiles_fault: Option<String>,
     /// The one store that pin, Recent and undo-close all draw from — kept beside
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
@@ -5134,7 +5139,7 @@ impl TabState {
     /// has never reported a folder is not called PowerShell. It is the same
     /// mistake the mark made, one column to the right.
     fn focused_profile_title(&self) -> &'static str {
-        profiles::PROFILES[self.leaf_profile(self.focused_leaf)].title
+        profiles::title(self.leaf_profile(self.focused_leaf))
     }
 
     /// What this tab's tooltip says (M140).
@@ -5185,7 +5190,7 @@ impl TabState {
     /// it left with the program. Your name for the tab did not.
     fn term_leaf(&self, seat: SeatId) -> TermLeafV1 {
         TermLeafV1 {
-            profile_id: profiles::PROFILES[self.leaf_profile(seat)].id.to_owned(),
+            profile_id: profiles::id(self.leaf_profile(seat)),
             cwd: self
                 .sessions
                 .get(&seat)
@@ -5204,7 +5209,7 @@ impl TabState {
     /// one of them; the identity terminal is the one the tab has always been.
     /// Which profile the shell in `seat` was started from.
     ///
-    /// [`profiles::FALLBACK_PROFILE`] for a seat this tab holds no shell for,
+    /// [`profiles::fallback_profile()`] for a seat this tab holds no shell for,
     /// which is not a fallback so much as the only answer available: the callers
     /// are the chrome, asking what mark to draw over a seat, and a Files or
     /// Preview seat has no profile because it has no shell. Those callers pick
@@ -5212,7 +5217,7 @@ impl TabState {
     fn leaf_profile(&self, seat: SeatId) -> usize {
         self.sessions
             .get(&seat)
-            .map_or(profiles::FALLBACK_PROFILE, |leaf| leaf.profile)
+            .map_or(profiles::fallback_profile(), |leaf| leaf.profile)
     }
 
     /// The mark the chrome draws for one seat's shell — this tab's per-seat half
@@ -5220,7 +5225,7 @@ impl TabState {
     fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
         self.sessions
             .iter()
-            .map(|(seat, leaf)| (*seat, profiles::PROFILES[leaf.profile].mark))
+            .map(|(seat, leaf)| (*seat, profiles::mark(leaf.profile)))
             .collect()
     }
 
@@ -5244,7 +5249,7 @@ impl TabState {
         } else {
             self.seats.terminal()
         };
-        profiles::PROFILES[self.leaf_profile(leaf)].mark
+        profiles::mark(self.leaf_profile(leaf))
     }
 
     fn seed(&self) -> seed::Seed {
@@ -5698,7 +5703,7 @@ impl TabState {
             // pane split out of a PowerShell tab was measured against the word
             // "PowerShell", so its honest `Command Prompt` title read as an
             // announcement while a second PowerShell pane's did not.
-            profiles::PROFILES[self.leaf_profile(seat)].title,
+            &profiles::announcement_set(self.leaf_profile(seat)),
         )
         .map(|(name, _)| name)
     }
@@ -12976,7 +12981,7 @@ struct LeafSeed {
     /// profile to carry a visible first line, and it names two ways in — an
     /// unknown `profile_id` and a shell that is gone — with one rule for both
     /// ("绝不静默替换"). Only the second half was implemented: `index_of_id`
-    /// resolves an unrecognised id to `FALLBACK_PROFILE` *before* the spawn, so
+    /// resolves an unrecognised id to `fallback_profile()` *before* the spawn, so
     /// the shell starts cleanly, `bt-pty` has nothing to report, and the pane
     /// came up as a PowerShell with no indication it had ever been anything
     /// else. Carrying the id this far is what lets the banner name it.
@@ -13174,7 +13179,7 @@ impl SplitSeed {
                 profile: source_profile,
                 cwd: profiles::translate_cwd(
                     profiles::PathNamespace::Windows,
-                    profiles::PROFILES[source_profile].paths,
+                    profiles::paths(source_profile),
                     path,
                 ),
                 unknown_profile_id: None,
@@ -13260,12 +13265,12 @@ fn create_leaf_session(
     formulas: FormulaSwitches,
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
-    let chosen = profiles::PROFILES[seed.profile];
+    let chosen_id = profiles::id(seed.profile);
     // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
     // this process, because the module that is broken is the one `Windows
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
     // Idempotent — see `psreadline::begin_probe`.
-    if chosen.id == profiles::WINDOWS_POWERSHELL_ID {
+    if chosen_id == profiles::WINDOWS_POWERSHELL_ID {
         psreadline::begin_probe();
     }
     let mut resolved_program = None;
@@ -13289,7 +13294,7 @@ fn create_leaf_session(
             panic!(
                 "profile {:?} reached spawn with no resolved program: the picker \
                  must not offer a profile this machine cannot start",
-                chosen.id
+                chosen_id
             )
         });
         // **Where it opens.** A leaf with a directory of its own — inherited
@@ -13332,7 +13337,12 @@ fn create_leaf_session(
                 wake,
                 place.working_directory,
             )
-            .with_context(|| format!("spawn the {} profile in ConPTY", chosen.title))?,
+            .with_context(|| {
+                format!(
+                    "spawn the {} profile in ConPTY",
+                    profiles::title(seed.profile)
+                )
+            })?,
         )
     } else {
         None
@@ -13354,14 +13364,14 @@ fn create_leaf_session(
     // channel rather than this decision.
     //
     // For the default profile itself this changes nothing, because that fallback
-    // is `pwsh` → `powershell.exe` *within* the same profile: `FALLBACK_PROFILE`
+    // is `pwsh` → `powershell.exe` *within* the same profile: `fallback_profile()`
     // is what it already was.
     let profile = if let Some(fallback) = &shell_fallback {
         // And it is no longer running the program it was asked for either: the
         // one fact that field exists to answer is "what is behind this pane", so
         // it follows the swap the same way the profile does.
         resolved_program = Some(PathBuf::from(fallback.started));
-        profiles::FALLBACK_PROFILE
+        profiles::fallback_profile()
     } else {
         seed.profile
     };
@@ -13391,7 +13401,7 @@ fn create_leaf_session(
     ));
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
-    // `FALLBACK_PROFILE` before the spawn, so the shell starts cleanly and
+    // `fallback_profile()` before the spawn, so the shell starts cleanly and
     // `bt-pty` has nothing to report — the pane simply came up a PowerShell,
     // having been something else when it was saved, with nothing said. §3 and
     // §5#3 give both ways in one rule, so they get one line in one register.
@@ -14602,6 +14612,19 @@ impl Runtime {
         // repaint behind it, and it is the reason this one no longer has to be
         // the only one.
         i18n::install(resolved_language(settings_store.loaded().language));
+        // **Before anything measures a profile's name.** The table decides the
+        // `˅` menu's width, the pane submenu's, the default-profile combo's
+        // column and every tab that falls back to its profile's name; installing
+        // it after any of those had been laid out would be a window drawing
+        // yesterday's widths under today's words. Same door, same reason, one
+        // line apart.
+        let mut profiles_store = persist::ProfilesStore::open();
+        let mut profiles_fault = profiles_store.take_fault();
+        for fault in profiles::install(profiles_store.loaded()) {
+            let sentence = i18n::profile_entry_fault(&fault);
+            eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
+            profiles_fault.get_or_insert(sentence);
+        }
         // Defaults, then the file, then whatever the file could not be honoured
         // for — reported rather than repaired, because the file is the user's
         // own words and a build that silently rewrote one it could not read
@@ -14661,7 +14684,7 @@ impl Runtime {
         let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = opening_window_attributes(
-            profiles::PROFILES[default_profile].title,
+            profiles::title(default_profile),
             restored
                 .map(|placement| placement.size)
                 .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
@@ -15141,6 +15164,8 @@ impl Runtime {
             keybindings_fault,
             cli_refusals: std::mem::take(&mut cli_plan.refusals),
             cli_preview: cli_plan.preview.take(),
+            profiles_store,
+            profiles_fault,
             recent,
             pending_restore,
             // "It opens BEFORE it asks — like a browser, which lands you on
@@ -15291,7 +15316,7 @@ impl Runtime {
     /// profile, so a second profile is a launcher and not a new path through the
     /// tab machinery.
     fn new_tab_with_profile(&mut self, profile: usize) -> Result<()> {
-        debug_assert!(profile < profiles::PROFILES.len());
+        debug_assert!(profile < profiles::count());
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         let wake = self.pty_wake.wake();
         let id = TabId(self.next_tab_id);
@@ -18343,7 +18368,7 @@ impl Runtime {
                     // This leaf's own shell, off the session that is running in
                     // it — the same map every other per-seat fact in this frame
                     // comes from.
-                    profile_mark: session.map(|leaf| profiles::PROFILES[leaf.profile].mark),
+                    profile_mark: session.map(|leaf| profiles::mark(leaf.profile)),
                     // The short name, and C28's own two lengths are why. A pane
                     // head has a whole bar and answers "where is this" with the
                     // place entire; this popup is a 210px thumbnail whose names
@@ -18705,9 +18730,8 @@ impl Runtime {
         // disappears with the Tab layout combo, the shortcut lines change as the
         // user records, and the height, the hit test and the draw all come off
         // this one call, so all three follow it in the same frame.
-        let rows = settings::visible_rows(self.rail.layout);
-        let shortcuts = self.shortcuts.editor_rows();
-        let content = self.settings_dialog(&rows, &shortcuts);
+        let (rows, shortcuts, profile_lines) = self.settings_content();
+        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
         // **The probe's second trigger** (§7.1.6c-5), and it is here because this
         // is the one place that knows which page is being shown *and* is reached
         // by every road to showing it — the gear, a press on the rail, an arrow
@@ -18751,10 +18775,21 @@ impl Runtime {
     /// made it. Every caller therefore reads the *same* two lists it hands to
     /// the panel, which is what keeps the focus order and the boxes from being
     /// derived one frame apart.
-    fn settings_content(&self) -> (Vec<settings::SettingsRow>, Vec<shortcuts::ShortcutRow>) {
+    fn settings_content(
+        &self,
+    ) -> (
+        Vec<settings::SettingsRow>,
+        Vec<shortcuts::ShortcutRow>,
+        Vec<profiles::ProfileLine>,
+    ) {
         (
             settings::visible_rows(self.rail.layout),
             self.shortcuts.editor_rows(),
+            // Derived here rather than held on `Runtime`, for the two lists
+            // beside it: the page has to show what is true *this frame*, and a
+            // copy kept on the struct is a copy that has to be refreshed by
+            // whoever changed the table, in every place they changed it.
+            profiles::page_lines(&self.profile_programs, self.default_profile()),
         )
     }
 
@@ -18771,10 +18806,12 @@ impl Runtime {
         &self,
         rows: &'a [settings::SettingsRow],
         shortcuts: &'a [shortcuts::ShortcutRow],
+        profiles: &'a [profiles::ProfileLine],
     ) -> settings::SettingsContent<'a> {
         settings::SettingsContent {
             rows,
             shortcuts,
+            profiles,
             advanced: self.advanced_open(),
         }
     }
@@ -18815,9 +18852,9 @@ impl Runtime {
                 self.psreadline_row_state(),
             ) && self.psreadline_documents.is_some(),
             psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
-            profile_available: std::array::from_fn(|index| {
-                self.profile_programs.is_available(index)
-            }),
+            profile_available: (0..profiles::count())
+                .map(|index| self.profile_programs.is_available(index))
+                .collect(),
             background_image: !self.settings_store.loaded().background_image.is_empty(),
             background_fit: settings::image_fit_index(self.settings_store.loaded().background_fit),
             background_image_opacity: self.settings_store.loaded().background_image_opacity,
@@ -18970,8 +19007,10 @@ impl Runtime {
             // The ring, not the focus: `focus_ring` is `None` while the keyboard
             // arrived at this control by way of somebody's finger.
             let focus = self.settings.focus_ring();
-            let values = self.settings_values();
+            let values = &self.settings_values();
             let shortcuts = self.shortcuts.editor_rows();
+            let profile_lines =
+                profiles::page_lines(&self.profile_programs, self.default_profile());
             let background_image = self.background_image_name();
             let recording = self.settings.recording_state();
             let recording =
@@ -18987,6 +19026,7 @@ impl Runtime {
                 focus,
                 values,
                 &shortcuts,
+                &profile_lines,
                 &background_image,
                 recording,
                 &mut measure,
@@ -19184,7 +19224,7 @@ impl Runtime {
                     kind,
                     self.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::PROFILES[leaf.profile].mark),
+                        .map(|leaf| profiles::mark(leaf.profile)),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -19496,7 +19536,7 @@ impl Runtime {
                     kind,
                     self.sessions
                         .get(seat)
-                        .map(|leaf| profiles::PROFILES[leaf.profile].mark),
+                        .map(|leaf| profiles::mark(leaf.profile)),
                     palette,
                 );
                 // The dragged seat's own name, by id — the ghost and the
@@ -19715,9 +19755,9 @@ impl Runtime {
     /// between the pointer and the gear it is over — the highlight would be a
     /// button claiming to be reachable through a modal.
     fn toggle_settings_panel(&mut self) -> Result<()> {
-        let (rows, shortcuts) = self.settings_content();
+        let (rows, shortcuts, profile_lines) = self.settings_content();
         self.settings
-            .toggle(self.settings_dialog(&rows, &shortcuts));
+            .toggle(self.settings_dialog(&rows, &shortcuts, &profile_lines));
         // A dialog opens at its top. The distance belongs to the sitting the
         // wheel moved, not to the preference the dialog edits, so it does not
         // outlive the dialog being shut.
@@ -19742,6 +19782,9 @@ impl Runtime {
     /// them is a verb that half works, and the half that would have been missed
     /// here is the half the keyboard was built for.
     fn apply_settings_choice(&mut self, target: settings::SettingsTarget) -> Result<()> {
+        if let Some(action) = settings::profile_action_requested(target) {
+            self.apply_profile_action(action)?;
+        }
         if let Some(mode) = settings::theme_requested(target) {
             self.apply_theme_mode(mode)?;
         }
@@ -19796,7 +19839,7 @@ impl Runtime {
             self.set_rail_state(rail_state_for(self.rail.layout, mode))?;
         }
         if let Some(id) = settings::default_profile_requested(target) {
-            self.apply_default_profile(id)?;
+            self.apply_default_profile(&id)?;
         }
         if let Some(source) = settings::background_image_requested(target) {
             match source {
@@ -19832,8 +19875,8 @@ impl Runtime {
         // Tab layout is the one choice that changes which rows exist, and the
         // focus may be standing on the row it just deleted. So is the
         // disclosure, which is the same sentence with eight rows in it.
-        let (rows, shortcuts) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts);
+        let (rows, shortcuts, profile_lines) = self.settings_content();
+        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
         self.settings.keep_focus_reachable(content);
         Ok(())
     }
@@ -19876,9 +19919,9 @@ impl Runtime {
     /// this discards is exactly the eight rows the reader is looking at while
     /// they press it.
     fn reset_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
-        let (rows, shortcuts) = self.settings_content();
+        let (rows, shortcuts, profile_lines) = self.settings_content();
         let advanced = self
-            .settings_dialog(&rows, &shortcuts)
+            .settings_dialog(&rows, &shortcuts, &profile_lines)
             .advanced_rows(category);
         for row in advanced {
             self.reset_advanced_row(row)?;
@@ -19990,8 +20033,8 @@ impl Runtime {
             _ => return Ok(()),
         }
         self.store_keybindings();
-        let (rows, shortcuts) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts);
+        let (rows, shortcuts, profile_lines) = self.settings_content();
+        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
         self.settings.keep_focus_reachable(content);
         Ok(())
     }
@@ -20062,6 +20105,59 @@ impl Runtime {
         Ok(())
     }
 
+    /// One press on the Profiles page: move a row, or copy one.
+    ///
+    /// **Both leave through [`Self::store_profiles`]**, which is the one place
+    /// the file, the programs probe and the window's measurements are moved
+    /// together. A verb that wrote the table and forgot one of the three would be
+    /// a list that changed on screen and not on disk, or a duplicate whose
+    /// program had never been looked for and which therefore drew itself greyed.
+    fn apply_profile_action(&mut self, action: settings::ProfileAction) -> Result<()> {
+        let moved = match action {
+            settings::ProfileAction::MoveUp(index) => profiles::move_profile(index, false),
+            settings::ProfileAction::MoveDown(index) => profiles::move_profile(index, true),
+            settings::ProfileAction::Duplicate(index) => profiles::duplicate(index).is_some(),
+        };
+        if !moved {
+            return Ok(());
+        }
+        self.store_profiles()
+    }
+
+    /// Write the table to `profiles.json` and re-probe what it can start.
+    ///
+    /// **Three things move together and are moved in one place**: the file, the
+    /// programs probe (a duplicate is a new row whose executable has never been
+    /// looked for) and the window's own measurements, which follow
+    /// `profiles::profile_revision` through `LayoutKey`. Anything that changes
+    /// the table calls this and nothing else does.
+    fn store_profiles(&mut self) -> Result<()> {
+        self.profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        self.profiles_store.store(profiles::to_file());
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })
+    }
+
+    /// Say once, on the window, that `profiles.json` could not be used whole.
+    ///
+    /// [`Self::announce_keybindings_fault`]'s twin and for its reason: the
+    /// fallback is invisible by construction — the profiles simply are the ones
+    /// this build ships — so a user whose file was refused has no other way to
+    /// find out.
+    fn announce_profiles_fault(&mut self) -> Result<()> {
+        let Some(fault) = self.profiles_fault.take() else {
+            return Ok(());
+        };
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            fault,
+        )
+    }
+
     /// One press, while a shortcut row is listening.
     ///
     /// **The judging happens in `shortcuts.rs`, the state machine in
@@ -20114,8 +20210,8 @@ impl Runtime {
                     self.shortcuts.set(id, chord);
                     self.store_keybindings();
                 }
-                let (rows, shortcuts) = self.settings_content();
-                let content = self.settings_dialog(&rows, &shortcuts);
+                let (rows, shortcuts, profile_lines) = self.settings_content();
+                let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
                 self.settings.keep_focus_reachable(content);
             }
         }
@@ -20143,7 +20239,7 @@ impl Runtime {
                 || self.settings_menu_bar_drag.take().is_some())
         {
             if let Some(position) = self.pointer_position {
-                let hover = settings::hit(layout, self.settings_values(), position.x, position.y);
+                let hover = settings::hit(layout, &self.settings_values(), position.x, position.y);
                 self.settings.set_hover(Some(hover));
             }
             if self.refresh_chrome() {
@@ -20168,7 +20264,7 @@ impl Runtime {
             self.drag_settings_menu_bar(&bar, position)?;
             return Ok(());
         }
-        let target = settings::hit(layout, self.settings_values(), position.x, position.y);
+        let target = settings::hit(layout, &self.settings_values(), position.x, position.y);
         // The focus follows the finger, with the ring off — the pointer half of
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
@@ -20219,6 +20315,9 @@ impl Runtime {
             target @ (settings::SettingsTarget::Advanced(_)
             | settings::SettingsTarget::ResetAdvanced(_)
             | settings::SettingsTarget::CustomiseScheme
+            | settings::SettingsTarget::ProfileUp(_)
+            | settings::SettingsTarget::ProfileDown(_)
+            | settings::SettingsTarget::ProfileDuplicate(_)
             | settings::SettingsTarget::DeleteScheme) => {
                 self.apply_settings_choice(target)?;
             }
@@ -20227,10 +20326,14 @@ impl Runtime {
             // mock-up closes on the scrim and on the `×`, and nothing else.
             settings::SettingsTarget::Panel => {}
             settings::SettingsTarget::Menu(_) => {}
+            // A press on a profile row is a press on the row and not on a verb:
+            // the run's three buttons are the page's verbs in this slice, and
+            // the row itself becomes one the day there is an editor to open.
+            settings::SettingsTarget::ProfileRow(_) => {}
         }
         if let Some(position) = self.pointer_position {
             let hover = self.settings_layout().map(|layout| {
-                settings::hit(&layout, self.settings_values(), position.x, position.y)
+                settings::hit(&layout, &self.settings_values(), position.x, position.y)
             });
             self.settings.set_hover(hover);
             if !self.settings.is_open() {
@@ -37622,7 +37725,7 @@ impl Runtime {
                 self.drag_settings_menu_bar(&bar, position)?;
                 return Ok(());
             }
-            let hover = settings::hit(&layout, self.settings_values(), position.x, position.y);
+            let hover = settings::hit(&layout, &self.settings_values(), position.x, position.y);
             if self.settings.set_hover(Some(hover)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -41170,7 +41273,7 @@ impl Runtime {
     /// the minimum, so a list already showing the item does not twitch.
     fn show_open_settings_choice(&mut self, row: settings::SettingsRow) {
         let index = row
-            .selected_index(self.settings_values())
+            .selected_index(&self.settings_values())
             .unwrap_or_default();
         self.show_settings_choice_at(index);
     }
@@ -41214,7 +41317,7 @@ impl Runtime {
             }
             let moved = self.settings_layout();
             self.settings.set_hover(moved.map(|layout| {
-                settings::hit(&layout, self.settings_values(), position.x, position.y)
+                settings::hit(&layout, &self.settings_values(), position.x, position.y)
             }));
             if self.refresh_chrome() {
                 self.present_chrome_change()?;
@@ -41233,7 +41336,7 @@ impl Runtime {
         if let Some(position) = self.pointer_position {
             let moved = self.settings_layout();
             self.settings.set_hover(moved.map(|layout| {
-                settings::hit(&layout, self.settings_values(), position.x, position.y)
+                settings::hit(&layout, &self.settings_values(), position.x, position.y)
             }));
         }
         if self.refresh_chrome() {
@@ -41833,9 +41936,9 @@ impl Runtime {
             }
             let key = settings_key_of(&event.logical_key, self.modifiers, event.repeat);
             let before = self.settings.category();
-            let (rows, shortcuts) = self.settings_content();
-            let content = self.settings_dialog(&rows, &shortcuts);
-            let verdict = self.settings.key(key, content, self.settings_values());
+            let (rows, shortcuts, profile_lines) = self.settings_content();
+            let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
+            let verdict = self.settings.key(key, content, &self.settings_values());
             // Turning a page puts the reader at its top — the wheel's distance
             // belonged to the page they left. Read off the panel rather than
             // reported by the verdict, because the arrows turn pages as they
@@ -41881,7 +41984,7 @@ impl Runtime {
                         && let Some(moved) = self.settings_layout()
                     {
                         let hover =
-                            settings::hit(&moved, self.settings_values(), position.x, position.y);
+                            settings::hit(&moved, &self.settings_values(), position.x, position.y);
                         self.settings.set_hover(Some(hover));
                     }
                 }
@@ -42037,11 +42140,8 @@ impl Runtime {
                         _ => profiles::MenuStep::Right,
                     };
                     if let Some(menu) = self.pane_menu.as_mut()
-                        && let Some(moved) = profiles::PaneMenuHover::step(
-                            menu.hover,
-                            step,
-                            profiles::PROFILES.len(),
-                        )
+                        && let Some(moved) =
+                            profiles::PaneMenuHover::step(menu.hover, step, profiles::count())
                     {
                         menu.hover = Some(moved);
                     }
@@ -43302,6 +43402,16 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     self.fail(event_loop, error);
                     return;
                 }
+                // The profile file owes the same sentence for the same reason,
+                // and it is a separate notice rather than a shared one because
+                // they name two different files a user would fix in two
+                // different places.
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.announce_profiles_fault()
+                {
+                    self.fail(event_loop, error);
+                    return;
+                }
                 // The command line's own two debts, in the same place and for the
                 // same reason: a document to show, and whatever could not be
                 // honoured. Both need a window — the preview needs a seat solved
@@ -44543,7 +44653,7 @@ fn tab_surface_tip_boxes(
 /// on their prompt line, and a person who wants to know *what they are typing
 /// into now* learns it from exactly this.
 fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String {
-    // The record's `started` is `powershell.exe`, and `FALLBACK_PROFILE` is the
+    // The record's `started` is `powershell.exe`, and `fallback_profile()` is the
     // profile that resolves to it — one shell, and the name the user knows it
     // by is the profile's.
     debug_assert!(
@@ -44551,7 +44661,7 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
             .started
             .eq_ignore_ascii_case(bt_pty::WINDOWS_POWERSHELL)
     );
-    let (requested, started) = if requested == profiles::FALLBACK_PROFILE {
+    let (requested, started) = if requested == profiles::fallback_profile() {
         // **The one case the profiles cannot name**, and it is reachable rather
         // than theoretical: `BT_SHELL` points the PowerShell profile at a shell
         // that is not there, or a `pwsh` install is removed between sessions, and
@@ -44574,10 +44684,8 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
         )
     } else {
         (
-            profiles::PROFILES[requested].title.to_owned(),
-            profiles::PROFILES[profiles::FALLBACK_PROFILE]
-                .title
-                .to_owned(),
+            profiles::title(requested).to_owned(),
+            profiles::title(profiles::fallback_profile()).to_owned(),
         )
     };
     banner_line(&i18n::fallback_banner_text(&requested, &started))
@@ -44587,7 +44695,7 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
 /// `M2-restart-shell-contract.md` §3's *other* way into the fallback, and the
 /// half that was silent until now.
 ///
-/// `index_of_id` resolves an unrecognised id to [`profiles::FALLBACK_PROFILE`]
+/// `index_of_id` resolves an unrecognised id to [`profiles::fallback_profile()`]
 /// *before* the spawn, so the shell starts cleanly, `bt-pty` has nothing to
 /// report, and the pane came up a PowerShell having been something else when it
 /// was saved — with nothing said. §3 and §5#3 give one rule for both ways in
@@ -44602,7 +44710,7 @@ fn fallback_banner(fallback: &bt_pty::ShellFallback, requested: usize) -> String
 /// and neither is ours to bound — but every word in it is load-bearing, which is
 /// the part that *is* ours.
 fn unknown_profile_banner(unknown: &str) -> String {
-    let started = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
+    let started = profiles::title(profiles::fallback_profile());
     banner_line(&i18n::unknown_profile_banner_text(unknown, started))
 }
 
@@ -44622,6 +44730,12 @@ fn unknown_profile_banner(unknown: &str) -> String {
 /// * `lang_rev` — [`i18n::lang_revision`], advanced by the Language row
 ///   (§7.1.6c-3c). It is the number `crates/bt-app/src/i18n.rs`'s header spent a
 ///   slice explaining the absence of.
+/// * `profile_rev` — [`profiles::profile_revision`], advanced by a reorder, a
+///   duplicate or a rename (§7.1.6c-6). The previous entry's argument, applied
+///   to the other table of names this window measures.
+///
+/// **Five fields, not four**, and the sentence above is deliberately left saying
+/// four in the places it counts callers rather than fields.
 fn window_layout_key(width_cells: NonZeroU32, dpi_milli: NonZeroU32, font_rev: u64) -> LayoutKey {
     LayoutKey {
         width_cells,
@@ -44629,6 +44743,7 @@ fn window_layout_key(width_cells: NonZeroU32, dpi_milli: NonZeroU32, font_rev: u
         font_rev,
         theme_rev: theme_revision(),
         lang_rev: i18n::lang_revision(),
+        profile_rev: profiles::profile_revision(),
     }
 }
 
@@ -44830,14 +44945,22 @@ fn place_layer(working_directory: Option<&Path>, place: CwdRendering) -> Option<
 fn pane_head_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
-    profile_title: &str,
+    profile_titles: &[&str],
 ) -> Option<(String, tooltip::NameSource)> {
     let separator = tooltip::NAME_PLACE_SEPARATOR;
     let place = place_layer(working_directory, CWD_AS_WHOLE_PATH);
     // A title that merely repeats the profile's own is the shell agreeing with
     // the launcher, not a program announcing itself.
-    let announcement =
-        title_layer(program_title, TITLE_MAX_CHARS).filter(|title| title.as_str() != profile_title);
+    //
+    // **A set and no longer one string** (§7.1.6c-6). A profile now has a name
+    // the user can change and a shipped name its integration script still
+    // announces, and both have to be caught: comparing only the display title
+    // puts `PowerShell 7` back on every head the day a row is renamed, and
+    // comparing only the shipped one lets the user's own word through as if a
+    // program had said it. `profiles::announcement_set` is where the set is
+    // built and where that argument is written down.
+    let announcement = title_layer(program_title, TITLE_MAX_CHARS)
+        .filter(|title| !profile_titles.contains(&title.as_str()));
     match (announcement, place) {
         (Some(title), Some(place)) => Some((
             format!("{title}{separator}{place}"),
@@ -47083,7 +47206,7 @@ mod tests {
         let (seats, seed, leaves, _files, _preview) = revive_plan(&tab);
         assert_eq!(
             leaves.get(&seats.terminal()).map(|leaf| leaf.profile),
-            Some(profiles::FALLBACK_PROFILE),
+            Some(profiles::fallback_profile()),
             "an id this build cannot place falls to the default profile"
         );
         assert_eq!(
@@ -48127,7 +48250,7 @@ mod tests {
     fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
         let cwd = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app");
         let whole = r"D:\Developer\BetterTerminal\crates\bt-app".to_owned();
-        let profile = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
+        let profile = profiles::title(profiles::fallback_profile());
 
         // THE BUG. `scripts/shell-integration/folio.ps1` ends by
         // writing `ESC ]0;PowerShell BEL`, so every session in this window
@@ -48136,7 +48259,7 @@ mod tests {
         // times while the location — the only thing a head is for — was gone
         // from all four.
         assert_eq!(
-            pane_head_title(Some(profile), Some(cwd), profile),
+            pane_head_title(Some(profile), Some(cwd), &[profile]),
             Some((whole.clone(), tooltip::NameSource::Cwd)),
             "a shell that only agrees with its profile has announced nothing"
         );
@@ -48144,7 +48267,7 @@ mod tests {
         // place, and does not replace it: a head has a whole bar and can carry
         // both facts at once.
         assert_eq!(
-            pane_head_title(Some("vim main.rs"), Some(cwd), profile),
+            pane_head_title(Some("vim main.rs"), Some(cwd), &[profile]),
             Some((
                 format!("vim main.rs{}{whole}", tooltip::NAME_PLACE_SEPARATOR),
                 tooltip::NameSource::Program
@@ -48156,7 +48279,7 @@ mod tests {
         // profile ships, its panes start repeating a word already on the tab —
         // and this assertion is what notices.
         assert_eq!(
-            pane_head_title(Some("PowerShell"), Some(cwd), "Ubuntu"),
+            pane_head_title(Some("PowerShell"), Some(cwd), &["Ubuntu"]),
             Some((
                 format!("PowerShell{}{whole}", tooltip::NAME_PLACE_SEPARATOR),
                 tooltip::NameSource::Program
@@ -48168,7 +48291,7 @@ mod tests {
         // prefix back in.
         let smuggled = profile.replacen(' ', "\u{1b} \u{8}", 1) + "\u{7f}";
         assert_eq!(
-            pane_head_title(Some(&smuggled), Some(cwd), profile),
+            pane_head_title(Some(&smuggled), Some(cwd), &[profile]),
             Some((whole.clone(), tooltip::NameSource::Cwd)),
             "the check sees what the head would print, not what arrived"
         );
@@ -48176,19 +48299,19 @@ mod tests {
         // With no title at all it is the WHOLE folder, not its last segment —
         // C28's own `${s.cwd}`, the answer to "where is this".
         assert_eq!(
-            pane_head_title(None, Some(cwd), profile),
+            pane_head_title(None, Some(cwd), &[profile]),
             Some((whole.clone(), tooltip::NameSource::Cwd)),
             "the whole path; the leaf is what a label riding the pointer says"
         );
         // A title that sanitises away has said nothing, and falls through rather
         // than blanking the head — the impersonation the sanitiser refuses.
         assert_eq!(
-            pane_head_title(Some("\u{1b}\u{7}\u{8}"), Some(cwd), profile),
+            pane_head_title(Some("\u{1b}\u{7}\u{8}"), Some(cwd), &[profile]),
             Some((whole.clone(), tooltip::NameSource::Cwd)),
             "an empty sanitised layer is not an answer"
         );
         assert_eq!(
-            pane_head_title(Some("   "), Some(cwd), profile),
+            pane_head_title(Some("   "), Some(cwd), &[profile]),
             Some((whole.clone(), tooltip::NameSource::Cwd))
         );
 
@@ -48197,26 +48320,26 @@ mod tests {
         // leave the head emptier than the shell left it, because there is no
         // better answer underneath to reveal.
         assert_eq!(
-            pane_head_title(Some(profile), None, profile),
+            pane_head_title(Some(profile), None, &[profile]),
             Some((profile.to_owned(), tooltip::NameSource::Program)),
             "with nowhere to be, the profile's own word is still the best there is"
         );
         assert_eq!(
-            pane_head_title(Some("vim main.rs"), None, profile),
+            pane_head_title(Some("vim main.rs"), None, &[profile]),
             Some(("vim main.rs".to_owned(), tooltip::NameSource::Program))
         );
         // The path layer is sanitised on the same terms, because OSC 7 is as
         // program-controlled as OSC 2: a folder that sanitises to nothing has
         // named no place, and falls through exactly as an empty title does.
         assert_eq!(
-            pane_head_title(None, Some(Path::new("\u{1b}\u{7}")), profile),
+            pane_head_title(None, Some(Path::new("\u{1b}\u{7}")), &[profile]),
             None,
             "a path that sanitises away is not a place either"
         );
         // Neither layer: nobody has said anything, and the caption falls back to
         // the seat's kind where it is drawn rather than to a guess here.
-        assert_eq!(pane_head_title(None, None, profile), None);
-        assert_eq!(pane_head_title(Some(""), None, profile), None);
+        assert_eq!(pane_head_title(None, None, &[profile]), None);
+        assert_eq!(pane_head_title(Some(""), None, &[profile]), None);
 
         // Two panes, two answers — the whole point of resolving per leaf. They
         // differ in the last segment, and at the head's length they carry the
@@ -48226,12 +48349,12 @@ mod tests {
             pane_head_title(
                 Some(profile),
                 Some(Path::new(r"C:\repo\crates\bt-app")),
-                profile
+                &[profile]
             ),
             pane_head_title(
                 Some(profile),
                 Some(Path::new(r"C:\repo\crates\bt-term")),
-                profile
+                &[profile]
             ),
         );
 
@@ -48244,7 +48367,7 @@ mod tests {
                 Some("my tab"),
                 None,
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .0,
             "my tab",
@@ -48255,14 +48378,14 @@ mod tests {
                 None,
                 Some(profile),
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .0,
             profile,
             "and the tab still takes a title over a folder, filter or no filter"
         );
         assert_eq!(
-            pane_head_title(None, Some(cwd), profile).map(|(name, _)| name),
+            pane_head_title(None, Some(cwd), &[profile]).map(|(name, _)| name),
             Some(whole),
             "the pane under it does not"
         );
@@ -48291,7 +48414,7 @@ mod tests {
     /// anything.
     #[test]
     fn a_pane_heads_folder_is_capped_at_max_path_and_not_at_a_names_forty() {
-        let profile = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
+        let profile = profiles::title(profiles::fallback_profile());
         let ordinary = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app\src");
         let ordinary_text = ordinary.to_str().expect("a test path is UTF-8");
         assert!(
@@ -48299,7 +48422,7 @@ mod tests {
             "the fixture only proves anything if a name's cap would have bitten"
         );
         assert_eq!(
-            pane_head_title(None, Some(ordinary), profile),
+            pane_head_title(None, Some(ordinary), &[profile]),
             Some((ordinary_text.to_owned(), tooltip::NameSource::Cwd)),
             "an ordinary path is not cut at all — C28's whole path, whole"
         );
@@ -48315,7 +48438,7 @@ mod tests {
                 .join("\\")
         );
         assert!(long.chars().count() > CWD_MAX_CHARS);
-        let (named, source) = pane_head_title(None, Some(Path::new(&long)), profile)
+        let (named, source) = pane_head_title(None, Some(Path::new(&long)), &[profile])
             .expect("a long path is still a place");
         assert_eq!(
             named.chars().count(),
@@ -48335,7 +48458,7 @@ mod tests {
                 None,
                 Some(&"x".repeat(CWD_MAX_CHARS)),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .chars()
             .count(),
@@ -48394,7 +48517,7 @@ mod tests {
     fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
         let left_path = r"D:\Developer\BetterTerminal\crates\bt-app";
         let right_path = r"D:\Developer\BetterTerminal\crates\bt-term";
-        let profile = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
+        let profile = profiles::title(profiles::fallback_profile());
         // Both shells say exactly what the shipped integration makes them say:
         // the profile's own title, then where they stand. This is the pane pair
         // that used to read "PowerShell" twice.
@@ -50716,6 +50839,7 @@ mod tests {
         panel.toggle(settings::SettingsContent {
             rows: &rows,
             shortcuts: &[],
+            profiles: &[],
             advanced: settings::AdvancedOpen::default(),
         });
         assert!(panel.is_open(), "the gear's verb is 'open the dialog'");
@@ -52100,6 +52224,7 @@ mod tests {
             font_rev: 1,
             theme_rev: harness.session.layout_key().theme_rev,
             lang_rev: harness.session.layout_key().lang_rev,
+            profile_rev: harness.session.layout_key().profile_rev,
         });
         let delayed_relayout = harness.session.take_live_worker_task().unwrap();
         assert!(harness.publish_pty_frame());
@@ -53394,7 +53519,7 @@ mod tests {
             (
                 "the settings dialog's startup row",
                 settings::SettingsRow::DefaultProfile
-                    .description(settings::SettingsValues::sample()),
+                    .description(&settings::SettingsValues::sample()),
             ),
             ("the restore prompt", restore::sub_text()),
             ("this terminal's own banner", &banner),
@@ -53434,7 +53559,7 @@ mod tests {
                 Some("我的构建"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "我的构建",
             "what you typed outranks everything under it"
@@ -53444,7 +53569,7 @@ mod tests {
                 None,
                 Some("Claude ✳ 任务"),
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "Claude ✳ 任务",
             "then what the program announced"
@@ -53454,7 +53579,7 @@ mod tests {
                 None,
                 None,
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "BetterTerminal",
             "then where the shell says it is standing"
@@ -53464,9 +53589,9 @@ mod tests {
                 None,
                 None,
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
-            profiles::PROFILES[profiles::FALLBACK_PROFILE].title,
+            profiles::title(profiles::fallback_profile()),
             "and the profile catches what is left"
         );
     }
@@ -53482,7 +53607,7 @@ mod tests {
                 Some("build"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .1,
             Some(tooltip::NameSource::Manual)
@@ -53492,7 +53617,7 @@ mod tests {
                 None,
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .1,
             Some(tooltip::NameSource::Program)
@@ -53502,7 +53627,7 @@ mod tests {
                 None,
                 None,
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .1,
             Some(tooltip::NameSource::Cwd)
@@ -53514,7 +53639,7 @@ mod tests {
                 None,
                 None,
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .1,
             None
@@ -53526,7 +53651,7 @@ mod tests {
                 Some("\u{7}"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             ("pwsh".to_owned(), Some(tooltip::NameSource::Program))
         );
@@ -53541,7 +53666,7 @@ mod tests {
             None,
             None,
             Some(cwd),
-            profiles::PROFILES[profiles::FALLBACK_PROFILE].title,
+            profiles::title(profiles::fallback_profile()),
         );
         let path = cwd.to_string_lossy().into_owned();
         assert_eq!(
@@ -53567,7 +53692,7 @@ mod tests {
     #[test]
     fn the_new_tab_button_names_the_profile_it_would_start() {
         assert_eq!(
-            new_tab_tip(profiles::FALLBACK_PROFILE),
+            new_tab_tip(profiles::fallback_profile()),
             "New tab (Windows PowerShell 5.1)"
         );
         assert_eq!(
@@ -53580,8 +53705,11 @@ mod tests {
             "New tab (Command Prompt)",
             "point the setting elsewhere and the button says so"
         );
-        for (index, profile) in profiles::PROFILES.iter().enumerate() {
-            assert_eq!(new_tab_tip(index), format!("New tab ({})", profile.title));
+        for index in 0..profiles::count() {
+            assert_eq!(
+                new_tab_tip(index),
+                format!("New tab ({})", profiles::title(index))
+            );
         }
     }
 
@@ -53722,7 +53850,7 @@ mod tests {
                 None,
                 leaf.announced_title(),
                 leaf.session.working_directory(),
-                profiles::PROFILES[profiles::index_of_id("cmd")].title,
+                profiles::title(profiles::index_of_id("cmd")),
             ),
             "src",
             "the tab wears the folder's leaf"
@@ -53731,7 +53859,7 @@ mod tests {
             pane_head_title(
                 leaf.announced_title(),
                 leaf.session.working_directory(),
-                profiles::PROFILES[profiles::index_of_id("cmd")].title,
+                &[profiles::title(profiles::index_of_id("cmd"))],
             )
             .map(|(name, _)| name),
             Some(r"D:\src".to_owned()),
@@ -53746,12 +53874,12 @@ mod tests {
     /// both fall to the default profile and both must say so. Only the second
     /// was implemented. The first is the one that happens without anything
     /// breaking — a profile removed from a build, or a session file written by a
-    /// newer one — and `index_of_id` folded it into `FALLBACK_PROFILE` before
+    /// newer one — and `index_of_id` folded it into `fallback_profile()` before
     /// the spawn, so nothing downstream could tell the substitution from an
     /// ordinary PowerShell tab.
     ///
     /// Red gate: [`profiles::index_of_id`] alone cannot fail this test, because
-    /// it answers `FALLBACK_PROFILE` for a saved `"pwsh"` and a saved `"fish"`
+    /// it answers `fallback_profile()` for a saved `"pwsh"` and a saved `"fish"`
     /// alike; it takes [`profiles::has_id`] to know which happened, which is why
     /// that function exists.
     #[test]
@@ -53841,7 +53969,7 @@ mod tests {
             requested: std::ffi::OsString::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
             started: bt_pty::WINDOWS_POWERSHELL,
         };
-        let banner = fallback_banner(&inside, profiles::FALLBACK_PROFILE);
+        let banner = fallback_banner(&inside, profiles::fallback_profile());
         let mut one = DualPlaneSession::with_quotas_and_cell_height(
             nonzero_u32(80),
             nonzero_u32(6),
@@ -54039,7 +54167,7 @@ mod tests {
                     None,
                     None,
                     Some(Path::new(path)),
-                    profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                    profiles::title(profiles::fallback_profile())
                 ),
                 leaf,
                 "cwd {path}"
@@ -54060,7 +54188,7 @@ mod tests {
                 None,
                 Some("a\u{7}b\u{1b}c"),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "abc",
             "C0 goes, including the escape that starts every sequence"
@@ -54070,7 +54198,7 @@ mod tests {
                 None,
                 Some("\u{9b}0m evil"),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "0m evil",
             "and C1 goes, including the single-byte CSI"
@@ -54080,7 +54208,7 @@ mod tests {
                 None,
                 Some("  \tspaced  "),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "spaced",
             "the trim happens after the strip, as `cleanTitle` writes it"
@@ -54090,7 +54218,7 @@ mod tests {
                 None,
                 Some(&"x".repeat(80)),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             )
             .chars()
             .count(),
@@ -54104,7 +54232,7 @@ mod tests {
                 None,
                 Some("\u{1}\u{2}"),
                 Some(Path::new(r"C:\work")),
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "work"
         );
@@ -54113,16 +54241,16 @@ mod tests {
                 None,
                 Some(""),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
-            profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+            profiles::title(profiles::fallback_profile())
         );
         assert_eq!(
             display_title(
                 Some("hi\u{0}there"),
                 Some("prog"),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "hithere",
             "the name you type goes through the same sieve (mock-up line 5882)"
@@ -54132,7 +54260,7 @@ mod tests {
                 Some("   "),
                 Some("prog"),
                 None,
-                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
+                profiles::title(profiles::fallback_profile())
             ),
             "prog",
             "emptying the override reveals the layer underneath"
@@ -63736,7 +63864,7 @@ mod tests {
             // A shell-less fixture is not a shell of some other kind: these
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.
-            profile: profiles::FALLBACK_PROFILE,
+            profile: profiles::fallback_profile(),
             // And no program either, which is the honest shape of the same
             // fact: nothing was started, so nothing can have announced itself.
             program: None,
@@ -64168,7 +64296,11 @@ mod tests {
             .get_mut(&SeatId(2))
             .expect("the right-hand pane")
             .profile = gitbash;
-        assert_ne!(gitbash, profiles::FALLBACK_PROFILE, "the two panes differ");
+        assert_ne!(
+            gitbash,
+            profiles::fallback_profile(),
+            "the two panes differ"
+        );
         let torn = tear_pane_into_tab(
             &mut source,
             &cross_metrics(),
@@ -64207,12 +64339,12 @@ mod tests {
         );
         assert_eq!(
             torn.tab_mark(),
-            profiles::PROFILES[gitbash].mark,
+            profiles::mark(gitbash),
             "so the strip draws the new tab as the shell actually running in it"
         );
         assert_eq!(
             source.leaf_profile(SeatId(1)),
-            profiles::FALLBACK_PROFILE,
+            profiles::fallback_profile(),
             "and the pane that stayed is still its own shell, not the one that left"
         );
         assert_eq!(

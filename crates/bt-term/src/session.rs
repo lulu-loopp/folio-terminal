@@ -1091,6 +1091,7 @@ impl DualPlaneSession {
                 font_rev: 1,
                 theme_rev: 1,
                 lang_rev: 0,
+                profile_rev: 0,
             },
             view_generation: ViewGeneration(1),
             grid_generation: GridGeneration(1),
@@ -11873,6 +11874,7 @@ mod tests {
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,
+            profile_rev: 0,
         };
         assert_ne!(
             shared_math_artifact_key(MathMode::Display, "x", layout, DetectionRevision(1)),
@@ -12097,6 +12099,7 @@ mod tests {
         session.set_layout_key(LayoutKey {
             theme_rev: 2,
             lang_rev: 0,
+            profile_rev: 0,
             ..session.layout_key()
         });
         assert!(
@@ -12285,12 +12288,14 @@ mod tests {
         session.mark_pty_resize_requested_at(columns, rows, at);
         let theme_rev = session.layout_key().theme_rev;
         let lang_rev = session.layout_key().lang_rev;
+        let profile_rev = session.layout_key().profile_rev;
         session.set_layout_key(LayoutKey {
             width_cells: columns,
             dpi_milli,
             font_rev: 1,
             theme_rev,
             lang_rev,
+            profile_rev,
         });
     }
 
@@ -12725,6 +12730,7 @@ mod tests {
             font_rev: 1,
             theme_rev: session.layout_key().theme_rev,
             lang_rev: session.layout_key().lang_rev,
+            profile_rev: session.layout_key().profile_rev,
         });
         session
             .feed_at(
@@ -12807,6 +12813,7 @@ mod tests {
                 font_rev: 1,
                 theme_rev: session.layout_key().theme_rev,
                 lang_rev: session.layout_key().lang_rev,
+                profile_rev: session.layout_key().profile_rev,
             });
             session
                 .feed_at(
@@ -12900,6 +12907,7 @@ mod tests {
                 font_rev: 1,
                 theme_rev: session.layout_key().theme_rev,
                 lang_rev: session.layout_key().lang_rev,
+                profile_rev: session.layout_key().profile_rev,
             });
             let mut lines = Vec::new();
             for i in 0..60 {

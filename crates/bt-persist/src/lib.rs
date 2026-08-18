@@ -25,6 +25,8 @@
 //! - [`write_tracker`] — the write-failure alert cadence (§5.3): one alert
 //!   per failure streak, not per attempt.
 //! - [`sentinel`] — the crash-vs-clean-exit sentinel file primitives (§5.5).
+//! - [`profiles`] / [`ProfilesV1`] — `profiles.json`, the profile table's
+//!   departures from the shipped five plus the user's own profiles.
 //! - [`scheme`] — one Windows Terminal colour-scheme object, parsed. The one
 //!   reader here that is not versioned by this crate, because the format is
 //!   somebody else's; where scheme files live and which of them exist is
@@ -36,6 +38,7 @@ mod error;
 mod keybindings;
 mod layout;
 mod migrate;
+mod profiles;
 mod scheme;
 mod sentinel;
 mod session;
@@ -51,8 +54,12 @@ pub use layout::{
     SplitNodeV1, TermLeafV1,
 };
 pub use migrate::{
-    FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, ReadReport, SESSION_MIGRATIONS,
-    SETTINGS_MIGRATIONS,
+    FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, PROFILES_MIGRATIONS, ReadReport,
+    SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
+};
+pub use profiles::{
+    CandidateV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION, ProfileEntryV1, ProfilesV1,
+    ProgramV1, ResolutionV1, StartingDirV1,
 };
 pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme, write_scheme};
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
@@ -125,6 +132,28 @@ pub fn write_keybindings_atomic(
 ) -> Result<(), WriteError> {
     let bytes = serde_json::to_vec_pretty(keybindings).map_err(|source| WriteError::Serialize {
         what: "KeybindingsV1",
+        source,
+    })?;
+    atomic_write(path, &bytes)
+}
+
+/// Reads `profiles.json` from `path`, applying the same §5.4 fallback chain the
+/// other three files get. A missing file is [`ReadReport::NotFound`] and is the
+/// ordinary case — most machines never touch a profile — while a damaged one
+/// falls back to *no departures at all*, which leaves the caller's table at this
+/// build's shipped five. Never returns an `Err`: a profile file that cannot be
+/// read must not be a terminal that will not start.
+pub fn read_profiles(path: &Path) -> (ProfilesV1, ReadReport) {
+    migrate::read_with_fallback(path, PROFILES_SCHEMA_VERSION, PROFILES_MIGRATIONS)
+}
+
+/// Serializes `profiles` and writes it to `path` via [`atomic_write`].
+/// Pretty-printed for [`write_settings_atomic`]'s reason, and as much as
+/// [`write_keybindings_atomic`] is: this is the other file a user is invited to
+/// open and read top to bottom.
+pub fn write_profiles_atomic(path: &Path, profiles: &ProfilesV1) -> Result<(), WriteError> {
+    let bytes = serde_json::to_vec_pretty(profiles).map_err(|source| WriteError::Serialize {
+        what: "ProfilesV1",
         source,
     })?;
     atomic_write(path, &bytes)

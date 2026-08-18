@@ -14371,6 +14371,7 @@ mod tests {
             crate::settings::SettingsContent {
                 rows: &rows,
                 shortcuts: &[],
+                profiles: &[],
                 advanced: crate::settings::AdvancedOpen::default(),
             },
             crate::settings::SettingsCategory::Appearance,
@@ -14434,7 +14435,7 @@ mod tests {
             // and neither is the divider, the head or the terminal that
             // `hit_chrome` just proved is really there.
             let over =
-                crate::settings::hit(&overlay, crate::settings::SettingsValues::sample(), x, y);
+                crate::settings::hit(&overlay, &crate::settings::SettingsValues::sample(), x, y);
             assert!(
                 matches!(
                     over,
