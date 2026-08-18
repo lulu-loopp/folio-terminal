@@ -313,8 +313,8 @@ mod windows_impl {
         },
         Graphics::Dwm::{
             DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_AUTO, DWMSBT_NONE,
-            DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE,
-            DWMWCP_ROUND, DwmSetWindowAttribute,
+            DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
         },
         Graphics::Gdi::{
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
@@ -1815,6 +1815,48 @@ mod windows_impl {
             )
         }
         .map_err(|error| format!("SetWindowPos(topmost={topmost}) failed: {error}"))
+    }
+
+    /// Tell DWM which of the two canvases this window is wearing —
+    /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
+    ///
+    /// **This is the whole of "the acrylic plate follows the scheme"**
+    /// (§7.1.6c-4f amendment, measured on this machine 2026-08-18). The plate
+    /// `DWMSBT_TRANSIENTWINDOW` draws is DWM's, not ours, and the one thing DWM
+    /// lets a window say about its colour is this flag — so the plate is dark
+    /// exactly when the window has declared itself dark. Measured, light desktop
+    /// `#F2F2F2` behind, Solarized Dark at 30 %: the pane body reads
+    /// `(156,177,183)` without the flag and `(99,120,126)` with it.
+    ///
+    /// **The order does not matter and the plate is not latched.** 4f wrote down
+    /// that setting this to 1 did not darken the material; it does. Setting it
+    /// before the backdrop, after the backdrop, and either side of a
+    /// `DWMSBT_NONE` round trip all measured the identical `(99,120,126)`, so a
+    /// window may say this whenever its canvas moves and need not re-ask for the
+    /// backdrop afterwards.
+    ///
+    /// **Not tied to the Acrylic row.** The flag is a statement about the
+    /// window, not about one setting: it is also what colours the one-pixel DWM
+    /// border (`(176,176,176)` -> `(153,153,153)` in the same measurement), and
+    /// a dark window with the blur switched off still owes itself a dark border.
+    ///
+    /// Best-effort, like the corner preference above and unlike
+    /// [`set_system_backdrop`]: there is no settings row whose position claims
+    /// this happened, so a Windows too old to know the attribute (it is
+    /// 20H1's; 1809 spelled it 19) simply keeps the border it already had.
+    pub fn set_window_dark_mode(hwnd: NonZeroIsize, dark: bool) -> Result<(), String> {
+        let value = i32::from(dark);
+        // SAFETY: as `set_system_backdrop` — the pointer is to a live local of
+        // exactly the size passed, and DWM copies it before returning.
+        unsafe {
+            DwmSetWindowAttribute(
+                HWND(hwnd.get() as *mut c_void),
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                std::ptr::from_ref(&value).cast::<c_void>(),
+                size_of::<i32>() as u32,
+            )
+        }
+        .map_err(|error| format!("DwmSetWindowAttribute(immersive dark={dark}) failed: {error}"))
     }
 
     /// Ask DWM for (or withdraw) the acrylic system backdrop —
@@ -3426,9 +3468,9 @@ pub use windows_impl::{
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
     message_box, monospace_font_families, open_local_file, open_local_path, os_ui_language,
     recycle, request_window_close, reveal_in_explorer, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_outer_rect, set_window_topmost,
-    shell_execute, spawn_at_priority, system_backdrop_available, wheel_scroll_amount,
-    write_to_console,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
+    wheel_scroll_amount, write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.
