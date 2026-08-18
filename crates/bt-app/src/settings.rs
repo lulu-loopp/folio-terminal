@@ -60,6 +60,26 @@ use crate::seats::{RailMode, TabLayoutMode};
 /// surface — which is the other half of the ruling: this is still a modal you
 /// dismiss, not a place you go.
 const DIALOG_MAX_WIDTH_LOGICAL_PX: f32 = 720.0;
+/// `.settings { max-height: min(600px, calc(100% - 72px)) }` — the cap on the
+/// other axis, and the second half of "a modal you dismiss, not a place you go".
+///
+/// **Born of the height ruling's own consequence** (user report, 2026-08-17).
+/// One height whatever page is up means the tallest page sets it, and the
+/// tallest page is the forty-line shortcut table — so on any ordinary window the
+/// dialog ran from the caption to the bottom edge. A whole-window surface is the
+/// exact shape the width's cap was chosen to avoid; the height needs the same
+/// sentence said on its own axis.
+///
+/// **600 is where an everyday page stops needing a scroll bar.** The dialog
+/// spends `2 * 1` of border and 56 of header before the body, so 600 leaves 542
+/// for a page, and a page spends `10 + 18` on its own two paddings and 25 on its
+/// one heading: 489 of rows, which is nine of the dialog's 54px rows — or eight
+/// of them plus a folded `Advanced` disclosure (38.5), the shape `Appearance`
+/// actually has. Every page this build draws fits: `General` (3 rows),
+/// `Appearance` folded (7 rows and the disclosure, 469.5), `Terminal` (1),
+/// `Rendered blocks` (2). What is left to scroll is exactly what should —
+/// the shortcut table, and an `Advanced` group somebody opened.
+const DIALOG_MAX_HEIGHT_LOGICAL_PX: f32 = 600.0;
 const DIALOG_WIDTH_RATIO: f32 = 0.92;
 /// `.settings { margin: 54px auto 0 }` — the drop from the window's top, and
 /// `auto` on both sides, which is what centres it.
@@ -4230,7 +4250,14 @@ pub fn layout_for_menu(
         + px(NAV_PADDING_BOTTOM_LOGICAL_PX);
     let body_height = tallest_page.max(nav_height);
     let header = px(HEADER_HEIGHT_LOGICAL_PX);
-    let height = (2.0 * border + header + body_height).min(available).round();
+    // Three bounds, and the smallest wins: what the window can host, what a
+    // dialog is allowed to be, and what the tallest page actually needs. The cap
+    // is why the shortcut table's forty lines do not turn this into a
+    // whole-window surface — see [`DIALOG_MAX_HEIGHT_LOGICAL_PX`].
+    let height = (2.0 * border + header + body_height)
+        .min(px(DIALOG_MAX_HEIGHT_LOGICAL_PX))
+        .min(available)
+        .round();
     // Below the header plus its own two borders there is no dialog left to draw,
     // only a lid — and a lid with no body is not the design's dialog. Narrower
     // than the rail plus the gutters plus a picker is the same sentence sideways.
@@ -6314,17 +6341,22 @@ pub(crate) fn push_float_window(
 mod tests {
     use super::*;
 
-    /// A window big enough that nothing is clamped: the shape every geometry
-    /// claim below is stated against.
-    /// The window every geometry claim below is stated against.
+    /// The window every geometry claim below is stated against — an ordinary
+    /// desk's window, roomier than the dialog is allowed to be.
     ///
     /// **1100 and not 800 since §7.1.6c-4b.** The Appearance page took six more
     /// rows that day and 103 + 15×54 = 913 no longer fits under 800's
     /// `max-height: calc(100% - 72px)` — so every "the page decides the height"
-    /// pin would have been measuring the *clamp* instead. The clamp has pins of
-    /// its own (`a_row_at_the_content_edge_is_cut_and_never_compressed`,
+    /// pin would have been measuring the *window* clamp instead. That clamp has
+    /// pins of its own (`a_row_at_the_content_edge_is_cut_and_never_compressed`,
     /// `a_stack_taller_than_the_dialog_scrolls`), and they say what window they
     /// want rather than relying on this one being too small.
+    ///
+    /// **What decides the height on this window is now the 600 cap**, not the
+    /// window and not the page (user report 2026-08-17) — which is the point of
+    /// keeping it roomy: a fixture window that could only just host the dialog
+    /// would prove nothing about a dialog that refuses to fill the window it is
+    /// given.
     const SURFACE: (f32, f32) = (1280.0, 1100.0);
 
     /// `.row`'s own height at scale 1: `2 * 11` of padding around the taller of
@@ -6371,14 +6403,20 @@ mod tests {
     }
 
     /// **The height the dialog actually opens at**: its tallest page's, whatever
-    /// page is showing (user ruling 2026-08-17). For this fixture that is
-    /// `Appearance`, whose rows are every row on it plus the group they end in.
+    /// page is showing (user ruling 2026-08-17), and never more than
+    /// [`DIALOG_MAX_HEIGHT_LOGICAL_PX`] (user report, 2026-08-17).
+    ///
+    /// The cap is the ruling's own consequence caught: one height means the
+    /// tallest page sets it, the tallest page is the shortcut table, and a
+    /// dialog sized for forty lines is a whole-window surface. On this fixture's
+    /// window the cap is what answers — `Appearance` with its group open is 947
+    /// — so every claim below that reads this number is reading 600.
     fn fixed_dialog_height(tab_layout: TabLayoutMode) -> f32 {
         let on_page = visible_rows(tab_layout)
             .into_iter()
             .filter(|row| row.category() == SettingsCategory::Appearance)
             .count();
-        dialog_around(page_height_disclosed(on_page))
+        dialog_around(page_height_disclosed(on_page)).min(DIALOG_MAX_HEIGHT_LOGICAL_PX)
     }
 
     /// The rows a dialog holds with the tabs across the top — the state the app
@@ -6458,6 +6496,16 @@ mod tests {
     }
 
     fn open(scale: f32, menu_open: bool) -> SettingsLayout {
+        open_scrolled(scale, menu_open, UNSCROLLED)
+    }
+
+    /// The same dialog, scrolled this far down its page.
+    ///
+    /// **Needed since the dialog took its 600px cap**: `PAGE`'s fifteen rows and
+    /// their open group are 947 tall and the frame holds 542 of it, so a claim
+    /// about a row in the lower half is a claim about a row a reader would have
+    /// to scroll to. [`scroll_showing`] is what turns a band into this number.
+    fn open_scrolled(scale: f32, menu_open: bool, scroll: f32) -> SettingsLayout {
         let rows = flat_rows();
         layout_for_menu(
             (SURFACE.0 * scale).round(),
@@ -6466,11 +6514,30 @@ mod tests {
             menu_open.then_some(SettingsRow::Theme),
             content(&rows, &[]),
             PAGE,
-            UNSCROLLED,
+            scroll,
             MENU_UNSCROLLED,
             &mut flat(0.0),
         )
         .expect("this window can host the dialog")
+    }
+
+    /// **The least scroll that brings `band` wholly inside the scrollport.**
+    ///
+    /// Zero for a band already in view, which is the whole of why it is a `max`
+    /// and not a subtraction: every fixture that fitted before the height cap
+    /// arrived reads exactly as it did, and only the pages that now overflow ask
+    /// for anything. Clamped at what the page can actually honour, the same
+    /// clamp `layout_for_menu` applies to the runtime's own unbounded field.
+    fn scroll_showing(reference: &SettingsLayout, band: [f32; 4]) -> f32 {
+        (band[3] - reference.clip[3])
+            .max(0.0)
+            .min(reference.max_scroll())
+    }
+
+    /// The same, named by the row whose band it is.
+    fn scroll_to_row(reference: &SettingsLayout, row: SettingsRow) -> f32 {
+        let band = reference.row(row).expect("the page holds this row").band;
+        scroll_showing(reference, band)
     }
 
     fn open_cursor(scale: f32) -> SettingsLayout {
@@ -6490,19 +6557,29 @@ mod tests {
     /// The same dialog, told how wide the open picker's longest label measures.
     /// Zero is the honest reading for every caller above: their options are one
     /// short word each and the popup's floor — the button's own width — wins.
+    ///
+    /// **The row whose picker is asked for is scrolled into view first**, which
+    /// is what a reader would have had to do since the dialog took its 600px
+    /// cap: a popup hangs from its button and lets go the moment the button
+    /// leaves the scrollport (`a_picker_whose_row_scrolls_away_is_not_open`), and
+    /// the lower half of the Appearance page is below the fold at rest. For a
+    /// row already in view — which is every caller that predates the cap — this
+    /// is no scroll at all.
     fn open_rows_measured(
         scale: f32,
         menu: Option<SettingsRow>,
         tab_layout: TabLayoutMode,
         widest_option: f32,
     ) -> SettingsLayout {
-        open_page(
-            scale,
-            menu,
-            tab_layout,
-            menu.map_or(PAGE, SettingsRow::category),
-            widest_option,
-        )
+        let category = menu.map_or(PAGE, SettingsRow::category);
+        let scroll = match menu {
+            Some(row) => {
+                let at_rest = open_page(scale, None, tab_layout, category, widest_option);
+                scroll_to_row(&at_rest, row)
+            }
+            None => UNSCROLLED,
+        };
+        open_page_scrolled(scale, menu, tab_layout, category, widest_option, scroll)
     }
 
     /// One named page of the dialog.
@@ -6513,6 +6590,18 @@ mod tests {
         category: SettingsCategory,
         widest_option: f32,
     ) -> SettingsLayout {
+        open_page_scrolled(scale, menu, tab_layout, category, widest_option, UNSCROLLED)
+    }
+
+    /// The same page, scrolled this far down.
+    fn open_page_scrolled(
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+        category: SettingsCategory,
+        widest_option: f32,
+        scroll: f32,
+    ) -> SettingsLayout {
         let rows = visible_rows(tab_layout);
         let shortcuts = shortcut_lines();
         layout_for_menu(
@@ -6522,7 +6611,7 @@ mod tests {
             menu,
             content(&rows, &shortcuts),
             category,
-            UNSCROLLED,
+            scroll,
             MENU_UNSCROLLED,
             &mut flat(widest_option),
         )
@@ -6571,6 +6660,16 @@ mod tests {
         advanced: AdvancedOpen,
         menu: Option<SettingsRow>,
     ) -> SettingsLayout {
+        shaped_scrolled(category, advanced, menu, UNSCROLLED)
+    }
+
+    /// The same, scrolled this far down the page.
+    fn shaped_scrolled(
+        category: SettingsCategory,
+        advanced: AdvancedOpen,
+        menu: Option<SettingsRow>,
+        scroll: f32,
+    ) -> SettingsLayout {
         let rows = flat_rows();
         let lines = shortcut_lines();
         layout_for_menu(
@@ -6580,7 +6679,7 @@ mod tests {
             menu,
             content_with(&rows, &lines, advanced),
             category,
-            UNSCROLLED,
+            scroll,
             MENU_UNSCROLLED,
             &mut measure,
         )
@@ -6839,8 +6938,17 @@ mod tests {
             page_widest,
             "and the column is the same width with the advanced group folded"
         );
-        // The value the button draws is now the whole word, not a prefix of it.
-        let labels = labels_of(&placed, None, values());
+        // The value the button draws is now the whole word, not a prefix of it —
+        // read on a dialog scrolled to the row, because `Split direction` is the
+        // last thing on this page and the page is taller than the capped frame.
+        let at_row = shaped_scrolled(
+            SettingsCategory::Appearance,
+            every_group_open(),
+            None,
+            scroll_to_row(&placed, SettingsRow::SplitDirection),
+        );
+        let split = combo_of(&at_row, SettingsRow::SplitDirection);
+        let labels = labels_of(&at_row, None, values());
         let drawn = labels
             .iter()
             .find(|label| label.rect == combo_value_box(split))
@@ -6899,10 +7007,20 @@ mod tests {
     /// goes red on the first row whose sentence is longer than its column.
     #[test]
     fn a_rows_sentence_is_cut_to_its_own_column_and_never_runs_under_the_control() {
-        let placed = shaped(SettingsCategory::Appearance, every_group_open(), None);
-        let labels = labels_of(&placed, None, values());
+        let at_rest = shaped(SettingsCategory::Appearance, every_group_open(), None);
         let mut cut = 0;
-        for row in &placed.rows {
+        for entry in &at_rest.rows {
+            // One dialog per row, each scrolled to show the row it is about: an
+            // open group takes this page past the dialog's 600px cap, and a
+            // sentence below the fold is not a sentence that was drawn wrongly.
+            let placed = shaped_scrolled(
+                SettingsCategory::Appearance,
+                every_group_open(),
+                None,
+                scroll_to_row(&at_rest, entry.row),
+            );
+            let labels = labels_of(&placed, None, values());
+            let row = &row_of(&placed, entry.row);
             assert_eq!(
                 row.desc[2],
                 row.combo[0] - ROW_GAP_LOGICAL_PX,
@@ -7224,14 +7342,26 @@ mod tests {
             "with the button row's own gap between them"
         );
 
-        let (x, y) = centre(customise);
+        // Asked at the foot of the page, where the verb is: an open group takes
+        // the page past the dialog's 600px cap, so the line both verbs stand on
+        // is below the fold until a reader scrolls to it.
+        let at_foot = shaped_scrolled(
+            SettingsCategory::Appearance,
+            every_group_open(),
+            None,
+            open.max_scroll(),
+        );
+        let foot = at_foot
+            .customise_scheme()
+            .expect("the verb is still there at the foot of the page");
+        let (x, y) = centre(foot);
         assert_eq!(
-            hit(&open, values(), x, y),
+            hit(&at_foot, values(), x, y),
             SettingsTarget::CustomiseScheme,
             "and it answers a press where it is drawn"
         );
         assert!(
-            labels_of(&open, None, values())
+            labels_of(&at_foot, None, values())
                 .iter()
                 .any(|label| label.text == Text::CustomiseScheme.text()),
             "with its own word on it"
@@ -7450,9 +7580,23 @@ mod tests {
             RESET_ADVANCED_WIDTH_LOGICAL_PX,
             "and it is the shortcut page's `.btn` at its own width"
         );
-        let (x, y) = centre(reset);
+        // The two hit tests are asked where the two boxes are on screen: opening
+        // the group takes the page past the dialog's 600px cap, so the verb that
+        // closes it is below the fold until a reader scrolls down to it — while
+        // the heading is still up at the top, and stays there.
+        let at_foot = shaped_scrolled(
+            SettingsCategory::Appearance,
+            every_group_open(),
+            None,
+            open.max_scroll(),
+        );
+        let (x, y) = centre(
+            at_foot
+                .reset_advanced()
+                .expect("the verb is still there at the foot of the page"),
+        );
         assert_eq!(
-            hit(&open, values(), x, y),
+            hit(&at_foot, values(), x, y),
             SettingsTarget::ResetAdvanced(SettingsCategory::Appearance),
             "which answers for the page it closes"
         );
@@ -7613,7 +7757,8 @@ mod tests {
             height(placed.frame),
             fixed_dialog_height(TabLayoutMode::Horizontal),
             "the tallest page decides the height, its one heading and its \
-             Advanced group included"
+             Advanced group included — under the 600 cap, which on this window \
+             is the bound that answers"
         );
 
         // The 92% share takes over below 720/0.92 ~= 782.6 logical pixels.
@@ -7826,9 +7971,16 @@ mod tests {
         // Every row's button, on a dialog with nothing open over them — with a
         // picker up the row it hangs over belongs to the picker, which is
         // `a_press_inside_an_open_picker_never_reaches_the_row_beneath_it`.
-        let shut = open(1.0, false);
-        for placed_row in &shut.rows {
-            let (x, y) = centre(placed_row.combo);
+        //
+        // Each row is asked on a dialog scrolled to show it: this page is taller
+        // than the capped frame, and a row below the fold is not a control that
+        // answers wrongly — it is a control that is not on screen, which is
+        // `a_row_scrolled_out_of_the_content_box_takes_no_press`.
+        let at_rest = open(1.0, false);
+        for placed_row in &at_rest.rows {
+            let shut = open_scrolled(1.0, false, scroll_to_row(&at_rest, placed_row.row));
+            let combo = row_of(&shut, placed_row.row).combo;
+            let (x, y) = centre(combo);
             assert_eq!(
                 hit(&shut, values(), x, y),
                 placed_row.row.control_target(),
@@ -8033,12 +8185,19 @@ mod tests {
 
     /// The dialog holding `rows`, scrolled this far, in a normal window.
     fn scrolled(rows: &[SettingsRow], scroll: f32) -> SettingsLayout {
+        scrolled_with(rows, every_group_open(), scroll)
+    }
+
+    /// The same, with the Advanced groups in a named state — what a claim about
+    /// an *everyday* page has to say now that the dialog is capped at 600 and an
+    /// open group is one of the two things that overflows it.
+    fn scrolled_with(rows: &[SettingsRow], advanced: AdvancedOpen, scroll: f32) -> SettingsLayout {
         layout_for_menu(
             SURFACE.0,
             SURFACE.1,
             1.0,
             None,
-            content(rows, &[]),
+            content_with(rows, &[], advanced),
             PAGE,
             scroll,
             MENU_UNSCROLLED,
@@ -8161,17 +8320,21 @@ mod tests {
     /// The dialog as it stands today, so the wheel is a no-op until the row list
     /// actually outgrows the window — and the clamp is what makes the runtime's
     /// unclamped field safe to keep across a resize.
+    ///
+    /// **Stated with the Advanced group folded** since the dialog took its 600px
+    /// cap: the page that fits is the everyday one, and an open group is one of
+    /// the two things the cap deliberately leaves to scroll.
     #[test]
     fn a_stack_that_fits_reports_nowhere_to_scroll() {
         let rows = visible_rows(TabLayoutMode::Vertical);
-        let placed = scrolled(&rows, 0.0);
+        let placed = scrolled_with(&rows, AdvancedOpen::default(), 0.0);
         assert_eq!(
             placed.max_scroll(),
             0.0,
-            "seven rows fit a {}px window with room to spare",
-            SURFACE.1
+            "the everyday Appearance page fits a {}px dialog with room to spare",
+            DIALOG_MAX_HEIGHT_LOGICAL_PX
         );
-        let shoved = scrolled(&rows, 4_000.0);
+        let shoved = scrolled_with(&rows, AdvancedOpen::default(), 4_000.0);
         assert_eq!(
             shoved.rows[0].combo, placed.rows[0].combo,
             "an offset a list this short cannot honour is clamped away, not applied"
@@ -8450,8 +8613,23 @@ mod tests {
         let mut ellipsised = Vec::new();
         let mut placed_rows = Vec::new();
         for category in SettingsCategory::ALL {
-            let page = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
-            placed_rows.extend(page.rows.iter().map(|row| (page.clone(), *row)));
+            let at_rest = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
+            for entry in &at_rest.rows {
+                // One dialog per row, scrolled to show it: since the height took
+                // its 600px cap a page can be taller than the frame, and a value
+                // below the fold is not drawn at all — which is a different
+                // claim from the one this pin makes.
+                let page = open_page_scrolled(
+                    1.0,
+                    None,
+                    TabLayoutMode::Vertical,
+                    category,
+                    0.0,
+                    scroll_to_row(&at_rest, entry.row),
+                );
+                let row = row_of(&page, entry.row);
+                placed_rows.push((page, row));
+            }
         }
         for (placed, row) in &placed_rows {
             let labels = labels_of(placed, None, values());
@@ -9246,7 +9424,19 @@ mod tests {
         for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             for scale in [1.0_f32, 1.25, 2.0] {
                 for row in visible_rows(tab_layout) {
-                    let placed = open_page(scale, None, tab_layout, row.category(), 0.0);
+                    // On a dialog scrolled to show it: since the 600px cap a
+                    // page can be taller than the frame, and the claim is that a
+                    // row answers where it is *drawn* — not that every row of
+                    // every page is drawn at once.
+                    let at_rest = open_page(scale, None, tab_layout, row.category(), 0.0);
+                    let placed = open_page_scrolled(
+                        scale,
+                        None,
+                        tab_layout,
+                        row.category(),
+                        0.0,
+                        scroll_to_row(&at_rest, row),
+                    );
                     let combo = placed.row(row).expect("a visible row is placed").combo;
                     let centre = (
                         f64::from((combo[0] + combo[2]) / 2.0),
@@ -9263,18 +9453,24 @@ mod tests {
         }
     }
 
-    /// The dialog is as tall as everything the page it is showing is holding —
-    /// its heading included.
+    /// The dialog is as tall as everything an everyday page is holding — its
+    /// heading included.
     ///
     /// A height that forgot the heading would push the last row past the bottom
     /// of the content box and clip it away, which is the bug that shipped once.
+    ///
+    /// **Everyday**, since the height took its 600px cap: the two things the cap
+    /// deliberately leaves below the fold are the shortcut table and an
+    /// `Advanced` group somebody opened, and both are named in
+    /// [`the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll`]
+    /// rather than assumed away here.
     #[test]
     fn the_dialog_makes_room_for_every_heading_it_draws() {
         for category in SettingsCategory::ALL {
             if category == SettingsCategory::Shortcuts {
                 continue;
             }
-            let placed = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
+            let placed = shaped(category, AdvancedOpen::default(), None);
             let content = placed.content;
             let Some(last) = placed.rows.last() else {
                 continue;
@@ -9285,6 +9481,85 @@ mod tests {
                  fit inside the content box"
             );
         }
+    }
+
+    /// PIN (user report 2026-08-17) — **the dialog is 600 tall on a window that
+    /// could host far more, and every everyday page fits inside it unscrolled.**
+    ///
+    /// The report: one height whatever page is up means the *tallest* page sets
+    /// it, the tallest page is the forty-line shortcut table, and the dialog
+    /// arrived running from the caption to the bottom edge on an ordinary window
+    /// — a whole-window surface, which is the one shape the width's own cap was
+    /// chosen to avoid.
+    ///
+    /// So the height takes a cap of its own, and the number is chosen against
+    /// what a page holds rather than against a screen: 600 leaves 542 for the
+    /// body, a page spends 28 on its two paddings and 25 on its one heading, and
+    /// the 489 left is nine of the dialog's 54px rows — or eight of them plus a
+    /// folded `Advanced` (38.5), which is the shape `Appearance` actually has.
+    /// Every everyday page is named here rather than swept, so the day a page
+    /// grows a tenth row this pin says so instead of the page quietly growing a
+    /// scroll bar.
+    ///
+    /// Red gate: drop the `.min(px(DIALOG_MAX_HEIGHT_LOGICAL_PX))` and the first
+    /// assertion goes red at 947; take the constant down to 500 and the second
+    /// does, on `Appearance`.
+    #[test]
+    fn the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll() {
+        for category in [
+            SettingsCategory::General,
+            SettingsCategory::Appearance,
+            SettingsCategory::Terminal,
+            SettingsCategory::RenderedBlocks,
+        ] {
+            let placed = shaped(category, AdvancedOpen::default(), None);
+            assert_eq!(
+                height(placed.frame),
+                DIALOG_MAX_HEIGHT_LOGICAL_PX,
+                "{category:?}: a {}px window still gets a dialog and not a surface",
+                SURFACE.1
+            );
+            assert_eq!(
+                placed.max_scroll(),
+                0.0,
+                "{category:?}: an everyday page has nothing below the fold"
+            );
+            for row in &placed.rows {
+                assert!(
+                    placed.shows(row.band),
+                    "{category:?}: {:?} is not wholly inside the content box \
+                     unscrolled: {:?} in {:?}",
+                    row.row,
+                    row.band,
+                    placed.clip
+                );
+            }
+            if let Some(group) = placed.advanced() {
+                assert!(!group.open, "{category:?}: this fixture folds the group");
+                assert!(
+                    placed.shows(group.band),
+                    "{category:?}: and its folded Advanced heading is inside it too"
+                );
+            }
+        }
+        // And the two things that scroll, which is exactly what the cap was
+        // chosen to leave outside: the shortcut table, and a group opened.
+        assert!(
+            shaped(SettingsCategory::Shortcuts, AdvancedOpen::default(), None).max_scroll() > 0.0,
+            "the shortcut table is longer than any dialog this build opens"
+        );
+        assert!(
+            shaped(SettingsCategory::Appearance, every_group_open(), None).max_scroll() > 0.0,
+            "and so is an Advanced group somebody opened"
+        );
+        // And the mock-up carries the same rule, because it is the only visual
+        // authority this dialog has: a cap written here and not there would be a
+        // number with nothing behind it.
+        assert!(
+            MOCKUP.contains("max-height: min(600px, calc(100% - 72px));"),
+            "`design/ui-mockup.html` says `.settings {{ max-height: \
+             min(600px, calc(100% - 72px)) }}`"
+        );
     }
 
     /// Every category the dialog can show holds at least one row, and a
@@ -10166,8 +10441,12 @@ mod tests {
     /// one column without confusing the hit test.
     #[test]
     fn a_slider_row_answers_the_pointer_as_a_slider_and_a_picker_row_as_a_picker() {
-        let placed = open(1.0, false);
+        // Each control asked on a dialog scrolled to show its own row: all six
+        // live inside the Advanced group, which takes this page past the
+        // dialog's 600px cap.
+        let at_rest = open(1.0, false);
         for row in [SettingsRow::ImageOpacity, SettingsRow::BackgroundOpacity] {
+            let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
             assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Slider(row));
             assert!(row.control().range().is_some());
@@ -10179,6 +10458,7 @@ mod tests {
             SettingsRow::Acrylic,
             SettingsRow::AlwaysOnTop,
         ] {
+            let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
             assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Combo(row));
             assert!(row.control().range().is_none());
@@ -10307,13 +10587,17 @@ mod tests {
     #[test]
     fn a_row_this_machine_cannot_honour_is_greyed_whole_and_says_why() {
         let palette = chrome_palette();
-        let placed = open(1.0, false);
+        // Both rows are inside the Advanced group, which takes this page past
+        // the dialog's 600px cap, so each is read on a dialog scrolled to it.
+        let at_rest = open(1.0, false);
+        let showing = |row: SettingsRow| open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
 
         let mut lacking = values();
         lacking.acrylic_available = false;
         lacking.translucency_available = false;
 
         for row in [SettingsRow::Acrylic, SettingsRow::BackgroundOpacity] {
+            let placed = showing(row);
             assert!(
                 row.available(values()),
                 "{row:?} is live on a capable machine"
@@ -10342,9 +10626,10 @@ mod tests {
 
         // Every one of the row's three parts steps back to the hint ink, and
         // nothing on a live row does.
-        let greyed = labels_of(&placed, None, lacking);
-        let live = labels_of(&placed, None, values());
         for row in [SettingsRow::Acrylic, SettingsRow::BackgroundOpacity] {
+            let placed = showing(row);
+            let greyed = labels_of(&placed, None, lacking);
+            let live = labels_of(&placed, None, values());
             let title = row_of(&placed, row).title;
             let drawn = greyed
                 .iter()
@@ -10798,8 +11083,14 @@ mod tests {
     /// carries the same word.
     #[test]
     fn the_new_rows_wear_the_mock_ups_own_words() {
-        let placed = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
-        let labels = labels_of(&placed, None, values());
+        // Two frames of the one page, because since the dialog's 600px cap a
+        // page taller than the frame does not draw all its words at once: the
+        // everyday rows at rest, and the Advanced group's Sidebar row with its
+        // picker open under it.
+        let at_rest = open_rows(1.0, None, TabLayoutMode::Vertical);
+        let at_sidebar = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
+        let mut labels = labels_of(&at_rest, None, values());
+        labels.extend(labels_of(&at_sidebar, None, values()));
         for text in [
             "Tab layout",
             "Choose where tabs appear in the window",
@@ -12072,28 +12363,42 @@ mod tests {
     /// to undo, and neither on a row the audit declined — the same three answers
     /// the focus order reads, because a control the pointer can press and the
     /// keyboard cannot reach is half a control.
+    ///
+    /// **Walked one line at a time since the dialog took its 600px cap**: this
+    /// table is forty lines and no dialog this build opens is tall enough for it
+    /// — which is the cap's whole point, and why it is the page the scrolling
+    /// pins are stated on. So each line is asked on a dialog scrolled to show
+    /// it, exactly as a reader would reach it.
     #[test]
     fn every_shortcut_line_answers_the_pointer_where_its_own_controls_are_drawn() {
         let mut table = crate::shortcuts::Shortcuts::defaults();
         table.set("new-tab", crate::shortcuts::parse_chord("Ctrl+Shift+Y"));
         let lines = table.editor_rows();
         let rows = visible_rows(TabLayoutMode::Horizontal);
-        let placed = layout_for_menu(
-            SURFACE.0,
-            2_400.0,
-            1.0,
-            None,
-            content(&rows, &lines),
-            SettingsCategory::Shortcuts,
-            UNSCROLLED,
-            MENU_UNSCROLLED,
-            &mut flat(0.0),
-        )
-        .expect("a tall window hosts the whole table");
-        assert_eq!(placed.max_scroll(), 0.0, "and hosts it without scrolling");
-        assert_eq!(placed.shortcuts.len(), lines.len());
+        let page = |scroll: f32| {
+            layout_for_menu(
+                SURFACE.0,
+                SURFACE.1,
+                1.0,
+                None,
+                content(&rows, &lines),
+                SettingsCategory::Shortcuts,
+                scroll,
+                MENU_UNSCROLLED,
+                &mut flat(0.0),
+            )
+            .expect("this window hosts the dialog")
+        };
+        let at_rest = page(UNSCROLLED);
+        assert!(
+            at_rest.max_scroll() > 0.0,
+            "the table is longer than the dialog its own height cap allows"
+        );
+        assert_eq!(at_rest.shortcuts.len(), lines.len());
 
-        for (line, drawn) in lines.iter().zip(&placed.shortcuts) {
+        for (index, line) in lines.iter().enumerate() {
+            let placed = page(scroll_showing(&at_rest, at_rest.shortcuts[index].band));
+            let drawn = &placed.shortcuts[index];
             assert_eq!(drawn.record.is_some(), line.recordable, "{}", line.title);
             assert_eq!(drawn.restore.is_some(), line.overridden, "{}", line.title);
             if let Some(record) = drawn.record {
@@ -12121,12 +12426,14 @@ mod tests {
                 line.title
             );
         }
-        let (x, y) = centre(placed.restore_all.expect("the page's own verb"));
-        assert_eq!(hit(&placed, values(), x, y), SettingsTarget::RestoreAll);
+        // The page's own verb closes the table, so it is reached at the foot.
+        let at_foot = page(at_rest.max_scroll());
+        let (x, y) = centre(at_foot.restore_all.expect("the page's own verb"));
+        assert_eq!(hit(&at_foot, values(), x, y), SettingsTarget::RestoreAll);
 
         // Exactly one line has a `↺`, which is the one row that departs.
         assert_eq!(
-            placed
+            at_rest
                 .shortcuts
                 .iter()
                 .filter(|line| line.restore.is_some())
@@ -12141,38 +12448,40 @@ mod tests {
     /// The caps stay inside the room the layout reserved for them, which is what
     /// keeps the longest chord this table can produce from running into its own
     /// row's name.
+    ///
+    /// **One line at a time since the dialog took its 600px cap**: the table is
+    /// longer than any dialog this build opens, so the words on a line near the
+    /// foot are read on a dialog scrolled to that line.
     #[test]
     fn a_chord_is_drawn_as_caps_that_stay_in_the_room_reserved_for_them() {
         let lines = shortcut_lines();
         let rows = visible_rows(TabLayoutMode::Horizontal);
-        let placed = layout_for_menu(
-            SURFACE.0,
-            2_400.0,
-            1.0,
-            None,
-            content(&rows, &lines),
-            SettingsCategory::Shortcuts,
-            UNSCROLLED,
-            MENU_UNSCROLLED,
-            &mut flat(0.0),
-        )
-        .expect("a tall window hosts the whole table");
-        let drawn = build(
-            &placed,
-            None,
-            None,
-            values(),
-            &lines,
-            "",
-            None,
-            &mut measure,
-        );
-        let labels: Vec<ChromeLabel> = drawn
-            .iter()
-            .flat_map(|layer| layer.labels.clone())
-            .collect();
+        let page = |scroll: f32| {
+            layout_for_menu(
+                SURFACE.0,
+                SURFACE.1,
+                1.0,
+                None,
+                content(&rows, &lines),
+                SettingsCategory::Shortcuts,
+                scroll,
+                MENU_UNSCROLLED,
+                &mut flat(0.0),
+            )
+            .expect("this window hosts the dialog")
+        };
+        let words = |placed: &SettingsLayout| -> Vec<ChromeLabel> {
+            build(placed, None, None, values(), &lines, "", None, &mut measure)
+                .iter()
+                .flat_map(|layer| layer.labels.clone())
+                .collect()
+        };
+        let at_rest = page(UNSCROLLED);
 
-        for (line, box_) in lines.iter().zip(&placed.shortcuts) {
+        for (index, line) in lines.iter().enumerate() {
+            let placed = page(scroll_showing(&at_rest, at_rest.shortcuts[index].band));
+            let box_ = &placed.shortcuts[index];
+            let labels = words(&placed);
             for cap in &line.caps {
                 let label = labels
                     .iter()
@@ -12202,8 +12511,11 @@ mod tests {
                 );
             }
         }
+        // The page's own verb closes the table, so it is read at the foot.
         assert!(
-            labels.iter().any(|label| label.text == RESTORE_ALL_LABEL),
+            words(&page(at_rest.max_scroll()))
+                .iter()
+                .any(|label| label.text == RESTORE_ALL_LABEL),
             "the page's own verb is drawn"
         );
     }
@@ -12530,6 +12842,13 @@ mod tests {
             words,
             [
                 SettingsCategory::General.nav_label(),
+                // Designed ahead of the build (house rule: a new surface is
+                // styled and reviewed before it is coded): the Profiles page
+                // was mocked up and ratified on 2026-08-18, and slice 5a is
+                // what makes it a `SettingsCategory`. When it lands, replace
+                // this literal with its `nav_label()` — the pin then goes back
+                // to reading every word from the enum.
+                "Profiles",
                 SettingsCategory::Appearance.nav_label(),
                 SettingsCategory::Terminal.nav_label(),
                 SettingsCategory::RenderedBlocks.nav_label(),
