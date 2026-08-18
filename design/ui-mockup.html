@@ -2408,12 +2408,26 @@
      in here still asks a question with a small named answer, and those stay
      combos: this is not a new default, it is the form the two numeric rows owe.
 
-     IT OCCUPIES THE COMBO'S COLUMN, EXACTLY. 118px is the combo's `min-width`,
-     and the slider is 76 of track + 8 of gap + 34 of number = 118, so the right
-     edge of every control in the dialog is still one line. The number is
-     `tabular-nums` because it changes while you drag, and a proportional 8 is
-     narrower than a proportional 0 — without it the track would breathe in and
-     out under the thumb.
+     IT OCCUPIES THE PAGE'S CONTROL COLUMN — BOTH EDGES (user ruling
+     2026-08-18). It used to be written as a fixed 118: 76 of track + 8 of gap +
+     34 of number, which was exactly the combo's `min-width` on the day it was
+     written, because on that day every control was 118 wide. §7.1.6c-5 then made
+     the column the widest word on the PAGE, and a slider that kept its own 118
+     stopped starting where its neighbours start — on this page the two tracks
+     began some ninety pixels inside the buttons above them, which is the ragged
+     left edge that ruling exists to abolish showing up in the one control form
+     it did not reach.
+
+     So the number the slider owns is the NUMBER'S SLOT, not the track: 34px of
+     right-aligned digits against the column's trailing edge, an 8px gap, and the
+     track takes whatever is left (`flex: 1`). At a column of 118 that leaves
+     exactly the original 76, so the old geometry is the floor's special case
+     rather than a second rule. A longer track is a finer drag for the same 5%
+     step, which is a bonus and not the reason.
+
+     The number is `tabular-nums` because it changes while you drag, and a
+     proportional 8 is narrower than a proportional 0 — without it the track
+     would breathe in and out under the thumb.
 
      THE THUMB IS THE ACCENT AND SO IS THE FILLED HALF, because they are one
      statement read two ways: the fill says how much, the thumb says where you
@@ -2425,9 +2439,16 @@
      the value is a percentage of a picture's presence, where one percent is
      not a thing anybody can see, and twenty presses across the whole range is a
      control you can actually drive without the mouse. */
-  .slider { flex: none; display: flex; align-items: center; gap: 8px; }
+  /* It takes the control column, exactly as a `.combo button` does, and for the
+     same reason: `min-width: 118px` is the floor and the page's widest word is
+     what the column actually is. `max-width: 50%` is the row's own half, the
+     same bound the buttons live under. */
+  .slider {
+    flex: none; display: flex; align-items: center; gap: 8px;
+    min-width: 118px; max-width: 50%;
+  }
   .slider .track {
-    position: relative; width: 76px; height: 4px;
+    position: relative; flex: 1; min-width: 0; height: 4px;
     border-radius: 2px; background: var(--border);
   }
   .slider .fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--accent); }
@@ -2438,7 +2459,7 @@
   }
   .slider:hover .thumb { transform: scale(1.15); }
   .slider .num {
-    width: 34px; text-align: right;
+    flex: none; width: 34px; text-align: right;
     font-size: 12.5px; color: var(--ink2); font-variant-numeric: tabular-nums;
   }
   .slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
@@ -2599,6 +2620,22 @@
   .sc-foot, .adv-foot { display: flex; justify-content: flex-end; margin-top: 14px; gap: 8px; }
   .adv-foot .btn { width: 140px; }
   .adv-foot .adv-customise { width: 152px; }
+  /* A third verb arrived on 2026-08-18 and needed no new number, which is what
+     the `gap` above was written for. `Delete scheme` takes the reset's 140 and
+     not the customise's 152: two words and no ellipsis after them, because
+     unlike its neighbour it finishes what it names.
+
+     Its own line above the row, `.row .desc`'s line box: the three buttons and
+     their gaps are 448 of a 504px row, so the sentence cannot stand beside
+     them — and it is drawn in BOTH states so that opening this group is not a
+     different height depending on which scheme is in force. The margin belongs
+     to the hint when the hint is there, so `.adv-foot` loses its own. */
+  .adv-foot-hint {
+    margin-top: 14px; line-height: 1.5; font-size: 12px; color: var(--ink2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .adv-foot-hint + .adv-foot { margin-top: 0; }
+  .adv-foot .adv-delete[disabled] { color: var(--ink2); cursor: default; }
   /* The colour under the pointer (§7.1.6c-4c). `#cmd-peek`'s card wearing a
      third face: same 380ms, same surface, same radius — a 28px well before the
      token, and the line box IS the well, so the card is exactly as tall as the
@@ -3818,6 +3855,35 @@
           </div>
         </div>
 
+        <!-- SIDEBAR TOUCHES TAB LAYOUT AGAIN (user ruling 2026-08-18),
+             reversing the 2026-08-17 filing of it under Advanced. The argument
+             for the move was that the CONDITION carries the dependency once the
+             group does the hiding — the row is not there at all while the tabs
+             run across the top. In use it does not carry it: a row that appears
+             only under a vertical rail, two headings below the row that turns
+             the rail on and behind a collapsed disclosure, is a row nobody
+             meets. The disclosure had hidden the answer to the question the row
+             above it had just raised. Adjacency again, condition unchanged. -->
+        <div class="row" id="row-railmode">
+          <div class="text">
+            <div class="title">Sidebar</div>
+            <div class="desc">How the vertical tab sidebar rests</div>
+          </div>
+          <div class="combo" data-combo="railmode">
+            <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
+            <!-- user ruling 2026-08-10: "Icons, expand on hover" → "Icons".
+                 The sentence form named the hover behaviour in the one place a
+                 label has no room for it, and it was the only option string in
+                 the whole dialog wide enough to overrun its own popup. The
+                 hover-to-expand behaviour is unchanged — it is simply not
+                 spelled out in the picker any more. -->
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
+              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons</div>
+            </div>
+          </div>
+        </div>
+
         <div class="row">
           <div class="text">
             <div class="title">Waiting badge</div>
@@ -3845,20 +3911,16 @@
              grid is written in (face, then size), what the caret looks like, and
              where the tabs go.
 
-             `Waiting badge` keeps its place at the end of that run because it is
-             not one of the eight rows the ruling named: nothing is advanced
-             unless it was named, and a row swept in by resemblance is a row
-             nobody ruled on.
+             `Waiting badge` keeps its place at the end of that run because it
+             is not one of the rows the ruling named: nothing is advanced unless
+             it was named, and a row swept in by resemblance is a row nobody
+             ruled on.
 
-             SIDEBAR NO LONGER TOUCHES TAB LAYOUT. Every slice until this one
-             kept the two adjacent on the ground that Sidebar reads as Tab
-             layout's dependent — it only exists while the tabs run down the
-             side. The ruling files it under Advanced and leaves Tab layout on
-             top, so that adjacency is gone and the CONDITION carries the
-             dependency alone: the row is not in the group at all while the tabs
-             run across the top, exactly as before. That is enough, and it was
-             always the half that was actually true — the adjacency was a hint
-             about a rule the visibility already enforced. -->
+             SIDEBAR IS NOT IN THIS GROUP. It was, for one day (2026-08-17),
+             on the ground that the CONDITION carries the dependency once the
+             group does the hiding. The 2026-08-18 ruling put it back above,
+             directly under the row it depends on; the note beside it there
+             records why. -->
         <div class="adv" id="adv-appearance">
         <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-appearance-rows">
           <svg class="tri"><use href="#i-tri"/></svg>
@@ -3978,26 +4040,6 @@
           </div>
         </div>
 
-        <div class="row" id="row-railmode">
-          <div class="text">
-            <div class="title">Sidebar</div>
-            <div class="desc">How the vertical tab sidebar rests</div>
-          </div>
-          <div class="combo" data-combo="railmode">
-            <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
-            <!-- user ruling 2026-08-10: "Icons, expand on hover" → "Icons".
-                 The sentence form named the hover behaviour in the one place a
-                 label has no room for it, and it was the only option string in
-                 the whole dialog wide enough to overrun its own popup. The
-                 hover-to-expand behaviour is unchanged — it is simply not
-                 spelled out in the picker any more. -->
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
-              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons</div>
-            </div>
-          </div>
-        </div>
-
         <!-- THE ROW THAT PROVED A PICKER IS AS WIDE AS ITS WORDS (§7.1.6c-5).
              `Auto` says what it does in a parenthesis, against the ruling that a
              picker item is a name and not a sentence about it — the two are not
@@ -4049,8 +4091,35 @@
              one the disclosure exists for. `Reset to defaults` does not touch
              it, and does not delete anything in that folder: the files are the
              user's. -->
+        <!-- DELETE SCHEME (§7.1.6c-4d, user ruling 2026-08-18). `Customise
+             scheme…` could only ever make files: press it twice and the folder
+             holds two copies, the picker holds two more names, and the only way
+             back was Explorer. This is the way back.
+
+             IT SENDS THE FILE TO THE RECYCLE BIN, not to oblivion. A colour
+             scheme is a file somebody wrote by hand, often over an afternoon,
+             and a delete button in a settings dialog that destroys one is a
+             button nobody can afford to press. The card says where it went,
+             which is both the fact and the undo. The row then falls back to the
+             default scheme, hot.
+
+             IT IS DARK FOR A BUILT-IN SCHEME, and the line above the verbs says
+             why. A bundled scheme travels inside the executable and has no file
+             anywhere to move; so does the stored default. Greyed rather than
+             hidden, because the reason is what a reader came for — the same
+             ruling the Acrylic row lives under, and the reason lives in a muted
+             line for the same reason it does there.
+
+             THAT LINE IS ALWAYS THERE AND ALWAYS SAYS SOMETHING. The verb row
+             is 448px of button inside a 504px row; there is no room beside them
+             for a sentence. And a line that appeared only when the verb went
+             dark would make this group's height depend on which colour scheme
+             is in force. So it stands above them in both states: what the verb
+             will do, or why it cannot. -->
+        <div class="adv-foot-hint">Deleting sends this scheme's file to the Recycle Bin</div>
         <div class="adv-foot">
           <button class="btn adv-customise">Customise scheme…</button>
+          <button class="btn adv-delete">Delete scheme</button>
           <button class="btn adv-reset">Reset to defaults</button>
         </div>
         </div>

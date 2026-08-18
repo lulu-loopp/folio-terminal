@@ -257,6 +257,22 @@ fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, Inlin
 }
 
 fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
+    decode_image_bytes_within(bytes, MAX_INLINE_IMAGE_RGBA_BYTES)
+}
+
+/// The container walk, under a caller's pixel budget.
+///
+/// The budget is a parameter and not a constant because there are two callers
+/// with two honest answers: an inline image nobody asked for gets
+/// [`MAX_INLINE_IMAGE_RGBA_BYTES`], and a background picture somebody chose
+/// through a chooser gets [`MAX_BACKGROUND_IMAGE_RGBA_BYTES`]. Everything else
+/// about the walk — which containers are admitted, how APNG is detected, the
+/// dimension check that follows the decode — is one reading for both, which is
+/// the reason this is a parameter rather than a second function.
+fn decode_image_bytes_within(
+    bytes: &[u8],
+    max_rgba_bytes: u64,
+) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|error| InlineImageDecodeError::Decode(error.to_string()))?;
@@ -281,7 +297,7 @@ fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDe
     };
 
     let mut limits = Limits::default();
-    limits.max_alloc = Some(MAX_INLINE_IMAGE_RGBA_BYTES);
+    limits.max_alloc = Some(max_rgba_bytes);
     reader.limits(limits);
     let image = reader
         .decode()
@@ -292,10 +308,7 @@ fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDe
         .checked_mul(u64::from(height_px))
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or(InlineImageDecodeError::InvalidDimensions)?;
-    if width_px == 0
-        || height_px == 0
-        || expected > MAX_INLINE_IMAGE_RGBA_BYTES
-        || expected != rgba.len() as u64
+    if width_px == 0 || height_px == 0 || expected > max_rgba_bytes || expected != rgba.len() as u64
     {
         return Err(InlineImageDecodeError::InvalidDimensions);
     }
@@ -336,6 +349,240 @@ fn normalized_local_path_key(path: &Path) -> String {
 /// (e.g. the hover-peek cache) share the decoder's notion of "same file" instead of re-deriving it.
 pub fn normalized_local_image_path_key(path: &Path) -> String {
     normalized_local_path_key(path)
+}
+
+// ── the window's ground picture, which is not an inline image ──────────────
+//
+// **The background borrowed the inline decoder's gates and inherited the wrong
+// budget** (user report 2026-08-18: a 24 MP camera JPEG raised "inline image
+// exceeds its decode limit" from a settings row). §7.1.6c-4b's ruling was
+// "decode with the one decoder this repo has, limits and all", and the limits
+// were the honest ones *for an inline image*: a picture a shell wrote into a
+// scrollback arrives unasked, may arrive a hundred times in a screenful, and
+// costs a texture each — 8 MiB of file and 64 MiB of pixels is a generous
+// allowance for something nobody chose.
+//
+// A wallpaper is the opposite object in every one of those respects. There is
+// exactly one per window, it was chosen by hand through a modal chooser, it is
+// uploaded once and it is never a surprise. So it gets its own budget, and the
+// budget is stated against what it actually costs rather than against what an
+// inline image costs.
+
+/// What a background picture's *file* may weigh.
+///
+/// 64 MiB, which is the whole of the "is this a picture or a mistake" question
+/// at this size: the largest ordinary camera JPEG in circulation — a 100 MP
+/// medium-format frame at maximum quality — is under 60 MB, and everything
+/// above that is a scan, a render or a wrong file. The read is transient (it is
+/// dropped the moment the pixels exist) and it happens on a worker, so the cost
+/// of being generous here is a moment of memory on a thread nobody is waiting
+/// on.
+pub const MAX_BACKGROUND_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What a background picture may decode to before it is resampled.
+///
+/// 768 MiB of RGBA, which is 192 megapixels. It is deliberately far above
+/// anything the *upload* will ever see — [`background_target_size`] cuts the
+/// picture down to the largest monitor before it leaves this module — because
+/// this bound is not a resource budget, it is the line between a large photo
+/// and a decompression bomb. The resource budget is the resample target.
+pub const MAX_BACKGROUND_IMAGE_RGBA_BYTES: u64 = 768 * 1024 * 1024;
+
+/// Why a chosen background picture is not on screen.
+///
+/// A type of its own rather than [`InlineImageDecodeError`] because the failure
+/// is reported on a **settings row**, and that row must not speak about inline
+/// images: "inline image exceeds its decode limit" is true of a mechanism the
+/// reader of that row has never heard of, and it names a limit that is not the
+/// one that was applied (user report 2026-08-18).
+///
+/// **The variants carry the facts and not a sentence**, which is what lets the
+/// window say them in either language: `bt_app::i18n::background_picture_refused`
+/// matches on this type. The `Display` below is the developer-facing reading —
+/// what a log line or an `anyhow` chain gets — and it is held to the same rule
+/// by `a_refused_background_picture_never_speaks_of_inline_images`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BackgroundImageError {
+    /// Not a drive-rooted path spelled like one of the formats this build
+    /// decodes.
+    InvalidPath,
+    Io(String),
+    /// The file is bigger than [`MAX_BACKGROUND_IMAGE_BYTES`]. Both numbers are
+    /// carried so the sentence can name the limit it applied — an error that
+    /// says only "too large" leaves the reader with no way to tell a 70 MB file
+    /// from a 700 MB one.
+    TooLarge {
+        bytes: u64,
+        limit: u64,
+    },
+    /// A container this build has no decoder for.
+    UnsupportedFormat,
+    /// The decoder read the header and then refused the body.
+    Decode(String),
+    /// Zero-sized, or past [`MAX_BACKGROUND_IMAGE_RGBA_BYTES`].
+    InvalidDimensions,
+}
+
+impl fmt::Display for BackgroundImageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPath => formatter.write_str("not a picture file this window can open"),
+            Self::Io(error) => write!(formatter, "could not be read: {error}"),
+            Self::TooLarge { bytes, limit } => write!(
+                formatter,
+                "is {} and a background picture may be up to {}",
+                mebibytes(*bytes),
+                mebibytes(*limit)
+            ),
+            Self::UnsupportedFormat => {
+                formatter.write_str("is not a picture format this build decodes")
+            }
+            Self::Decode(error) => write!(formatter, "could not be decoded: {error}"),
+            Self::InvalidDimensions => {
+                formatter.write_str("has no pixels, or more of them than this build will decode")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BackgroundImageError {}
+
+/// A byte count as a reader of a file listing would see it.
+///
+/// Public because the two sentences that quote a byte count — this module's
+/// developer-facing `Display` and the window's own bilingual card — have to
+/// quote the *same* number in the same units, and a second rounding written
+/// beside the second sentence is how "64 MB" and "67 MB" come to name one limit.
+#[must_use]
+pub fn mebibytes(bytes: u64) -> String {
+    format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// The size a background picture is resampled to before it is uploaded.
+///
+/// **The ceiling is the largest monitor's pixel size, and never the picture's
+/// own.** The ground quad covers the window and nothing else, so the most
+/// texels that can ever be resolved from it is the number of physical pixels
+/// the window can occupy — which is bounded, for the life of the process, by
+/// the biggest screen attached to it. A 6000x4000 photo on a 3840-wide monitor
+/// has three quarters of its pixels resolved by the sampler into texels nobody
+/// can see, and it costs 96 MiB of upload to not show them.
+///
+/// The window's *current* size was the other candidate and is the wrong one: a
+/// window is resized and maximised constantly, and a ceiling taken from it
+/// would either re-decode the file on every drag or lock the picture to
+/// whatever shape the window happened to have when it was chosen. The monitor
+/// does not change while a frame is being dragged.
+///
+/// Downscale only — a picture smaller than the ceiling is uploaded as it is,
+/// because upsampling on the CPU produces exactly what the sampler would have
+/// produced from the smaller texture and charges memory for it.
+///
+/// **What this changes for `Tile`**, stated rather than discovered: a tile
+/// larger than the largest monitor is shrunk to it, so a picture that used to
+/// show one copy and a sliver of a second now shows exactly one. Every tile
+/// smaller than a screen — which is every picture anybody tiles — is untouched.
+#[must_use]
+pub fn background_target_size(image: (u32, u32), ceiling: (u32, u32)) -> (u32, u32) {
+    let (width, height) = image;
+    let (max_width, max_height) = ceiling;
+    if width == 0 || height == 0 || max_width == 0 || max_height == 0 {
+        return image;
+    }
+    if width <= max_width && height <= max_height {
+        return image;
+    }
+    // One scale for both axes: the aspect ratio is the picture's own and the
+    // three fits are the only things allowed to change it.
+    let scale = f64::min(
+        f64::from(max_width) / f64::from(width),
+        f64::from(max_height) / f64::from(height),
+    );
+    let shrink = |side: u32, cap: u32| ((f64::from(side) * scale).round() as u32).clamp(1, cap);
+    (shrink(width, max_width), shrink(height, max_height))
+}
+
+/// Read the picture named for the window's ground, and hand back the texture it
+/// will be uploaded as.
+///
+/// Worker work, always (§7.1.6c-4d, user report 2026-08-18). 4b decoded on the
+/// event thread and argued it: the two moments this runs are startup and a
+/// modal chooser closing, and "both already have somebody waiting". The
+/// argument holds for a screenshot and fails for a photograph — a 24 MP JPEG is
+/// a fifth of a second of decode plus a resample on top, and a window that
+/// stops answering the keyboard for a quarter of a second is not a window that
+/// was being polite to somebody waiting. The row applies immediately; the
+/// picture lands a beat later.
+///
+/// The returned key carries the resample target, so a picture that comes back
+/// at a different size is a different texture rather than a stale one — the
+/// same rule [`display_texture_key`] states for an inline image at a zoom.
+pub fn decode_background_image(
+    path: &Path,
+    ceiling: (u32, u32),
+) -> Result<DecodedInlineImage, BackgroundImageError> {
+    if !is_admissible_local_image_path(path) {
+        return Err(BackgroundImageError::InvalidPath);
+    }
+    let mut file = File::open(path).map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(BackgroundImageError::InvalidPath);
+    }
+    if metadata.len() > MAX_BACKGROUND_IMAGE_BYTES {
+        return Err(BackgroundImageError::TooLarge {
+            bytes: metadata.len(),
+            limit: MAX_BACKGROUND_IMAGE_BYTES,
+        });
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_BACKGROUND_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+    if bytes.len() as u64 > MAX_BACKGROUND_IMAGE_BYTES {
+        return Err(BackgroundImageError::TooLarge {
+            bytes: bytes.len() as u64,
+            limit: MAX_BACKGROUND_IMAGE_BYTES,
+        });
+    }
+    let payload =
+        decode_image_bytes_within(&bytes, MAX_BACKGROUND_IMAGE_RGBA_BYTES).map_err(|error| {
+            match error {
+                InlineImageDecodeError::UnsupportedFormat => {
+                    BackgroundImageError::UnsupportedFormat
+                }
+                InlineImageDecodeError::InvalidDimensions => {
+                    BackgroundImageError::InvalidDimensions
+                }
+                InlineImageDecodeError::TooLarge => BackgroundImageError::TooLarge {
+                    bytes: bytes.len() as u64,
+                    limit: MAX_BACKGROUND_IMAGE_BYTES,
+                },
+                other => BackgroundImageError::Decode(other.to_string()),
+            }
+        })?;
+    let (width_px, height_px) =
+        background_target_size((payload.width_px, payload.height_px), ceiling);
+    let scaled = scale_inline_image(&InlineImageScaleTask {
+        occurrence_id: 0,
+        content_key: payload.key,
+        rgba: payload.rgba,
+        width_px: payload.width_px,
+        height_px: payload.height_px,
+        display_width_px: width_px,
+        display_height_px: height_px,
+    });
+    Ok(DecodedInlineImage {
+        occurrence_id: 0,
+        key: scaled.key,
+        rgba: scaled.rgba,
+        width_px,
+        height_px,
+        animated: payload.animated,
+    })
 }
 
 fn is_admissible_local_image_path(path: &Path) -> bool {
@@ -2632,6 +2879,148 @@ mod tests {
         assert_eq!(
             scanner.scan(b"\x1b]1337;File=inline=1:QUJDREVGRw==\x07"),
             vec![InlineImageStreamAction::TooLarge]
+        );
+    }
+    /// PIN (user report 2026-08-18) — **the background picture is decoded
+    /// against its own budget, not the inline image's.**
+    ///
+    /// The report was a 24 MP camera JPEG chosen from the Appearance page and
+    /// refused with "inline image exceeds its decode limit". The gate that
+    /// refused it was honest about an inline image and wrong about a wallpaper:
+    /// one picture, chosen by hand, uploaded once.
+    ///
+    /// The probe is a 4200x4200 greyscale PNG — a few kilobytes of file and
+    /// 70.6 MiB of RGBA, so it clears every file-size gate in the module and is
+    /// stopped only by the pixel budget. The inline decoder refuses it; the
+    /// background decoder takes it and hands back a texture cut to the ceiling.
+    ///
+    /// Red gate: point `decode_background_image` at
+    /// `MAX_INLINE_IMAGE_RGBA_BYTES` and the second half goes red.
+    #[test]
+    fn a_background_picture_clears_the_pixel_budget_that_stops_an_inline_image() {
+        const SIDE: u32 = 4200;
+        assert!(
+            u64::from(SIDE) * u64::from(SIDE) * 4 > MAX_INLINE_IMAGE_RGBA_BYTES,
+            "the probe has to be past the inline budget or it proves nothing"
+        );
+        assert!(
+            u64::from(SIDE) * u64::from(SIDE) * 4 < MAX_BACKGROUND_IMAGE_RGBA_BYTES,
+            "and inside the background's, or it proves the wrong thing"
+        );
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-background-budget-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("wallpaper.png");
+        {
+            // Greyscale on the way in, so the file this test writes is 17 MiB of
+            // zeroes and not 70; the decode still expands to RGBA, which is the
+            // side the budget is stated on.
+            let plane: image::ImageBuffer<image::Luma<u8>, Vec<u8>> =
+                image::ImageBuffer::new(SIDE, SIDE);
+            plane.save_with_format(&path, ImageFormat::Png).unwrap();
+        }
+
+        let inline = decode_inline_image(InlineImageTask {
+            occurrence_id: 0,
+            source: InlineImageSource::LocalPath(path.clone()),
+        });
+        assert!(
+            inline.is_err(),
+            "an inline image of this size is still refused, which is the gate              the background was borrowing"
+        );
+
+        let ground = decode_background_image(&path, (3840, 2160)).unwrap();
+        assert_eq!(
+            (ground.width_px, ground.height_px),
+            (2160, 2160),
+            "and the background takes it, cut to the ceiling it was given"
+        );
+        assert!(
+            ground.key.ends_with("@2160x2160"),
+            "the resample target is part of the texture identity: {}",
+            ground.key
+        );
+        assert_eq!(ground.rgba.len(), 2160 * 2160 * 4);
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN — **the resample target is the largest monitor, one scale on both
+    /// axes, and never an upscale.**
+    #[test]
+    fn a_background_picture_is_cut_to_the_ceiling_and_never_stretched_to_it() {
+        // Smaller than the ceiling on both axes: untouched, because upsampling
+        // on the CPU produces what the sampler would have produced anyway.
+        assert_eq!(background_target_size((800, 600), (3840, 2160)), (800, 600));
+        assert_eq!(
+            background_target_size((3840, 2160), (3840, 2160)),
+            (3840, 2160)
+        );
+        // Over on one axis: one scale, taken from the axis that is furthest
+        // over, so the aspect ratio is the picture's own.
+        assert_eq!(
+            background_target_size((6000, 4000), (3840, 2160)),
+            (3240, 2160)
+        );
+        assert_eq!(
+            background_target_size((6000, 1000), (3840, 2160)),
+            (3840, 640)
+        );
+        // A shape so extreme the short side rounds to nothing still has a pixel
+        // on it: a zero-sided texture is not a smaller texture, it is no
+        // texture.
+        assert_eq!(
+            background_target_size((100_000, 3), (3840, 2160)),
+            (3840, 1)
+        );
+        // No ceiling to speak of is no resample: the caller could not name a
+        // monitor, and inventing one here would be this module deciding how big
+        // a screen is.
+        assert_eq!(background_target_size((6000, 4000), (0, 0)), (6000, 4000));
+    }
+
+    /// PIN (user report 2026-08-18) — **a refused background picture says what
+    /// happened to *this file*, in words a settings row can carry.**
+    ///
+    /// The reported sentence was "inline image exceeds its decode limit", which
+    /// names a mechanism the reader of the Appearance page has never met and a
+    /// limit that is not the one that was applied. Every sentence this type
+    /// says is about the file the chooser just returned.
+    #[test]
+    fn a_refused_background_picture_never_speaks_of_inline_images() {
+        for error in [
+            BackgroundImageError::InvalidPath,
+            BackgroundImageError::Io("access is denied".to_owned()),
+            BackgroundImageError::TooLarge {
+                bytes: 200 * 1024 * 1024,
+                limit: MAX_BACKGROUND_IMAGE_BYTES,
+            },
+            BackgroundImageError::UnsupportedFormat,
+            BackgroundImageError::Decode("truncated stream".to_owned()),
+            BackgroundImageError::InvalidDimensions,
+        ] {
+            let sentence = error.to_string();
+            assert!(
+                !sentence.contains("inline"),
+                "{error:?} leaks the inline vocabulary: {sentence}"
+            );
+            assert!(!sentence.is_empty());
+        }
+        assert_eq!(
+            BackgroundImageError::TooLarge {
+                bytes: 200 * 1024 * 1024,
+                limit: MAX_BACKGROUND_IMAGE_BYTES,
+            }
+            .to_string(),
+            "is 200 MB and a background picture may be up to 64 MB",
+            "the sentence names both numbers, because \"too large\" alone              leaves a 70 MB file and a 700 MB one indistinguishable"
         );
     }
 }

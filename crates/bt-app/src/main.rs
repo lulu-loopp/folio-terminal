@@ -93,7 +93,7 @@ use winit::{
     // the digit behind Shift, and the binding is meant to be the digit either way.
     platform::modifier_supplement::KeyEventExtModifierSupplement,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
-    window::{Theme as OsTheme, Window, WindowId},
+    window::{Theme as OsTheme, Window, WindowAttributes, WindowId},
 };
 
 const INITIAL_WIDTH: f64 = 960.0;
@@ -239,6 +239,32 @@ enum AppEvent {
     /// clock in the window, and a commit still asked whether a palette had
     /// changed.
     SchemesChanged,
+    /// **The window's ground picture has been decoded** (§7.1.6c-4d).
+    ///
+    /// 4b decoded it on the event thread and said why: the two moments it runs
+    /// are startup and a modal chooser closing, and both already have somebody
+    /// waiting. A 24 MP photograph is what retired that argument (user report
+    /// 2026-08-18) — a fifth of a second of decode and a resample after it is
+    /// not politeness to somebody waiting, it is a window that stopped
+    /// answering. The row is applied the instant it is pressed and the picture
+    /// arrives behind it, which is what this variant carries.
+    BackgroundPictureReady,
+}
+
+/// One answer from the picture worker (§7.1.6c-4d).
+///
+/// The file's own name travels with the answer rather than being read back off
+/// the settings when it lands, because by then the settings may name a different
+/// file: a card has to say which picture was refused, and the only reading of
+/// that which cannot go stale is the one taken when the question was asked.
+#[derive(Debug)]
+struct BackgroundDecode {
+    generation: u64,
+    file: String,
+    /// The texture, or the facts about why there is not one — the error and
+    /// not its sentence, so the card can be written in the window's language
+    /// (`i18n::background_picture_refused`).
+    result: Result<Arc<bt_render::BackgroundImage>, bt_term::BackgroundImageError>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -3990,6 +4016,21 @@ struct Runtime {
     /// [`Self::apply_window_ground`], which is also the one place the two
     /// percentages and the fit reach it.
     background_picture: Option<Arc<bt_render::BackgroundImage>>,
+    /// Where the picture worker leaves its one answer (§7.1.6c-4d).
+    ///
+    /// One slot and not a queue, for `scheme_watch`'s reason one door over:
+    /// there is one ground per window, so a second decode supersedes the first
+    /// outright and a queue would only be a way of applying a picture the reader
+    /// has already replaced.
+    background_decode: Arc<std::sync::Mutex<Option<BackgroundDecode>>>,
+    /// Which request the slot's answer would be an answer to.
+    ///
+    /// Bumped by every call that changes what the ground's picture should be —
+    /// a row, a chooser, a reset, a clear — so an answer that lands after its
+    /// question was withdrawn is dropped rather than drawn. Without it, choosing
+    /// a slow picture and then choosing `None` would end with the slow picture
+    /// on screen and `None` in the file.
+    background_decode_generation: u64,
     /// Which slider the pointer is currently dragging, if any.
     ///
     /// A drag is the press that began it, asked again with a new `x` — see
@@ -14448,25 +14489,12 @@ impl Runtime {
         let default_profile =
             profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
         let restored = restore_window_placement(event_loop, session_store.loaded());
-        let attributes = Window::default_attributes()
-            // "新 tab，和启动" — one setting for both (mock-up 7575: `bootFresh()`
-            // opens its first tab from `defaultProfile()`). The title is replaced
-            // by the active tab's own the moment there is one, so what this is
-            // for is the name on the taskbar button between `CreateWindow` and
-            // the first paint.
-            .with_title(profiles::PROFILES[default_profile].title)
-            // Approximate on purpose: winit sizes by client area and the frame
-            // installed below turns the client area into the whole outer rect, so
-            // the exact rectangle can only be set once that frame exists. What
-            // this opening size is for is landing the window on the right monitor
-            // at the right DPI, which is what the exact one is then scaled by.
-            .with_inner_size(
-                restored
-                    .map(|placement| placement.size)
-                    .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
-            )
-            // Do not expose the system class brush while the first swapchain image is pending.
-            .with_visible(false);
+        let attributes = opening_window_attributes(
+            profiles::PROFILES[default_profile].title,
+            restored
+                .map(|placement| placement.size)
+                .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
+        );
         let attributes = match restored.and_then(|placement| placement.position) {
             Some(position) => attributes.with_position(position),
             None => attributes,
@@ -14737,6 +14765,8 @@ impl Runtime {
             image_picker,
             image_pick_pending: false,
             background_picture: None,
+            background_decode: Arc::new(std::sync::Mutex::new(None)),
+            background_decode_generation: 0,
             settings_slider_drag: None,
             settings_menu_bar_drag: None,
             acrylic_available,
@@ -18576,7 +18606,36 @@ impl Runtime {
             // DWM per frame would be a syscall inside a hover repaint.
             acrylic_available: self.acrylic_available,
             translucency_available: self.translucency_available,
+            scheme_in_force_is_user_file: self.scheme_in_force().is_some(),
         }
+    }
+
+    /// The scheme the window is **actually wearing**, as a name and a file, when
+    /// that file is one of the user's own (§7.1.6c-4d).
+    ///
+    /// `None` for a bundled scheme, which has no file anywhere, and `None` for
+    /// the stored default, which is bundled by definition. The canvas decides
+    /// which of the two rows is being asked, by luma — the question
+    /// `Runtime::customise_scheme` asks and the question the chrome asks, and
+    /// deliberately not the theme setting, because a `BT_BG` override makes
+    /// those two disagree and it is the canvas the reader is looking at.
+    ///
+    /// One reading with two callers — the dialog's `Delete scheme` predicate and
+    /// the press that acts on it — so a button that is live and a press that
+    /// finds nothing to delete cannot come apart.
+    fn scheme_in_force(&self) -> Option<(String, String)> {
+        let light = bt_render::background_is_light(bt_render::background_rgb());
+        let stored = if light {
+            self.settings_store.loaded().light_scheme.clone()
+        } else {
+            self.settings_store.loaded().dark_scheme.clone()
+        };
+        if stored.is_empty() {
+            return None;
+        }
+        let catalogue = schemes::catalogue();
+        let file = catalogue.user_file_of(&stored, light)?.to_owned();
+        Some((stored, file))
     }
 
     /// The chosen picture's file name, for the button that carries it.
@@ -19540,6 +19599,9 @@ impl Runtime {
         if let settings::SettingsTarget::ResetAdvanced(category) = target {
             self.reset_advanced_group(category)?;
         }
+        if target == settings::SettingsTarget::DeleteScheme {
+            self.delete_scheme_in_force()?;
+        }
         if target == settings::SettingsTarget::CustomiseScheme {
             self.customise_scheme()?;
         }
@@ -19904,7 +19966,8 @@ impl Runtime {
             // half works.
             target @ (settings::SettingsTarget::Advanced(_)
             | settings::SettingsTarget::ResetAdvanced(_)
-            | settings::SettingsTarget::CustomiseScheme) => {
+            | settings::SettingsTarget::CustomiseScheme
+            | settings::SettingsTarget::DeleteScheme) => {
                 self.apply_settings_choice(target)?;
             }
             // A press on the dialog's own body, or inside the open menu but on
@@ -20416,12 +20479,20 @@ impl Runtime {
 
     /// Read the picture named in the settings, or clear it.
     ///
-    /// **On the event thread, deliberately.** The decoder's worker lane is keyed
-    /// by `LeafId` and a wallpaper has no leaf; more to the point, the two
-    /// moments this runs are startup-with-a-picture-already-chosen and the
-    /// instant a modal chooser closed, and both already have somebody waiting.
-    /// The read is bounded to 8 MiB of file and the decode to 64 MiB of pixels
-    /// by the decoder's own gates.
+    /// **Off the event thread** (§7.1.6c-4d, user report 2026-08-18). 4b did
+    /// this inline and wrote down why: the two moments it runs are
+    /// startup-with-a-picture-already-chosen and the instant a modal chooser
+    /// closed, and both already have somebody waiting. That argument was made
+    /// against a screenshot and dies against a photograph — a 24 MP JPEG is
+    /// hundreds of milliseconds of decode with a resample behind it, and a
+    /// window that stops answering the keyboard for a quarter of a second is
+    /// not being polite to anybody. The row applies the instant it is pressed,
+    /// which is the latency that mattered; the picture lands a beat later.
+    ///
+    /// **The picture already on screen stays up while the next one decodes.**
+    /// Clearing here would make every change of wallpaper a flash of the bare
+    /// ground, and the ground with no picture is not a state the reader asked
+    /// to see.
     ///
     /// A file that will not decode leaves the **name in the settings** and the
     /// window without a picture, and says so once in a card: a wallpaper on a
@@ -20429,29 +20500,107 @@ impl Runtime {
     /// erasing the setting would mean plugging the drive back in changed nothing.
     fn reload_background_picture(&mut self) -> Result<()> {
         let stored = self.settings_store.loaded().background_image.clone();
+        // Every call withdraws whatever the last one asked for, `None` included:
+        // a clear that raced a slow decode must win, and the generation is how
+        // it does.
+        self.background_decode_generation += 1;
         if stored.is_empty() {
             self.background_picture = None;
             return Ok(());
         }
-        match bt_term::decode_inline_image(bt_term::InlineImageTask {
-            occurrence_id: 0,
-            source: bt_term::InlineImageSource::LocalPath(PathBuf::from(&stored)),
-        }) {
-            Ok(decoded) => {
-                self.background_picture = Some(Arc::new(bt_render::BackgroundImage {
-                    key: decoded.key,
-                    rgba: decoded.rgba,
-                    width_px: decoded.width_px,
-                    height_px: decoded.height_px,
-                }));
+        let generation = self.background_decode_generation;
+        let ceiling = self.background_picture_ceiling();
+        let path = PathBuf::from(&stored);
+        let file = path.file_name().map_or_else(
+            || stored.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let slot = Arc::clone(&self.background_decode);
+        let proxy = self.event_proxy.clone();
+        // In the workers' band: a wallpaper is never the reason a frame is late.
+        bt_platform::spawn_at_priority(
+            "background-picture",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
+                let result = bt_term::decode_background_image(&path, ceiling).map(|decoded| {
+                    Arc::new(bt_render::BackgroundImage {
+                        key: decoded.key,
+                        rgba: decoded.rgba,
+                        width_px: decoded.width_px,
+                        height_px: decoded.height_px,
+                    })
+                });
+                *slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(BackgroundDecode {
+                    generation,
+                    file,
+                    result,
+                });
+                // After the answer is in the slot, never before.
+                let _ = proxy.send_event(AppEvent::BackgroundPictureReady);
+            },
+        )
+        .ok();
+        Ok(())
+    }
+
+    /// The largest texture the ground will ever resolve, in physical pixels.
+    ///
+    /// **The biggest monitor attached to this machine**, and not the window: the
+    /// ground quad covers the window, so the most texels anything can resolve
+    /// out of it is the number of pixels the window can occupy — bounded by the
+    /// largest screen it can be dragged onto and maximised on. Taking it from
+    /// the window's current size instead would mean a picture re-decoded on
+    /// every drag, or one frozen at whatever shape the window had when it was
+    /// chosen. The screens do not change while a frame is being dragged.
+    ///
+    /// A machine that reports no monitors at all falls back to this window's own
+    /// physical size, which is the only other fact available and is never zero.
+    fn background_picture_ceiling(&self) -> (u32, u32) {
+        let mut ceiling = (0_u32, 0_u32);
+        for monitor in self.window.available_monitors() {
+            let size = monitor.size();
+            ceiling.0 = ceiling.0.max(size.width);
+            ceiling.1 = ceiling.1.max(size.height);
+        }
+        if ceiling.0 == 0 || ceiling.1 == 0 {
+            let inner = self.window.inner_size();
+            ceiling = (inner.width.max(1), inner.height.max(1));
+        }
+        ceiling
+    }
+
+    /// Take whatever the picture worker left, if it is still an answer to the
+    /// question that is being asked.
+    fn adopt_background_picture(&mut self) -> Result<()> {
+        let Some(landed) = self
+            .background_decode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return Ok(());
+        };
+        // A picture the reader has already replaced. Dropped in silence: it
+        // answers a row nobody is looking at any more, and a card about it would
+        // be a report on a decision that has been superseded.
+        if landed.generation != self.background_decode_generation {
+            return Ok(());
+        }
+        match landed.result {
+            Ok(image) => {
+                self.background_picture = Some(image);
+                self.apply_window_ground()?;
             }
-            Err(error) => {
+            Err(refusal) => {
                 self.background_picture = None;
+                self.apply_window_ground()?;
                 self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
-                    Some(i18n::Text::RowBackgroundImage.text().to_owned()),
-                    i18n::preview_failed(&error.to_string()),
+                    Some(i18n::Text::BackgroundPictureRefused.text().to_owned()),
+                    i18n::background_picture_refused(&landed.file, &refusal),
                 )?;
             }
         }
@@ -20695,6 +20844,95 @@ impl Runtime {
             anchor,
             None,
             i18n::scheme_customised(&file),
+        )
+    }
+
+    /// **Send the scheme in force to the Recycle Bin, and fall back to the
+    /// default** (§7.1.6c-4d, user ruling 2026-08-18).
+    ///
+    /// `Customise scheme…` could only ever make files. A folder that grows a
+    /// copy every time somebody presses a button and never loses one is a
+    /// picker that only gets longer, and the way out of it was Explorer — which
+    /// is to say, not this window.
+    ///
+    /// Four steps, and the order is the one that survives each step failing:
+    ///
+    /// 1. the file goes to the **Recycle Bin** and not to `remove_file`. It is a
+    ///    file the user wrote by hand, and a delete button in a settings dialog
+    ///    that destroys one is a button nobody can afford to press. The card
+    ///    says where it went, which is a fact and also the undo;
+    /// 2. the row falls back to the **default** — the stored name is cleared,
+    ///    not left dangling, because unlike a file that has wandered off there
+    ///    is nothing to come back;
+    /// 3. the catalogue is re-read **here**, before the watcher gets to it, so
+    ///    the picker has already lost the entry by the next frame;
+    /// 4. one card, naming the file and the scheme now in force.
+    ///
+    /// **One card and not two**, which is the whole of why step 3 is where it
+    /// is. The folder's watcher will see this deletion and run
+    /// `schemes::rescan_verdict`, whose standing answer to "the selected
+    /// scheme's file is gone" is a fall to the default *and an Info card*. That
+    /// rule is right for a file that left the folder behind this window's back
+    /// and wrong for one this window just deleted — the press already knows.
+    /// It is silenced by arithmetic rather than by a flag: the verdict is
+    /// derived from the two **stored names**, step 2 has already made this one
+    /// the default, and a default resolves to a bundled scheme that cannot go
+    /// missing. Pinned by `a_deletion_this_window_made_raises_one_card_not_two`.
+    fn delete_scheme_in_force(&mut self) -> Result<()> {
+        // Asked again rather than passed in from the draw: a frame's worth of
+        // staleness between the button lighting and the press landing is a
+        // frame in which the file could have been renamed underneath it.
+        let Some((_, file)) = self.scheme_in_force() else {
+            return Ok(());
+        };
+        let light = bt_render::background_is_light(bt_render::background_rgb());
+        let path = match schemes::user_dir() {
+            Ok(directory) => directory.join(&file),
+            Err(error) => {
+                return self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    Some(i18n::Text::DeleteScheme.text().to_owned()),
+                    i18n::not_deleted(&error.to_string()),
+                );
+            }
+        };
+        match bt_platform::recycle(&path) {
+            // The shell asked, and the answer was no. Nothing happened and
+            // nothing is said: "cancelled" is a card about a decision the reader
+            // made half a second ago and is still looking at.
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(error) => {
+                return self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    Some(i18n::Text::DeleteScheme.text().to_owned()),
+                    i18n::not_deleted(&error),
+                );
+            }
+        }
+        if light {
+            self.apply_scheme(Some(String::new()), None)?;
+        } else {
+            self.apply_scheme(None, Some(String::new()))?;
+        }
+        // Ahead of the watcher, so the picker has lost the entry by the next
+        // frame rather than by the next quiet window — and so the verdict the
+        // watcher does eventually reach is about a folder that already matches
+        // the settings.
+        let after = schemes::rescan();
+        let fallback = after.default_name(light).to_owned();
+        drop(after);
+        self.refresh_scheme_sources();
+        self.toast(
+            toast::ToastKind::Ok,
+            toast::ToastAnchor::Window,
+            Some(i18n::Text::SchemeDeleted.text().to_owned()),
+            // **The file and not the scheme's name**: what is in the Recycle Bin
+            // is spelled the way the file was, and that is the string somebody
+            // going to fetch it back has to recognise.
+            i18n::scheme_deleted(&file, &fallback),
         )
     }
 
@@ -42584,6 +42822,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     self.fail(event_loop, error);
                 }
             }
+            // The texture is already in the slot; what is owed is the ground
+            // put in force around it, which is `apply_window_ground`'s one job.
+            AppEvent::BackgroundPictureReady => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.adopt_background_picture()
+                {
+                    self.fail(event_loop, error);
+                }
+            }
         }
     }
 
@@ -44185,6 +44432,101 @@ fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {
 /// window that is see-through onto itself, which is indistinguishable from a
 /// window that is not see-through. Read from the ground rather than passed in,
 /// so the two callers (a theme flip and a ground change) cannot disagree.
+/// **How this window is asked for**, before anything is installed on it.
+///
+/// A function rather than a chain inline in `resumed`, because two of these
+/// three answers are load-bearing and neither is visible from anywhere else in
+/// the process: `visible = false` keeps the system class brush off the screen
+/// until the first swapchain image exists, and `transparent = true` is the whole
+/// of what lets a translucent ground out of the window (see the note on the
+/// call). It is pinned by
+/// `the_window_is_asked_for_transparent_and_invisible`.
+#[must_use]
+fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> WindowAttributes {
+    Window::default_attributes()
+        // "新 tab，和启动" — one setting for both (mock-up 7575: `bootFresh()`
+        // opens its first tab from `defaultProfile()`). The title is replaced
+        // by the active tab's own the moment there is one, so what this is
+        // for is the name on the taskbar button between `CreateWindow` and
+        // the first paint.
+        .with_title(title)
+        // Approximate on purpose: winit sizes by client area and the frame
+        // installed below turns the client area into the whole outer rect, so
+        // the exact rectangle can only be set once that frame exists. What
+        // this opening size is for is landing the window on the right monitor
+        // at the right DPI, which is what the exact one is then scaled by.
+        .with_inner_size(size)
+        // Do not expose the system class brush while the first swapchain image is pending.
+        .with_visible(false)
+        // **The one line that lets an alpha out of this window** (user
+        // report 2026-08-18; §7.1.6c-4d 裁决四).
+        //
+        // §7.1.6c-4b built the whole translucent ground and it was correct
+        // to the last byte: the surface is configured `PreMultiplied`, the
+        // clear carries the ground's alpha in linear light, and the class
+        // brush behind it is taken away. What was missing was on the other
+        // side of the window entirely — **DWM composites a plain top-level
+        // window as opaque**. It keeps a redirection bitmap for the HWND,
+        // composes the DirectComposition tree over it and then puts the
+        // result on the desktop with no per-pixel alpha at all, so a
+        // surface that is 30% there is drawn over an opaque rectangle and
+        // reads exactly like a window that is not see-through. Every
+        // measurement inside this process said 0.3 and every pixel on the
+        // screen said 1.0.
+        //
+        // `transparent` is winit's name for the fix: on Windows it is one
+        // `DwmEnableBlurBehindWindow` with an **empty** blur region, which
+        // is the documented way to ask DWM to honour a window's own alpha
+        // and adds no blur (the Acrylic row is a different call, and still
+        // is). It has to be set **at creation** — winit's
+        // `Window::set_transparent` is a no-op on this platform — so it
+        // cannot be conditional on the stored opacity without making that
+        // row need a restart, which is exactly what §7.1.6c-4b promised it
+        // would not need.
+        //
+        // Unconditional is also harmless at full opacity: the clear is then
+        // `a = 1.0` and `install_window_class_background` keeps its opaque
+        // brush, so there is no alpha anywhere for DWM to honour.
+        .with_transparent(true)
+}
+
+#[cfg(test)]
+mod opening_window_tests {
+    use super::{INITIAL_HEIGHT, INITIAL_WIDTH, LogicalSize, opening_window_attributes};
+
+    /// PIN (user report 2026-08-18) — **the window is asked for transparent,
+    /// and invisible.**
+    ///
+    /// `transparent` is what makes the whole of §7.1.6c-4b's translucent ground
+    /// visible: on Windows it is one `DwmEnableBlurBehindWindow` with an empty
+    /// region, and without it DWM composites this window as opaque no matter
+    /// what alpha the surface carries — which is exactly the report. It is a
+    /// *creation* attribute (winit's `set_transparent` is a no-op on this
+    /// platform), so there is no later call that could put it right, and this is
+    /// the only place it can be checked.
+    ///
+    /// `visible = false` is pinned in the same breath because it is the same
+    /// kind of fact — an attribute nothing downstream restates — and it is what
+    /// keeps the system class brush off the screen until the first frame.
+    ///
+    /// Red gate: drop `.with_transparent(true)` and this goes red; the window
+    /// still opens, still draws a 30% clear, and is opaque on screen.
+    #[test]
+    fn the_window_is_asked_for_transparent_and_invisible() {
+        let attributes =
+            opening_window_attributes("Folio", LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
+        assert!(
+            attributes.transparent,
+            "a window DWM believes is opaque cannot have a translucent ground"
+        );
+        assert!(!attributes.visible);
+        assert_eq!(
+            attributes.inner_size,
+            Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
+        );
+    }
+}
+
 fn install_theme_class_background(window: &Window) -> Result<()> {
     let opaque = bt_render::window_ground().alpha >= 1.0;
     bt_platform::install_window_class_background(window_hwnd(window)?, opaque.then(background_rgb))

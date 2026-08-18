@@ -615,6 +615,30 @@ pub enum Text {
     SchemeInUseBroken,
     /// And the title of the card raised when it stops existing.
     SchemeInUseGone,
+
+    // ── deleting a colour scheme (§7.1.6c-4d, user ruling 2026-08-18) ──────
+    /// The second verb on the Advanced foot: it sends the scheme in force to
+    /// the Recycle Bin. The ellipsis is not here — see `DeleteScheme`'s note in
+    /// `settings.rs`: this verb finishes the job it names.
+    DeleteScheme,
+    /// Why that verb is dark. A bundled scheme travels inside the executable and
+    /// has no file to send anywhere, and saying so is the whole of what a reader
+    /// standing in front of a greyed button needs.
+    DeleteSchemeBundled,
+    /// And what it will do when it is live. The line the two share is always
+    /// there, so it always says something: the reason a verb is dark, or the
+    /// fact about the verb that is not.
+    DeleteSchemeUserFile,
+    /// The title of the card raised when a scheme file has been recycled.
+    SchemeDeleted,
+
+    // ── the window's ground picture, refused (§7.1.6c-4d) ──────────────────
+    /// The title of the card raised when the chosen picture is not on screen.
+    ///
+    /// It says the *effect* and leaves the reason to the body, because the two
+    /// halves answer different questions: a reader who chose a wallpaper and got
+    /// no wallpaper is first asking whether the window heard them.
+    BackgroundPictureRefused,
 }
 
 impl Text {
@@ -1055,6 +1079,21 @@ impl Text {
             Self::CustomiseScheme => pick(lang, "Customise scheme…", "自定义配色…"),
             Self::SchemeInUseBroken => pick(lang, "Colour scheme not reloaded", "配色未重新载入"),
             Self::SchemeInUseGone => pick(lang, "Colour scheme not found", "找不到配色"),
+            Self::DeleteScheme => pick(lang, "Delete scheme", "删除配色"),
+            Self::DeleteSchemeBundled => pick(
+                lang,
+                "Built-in schemes have no file to delete",
+                "内置配色没有可删除的文件",
+            ),
+            Self::DeleteSchemeUserFile => pick(
+                lang,
+                "Deleting sends this scheme's file to the Recycle Bin",
+                "删除会把这套配色的文件移入回收站",
+            ),
+            Self::SchemeDeleted => pick(lang, "Colour scheme deleted", "配色已删除"),
+            Self::BackgroundPictureRefused => {
+                pick(lang, "Background picture not shown", "背景图未显示")
+            }
         }
     }
 
@@ -1070,7 +1109,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 159] = [
+    pub const ALL: [Self; 164] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1230,6 +1269,11 @@ impl Text {
         Self::CustomiseScheme,
         Self::SchemeInUseBroken,
         Self::SchemeInUseGone,
+        Self::DeleteScheme,
+        Self::DeleteSchemeBundled,
+        Self::DeleteSchemeUserFile,
+        Self::SchemeDeleted,
+        Self::BackgroundPictureRefused,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -1587,6 +1631,91 @@ pub fn unknown_profile_banner_text(unknown: &str, started: &str) -> String {
     }
 }
 
+/// The card raised when a scheme file has been sent to the Recycle Bin.
+///
+/// **Both facts, and no advice.** The file name is what the reader has to be
+/// able to find again and the Recycle Bin is where they will find it — a delete
+/// that says only "deleted" leaves somebody who pressed the wrong button with
+/// nothing to do. The second clause names the scheme now in force, for
+/// [`scheme_in_use_gone`]'s reason: the row moved, and a row that moves without
+/// saying where is a row the reader has to go and check.
+#[must_use]
+pub fn scheme_deleted(file: &str, fallback: &str) -> String {
+    match current() {
+        Lang::English => format!("{file} — moved to the Recycle Bin. {fallback} is in force."),
+        Lang::Chinese => format!("{file} —— 已移入回收站。当前使用 {fallback}。"),
+    }
+}
+
+/// A delete that did not happen, and why. [`not_saved`]'s shape one verb over,
+/// and the `{reason}` is the shell's own sentence on the same known seam.
+#[must_use]
+pub fn not_deleted(reason: &str) -> String {
+    match current() {
+        Lang::English => format!("Not deleted — {reason}"),
+        Lang::Chinese => format!("未删除 —— {reason}"),
+    }
+}
+
+/// The card raised when the chosen background picture is not on screen.
+///
+/// **The file, then what was asked of it.** The sentence the report caught —
+/// "Preview failed: inline image exceeds its decode limit" — got both halves
+/// wrong: it named no file, and it explained the failure in terms of a
+/// mechanism (an inline image) that the reader of the Appearance page has never
+/// met and whose limit was not the one applied.
+///
+/// It takes the **error** and not a rendered string, which is the whole reason
+/// `bt_term::BackgroundImageError` carries facts rather than a sentence: a
+/// `to_string()` on the far side of a worker would have arrived here in English
+/// with nothing left to translate. The two seams that stay in the OS's own
+/// language are the `io::Error` and the decoder's, and those are recorded in the
+/// inventory's §E exactly as [`not_saved`]'s is.
+#[must_use]
+pub fn background_picture_refused(file: &str, error: &bt_term::BackgroundImageError) -> String {
+    refusal_in_lang(current(), file, error)
+}
+
+/// [`background_picture_refused`] with the language named, which is
+/// [`Text::in_lang`]'s split for the same reason: `CURRENT` is one global, and a
+/// test that switched it to read the other column would be switching it under
+/// every other test in the process.
+fn refusal_in_lang(lang: Lang, file: &str, error: &bt_term::BackgroundImageError) -> String {
+    use bt_term::BackgroundImageError as Refusal;
+    match (lang, error) {
+        (Lang::English, Refusal::InvalidPath) => {
+            format!("{file} is not a picture file this window can open")
+        }
+        (Lang::Chinese, Refusal::InvalidPath) => format!("{file} 不是这扇窗能打开的图片文件"),
+        (Lang::English, Refusal::Io(reason)) => format!("{file} could not be read: {reason}"),
+        (Lang::Chinese, Refusal::Io(reason)) => format!("{file} 无法读取：{reason}"),
+        (Lang::English, Refusal::TooLarge { bytes, limit }) => format!(
+            "{file} is {} and a background picture may be up to {}",
+            bt_term::mebibytes(*bytes),
+            bt_term::mebibytes(*limit)
+        ),
+        (Lang::Chinese, Refusal::TooLarge { bytes, limit }) => format!(
+            "{file} 有 {}，背景图最大 {}",
+            bt_term::mebibytes(*bytes),
+            bt_term::mebibytes(*limit)
+        ),
+        (Lang::English, Refusal::UnsupportedFormat) => {
+            format!("{file} is not a picture format this build decodes")
+        }
+        (Lang::Chinese, Refusal::UnsupportedFormat) => format!("{file} 的格式这个版本无法解码"),
+        (Lang::English, Refusal::Decode(reason)) => {
+            format!("{file} could not be decoded: {reason}")
+        }
+        (Lang::Chinese, Refusal::Decode(reason)) => format!("{file} 解码失败：{reason}"),
+        (Lang::English, Refusal::InvalidDimensions) => {
+            format!("{file} has no pixels, or more of them than this build will decode")
+        }
+        (Lang::Chinese, Refusal::InvalidDimensions) => {
+            format!("{file} 没有像素，或像素数超出这个版本的解码上限")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1694,6 +1823,67 @@ mod tests {
                 "{entry:?} reads {chinese:?}, which has no Chinese in it"
             );
         }
+    }
+
+    /// PIN (user report 2026-08-18) — **a refused background picture names the
+    /// file and says what was asked of it, in both languages, and never
+    /// mentions an inline image.**
+    ///
+    /// The reported card read `Preview failed: inline image exceeds its decode
+    /// limit`. Three things were wrong with it and only one was the limit: it
+    /// named no file, it explained the failure through a mechanism the reader of
+    /// the Appearance page has never met, and the Chinese window said the same
+    /// English clause. All three are asserted here.
+    ///
+    /// Red gate: pass `error.to_string()` through a one-line formatter again and
+    /// the Chinese half goes red, because there is nothing left to translate.
+    #[test]
+    fn a_refused_background_picture_names_the_file_in_both_languages() {
+        use bt_term::BackgroundImageError as Refusal;
+        const FILE: &str = "DSCF1264.JPG";
+        for error in [
+            Refusal::InvalidPath,
+            Refusal::Io("access is denied".to_owned()),
+            Refusal::TooLarge {
+                bytes: 200 * 1024 * 1024,
+                limit: bt_term::MAX_BACKGROUND_IMAGE_BYTES,
+            },
+            Refusal::UnsupportedFormat,
+            Refusal::Decode("truncated stream".to_owned()),
+            Refusal::InvalidDimensions,
+        ] {
+            let english = refusal_in_lang(Lang::English, FILE, &error);
+            let chinese = refusal_in_lang(Lang::Chinese, FILE, &error);
+            for (lang, said) in [(Lang::English, &english), (Lang::Chinese, &chinese)] {
+                assert!(
+                    said.starts_with(FILE),
+                    "{error:?} in {lang:?} does not name the file: {said}"
+                );
+                assert!(
+                    !said.contains("inline"),
+                    "{error:?} in {lang:?} still speaks of inline images: {said}"
+                );
+            }
+            assert_ne!(english, chinese, "{error:?} was never translated");
+            assert!(
+                chinese
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "{error:?} reads {chinese:?}, which has no Chinese in it"
+            );
+        }
+        assert!(
+            refusal_in_lang(
+                Lang::English,
+                FILE,
+                &Refusal::TooLarge {
+                    bytes: 200 * 1024 * 1024,
+                    limit: bt_term::MAX_BACKGROUND_IMAGE_BYTES,
+                }
+            )
+            .contains("64 MB"),
+            "and the limit it names is the background's own, not the inline one"
+        );
     }
 
     /// PIN (user ruling, 2026-08-17) — **no string in this window speaks in the
