@@ -23,6 +23,7 @@ mod git;
 mod git_graph;
 mod git_panel;
 mod git_watch;
+mod hex_peek;
 mod highlight;
 mod i18n;
 mod input;
@@ -34,6 +35,7 @@ mod preview_edit;
 mod profiles;
 mod psreadline;
 mod restore;
+mod scheme_watch;
 mod schemes;
 mod search;
 mod seats;
@@ -44,6 +46,7 @@ mod shortcuts;
 mod text_field;
 mod toast;
 mod tooltip;
+mod watch_clock;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -226,6 +229,16 @@ enum AppEvent {
     /// shell output, no hover and no keystroke to produce the frame that would
     /// replace that line — so the probe has to ask for one itself.
     PsReadLineProbed,
+    /// **The kernel says a file in the schemes folder moved** (§7.1.6c-4c,
+    /// `scheme_watch`).
+    ///
+    /// [`Self::GitChanged`]'s twin over a second directory, and separate from it
+    /// for the reason that variant is separate from `GitReady`: it carries no
+    /// answer, only a nudge to look at a clock. Folding the two into one would
+    /// mean a scheme saved while no repository is open still walked every git
+    /// clock in the window, and a commit still asked whether a palette had
+    /// changed.
+    SchemesChanged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -805,6 +818,21 @@ struct PreviewViewState {
 /// A `SeatId` and a [`float::FloatId`] are both `u64`-shaped and would silently
 /// answer for one another if either were used bare, which is the whole reason
 /// this is a type and not a number.
+/// A colour token under the pointer in a text preview (§7.1.6c-4c).
+///
+/// Every field is what the tip needs and none of it is re-derived at paint
+/// time: the box is where the token is drawn, the text is the token as the
+/// document spells it, and the colour is what the swatch is filled with. The
+/// offset is the anchor's identity — see `TooltipAnchorId::PreviewHex`.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewHexHover {
+    surface: PreviewSurface,
+    host: [f32; 4],
+    offset: usize,
+    text: String,
+    rgba: [u8; 4],
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum PreviewSurface {
     /// A `SeatKind::Preview` leaf of this tab's layout tree.
@@ -4231,6 +4259,37 @@ struct Runtime {
     /// The rail and the tick the pointer is on, if any. At most one, because at
     /// most one rail is hot (mock 8478-8483).
     command_rail_hover: Option<(SeatId, usize)>,
+    /// The colour token under the pointer, and where it is drawn
+    /// (§7.1.6c-4c).
+    ///
+    /// On the runtime beside [`Self::command_rail_hover`] rather than on a tab,
+    /// for the reason that field is here: there is one pointer, so there is at
+    /// most one of these in the window whatever tab it is over.
+    preview_hex_hover: Option<PreviewHexHover>,
+    /// The schemes folder's watch and its debounce (§7.1.6c-4c).
+    scheme_watch: scheme_watch::SchemeWatch,
+    /// The scheme file currently reported broken, so that it is reported once.
+    ///
+    /// **Cleared when the folder reads cleanly again**, which is the whole of
+    /// the ruling's "toast again only after it was valid in between": a file
+    /// somebody is editing goes through a dozen unparseable states on its way to
+    /// a good one, and a card per keystroke-plus-save would be a window shouting
+    /// at somebody who is already looking at the error.
+    scheme_fault: Option<String>,
+    /// `[light, dark]`: the name each row stores and the file it last resolved
+    /// to, or `None` when that row's name resolves to nothing.
+    ///
+    /// **A name and a file are not the same identity**, and a rescan needs both.
+    /// The settings file stores a name; a file that stops parsing is reported by
+    /// file; and once it has stopped parsing the catalogue no longer connects
+    /// the two, because the entry that connected them is gone. This is where the
+    /// connection is kept across that gap — without it there is no way to say
+    /// "the scheme you are wearing is the file that just broke" rather than
+    /// "some file in your folder is broken".
+    ///
+    /// `None` for a row storing `""` is the ordinary case and is right: an
+    /// unnamed row means the default, and the default is bundled.
+    scheme_source: [Option<(String, String)>; 2],
     /// A jump's 950 ms row flash, while one is running.
     command_flash: Option<CommandFlash>,
     /// **The window's one in-pane search** (§7.1.5d, S3).
@@ -14598,6 +14657,10 @@ impl Runtime {
             toast_pointer_drawn: toast::ToastPointer::default(),
             command_rails: BTreeMap::new(),
             command_rail_hover: None,
+            preview_hex_hover: None,
+            scheme_watch: scheme_watch::SchemeWatch::default(),
+            scheme_fault: None,
+            scheme_source: [None, None],
             command_flash: None,
             search: search::SearchState::default(),
             search_layout: None,
@@ -14792,9 +14855,16 @@ impl Runtime {
         })?;
         runtime.redraw()?;
         // Said now rather than at the moment of the scan, because the scan
-        // happens before there is a window to say it in — and said once, because
-        // the catalogue is read once (see `schemes::catalogue`).
+        // happens before there is a window to say it in. Said once per launch:
+        // a rescan afterwards reports only the file behind the scheme actually
+        // in force (`reread_schemes`), because that is the one whose breakage
+        // the reader is in the middle of causing.
         runtime.report_skipped_schemes()?;
+        // The first of the two moments the schemes folder's watch can be armed
+        // at — the other is the instant `Customise scheme…` creates it. Nothing
+        // asks whether the folder exists on a schedule; see `scheme_watch`.
+        runtime.scheme_watch.arm(&runtime.event_proxy);
+        runtime.refresh_scheme_sources();
         let background_visible = startup_started.elapsed();
         runtime.background_visible = Some(background_visible);
         if trace_startup {
@@ -16154,6 +16224,21 @@ impl Runtime {
                 tooltip::TipFace::Peek { muted },
             );
         }
+        // The colour under the pointer, on the pointer's own 380ms and the
+        // tip's own surface (§7.1.6c-4c). Pushed last of the content anchors and
+        // therefore outermost of them, which is right: it is the innermost thing
+        // on screen that is not a popup, and nothing else registers a box inside
+        // a preview's body.
+        if self.drag.is_none()
+            && let Some(hover) = self.preview_hex_hover.as_ref()
+        {
+            anchors.push_faced(
+                tooltip::TooltipAnchorId::PreviewHex(hover.surface, hover.offset),
+                hover.host,
+                hover.text.clone(),
+                tooltip::TipFace::Swatch { rgba: hover.rgba },
+            );
+        }
         // A tip whose subject has left the strip has nothing left to say — and a
         // tip still counting down toward a subject that left has nothing to
         // arrive at. Retiring both here, against the list that was just built, is
@@ -16943,6 +17028,15 @@ impl Runtime {
     }
 
     /// The glance card's anchor for the tick the crest is on, if a rail is hot.
+    /// The colour token under the pointer, as an anchor identity.
+    fn preview_hex_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
+        let hover = self.preview_hex_hover.as_ref()?;
+        Some(tooltip::TooltipAnchorId::PreviewHex(
+            hover.surface,
+            hover.offset,
+        ))
+    }
+
     fn command_tick_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
         let (seat, index) = self.command_rail_hover?;
         let tick = self.command_rails.get(&seat)?.rail().ticks.get(index)?;
@@ -19284,6 +19378,9 @@ impl Runtime {
         if let settings::SettingsTarget::ResetAdvanced(category) = target {
             self.reset_advanced_group(category)?;
         }
+        if target == settings::SettingsTarget::CustomiseScheme {
+            self.customise_scheme()?;
+        }
         // Tab layout is the one choice that changes which rows exist, and the
         // focus may be standing on the row it just deleted. So is the
         // disclosure, which is the same sentence with eight rows in it.
@@ -19644,7 +19741,8 @@ impl Runtime {
             // reachable two ways whose body lives on one of them is a verb that
             // half works.
             target @ (settings::SettingsTarget::Advanced(_)
-            | settings::SettingsTarget::ResetAdvanced(_)) => {
+            | settings::SettingsTarget::ResetAdvanced(_)
+            | settings::SettingsTarget::CustomiseScheme) => {
                 self.apply_settings_choice(target)?;
             }
             // A press on the dialog's own body, or inside the open menu but on
@@ -20342,6 +20440,189 @@ impl Runtime {
                 self.apply_background_image(path.to_string_lossy().into_owned())?;
             }
             Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
+        }
+        Ok(())
+    }
+
+    /// **Copy the scheme in force into the user's own folder, and open the
+    /// copy** (§7.1.6c-4c, user ruling: route B).
+    ///
+    /// This is the whole of "a scheme editor" in this product, and the reason it
+    /// is not a panel of nineteen colour wells is that the file already is one:
+    /// §7.1.6c-4a made a scheme a Windows Terminal JSON object, so an editor of
+    /// our own would be a worse way to edit a format the ecosystem already
+    /// edits. What was missing was never a picker — it was a *copy to edit* and
+    /// a way to see what you are typing, and those are the two things this verb
+    /// and [`crate::hex_peek`] add.
+    ///
+    /// Five steps, in the order a person would do them by hand:
+    ///
+    /// 1. take the scheme **actually painted** — by the canvas's luma, which is
+    ///    the question the chrome asks, and not by the theme setting, because
+    ///    under a `BT_BG` override those two disagree on purpose;
+    /// 2. write it out under a name nothing else holds;
+    /// 3. tick it in the row for that canvas, so the window is already wearing
+    ///    the copy before it is edited and the first save is visible;
+    /// 4. shut the dialog, because what happens next is not in it;
+    /// 5. open the file in a preview pane with the keyboard in it.
+    ///
+    /// **A failure to write stops at step two** and says so. Everything after it
+    /// is about a file that exists.
+    fn customise_scheme(&mut self) -> Result<()> {
+        let light = bt_render::background_is_light(bt_render::background_rgb());
+        let settings = self.settings_store.loaded();
+        let stored = if light {
+            settings.light_scheme.clone()
+        } else {
+            settings.dark_scheme.clone()
+        };
+        let catalogue = schemes::catalogue();
+        // The name the picker is ticking, which is the name of what is on
+        // screen: a stored name this build does not hold shows the default, and
+        // a copy called `<a name nobody has> (custom)` would be a file named
+        // after a scheme it does not contain.
+        let base = if catalogue.file_of(&stored, light).is_some() {
+            stored
+        } else {
+            catalogue.default_name(light).to_owned()
+        };
+        let scheme = catalogue.resolve(&base, light);
+        drop(catalogue);
+        let (path, name) = match schemes::write_custom_copy(&base, &scheme) {
+            Ok((path, name, _)) => (path, name),
+            Err(error) => {
+                return self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    Some(i18n::Text::CustomiseScheme.text().to_owned()),
+                    i18n::not_saved(&error.to_string()),
+                );
+            }
+        };
+        // The folder exists now whether or not it did a moment ago, which is one
+        // of the two moments `SchemeWatch` can be armed at.
+        self.scheme_watch.arm(&self.event_proxy);
+        if light {
+            self.apply_scheme(Some(name), None)?;
+        } else {
+            self.apply_scheme(None, Some(name))?;
+        }
+        self.refresh_scheme_sources();
+        // **The dialog goes.** It is the one verb in it whose answer is a
+        // document, and a modal standing over the document it just handed you is
+        // a modal in the way.
+        self.settings.close();
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_file_on(surface, path.clone())?;
+        // The keyboard goes into the text, so the file is *open for editing* and
+        // not merely open. `preview_edit_focus` is re-validated at every read, so
+        // setting it before the head has landed is safe: it becomes true the
+        // moment there is something to type into.
+        self.preview_edit_focus = Some(surface);
+        let anchor = match surface {
+            PreviewSurface::Seat(seat) => toast::ToastAnchor::PreviewSeat(seat),
+            PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
+        };
+        let file = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        self.toast(
+            toast::ToastKind::Ok,
+            anchor,
+            None,
+            i18n::scheme_customised(&file),
+        )
+    }
+
+    /// Note which file each canvas's scheme is coming from, now.
+    ///
+    /// Asked after every event that can change the answer — startup, a row
+    /// pressed, a copy written, a folder re-read — rather than derived when it is
+    /// needed, because by the time it is needed the connection it records is
+    /// exactly what has been lost.
+    fn refresh_scheme_sources(&mut self) {
+        let names = [
+            self.settings_store.loaded().light_scheme.clone(),
+            self.settings_store.loaded().dark_scheme.clone(),
+        ];
+        let catalogue = schemes::catalogue();
+        for (index, light) in [true, false].into_iter().enumerate() {
+            self.scheme_source[index] = catalogue
+                .file_of(&names[index], light)
+                .map(|file| (names[index].clone(), file.to_owned()));
+        }
+    }
+
+    /// The schemes folder moved and has gone quiet: read it again
+    /// (§7.1.6c-4c).
+    ///
+    /// Called once per turn of the loop beside every other clock in this window.
+    /// It costs one comparison while nothing is happening — the debounce arms
+    /// only after a notification, which is what keeps an always-on watch from
+    /// being the polling R31 forbids.
+    fn advance_scheme_watch(&mut self, now: Instant) -> Result<()> {
+        if !self.scheme_watch.due(now) {
+            return Ok(());
+        }
+        self.reread_schemes()
+    }
+
+    /// Read the folder again, and put in force whatever that changed.
+    ///
+    /// Three outcomes, and the interesting one is the middle:
+    ///
+    /// * **the selected scheme changed** — re-derive and hot-apply, through the
+    ///   very door a settings row goes through, so a file saved and a row
+    ///   pressed cannot produce two different windows;
+    /// * **the selected scheme's file stopped parsing** — the colours on screen
+    ///   do not move, and one card says which file and why. Falling back to the
+    ///   default here would be the worst of both: the window would change colour
+    ///   *because* you made a typo, and you would be reading the error against a
+    ///   palette that is not the one you are editing;
+    /// * **the selected scheme's file is gone** — the row falls to the default,
+    ///   which is `Catalogue::resolve`'s standing answer, and one card says so.
+    ///   The stored name is left alone, so putting the file back puts the scheme
+    ///   back.
+    ///
+    /// A scheme nobody has selected can do any of the three and nothing happens,
+    /// which falls out of the arithmetic rather than being checked: what is
+    /// handed to `set_schemes` is derived from the two stored names, so a file
+    /// neither of them resolves to cannot move it.
+    fn reread_schemes(&mut self) -> Result<()> {
+        let source = self.scheme_source.clone();
+        let after = schemes::rescan();
+        let settings = self.settings_store.loaded().clone();
+        let verdict = schemes::rescan_verdict(
+            &after,
+            [&settings.light_scheme, &settings.dark_scheme],
+            source,
+            bt_render::schemes_in_force(),
+            self.scheme_fault.as_deref(),
+        );
+        if bt_render::set_schemes(verdict.schemes.0, verdict.schemes.1)
+            == bt_render::ThemeChange::Changed
+        {
+            self.adopt_new_palette()?;
+        }
+        self.refresh_scheme_sources();
+        self.scheme_fault = verdict.fault;
+        if let Some((file, reason)) = verdict.report {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                Some(i18n::Text::SchemeInUseBroken.text().to_owned()),
+                i18n::scheme_in_use_broken(&file, &reason),
+            )?;
+        }
+        for (name, fallback) in verdict.gone {
+            self.toast(
+                toast::ToastKind::Info,
+                toast::ToastAnchor::Window,
+                Some(i18n::Text::SchemeInUseGone.text().to_owned()),
+                i18n::scheme_in_use_gone(&name, &fallback),
+            )?;
         }
         Ok(())
     }
@@ -22615,6 +22896,93 @@ impl Runtime {
         self.preview_link_hover = over;
         self.apply_pointer_cursor();
         self.repaint_preview()
+    }
+
+    /// The colour token under the pointer, and the box it is drawn in
+    /// (§7.1.6c-4c).
+    ///
+    /// **The painter's arithmetic read forwards**, where `preview_offset_at`
+    /// reads it backwards: the pointer names an offset, the offset names a line
+    /// and a token in it, and the token's columns name the box it occupies on
+    /// the row it was wrapped onto. Both directions go through the same
+    /// `WrapLayout`, so a reflowed line answers with the box the reader can see
+    /// rather than the one an unwrapped document would have had.
+    ///
+    /// The last step is a guard rather than a computation: the offset arrives
+    /// clamped to the row's last column, so a pointer resting past the end of a
+    /// line whose last token is a colour would otherwise be told it is inside
+    /// that colour. Asking whether the pointer is inside the box that was just
+    /// computed is the general form of that check, and it costs one comparison.
+    fn preview_hex_at(&self, position: PhysicalPosition<f64>) -> Option<PreviewHexHover> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (surface, body) = self.preview_surface_at(position)?;
+        let content = self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.content.as_deref())?;
+        let offset = self.preview_offset_at(surface, body, scale, position)?;
+        let starts = preview_edit::line_starts(content);
+        let line_index = preview_edit::line_index(&starts, offset);
+        let (from, to) = preview_edit::line_bounds(content, &starts, line_index);
+        let line = &content[from..to];
+        let token = hex_peek::hex_token_at(line, offset.saturating_sub(from))?;
+
+        let pane = self.preview_pane(surface)?;
+        let metrics = seats::preview_text_metrics(scale);
+        let advance = pane.mono_advance;
+        if advance <= 0.0 {
+            return None;
+        }
+        let wrap = self.preview_wrap(surface)?;
+        let start_column = preview_edit::column_of(line, token.range.start);
+        let end_column = preview_edit::column_of(line, token.range.end);
+        // `row_of` answers with the row **and the column that row starts at** —
+        // not with the column inside it — which is what the caret needs and what
+        // a box has to subtract.
+        let (row, row_start) = wrap.row_of(line_index, start_column);
+        let (end_row, _) = wrap.row_of(line_index, end_column);
+        let column = start_column.saturating_sub(row_start);
+        // A token the wrap broke across two rows is anchored on the part of it
+        // that begins the break, cut at that row's own end: a box running from
+        // one row's middle to the next row's middle is not a box the token is
+        // drawn in. `row_span` is what says where the row ends.
+        let row_end = if end_row == row {
+            end_column
+        } else {
+            wrap.row_span(row).map_or(end_column, |(_, _, to)| to)
+        };
+        let columns = row_end.saturating_sub(start_column).max(1);
+        let left = body[0] + metrics.padding_x + column as f32 * advance - pane.scroll[0];
+        let top = body[1] + metrics.padding_y + row as f32 * metrics.line_height - pane.scroll[1];
+        let host = [
+            left,
+            top,
+            left + columns as f32 * advance,
+            top + metrics.line_height,
+        ];
+        let (x, y) = (position.x as f32, position.y as f32);
+        if x < host[0] || x > host[2] || y < host[1] || y > host[3] {
+            return None;
+        }
+        Some(PreviewHexHover {
+            surface,
+            host,
+            offset: from + token.range.start,
+            text: token.text(line).to_owned(),
+            rgba: token.rgba,
+        })
+    }
+
+    /// Arm, move or retire the colour card's subject.
+    ///
+    /// No repaint of its own: the card is a *tip*, so what it costs is an entry
+    /// in the anchor list the next frame builds, and the tip host's own clock
+    /// decides whether anything is drawn. A pointer crossing a scheme file
+    /// therefore costs exactly what a pointer crossing a tab strip costs.
+    fn note_preview_hex_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
+        let over = position.and_then(|position| self.preview_hex_at(position));
+        if over != self.preview_hex_hover {
+            self.preview_hex_hover = over;
+        }
     }
 
     /// A press on a block's scroll thumb takes hold of it.
@@ -36231,6 +36599,7 @@ impl Runtime {
         self.note_preview_body_hover(free.then_some(position))?;
         self.note_preview_block_hover(free.then_some(position))?;
         self.note_preview_link_hover(free.then_some(position))?;
+        self.note_preview_hex_hover(free.then_some(position));
         // The overlay owns the pointer the way it owns the next click: no chrome
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
         // The invitation takes the pointer outright, scrim included, in the
@@ -36603,10 +36972,19 @@ impl Runtime {
         // for the reason the rail takes the pointer at all: it is the surface on
         // top. `command_tick_anchor` answers only while a rail is hot, so
         // everywhere else this is the tip list exactly as it was.
-        let anchor = self.command_tick_anchor().or_else(|| {
-            self.tooltip_anchor_at(position)
-                .filter(|anchor| !self.layout_peek_suppresses(*anchor))
-        });
+        let anchor = self
+            .command_tick_anchor()
+            // The colour card, on the glance card's own terms and for its own
+            // reason: its anchor is a token that `note_preview_hex_hover` settled
+            // a few lines ago, and the list below still holds the *previous*
+            // frame's. Asking the list first would mean a card that never
+            // arrives while the hand is still, because a hand that has stopped
+            // moving produces no second pointer event to find it with.
+            .or_else(|| self.preview_hex_anchor())
+            .or_else(|| {
+                self.tooltip_anchor_at(position)
+                    .filter(|anchor| !self.layout_peek_suppresses(*anchor))
+            });
         self.note_tooltip(anchor)?;
         // Which pane the pointer is in, settled before anything asks a question of it. Everything
         // below — the formula hover, the link's underline, the reference's underline, the flyout —
@@ -41963,6 +42341,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // this window is read and where the debounce can either fire or ask
             // for a later wake-up.
             AppEvent::GitChanged => {}
+            // Same, one directory over: the time the folder moved at is already
+            // in `scheme_watch`'s mailbox, and `about_to_wait` is where the
+            // quiet window is read.
+            AppEvent::SchemesChanged => {}
             // The answer is already in `psreadline::probe()`; what is owed is a
             // frame that reads it. `refresh_chrome` rebuilds the row's sentence
             // from scratch — `SettingsRow::description` asks `row_state` afresh
@@ -42164,6 +42546,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             return;
         }
         if let Err(error) = runtime.advance_cursor_blink_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        if let Err(error) = runtime.advance_scheme_watch(now) {
             self.fail(event_loop, error);
             return;
         }
@@ -42410,6 +42796,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             runtime.math_hover_clear_at,
             runtime.preview_resample_deadline(),
             runtime.session_store.deadline(),
+            // The schemes folder's own debounce, on the same terms: absent for
+            // every window whose folder nobody is editing.
+            runtime.scheme_watch.deadline(),
             // The debounce a change notification started (R31's D). Absent —
             // and therefore costing nothing — for every window that is not
             // currently holding unanswered news about a repository, which is

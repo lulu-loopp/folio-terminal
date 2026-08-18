@@ -12,16 +12,27 @@
 //! `every_bundled_scheme_parses_and_keeps_the_name_its_row_is_listed_under`
 //! before it ever reached a user.
 //!
-//! # Enumerated once
+//! # Enumerated once, and re-enumerated on a reason
 //!
-//! [`catalogue`] is a `OnceLock`, for the reason `settings::monospace_families`
-//! gives about this machine's fonts: `SettingsRow::option_label` hands back
-//! `&'static str`, and a list that can change under it cannot supply one
-//! without a leak per call. The first ask is at startup — the stored pair has
-//! to be in force before the first grid is measured — so a file dropped into
-//! the folder afterwards is found on the next launch. That is the same answer
-//! the font row gives to a font installed mid-session, and it is stated here
-//! rather than left to be discovered.
+//! ~~[`catalogue`] is a `OnceLock`~~ — **superseded by §7.1.6c-4c**. The
+//! original text said a file dropped into the folder would be found on the next
+//! launch, "the same answer the font row gives to a font installed
+//! mid-session". That answer stopped being tenable the day this product started
+//! *writing* into the folder itself: a `Customise scheme…` that wrote a file the
+//! dialog could not list until a restart would be a verb that appears not to
+//! have worked.
+//!
+//! So the store is a revision-keyed [`std::sync::RwLock`] instead, read through
+//! an [`Arc`] so a caller holds a whole consistent catalogue rather than a
+//! borrow of a list that can be replaced under it. Re-enumeration happens on a
+//! **reason** and never on a clock — the folder is customised, or the folder's
+//! own watch says a file in it moved — which is the same rule R31 states about
+//! repositories, applied to the one directory this window writes schemes into.
+//!
+//! `SettingsRow::option_label` still hands back `&'static str`, and that is
+//! answered where the question is asked: `settings::scheme_labels` keeps one
+//! leaked slice per catalogue revision and interns each distinct name once. See
+//! its own doc comment for why the interning is bounded.
 //!
 //! # A file that will not parse
 //!
@@ -30,6 +41,11 @@
 //! not fatal: one bad file in a folder of good ones must not be able to stop a
 //! terminal from starting, and a silent skip would leave the user staring at a
 //! list their scheme is not in with nothing to read.
+
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock, atomic::AtomicU64},
+};
 
 use bt_render::ColourScheme;
 
@@ -52,6 +68,16 @@ pub struct SchemeEntry {
     /// [`Catalogue::names_for`].
     pub light: bool,
     pub origin: SchemeOrigin,
+    /// The file this entry was read out of — a bare file name, the same string
+    /// [`SchemeReject`] carries.
+    ///
+    /// Kept because a name and a file are two different identities and the
+    /// watcher needs both: the settings file stores a *name*, while a rescan
+    /// that fails reports a *file*. Without this field there is no way to say
+    /// "the scheme you are wearing is the one that just stopped parsing", and
+    /// the window would have to choose between reporting every bad file in the
+    /// folder or none.
+    pub file: String,
     pub scheme: ColourScheme,
 }
 
@@ -152,6 +178,7 @@ impl Catalogue {
                         light: bt_render::background_is_light(parsed.background),
                         name: parsed.name,
                         origin,
+                        file,
                         scheme: ColourScheme {
                             background: parsed.background,
                             foreground: parsed.foreground,
@@ -208,6 +235,36 @@ impl Catalogue {
             .iter()
             .filter(move |entry| entry.light == light)
             .map(|entry| entry.name.as_str())
+    }
+
+    /// Whether any row of either canvas is listed under this name.
+    ///
+    /// Canvas-blind on purpose, unlike every other lookup here: this is the
+    /// question [`unique_custom`] asks, and a copy that took a name already used
+    /// by the *other* canvas would be a folder holding two files claiming one
+    /// name — legal for the picker, which filters by canvas, and a trap for the
+    /// person reading the folder.
+    #[must_use]
+    pub fn holds_name(&self, name: &str) -> bool {
+        self.entries.iter().any(|entry| entry.name == name)
+    }
+
+    /// The file the scheme listed under `name` on this canvas was read out of.
+    #[must_use]
+    pub fn file_of(&self, name: &str, light: bool) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|entry| entry.light == light && entry.name == name)
+            .map(|entry| entry.file.as_str())
+    }
+
+    /// The reason a named file was skipped, if it was.
+    #[must_use]
+    pub fn reject_reason(&self, file: &str) -> Option<&str> {
+        self.rejects
+            .iter()
+            .find(|reject| reject.file == file)
+            .map(|reject| reject.reason.as_str())
     }
 
     /// The colours a stored name resolves to on this build, and the default's
@@ -281,10 +338,272 @@ pub const FOLIO_LIGHT_NAME: &str = "Folio Light";
 /// And its dark half.
 pub const FOLIO_DARK_NAME: &str = "Folio Dark";
 
-/// Every scheme this process can offer, read once — see the module header.
-pub fn catalogue() -> &'static Catalogue {
-    static CATALOGUE: std::sync::OnceLock<Catalogue> = std::sync::OnceLock::new();
-    CATALOGUE.get_or_init(|| Catalogue::build(bundled_sources().chain(user_sources())))
+/// The store behind [`catalogue`] and [`rescan`], and the revision that names
+/// what is in it.
+///
+/// The revision is a separate atomic rather than a field of [`Catalogue`],
+/// because the readers who need it — `settings::scheme_labels`, which keeps a
+/// leaked slice per revision — need to ask "is what I cached still current"
+/// without taking the lock or cloning the `Arc`.
+static CATALOGUE: RwLock<Option<Arc<Catalogue>>> = RwLock::new(None);
+static REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// Which enumeration [`catalogue`] would answer with.
+///
+/// Starts at 1 and advances on every [`rescan`] that changed the list, so `0`
+/// is "nothing has been enumerated yet" and no cache keyed on it can collide
+/// with a real answer.
+#[must_use]
+pub fn revision() -> u64 {
+    if REVISION.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        drop(catalogue());
+    }
+    REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Every scheme this process can offer.
+///
+/// Enumerated on the first ask — at startup, because the stored pair has to be
+/// in force before the first grid is measured — and re-enumerated only by
+/// [`rescan`]. See the module header for why this stopped being a `OnceLock`.
+#[must_use]
+pub fn catalogue() -> Arc<Catalogue> {
+    if let Some(held) = CATALOGUE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return held;
+    }
+    rescan()
+}
+
+/// Read the folder again and put the result in force.
+///
+/// Always re-reads: the caller only ever asks because something happened —
+/// this window wrote a file, or the folder's watch fired — and a rescan that
+/// second-guessed its caller would be a cache with an opinion. The revision
+/// advances only when the answer actually differs, so a save that changed a
+/// comment costs no relabelling downstream.
+pub fn rescan() -> Arc<Catalogue> {
+    let built = Arc::new(Catalogue::build(bundled_sources().chain(user_sources())));
+    let mut held = CATALOGUE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let changed = held
+        .as_ref()
+        .is_none_or(|previous| previous.entries != built.entries);
+    if changed {
+        REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    *held = Some(Arc::clone(&built));
+    built
+}
+
+/// The folder a user's own schemes live in, made if it is not there.
+///
+/// Made rather than merely named, because the one caller that asks for it by
+/// this door is about to write into it — the enumeration reads through
+/// [`user_sources`], which deliberately does *not* create anything so that a
+/// user who never customises a scheme never gets an empty directory in their
+/// `%APPDATA%` advertising a feature they did not ask for.
+pub fn user_dir() -> std::io::Result<PathBuf> {
+    let directory = crate::persist::storage_dir().join(USER_SCHEME_DIR);
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory)
+}
+
+/// What the copy of `base` is called, at `attempt`.
+///
+/// `attempt` 1 is `Nord (custom)`, and every later one numbers itself —
+/// `Nord (custom 2)`. The first has no number because the overwhelmingly common
+/// case is one copy, and `Nord (custom 1)` beside no `Nord (custom 2)` reads as
+/// a program that expects you to make more.
+#[must_use]
+pub fn custom_name(base: &str, attempt: u32) -> String {
+    if attempt <= 1 {
+        format!("{base} (custom)")
+    } else {
+        format!("{base} (custom {attempt})")
+    }
+}
+
+/// The file name a scheme called `name` is written under.
+///
+/// Windows forbids nine characters in a file name and forbids a trailing dot or
+/// space; a scheme's `name` is a free string out of somebody's JSON and may hold
+/// any of them. Each forbidden character becomes `-` — a replacement and not a
+/// deletion, so two names that differ only in punctuation do not collide into
+/// one file — and the trailing run is trimmed. The name inside the file is
+/// **not** touched by any of this: the file name is a place to keep it and the
+/// `name` key is its identity.
+#[must_use]
+pub fn file_name_for(name: &str) -> String {
+    let mut cleaned: String = name
+        .chars()
+        .map(|character| {
+            if matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            ) || character.is_control()
+            {
+                '-'
+            } else {
+                character
+            }
+        })
+        .collect();
+    while cleaned.ends_with(['.', ' ']) {
+        cleaned.pop();
+    }
+    format!("{cleaned}.json")
+}
+
+/// The first `(name, file)` pair for a copy of `base` that neither the catalogue
+/// nor the folder already holds.
+///
+/// **Both are checked, at the same attempt**, and that is the whole of this
+/// function. A name that is free while its file is taken would write over
+/// somebody's file; a file that is free while its name is taken would produce a
+/// second row the picker cannot tell from the first — `Catalogue::build` folds
+/// two entries of one name into one, so the copy would silently replace what it
+/// was copied from.
+///
+/// `taken` is handed in rather than read here so the rule can be tested without
+/// a filesystem: it answers "is this name or this file already spoken for".
+pub fn unique_custom(base: &str, taken: impl Fn(&str, &str) -> bool) -> (String, String) {
+    for attempt in 1..=u32::MAX {
+        let name = custom_name(base, attempt);
+        let file = file_name_for(&name);
+        if !taken(&name, &file) {
+            return (name, file);
+        }
+    }
+    unreachable!("a u32's worth of copies of one scheme cannot all be taken")
+}
+
+/// Write a copy of `scheme` into the user's folder, under a name and a file
+/// nothing else holds, and put the enlarged catalogue in force.
+///
+/// Returns the path written and the name the copy is listed under — the two
+/// things the caller needs and the two it must not compute a second time: the
+/// path is what a preview pane is opened on, and the name is what goes into
+/// `settings.json`, and a caller that re-derived either would be re-running
+/// [`unique_custom`] against a folder that now contains the answer.
+///
+/// **The copy is written, not linked.** What is put on disk is every one of the
+/// twenty-two keys resolved — see `bt_persist::write_scheme` — so the file the
+/// user opens holds the colours they are looking at, including the ones the
+/// scheme it was copied from left to a fallback.
+pub fn write_custom_copy(
+    base: &str,
+    scheme: &ColourScheme,
+) -> std::io::Result<(PathBuf, String, Arc<Catalogue>)> {
+    let directory = user_dir()?;
+    let held = catalogue();
+    let (name, file) = unique_custom(base, |name, file| {
+        held.holds_name(name) || directory.join(file).exists()
+    });
+    let text = bt_persist::write_scheme(&bt_persist::SchemeFileV1 {
+        name: name.clone(),
+        background: scheme.background,
+        foreground: scheme.foreground,
+        cursor: scheme.cursor,
+        selection: scheme.selection,
+        ansi: scheme.ansi,
+        accent: scheme.accent,
+    });
+    let path = directory.join(&file);
+    std::fs::write(&path, text)?;
+    Ok((path, name, rescan()))
+}
+
+/// What a rescan of the folder decided about the two schemes in force.
+///
+/// **Pure, and separate from everything that raises a card or repaints a
+/// window**, for [`crate::watch_clock::WatchClock`]'s reason: every interesting
+/// claim about this mechanism is a claim about *which* of three things happened
+/// to a named scheme, and a version of it living inside the runtime would only
+/// be checkable by writing files and watching a window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RescanVerdict {
+    /// What to put in force, `(light, dark)`.
+    pub schemes: (ColourScheme, ColourScheme),
+    /// The file behind a scheme in force that will not parse, if there is one.
+    /// The caller holds it so the next rescan can tell *still broken* from
+    /// *broken again*.
+    pub fault: Option<String>,
+    /// `(file, reason)` when that fault has not been said yet.
+    pub report: Option<(String, String)>,
+    /// `(name, fallback)` for each canvas whose file has left the folder.
+    pub gone: Vec<(String, String)>,
+}
+
+/// Read the three outcomes out of a fresh catalogue.
+///
+/// * **Still there** — resolve it, which is how a scheme edited in place gets
+///   its new colours.
+/// * **Its file will not parse** — keep what is in force. Falling back to the
+///   default here would be the worst of both: the window would change colour
+///   *because* of a typo, and the error would be read against a palette that is
+///   not the one being edited.
+/// * **Its file is gone** — fall to the default, which is [`Catalogue::resolve`]'s
+///   standing answer, and say so. The stored name is untouched, so putting the
+///   file back puts the scheme back.
+///
+/// A scheme nobody selected does all three and moves nothing, and that falls out
+/// of the arithmetic rather than being checked: what comes back is derived from
+/// the two stored names alone.
+///
+/// `source` is what each row resolved to **before** this rescan — the name it
+/// held and the file that name came from. It is the caller's memory because the
+/// catalogue cannot be it: once a file stops parsing, the entry that connected
+/// the name to the file is exactly what is missing.
+#[must_use]
+pub fn rescan_verdict(
+    after: &Catalogue,
+    stored: [&str; 2],
+    source: [Option<(String, String)>; 2],
+    in_force: (ColourScheme, ColourScheme),
+    held_fault: Option<&str>,
+) -> RescanVerdict {
+    let mut schemes = (
+        after.resolve(stored[0], true),
+        after.resolve(stored[1], false),
+    );
+    let mut fault: Option<(String, String)> = None;
+    let mut gone = Vec::new();
+    for (index, light) in [true, false].into_iter().enumerate() {
+        let name = stored[index];
+        if after.file_of(name, light).is_some() {
+            continue;
+        }
+        // It resolved before and does not now, under the same name: this row's
+        // own file is what moved.
+        let Some((_, file)) = source[index].as_ref().filter(|(held, _)| held == name) else {
+            continue;
+        };
+        match after.reject_reason(file) {
+            Some(reason) => {
+                if light {
+                    schemes.0 = in_force.0;
+                } else {
+                    schemes.1 = in_force.1;
+                }
+                fault.get_or_insert((file.clone(), reason.to_owned()));
+            }
+            None => gone.push((name.to_owned(), after.default_name(light).to_owned())),
+        }
+    }
+    let report = fault
+        .clone()
+        .filter(|(file, _)| held_fault != Some(file.as_str()));
+    RescanVerdict {
+        schemes,
+        fault: fault.map(|(file, _)| file),
+        report,
+        gone,
+    }
 }
 
 /// One candidate file: its name, where it came from, and either its text or the
@@ -549,6 +868,245 @@ mod tests {
         assert_eq!(nord.len(), 1, "one row, not two");
         assert_eq!(nord[0].origin, SchemeOrigin::User);
         assert_eq!(nord[0].scheme.background, [0x11, 0x18, 0x27]);
+    }
+
+    /// PIN (§7.1.6c-4c) — **what this window writes is what it ships**: a copy
+    /// of Folio's own dark scheme is `folio-dark.json`, byte for byte, but for
+    /// the name.
+    ///
+    /// This is the canonical-key-order pin and it is stated as an equality with
+    /// a real file rather than as a list of keys, because the list of keys is
+    /// what a reader would compare a written file against by eye. A writer that
+    /// sorted its keys, dropped a fallback it could have omitted, spelled its
+    /// hex in capitals or indented four spaces fails here.
+    #[test]
+    fn a_written_scheme_is_the_bundled_file_it_was_copied_from() {
+        let catalogue = Catalogue::build(bundled_sources());
+        let dark = catalogue.resolve(FOLIO_DARK_NAME, false);
+        let written = bt_persist::write_scheme(&bt_persist::SchemeFileV1 {
+            name: FOLIO_DARK_NAME.to_owned(),
+            background: dark.background,
+            foreground: dark.foreground,
+            cursor: dark.cursor,
+            selection: dark.selection,
+            ansi: dark.ansi,
+            accent: dark.accent,
+        });
+        assert_eq!(
+            written,
+            include_str!("../../../assets/schemes/folio-dark.json")
+        );
+    }
+
+    /// PIN — a copy takes the first name **and** file nothing holds, and both are
+    /// checked at the same attempt.
+    ///
+    /// The two halves matter separately: a free name over a taken file writes
+    /// over somebody's file, and a free file under a taken name produces a
+    /// second entry the picker folds into the first — so the copy would silently
+    /// replace what it was copied from.
+    #[test]
+    fn a_copy_takes_the_first_name_and_file_that_are_both_free() {
+        assert_eq!(
+            unique_custom("Nord", |_, _| false),
+            ("Nord (custom)".to_owned(), "Nord (custom).json".to_owned())
+        );
+        // The name is taken; the file is not.
+        assert_eq!(
+            unique_custom("Nord", |name, _| name == "Nord (custom)"),
+            (
+                "Nord (custom 2)".to_owned(),
+                "Nord (custom 2).json".to_owned()
+            )
+        );
+        // The file is taken; the name is not.
+        assert_eq!(
+            unique_custom("Nord", |_, file| file == "Nord (custom).json"),
+            (
+                "Nord (custom 2)".to_owned(),
+                "Nord (custom 2).json".to_owned()
+            )
+        );
+        // A folder somebody has been busy in.
+        let taken = ["Nord (custom)", "Nord (custom 2)", "Nord (custom 3)"];
+        assert_eq!(
+            unique_custom("Nord", |name, _| taken.contains(&name)).0,
+            "Nord (custom 4)"
+        );
+        // A copy of a copy is numbered from the copy's own name, not from the
+        // scheme it ultimately came from.
+        assert_eq!(
+            unique_custom("Nord (custom)", |_, _| false).0,
+            "Nord (custom) (custom)"
+        );
+    }
+
+    /// A scheme whose name is not a legal file name still gets a file, and the
+    /// name inside the file is untouched.
+    #[test]
+    fn a_name_the_filesystem_refuses_is_spelled_into_one_it_accepts() {
+        assert_eq!(file_name_for("Nord"), "Nord.json");
+        assert_eq!(file_name_for("a/b:c*d?e"), "a-b-c-d-e.json");
+        assert_eq!(file_name_for("trailing dots..."), "trailing dots.json");
+        assert_eq!(file_name_for("trailing space   "), "trailing space.json");
+        // A replacement rather than a deletion, so two names that differ only in
+        // punctuation do not collide into one file.
+        assert_ne!(file_name_for("a:b"), file_name_for("ab"));
+    }
+
+    /// PIN — **the selected scheme changed, so it is applied; an unselected one
+    /// changed, so nothing moves.**
+    #[test]
+    fn a_rescan_moves_the_selected_scheme_and_only_the_selected_one() {
+        let retuned =
+            Catalogue::build(bundled_sources().chain([
+                SchemeSource {
+                    file: "mine.json".to_owned(),
+                    origin: SchemeOrigin::User,
+                    text:
+                        Ok(
+                            include_str!("../../../assets/schemes/nord.json").replace(
+                                "\"background\": \"#2e3440\"",
+                                "\"background\": \"#111827\"",
+                            ),
+                        ),
+                },
+            ]));
+        let in_force = (bt_render::FOLIO_LIGHT, bt_render::FOLIO_DARK);
+
+        let chosen = rescan_verdict(
+            &retuned,
+            ["", "Nord"],
+            [None, Some(("Nord".to_owned(), "nord.json".to_owned()))],
+            in_force,
+            None,
+        );
+        assert_eq!(chosen.schemes.1.background, [0x11, 0x18, 0x27]);
+        assert_eq!(chosen.report, None);
+        assert!(chosen.gone.is_empty());
+
+        // The same folder, with nobody wearing Nord.
+        let ignored = rescan_verdict(
+            &retuned,
+            ["Folio Light", "Folio Dark"],
+            [
+                Some(("Folio Light".to_owned(), "folio-light.json".to_owned())),
+                Some(("Folio Dark".to_owned(), "folio-dark.json".to_owned())),
+            ],
+            in_force,
+            None,
+        );
+        assert_eq!(ignored.schemes, in_force);
+        assert_eq!(ignored.report, None);
+    }
+
+    /// PIN — **the file behind the scheme in force stopped parsing: the colours
+    /// stay, and it is said once.**
+    #[test]
+    fn a_broken_file_keeps_the_palette_and_is_reported_once_until_it_is_fixed() {
+        let broken = Catalogue::build(bundled_sources().chain([SchemeSource {
+            file: "mine.json".to_owned(),
+            origin: SchemeOrigin::User,
+            text: Ok(r##"{"name":"Mine","background":"#nope"}"##.to_owned()),
+        }]));
+        // Whatever is on screen right now, which is deliberately not either of
+        // the constants: this is the value that has to come back out.
+        let worn = ColourScheme {
+            background: [0x11, 0x22, 0x33],
+            ..bt_render::FOLIO_DARK
+        };
+        let in_force = (bt_render::FOLIO_LIGHT, worn);
+        let source = [None, Some(("Mine".to_owned(), "mine.json".to_owned()))];
+
+        let first = rescan_verdict(&broken, ["", "Mine"], source.clone(), in_force, None);
+        assert_eq!(first.schemes.1, worn, "the palette in force does not move");
+        assert_eq!(first.fault.as_deref(), Some("mine.json"));
+        let (file, reason) = first.report.clone().expect("a new fault is said");
+        assert_eq!(file, "mine.json");
+        assert!(
+            reason.contains("background"),
+            "and it names the key: {reason}"
+        );
+        assert!(first.gone.is_empty(), "a broken file has not gone anywhere");
+
+        // Saved broken again, with the same fault held: nothing more is said.
+        let again = rescan_verdict(
+            &broken,
+            ["", "Mine"],
+            source.clone(),
+            in_force,
+            first.fault.as_deref(),
+        );
+        assert_eq!(again.fault.as_deref(), Some("mine.json"));
+        assert_eq!(again.report, None, "one card, not one per save");
+
+        // Fixed. The fault clears, and the new colours go in.
+        let fixed = Catalogue::build(bundled_sources().chain([SchemeSource {
+            file: "mine.json".to_owned(),
+            origin: SchemeOrigin::User,
+            text: Ok(include_str!("../../../assets/schemes/nord.json").replace("Nord", "Mine")),
+        }]));
+        let good = rescan_verdict(
+            &fixed,
+            ["", "Mine"],
+            source.clone(),
+            in_force,
+            again.fault.as_deref(),
+        );
+        assert_eq!(good.schemes.1.background, [0x2e, 0x34, 0x40]);
+        assert_eq!(good.fault, None);
+        assert_eq!(good.report, None);
+
+        // And broken a third time, with nothing held: it is said again.
+        let relapse = rescan_verdict(&broken, ["", "Mine"], source, in_force, None);
+        assert!(
+            relapse.report.is_some(),
+            "a fault that was good in between is news again"
+        );
+    }
+
+    /// PIN — **the file left the folder: the row falls to the default and says
+    /// so, once.**
+    ///
+    /// Once falls out of the state rather than being counted: the second rescan
+    /// has no source to compare against, because the first one is what cleared
+    /// it.
+    #[test]
+    fn a_file_that_left_the_folder_falls_to_the_default_and_says_so_once() {
+        let without = Catalogue::build(bundled_sources());
+        let in_force = (bt_render::FOLIO_LIGHT, bt_render::FOLIO_DARK);
+        let first = rescan_verdict(
+            &without,
+            ["", "Mine"],
+            [None, Some(("Mine".to_owned(), "mine.json".to_owned()))],
+            in_force,
+            None,
+        );
+        assert_eq!(first.schemes.1, bt_render::FOLIO_DARK);
+        assert_eq!(first.gone, [("Mine".to_owned(), "Folio Dark".to_owned())]);
+        assert_eq!(first.report, None, "a missing file is not a broken one");
+
+        let second = rescan_verdict(&without, ["", "Mine"], [None, None], in_force, None);
+        assert!(second.gone.is_empty(), "said once");
+        assert_eq!(second.schemes.1, bt_render::FOLIO_DARK);
+    }
+
+    /// A name nobody ever held is not news: a `settings.json` edited by hand can
+    /// name a scheme that has never existed, and every rescan must not announce
+    /// its absence.
+    #[test]
+    fn a_name_that_never_resolved_is_never_reported_as_gone() {
+        let catalogue = Catalogue::build(bundled_sources());
+        let verdict = rescan_verdict(
+            &catalogue,
+            ["", "A Scheme Nobody Wrote"],
+            [None, None],
+            (bt_render::FOLIO_LIGHT, bt_render::FOLIO_DARK),
+            None,
+        );
+        assert!(verdict.gone.is_empty());
+        assert_eq!(verdict.report, None);
+        assert_eq!(verdict.schemes.1, bt_render::FOLIO_DARK);
     }
 
     /// The chrome a bundled scheme derives is that scheme's, all the way to the

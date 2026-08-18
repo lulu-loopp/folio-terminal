@@ -24,7 +24,7 @@
 //!    drops the handle — see [`GitWatch::sync`], which is handed the wanted set
 //!    and owns the difference.
 //! 2. **Coalesced** by [`WatchClock`]: one re-read after the tree goes quiet, and
-//!    at most one per [`GIT_WATCH_FLOOR`] while it does not.
+//!    at most one per [`crate::watch_clock::WATCH_FLOOR`] while it does not.
 //! 3. **An overflow is a change.** The kernel's "I stopped keeping track" is
 //!    reported by `bt_platform::DirWatch` exactly like every other notification,
 //!    because it carries the same information this file uses.
@@ -46,99 +46,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::AppEvent;
-
-/// How long a tree has to hold still before its news is acted on.
-///
-/// A single `git add` is one or two notifications inside a millisecond of each
-/// other; a `git commit` is a few dozen. Three hundred milliseconds is long
-/// enough that all of them arrive as one piece of news and short enough that a
-/// reader who typed the command has not looked away from the panel yet.
-pub const GIT_WATCH_QUIET: Duration = Duration::from_millis(300);
-
-/// And the shortest interval between two re-reads of one repository, however
-/// much is happening.
-///
-/// **This is what a `cargo build` costs.** A build writes for thirty seconds
-/// without a three-hundred-millisecond gap anywhere in it, so the quiet window
-/// alone would either say nothing for thirty seconds or — with no floor —
-/// nothing at all until it ended. Two seconds is the compromise the ruling
-/// names: the page keeps up with a build in progress, and the repository is
-/// asked no more often than a person could read the answer.
-pub const GIT_WATCH_FLOOR: Duration = Duration::from_secs(2);
-
-/// **The debounce, as arithmetic** — one repository's clock.
-///
-/// Pure and separate from everything that owns a handle, because the interesting
-/// claims about this mechanism are all claims about *times*: that a burst
-/// becomes one re-read, that a storm becomes one every two seconds, and that
-/// silence becomes nothing. A version of this living inside the watcher thread
-/// would only be checkable by writing files and waiting.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct WatchClock {
-    /// When the first notification since the last re-read arrived — the start of
-    /// the news that is currently owed. `None` when nothing is owed, which is
-    /// the whole of "this clock is not running".
-    first_pending: Option<Instant>,
-    /// And the most recent one, which is what the quiet window is measured from.
-    last_event: Option<Instant>,
-    /// When this repository was last re-read *because of this clock*, and the
-    /// floor's own anchor.
-    last_reread: Option<Instant>,
-}
-
-impl WatchClock {
-    /// The kernel said something moved.
-    pub fn note_event(&mut self, at: Instant) {
-        self.first_pending.get_or_insert(at);
-        self.last_event = Some(match self.last_event {
-            Some(last) if last > at => last,
-            _ => at,
-        });
-    }
-
-    /// When the re-read this clock owes becomes due, if it owes one.
-    ///
-    /// Three terms, and each is one of the ruling's three sentences:
-    ///
-    /// - **quiet**: `last_event + QUIET` — wait for the tree to stop moving.
-    /// - **cap**: `first_pending + FLOOR` — but never wait longer than the floor
-    ///   after the news *started*, or a build that never goes quiet would keep
-    ///   the panel silent for its whole duration.
-    /// - **floor**: `last_reread + FLOOR` — and never sooner than that after the
-    ///   last one, which is what makes a storm cost one reading every two
-    ///   seconds instead of one every three hundred milliseconds.
-    #[must_use]
-    pub fn due_at(&self) -> Option<Instant> {
-        let first = self.first_pending?;
-        let last = self.last_event?;
-        let natural = (last + GIT_WATCH_QUIET).min(first + GIT_WATCH_FLOOR);
-        Some(match self.last_reread {
-            Some(previous) => natural.max(previous + GIT_WATCH_FLOOR),
-            None => natural,
-        })
-    }
-
-    /// Is it due now, and if so, take it.
-    ///
-    /// Taking is what clears the news: after this the clock owes nothing until
-    /// the kernel speaks again, which is what makes "nothing changed, nothing
-    /// fires" a property of the type rather than of its caller.
-    pub fn take_due(&mut self, now: Instant) -> bool {
-        if self.due_at().is_none_or(|due| due > now) {
-            return false;
-        }
-        self.first_pending = None;
-        self.last_event = None;
-        self.last_reread = Some(now);
-        true
-    }
-}
+use crate::{AppEvent, watch_clock::WatchClock};
 
 /// One repository's subscription, and the clock its notifications feed.
 struct Watched {
@@ -394,7 +307,10 @@ fn trace(message: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::watch_clock::{WATCH_FLOOR, WATCH_QUIET};
 
     /// PIN (D, rule 2) — **a burst is one reading, and a storm is one reading
     /// every two seconds.**
@@ -421,7 +337,7 @@ mod tests {
         clock.note_event(start + Duration::from_millis(1));
         assert_eq!(
             clock.due_at(),
-            Some(start + Duration::from_millis(1) + GIT_WATCH_QUIET),
+            Some(start + Duration::from_millis(1) + WATCH_QUIET),
             "the quiet window runs from the last of them, not the first"
         );
         assert!(
@@ -462,7 +378,7 @@ mod tests {
         for pair in readings.windows(2) {
             let gap = pair[1] - pair[0];
             assert!(
-                gap >= GIT_WATCH_FLOOR && gap < GIT_WATCH_FLOOR + Duration::from_millis(100),
+                gap >= WATCH_FLOOR && gap < WATCH_FLOOR + Duration::from_millis(100),
                 "and no two are closer together than the floor: {gap:?}"
             );
         }
@@ -478,11 +394,11 @@ mod tests {
         let due = clock.due_at().expect("the last notification is still owed");
         assert_eq!(due, storm_from + Duration::from_millis(6100));
         assert!(
-            due <= quiet_at + GIT_WATCH_QUIET,
+            due <= quiet_at + WATCH_QUIET,
             "never later than a quiet window after the last thing that happened"
         );
         assert!(
-            due >= storm_from + Duration::from_millis(4050) + GIT_WATCH_FLOOR,
+            due >= storm_from + Duration::from_millis(4050) + WATCH_FLOOR,
             "and never sooner than a floor after the previous reading"
         );
         assert!(!clock.take_due(due - Duration::from_millis(1)));
@@ -637,7 +553,7 @@ mod tests {
             "not yet: the tree has not been quiet for long enough"
         );
         assert_eq!(
-            watch.due(now + GIT_WATCH_QUIET),
+            watch.due(now + WATCH_QUIET),
             vec![moved],
             "and then exactly the one that moved"
         );

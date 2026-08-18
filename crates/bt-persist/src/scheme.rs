@@ -147,6 +147,78 @@ pub fn parse_scheme(json: &str) -> Result<SchemeFileV1, SchemeParseError> {
     })
 }
 
+/// Every key a scheme Folio writes carries, in the order it writes them.
+///
+/// The order is the one the ten bundled files are written in, and it is the
+/// reading order of the format rather than an alphabetical one: the scheme's
+/// identity, then the surface, then the ink, then the two marks drawn on that
+/// surface, then Folio's own key, then the ANSI sixteen in palette order. A
+/// file this product hands a user to edit has to look like the ten they can
+/// compare it against, and `serde_json`'s map order is alphabetical — which
+/// would put `accent` above `background` and scatter the sixteen from
+/// `brightBlack` to `yellow`, a file nobody could diff against a bundled one.
+///
+/// It is spelled out here rather than derived from [`SchemeFileV1`]'s field
+/// order because the two differ on purpose: the struct holds `ansi` as one
+/// array, and the file spells all sixteen of its members.
+const WRITE_KEYS: [&str; 6] = [
+    "name",
+    "background",
+    "foreground",
+    "cursorColor",
+    "selectionBackground",
+    "accent",
+];
+
+/// One scheme as a file: the same JSON [`parse_scheme`] reads, pretty-printed
+/// two spaces deep, keys in [`WRITE_KEYS`] then [`ANSI_KEYS`] order.
+///
+/// **Every optional key is written out.** `cursorColor`, `selectionBackground`
+/// and `accent` all have documented fallbacks, so a writer could leave out the
+/// ones that happen to equal theirs and produce a shorter file — and hand the
+/// reader a file whose colours change when they edit an unrelated line, because
+/// the fallback they were silently riding on moved. What is written is what is
+/// in force.
+///
+/// The name goes through `serde_json` rather than being quoted here, so that a
+/// scheme called `He said "hi"` writes a file that parses; every other value is
+/// six hex digits and has nothing to escape.
+#[must_use]
+pub fn write_scheme(scheme: &SchemeFileV1) -> String {
+    let values: [String; 6] = [
+        Value::from(scheme.name.as_str()).to_string(),
+        quoted_hex(scheme.background),
+        quoted_hex(scheme.foreground),
+        quoted_hex(scheme.cursor),
+        quoted_hex(scheme.selection),
+        quoted_hex(scheme.accent),
+    ];
+    let mut out = String::from("{\n");
+    let lines = WRITE_KEYS
+        .into_iter()
+        .zip(values)
+        .chain(ANSI_KEYS.into_iter().zip(scheme.ansi.map(quoted_hex)));
+    let mut first = true;
+    for (key, value) in lines {
+        if !first {
+            out.push_str(",\n");
+        }
+        first = false;
+        out.push_str("  \"");
+        out.push_str(key);
+        out.push_str("\": ");
+        out.push_str(&value);
+    }
+    out.push_str("\n}\n");
+    out
+}
+
+/// `#rrggbb`, lower case, in quotes — the spelling [`parse_hex`] reads and the
+/// ten bundled files use.
+fn quoted_hex(colour: [u8; 3]) -> String {
+    format!("\"#{:02x}{:02x}{:02x}\"", colour[0], colour[1], colour[2])
+}
+
 /// `ink` at `alpha_per_mille` over `canvas`, rounding half away from zero.
 ///
 /// **This is `bt_render::theme::ink_over`'s arithmetic, transcribed** — the same
@@ -549,5 +621,91 @@ mod tests {
             );
             assert!(error.to_string().contains(shape));
         }
+    }
+
+    /// PIN — what [`write_scheme`] writes, [`parse_scheme`] reads back as the
+    /// very same scheme.
+    ///
+    /// The sample is a foreign file that names neither `accent` nor a cursor of
+    /// its own, so the round trip has to carry the *resolved* colours out —
+    /// which is what makes a written file independent of the fallbacks that
+    /// filled it in.
+    #[test]
+    fn a_written_scheme_parses_back_to_the_scheme_it_was_written_from() {
+        let scheme = parse_scheme(NORD).unwrap();
+        let written = write_scheme(&scheme);
+        assert_eq!(parse_scheme(&written).unwrap(), scheme);
+        assert!(
+            written.contains(r##""accent": "#81a1c1""##),
+            "a fallback that filled a key in is written out as a value: {written}"
+        );
+    }
+
+    /// PIN — the keys come out in the order the bundled ten are written in, and
+    /// all twenty-two of them come out.
+    #[test]
+    fn a_written_scheme_spells_every_key_in_the_bundled_order() {
+        let written = write_scheme(&parse_scheme(NORD).unwrap());
+        let keys: Vec<&str> = written
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('"'))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "name",
+                "background",
+                "foreground",
+                "cursorColor",
+                "selectionBackground",
+                "accent",
+                "black",
+                "red",
+                "green",
+                "yellow",
+                "blue",
+                "purple",
+                "cyan",
+                "white",
+                "brightBlack",
+                "brightRed",
+                "brightGreen",
+                "brightYellow",
+                "brightBlue",
+                "brightPurple",
+                "brightCyan",
+                "brightWhite",
+            ]
+        );
+    }
+
+    /// PIN — the shape of the file, not just its content: two-space indent, one
+    /// key per line, lower-case hex, a closing newline.
+    ///
+    /// A user is going to edit this file by hand, so the layout is part of what
+    /// is being written; `serde_json::to_string` would satisfy the two tests
+    /// above with one very long line.
+    #[test]
+    fn a_written_scheme_is_laid_out_the_way_a_bundled_file_is() {
+        let written = write_scheme(&parse_scheme(NORD).unwrap());
+        assert!(written.starts_with("{\n  \"name\": \"Nord\",\n"));
+        assert!(written.ends_with("\n  \"brightWhite\": \"#eceff4\"\n}\n"));
+        assert!(
+            !written.contains("#ECEFF4"),
+            "hex is written lower case whatever the source file used"
+        );
+        assert_eq!(written.lines().count(), 24, "a brace, 22 keys, a brace");
+    }
+
+    /// A name with something to escape in it writes a file that parses.
+    #[test]
+    fn a_name_that_needs_escaping_survives_the_round_trip() {
+        let mut scheme = parse_scheme(NORD).unwrap();
+        scheme.name = r#"He said "hi"\"#.to_owned();
+        assert_eq!(
+            parse_scheme(&write_scheme(&scheme)).unwrap().name,
+            scheme.name
+        );
     }
 }

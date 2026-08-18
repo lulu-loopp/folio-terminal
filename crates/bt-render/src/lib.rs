@@ -113,7 +113,7 @@ use theme::{
     DEFAULT_STATUS_BACKGROUND_RGB, search_current_ink_rgb, search_current_rgb, search_match_rgb,
     selection_background_rgb,
 };
-pub use theme::{background_is_light, ink_over_bp, set_schemes};
+pub use theme::{background_is_light, ink_over_bp, schemes_in_force, set_schemes};
 
 /// `mark.srch { border-radius: 3px }` (mock-up 1530) — the corner a found word
 /// wears, and the one thing that tells it apart from a dragged selection at a
