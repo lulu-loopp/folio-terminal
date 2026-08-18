@@ -286,6 +286,29 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 同 v3（LaTeX 默认块级强定界；CommonMark 真解析；overlay 裁剪+pointer-transparent+相交让位原文+无障碍暴露原文）。测试新增：反复 resize 抖动与人类节奏多手势 coalescing、vendor-tail 单 owner、收割 hard boundary、无焊接/无真实输出丢失/每手势有界干净重复、全平面矩形门禁、坏 frame 的 publish/selection/render 可恢复错误、trace 确定性回放、收割后滚轮上翻直达 renderer，以及配额淘汰、RIS/DECCOLM、alt、最后一行等生命周期矩阵项（对齐 G1）。
 
+### 4.5 Markdown 表格块（md-tables 片，2026-08-18，已落地）
+
+**一条管线,两个渲染器,只有一个字段不同。** Claude Code 一天写几十张 GFM 管道表,它们此前是几十行竖线。这一片让它们变成块——**不是第二套装饰机制**:检测记录、双状态机四版本、`Maximum height` 封顶与内部滚动、occlusion 清行、选择/拷贝、alt 屏规则,全部原样复用。新增的只有 `bt_doc::BlockKind { Math, Table }`,挂在 `MathOccurrence` 与 `PlaceholderArtifact` 上,worker 分派与两个开关各读一次。表格刻意携带 `MathMode::Display` 而不是自己的 mode,因为「display」问的是**呈现**问题(独占若干行,而不是行内一段),表格的答案与 `$$` 一致——于是每一条已经写成 `mode == Display` 的规则,表格是**构造上**遵守而不是靠第二个 match 分支遵守。
+
+**触发条件严格,且每一条都写出它的出处(`crates/bt-detect/src/table.rs` 模块文档)。** GFM 规范 §4.10:表头行 + 紧随其后的分隔行(`|---|:--:|`,连字符+可选冒号)+ 零到多行表体;首尾竖线可选;**表头与分隔行的单元格数必须相等,否则整块不成立**。三条**比 GFM 更严**的规则,因为输入是终端而不是文档,且都是明写的规则而不是启发式:① 表头行与分隔行**都必须含一个未转义的 `|`**——GFM 里无竖线的单列表格只在 CommonMark 把 `abc` / `---` 判为 setext 标题的地方才被绕开,而终端每天打印无数条 `---`;② **单元格数不同的表体行终止表格**,而不是像 GFM 那样补空/截断——文档后面还是文档,终端后面是任意程序输出;③ **表头行本身若是分隔行则不算表头**(`|---|---|` 叠两行是有人在画框)。红线样本:box-drawing、`||` 逻辑、`+---+---+` ASCII 框、锯齿行、分隔行里有字母、`---` 单独一行,全部不触发。
+
+**用户送来的「畸形」样本 `| | 计划发卡 β 峰 | 时间 |` + `|---|---|---|` + 三列行,GFM 的答案是:这是一张合法的表。** §4.10 只约束表头行单元格的**数量**,从不约束其**内容**;空的首格是三格中的一格,与分隔行的三格相等,于是成立。我们照 GFM 自己的答案渲染它——空的表头就是「不说话的表头」,而那正是行标签列上方那一格的用途。
+
+**版式复用预览面,不另起一套。** 列宽 = 该列最宽单元格 + chrome,下限四个字符(`markdown_table_columns`);**单元格不折行**(用户裁决 2026-08-13:「表格宽到哪里就是哪里,让面去滚动它」),因此行高统一;表头行有自己的底色与墨色;`border-collapse` 的发丝线;分隔行的冒号第一次真正落地成 `align_center`/`align_right`——**预览面此前解析了冒号又丢掉它**,这一片把 `MarkdownBlock::Table` 补上 `alignments`,于是两个表面共用一个 `:--:` 解析器(`bt_detect::table::delimiter_row`)。字号取终端自己的字号(`preview_markdown_metrics(terminal_font_px / 13)`),其余全是它的 em 比例。
+
+**表格块没有像素,这是它与公式唯一的形态差异。** 公式由一台不认识这扇窗的引擎排版,只能交出 RGBA;表格是**本窗自己的文字**——同一套字体链(含 CJK 回退)、同一台 shaper。把它光栅化就意味着在另一条线程上用第二套字体栈再排一次,而第一件出错的就会是列宽。所以 `RgbaArtifactKind::Table` 的 artifact `rgba` 为空,worker 只做**证明**(`resolve_detection_task`),`bt-app` 在主线程量出版面并交给渲染器一张 `TableBlockPaint`(块局部坐标的 quads + paragraphs,按 artifact 的 `source` 索引);`bt-render` 用与公式贴图**完全相同**的几何(`math_block_geometry` + `prepare_math_draws` 的原点算术)把它平移到块的角上,并入 preview-body 那条通道绘制。因此贴图缓存跳过表格(`math_block_admits_texture`),而占行、裁剪、封顶、内部滚动、清行、选择全部不变。
+
+**过宽的表格不缩放,只滚动。** 公式过宽会被缩到 500‰ 底线再滚,因为一个表达式是一个整体;表格是逐列读的,缩小换不到任何东西,只会让字变小——`MathBand::fit_scale_milli` 因此对 `BlockKind::Table` 直接返回原比例,余下的交给水平偏移,与预览面同一条裁决。
+
+**扫描窗口多了一个起点。** `$$` 的窗口锚在「已认证中立前沿」;表格没有这种跨行相位可携带,它由相邻两行证明、由其后每一行延长,所以窗口必须够到**本候选所在的那一段行的顶端**(`frozen_table_window_start`:向上走到第一条不像行的行为止,受同一个字节上限约束)。两者互不包含——竖线行对 display 解析器完全中立,前沿会径直穿过一张表——所以取两者更靠前的那个。
+
+**Arming 是一个两行的问题。** 单独一行既不能成为表,也不能被单独排除,所以判据就是「本行是行,且上一行也是行」(`may_arm_table`)。它**不由「Tables」开关把守**——与 `display_formulas` 同一条裁决,开关是呈现,关掉时检测照常跑,重新打开只花一帧。代价是两条相邻的带竖线日志会各排一次空扫,这是两行问题的诚实成本,有界于一次已经有界的窗口扫描。
+
+**Live 平面的地板同样适用，而且看得见。** `bt-viewport` 对一个 live 块的高度上限是 `(live_rows - LIVE_MIN_VISIBLE_TEXT_ROWS) * cell_height`（§1 放宽 ② 的护栏），超过就回退到源码。真机实测（1500×1200 窗、字号 16）：8 行的表格画出来，12 行的回退到竖线原文——这是公式一直在遵的那条规则，不是表格的新行为。滚进历史后没有这道地板，任意高度都成块。
+
+**设置:`Rendered blocks` 页第三行 `Tables`,默认 On,与两行公式开关并列**,文案只陈述事实(「Draw markdown tables in output; off shows the pipe text」/「绘制输出里的 markdown 表格；关闭则显示管道符原文」),中英双语。热切与 Display formulas 逐字一致:`set_table_bands` 只在「已完成记录变成视口 artifact」的那两个点被读(冻结面与 live 面各一),关掉即下一帧回到竖线原文,打开即从内存重新武装,不重扫不重排。持久化 `settings.json` v11 → v12,单键 `tables`;迁移**把既有行为带过去**而不是选一个新默认——v11 的档案从未被问过这个问题,沉默的诚实读法是产品自己的答案 `true`。
+
+
 ## 5. 数学渲染管线（M-1 spike）
 
 同 v3（三路径、300+ 样本含恶意输入、进程隔离开销验证、缓存键含 detection_rev + LayoutKey）。

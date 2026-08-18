@@ -10,7 +10,7 @@ pub use anchor::{
 };
 pub use document::{HistoryDocument, HistoryEntry, LiveRowRemoval};
 pub use versions::{
-    DecorationIntent, DecorationLifecycle, DetectionRevision, GridGeneration, InlineRunPlacement,
-    InvalidSourceTransition, LayoutKey, MathMode, SUBPIXELS_PER_PX, SourceLifecycle, VersionStamp,
-    ViewGeneration,
+    BlockKind, DecorationIntent, DecorationLifecycle, DetectionRevision, GridGeneration,
+    InlineRunPlacement, InvalidSourceTransition, LayoutKey, MathMode, SUBPIXELS_PER_PX,
+    SourceLifecycle, VersionStamp, ViewGeneration,
 };

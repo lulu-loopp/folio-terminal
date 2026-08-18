@@ -398,6 +398,15 @@ pub enum MarkdownBlock {
         /// The heading row first, then the body. Never empty: a table exists
         /// only where a heading row was found.
         rows: Vec<TableRow>,
+        /// What the separator row's colons said about each column, one entry per
+        /// column of the heading row. `None` where the column declared nothing.
+        ///
+        /// Read off the separator by `bt_detect::table::delimiter_row`, which is
+        /// the same function the terminal's own table detector reads it with —
+        /// one parser for `:--:`, because two would eventually disagree about
+        /// which way a column is set in a file that is open in a pane while the
+        /// same bytes scroll past in the pane beside it.
+        alignments: Vec<bt_detect::table::ColumnAlignment>,
     },
     /// Consecutive `>` rows, one entry per line, gathered as one block so the
     /// accent bar down their left is one bar rather than several.
@@ -582,6 +591,7 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
             flush_paragraph(&mut paragraph, &mut blocks);
             flush_list(&mut list, &mut ordered, &mut blocks);
             let mut rows = vec![split_pipe_row(line)];
+            let index_of_separator = index + 1;
             // Past the separator, then every pipe row that follows without a
             // break. A blank line ends the table exactly as it ends a paragraph.
             index += 2;
@@ -589,7 +599,8 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
                 rows.push(split_pipe_row(lines[index]));
                 index += 1;
             }
-            blocks.push(MarkdownBlock::Table { rows });
+            let alignments = table_alignments(lines[index_of_separator], rows[0].len());
+            blocks.push(MarkdownBlock::Table { rows, alignments });
             continue;
         }
 
@@ -772,6 +783,17 @@ fn is_table_separator(line: &str) -> bool {
             let cell = cell.trim().trim_start_matches(':').trim_end_matches(':');
             !cell.is_empty() && cell.chars().all(|ch| ch == '-')
         })
+}
+
+/// What the separator row said about each of `columns` columns.
+///
+/// Padded or trimmed to the heading row's width, because *this* parser — unlike the terminal's,
+/// which refuses a table whose two top rows disagree — accepts a separator of another width, and a
+/// column with no alignment entry would be a column the painter could not ask about.
+fn table_alignments(separator: &str, columns: usize) -> Vec<bt_detect::table::ColumnAlignment> {
+    let mut declared = bt_detect::table::delimiter_row(separator).unwrap_or_default();
+    declared.resize(columns, bt_detect::table::ColumnAlignment::None);
+    declared
 }
 
 /// One table row's cells, still as text.
@@ -3674,6 +3696,13 @@ mod tests {
                         vec![vec![Span::plain("a")], vec![Span::code("b")]],
                         vec![vec![Span::plain("1")], vec![Span::bold("2")]],
                     ],
+                    // The separator was `|---|:--:|`: the second column asked to
+                    // be centred and the first asked for nothing. Until the
+                    // tables slice this pair was parsed and thrown away.
+                    alignments: vec![
+                        bt_detect::table::ColumnAlignment::None,
+                        bt_detect::table::ColumnAlignment::Center,
+                    ],
                 },
                 // **The pipe row with no separator under it stays prose.** This
                 // is the assertion that keeps every sentence about `a | b` in a
@@ -4715,6 +4744,7 @@ mod tests {
             },
             MarkdownBlock::Table {
                 rows: vec![vec![parse_inline("x")]],
+                alignments: vec![bt_detect::table::ColumnAlignment::None],
             },
         ] {
             assert_eq!(

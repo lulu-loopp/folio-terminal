@@ -1158,6 +1158,26 @@ pub struct PreviewBody {
     pub blocks: Vec<PreviewBlock>,
 }
 
+/// One rendered table block's picture, in the block's own coordinates.
+///
+/// **Coordinates, not pixels, and that is the whole of what makes a table different from a
+/// formula here.** A formula arrives as an RGBA raster because a formula is typeset by an engine
+/// that knows nothing about this window; a table is set in *this* window's own text, in the
+/// terminal's own font at the terminal's own size, so rasterizing it would mean shaping it a
+/// second time against a second font stack — and the first thing that would cost is the CJK
+/// fallback chain the chrome shaper already carries. So the block hands over its layout instead of
+/// its pixels, in a space whose origin is the block's top-left, and this renderer puts that origin
+/// where the placement says the block starts.
+///
+/// It is [`PreviewQuad`] and [`PreviewParagraph`] because a table in a terminal pane and a table
+/// in a rendered markdown file are the same picture: same column arithmetic, same hairlines, same
+/// heading band, same cell insets. One layout, drawn twice at two metrics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableBlockPaint {
+    pub quads: Vec<PreviewQuad>,
+    pub paragraphs: Vec<PreviewParagraph>,
+}
+
 /// One block of a preview body that owns a horizontal offset.
 ///
 /// Its contents are already placed at that offset; what this carries is the
@@ -2509,6 +2529,8 @@ pub struct WindowRenderer {
     peek_overlay: Option<PeekImageOverlay>,
     preview_image: Option<PreviewImage>,
     preview_bodies: Vec<PreviewBody>,
+    /// This frame's table pictures, keyed by the source text of the block each belongs to.
+    table_blocks: HashMap<String, TableBlockPaint>,
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
@@ -3847,6 +3869,7 @@ impl WindowRenderer {
             peek_overlay: None,
             preview_image: None,
             preview_bodies: Vec::new(),
+            table_blocks: HashMap::new(),
             preview_text_renderer,
             trace_perf,
             perf_frame: 0,
@@ -4004,6 +4027,24 @@ impl WindowRenderer {
     pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
         let changed = self.preview_bodies != bodies;
         self.preview_bodies = bodies;
+        changed
+    }
+
+    /// Hand over this frame's table pictures, keyed by the block's own source text.
+    ///
+    /// A map rather than a slot on the placement because the placement travels through
+    /// `bt-viewport`, which does not know this crate's drawing types and must not learn them: a
+    /// projection says *where* a block is and how much of it may be seen, and a picture is not
+    /// part of that answer.
+    ///
+    /// **The source and not the artifact key**, because the source is the identity both sides of
+    /// this hand-off can see: the key is minted inside `bt-term` from versions the caller of this
+    /// method never holds, while the source is on the placement the renderer is already reading.
+    /// Two panes showing the same table are then showing one picture, which is also correct — and
+    /// the caller owns staleness, since it hands the whole map over every time anything moves.
+    pub fn set_table_blocks(&mut self, blocks: HashMap<String, TableBlockPaint>) -> bool {
+        let changed = self.table_blocks != blocks;
+        self.table_blocks = blocks;
         changed
     }
 
@@ -4542,6 +4583,12 @@ impl WindowRenderer {
             .map_or(self.seat, |entry| entry.seat);
         let empty_rect = [RectInstance::zeroed()];
         let mut prepared: Vec<PreparedSeat> = Vec::with_capacity(seats.len());
+        // Every rendered table on screen, from every seat, gathered as this frame's extra preview
+        // bodies. They join the list the caller set rather than forming a pass of their own: a
+        // body is already "fills then text inside one clip, in window coordinates", which is
+        // exactly what a table block is, and a second pass would be a second answer to the same
+        // question about ordering.
+        let mut table_block_bodies: Vec<PreviewBody> = Vec::new();
         let mut focused_text_stats = None;
         let mut rows_prepared_at = validated_at;
         let mut atlas_prepared_at = validated_at;
@@ -4618,6 +4665,7 @@ impl WindowRenderer {
             // Math draws first: the hover dim rect decorates a block's raster, so it must know which
             // rasters this frame actually put on screen before it decides to darken anything.
             let math_batch = self.prepare_math_draws(gpu, frame);
+            table_block_bodies.extend(self.table_block_bodies(frame));
             math_prepared_at = Instant::now();
             let math_vertex_buffer = (!math_batch.vertices.is_empty()).then(|| {
                 gpu.device
@@ -4828,6 +4876,7 @@ impl WindowRenderer {
         let preview_body_rects: Vec<RectInstance> = self
             .preview_bodies
             .iter()
+            .chain(table_block_bodies.iter())
             .flat_map(|body| {
                 preview_body_rect_instances(body, self.config.width, self.config.height)
             })
@@ -4841,7 +4890,7 @@ impl WindowRenderer {
                 })
         });
         let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
-        for body in &self.preview_bodies {
+        for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
             preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
         }
         let preview_text_prepared = !preview_text_layouts.is_empty()
@@ -5906,6 +5955,77 @@ impl WindowRenderer {
         })
     }
 
+    /// This seat's rendered tables, turned into bodies in whole-window coordinates.
+    ///
+    /// The geometry is the block's own, read from exactly the arithmetic `prepare_math_draws` uses
+    /// to place a raster tile — same origin, same interior scroll subtraction, same clip — so a
+    /// table and a formula standing in the same place stand in the *same* place. What the two do
+    /// with that box then differs: a raster is a quad with a texture on it, and a table is the
+    /// fills and the text its layout already decided, translated to the box's corner and cropped
+    /// by the clip the body carries.
+    fn table_block_bodies(&self, frame: &ViewportFrame) -> Vec<PreviewBody> {
+        if self.table_blocks.is_empty() {
+            return Vec::new();
+        }
+        let origin_x = self.seat.x as f32;
+        let origin_y = self.seat.y as f32;
+        let pane_top = self.metrics.padding_px;
+        frame
+            .math_blocks
+            .iter()
+            .filter(|placement| {
+                placement.artifact.kind == bt_viewport::RgbaArtifactKind::Table
+                    && placement.display == MathBlockDisplay::Rendered
+            })
+            .filter_map(|placement| {
+                let paint = self.table_blocks.get(&placement.artifact.source)?;
+                let geometry = self.math_block_geometry(frame, placement)?;
+                let left = math_block_left_px(self.metrics, placement.left_subpixels, true)
+                    - placement.horizontal_scroll_px as f32;
+                let top = pane_top
+                    + placement
+                        .top_subpixels
+                        .saturating_add(placement.content_offset_subpixels)
+                        as f32
+                        / SUBPIXELS_PER_PX as f32
+                    - placement.vertical_scroll_px as f32;
+                let shift = |rect: [f32; 4]| {
+                    [
+                        origin_x + left + rect[0],
+                        origin_y + top + rect[1],
+                        origin_x + left + rect[2],
+                        origin_y + top + rect[3],
+                    ]
+                };
+                Some(PreviewBody {
+                    clip: [
+                        origin_x + geometry.clip[0],
+                        origin_y + geometry.clip[1],
+                        origin_x + geometry.clip[2],
+                        origin_y + geometry.clip[3],
+                    ],
+                    quads: paint
+                        .quads
+                        .iter()
+                        .map(|quad| PreviewQuad {
+                            rect: shift(quad.rect),
+                            color: quad.color,
+                        })
+                        .collect(),
+                    paragraphs: paint
+                        .paragraphs
+                        .iter()
+                        .map(|paragraph| PreviewParagraph {
+                            rect: shift(paragraph.rect),
+                            ..paragraph.clone()
+                        })
+                        .collect(),
+                    blocks: Vec::new(),
+                })
+            })
+            .collect()
+    }
+
     fn math_failure_geometry(
         &self,
         frame: &ViewportFrame,
@@ -6705,6 +6825,10 @@ impl Renderer {
 
     pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
         self.window.set_preview_bodies(bodies)
+    }
+
+    pub fn set_table_blocks(&mut self, blocks: HashMap<String, TableBlockPaint>) -> bool {
+        self.window.set_table_blocks(blocks)
     }
 
     pub fn measure_preview_paragraph(
@@ -9481,7 +9605,12 @@ fn math_block_dim_is_drawn(placement: &MathBlockPlacement, textured: bool) -> bo
 /// at; the visible band then found nothing resident, skipped its quad, and left its placement and
 /// hover chrome drawing over bare background. Both preparation paths ask this one question.
 fn math_block_admits_texture(frame: &ViewportFrame, placement: &MathBlockPlacement) -> bool {
-    placement.display != MathBlockDisplay::Source
+    // A table has no texture and never will: its picture is the window's own text and fills,
+    // handed to this renderer as a preview body at the block's own box. Admitting it here would
+    // ask the atlas to upload an empty `rgba` and then report the miss as a textureless block —
+    // the exact diagnostic that exists to catch a band whose pixels failed to arrive.
+    placement.artifact.kind != bt_viewport::RgbaArtifactKind::Table
+        && placement.display != MathBlockDisplay::Source
         && frame
             .drawable_interval_overlaps(placement.top_subpixels, placement.clip_height_subpixels)
 }

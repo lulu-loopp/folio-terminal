@@ -53,7 +53,11 @@ use serde::{Deserialize, Serialize};
 /// the reason v10 gives for *not* being two: it arrived on a different day with
 /// a different reader. It is also the first list-valued field in this document,
 /// which is a shape change and not only a new key — see [`SettingsV1::advanced_open`].
-pub const SETTINGS_SCHEMA_VERSION: u32 = 11;
+///
+/// **v12 carries one field**, `tables`, and it is v11's reason again: a different day, a
+/// different reader. It carries a behaviour forward rather than choosing a new default — see
+/// `migrate_settings_v11_to_v12`.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 12;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -152,13 +156,14 @@ pub const DEFAULT_BACKGROUND_OPACITY: u8 = 100;
 /// made unreadable.
 pub const MINIMUM_BACKGROUND_OPACITY: u8 = 30;
 
-/// `settings.json` v11 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v12 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 11,
+///   "schema_version": 12,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
+///   "tables": true | false,
 ///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
 ///   "git_panel": true | false,
 ///   "split_direction": "Auto" | "Right" | "Down",
@@ -200,6 +205,18 @@ pub struct SettingsV1 {
     /// who wants typeset blocks but wants every `$` in a log left alone must be
     /// able to say so, and that is one switch, not a preference we guess.
     pub inline_formulas: bool,
+    /// Whether a detected GFM pipe table in command output is *drawn* as a
+    /// rendered block. The third switch on the Rendered blocks page, and
+    /// presentation policy in exactly the sense the two above it are: off leaves
+    /// the scanner running and simply keeps the pipe text on screen, so turning
+    /// it back on costs one frame and re-arms the same proven tables.
+    ///
+    /// A switch of its own rather than a third meaning for `display_formulas`,
+    /// for the reason `inline_formulas` gives: the two features fail
+    /// differently. A `$$` pair is a delimiter a program writes on purpose; a
+    /// pipe is ordinary punctuation, and someone who wants typeset formulas with
+    /// every `|` in their logs left alone has to be able to say exactly that.
+    pub tables: bool,
     /// Which profile a new tab — and the window's opening tab — starts from.
     ///
     /// **A profile id, never an index.** The mock-up's `state.defaultProfile` is
@@ -425,6 +442,7 @@ impl Default for SettingsV1 {
             theme_mode: ThemeModeV1::default(),
             display_formulas: true,
             inline_formulas: true,
+            tables: true,
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),
             git_panel: true,
             split_direction: SplitDirectionV1::default(),

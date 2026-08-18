@@ -1484,6 +1484,11 @@ pub enum SettingsRow {
     /// who wants typeset blocks with every `$` in a log left alone has to be
     /// able to say exactly that.
     InlineFormulas,
+    /// The third switch of the Rendered blocks page (2026-08-18): whether a GFM pipe table a
+    /// program printed is drawn as a table. Its own row for the reason `InlineFormulas` has one —
+    /// a pipe is ordinary punctuation and a `$$` is not, so the two carry different risk and a
+    /// reader must be able to answer them separately.
+    Tables,
     /// The Git panel's master switch (user ruling, 2026-08-15) — the Files
     /// group's only row.
     ///
@@ -1612,7 +1617,9 @@ impl SettingsRow {
             Self::PsReadLine => SettingsCategory::Terminal,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
-            Self::Formulas | Self::InlineFormulas => SettingsCategory::RenderedBlocks,
+            Self::Formulas | Self::InlineFormulas | Self::Tables => {
+                SettingsCategory::RenderedBlocks
+            }
             // Both were headings over one row apiece — `FILES` and `STARTUP` —
             // and both are the same kind of question: not a look, not a block, no
             // page of their own to fill. See [`SettingsCategory::General`].
@@ -1633,6 +1640,7 @@ impl SettingsRow {
             Self::Cursor => Text::RowCursor.text(),
             Self::Formulas => Text::RowFormulas.text(),
             Self::InlineFormulas => Text::RowInlineFormulas.text(),
+            Self::Tables => Text::RowTables.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
@@ -1697,6 +1705,10 @@ impl SettingsRow {
             // typeset, and a user who reads only this line should not go away
             // expecting one to be.
             Self::InlineFormulas => Text::DescInlineFormulas.text(),
+            // Says "in command output" for the reason the row above it does, and says "the pipe
+            // text" because a reader who is told only that tables stop being drawn will expect
+            // them to disappear rather than to go back to being what the program printed.
+            Self::Tables => Text::DescTables.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -1803,7 +1815,7 @@ impl SettingsRow {
     /// **`General`, `Terminal` and `Rendered blocks` have no advanced rows**, and
     /// the reasoning is per row rather than per page: `Language`, `Git panel`
     /// and `Default profile` are the three questions that page exists to answer;
-    /// the two formula switches *are* the Rendered blocks page; and the
+    /// the three switches *are* the Rendered blocks page; and the
     /// PSReadLine row is expert in subject and elementary in purpose — it is the
     /// one row in the dialog that repairs something the reader has already seen
     /// go wrong, so it is the last row that may be hidden. The Shortcuts page is
@@ -1839,6 +1851,7 @@ impl SettingsRow {
             | Self::Sidebar
             | Self::Formulas
             | Self::InlineFormulas
+            | Self::Tables
             | Self::GitPanel
             | Self::DefaultProfile
             | Self::Language
@@ -1898,9 +1911,11 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.len(),
             Self::Cursor => CURSOR_OPTIONS.len(),
-            Self::Formulas | Self::InlineFormulas | Self::GitPanel | Self::PsReadLine => {
-                FORMULA_OPTIONS.len()
-            }
+            Self::Formulas
+            | Self::InlineFormulas
+            | Self::Tables
+            | Self::GitPanel
+            | Self::PsReadLine => FORMULA_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
             Self::FontSize => FONT_SIZE_OPTIONS.len(),
             Self::LightScheme => scheme_labels(true).len(),
@@ -1937,9 +1952,11 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.get(index).copied().map(theme_label),
             Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
-            Self::Formulas | Self::InlineFormulas | Self::GitPanel | Self::PsReadLine => {
-                FORMULA_OPTIONS.get(index).copied().map(on_off_label)
-            }
+            Self::Formulas
+            | Self::InlineFormulas
+            | Self::Tables
+            | Self::GitPanel
+            | Self::PsReadLine => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // `&'static str` out of a runtime string, without a leak per call:
             // the list is enumerated once into a `static`, which outlives every
             // caller by construction. See [`monospace_families`].
@@ -2040,6 +2057,7 @@ impl SettingsRow {
             Self::InlineFormulas => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.inline_formulas),
+            Self::Tables => FORMULA_OPTIONS.iter().position(|it| *it == values.tables),
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
@@ -2161,6 +2179,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // ── the other three pages, none of which has an advanced row ──
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
+    rows.push(SettingsRow::Tables);
     rows.push(SettingsRow::Language);
     rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
@@ -2337,6 +2356,8 @@ pub struct SettingsValues {
     pub sidebar: RailMode,
     pub display_formulas: bool,
     pub inline_formulas: bool,
+    /// Whether a proven markdown table in command output is drawn as a block.
+    pub tables: bool,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
     /// Which way a split with no direction of its own cuts.
@@ -2458,6 +2479,7 @@ impl SettingsValues {
             sidebar: RailMode::Expanded,
             display_formulas: true,
             inline_formulas: true,
+            tables: true,
             git_panel: true,
             split_direction: SplitDirectionV1::Auto,
             language: LanguageV1::System,
@@ -4159,6 +4181,15 @@ pub fn cursor_style_requested(target: SettingsTarget) -> Option<CursorStyle> {
 pub fn display_formulas_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::Formulas, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+/// The "Tables" row's answer, if this target is one of its items.
+#[must_use]
+pub fn tables_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::Tables, index) => FORMULA_OPTIONS.get(index).copied(),
         _ => None,
     }
 }
@@ -11216,6 +11247,99 @@ mod tests {
         );
     }
 
+    /// PIN (2026-08-18): the Tables row, and the one thing its switch means. Off is a *rendering*
+    /// choice and the row says so, for the reason the row above it does: a reader who is told only
+    /// that tables stop being drawn will expect them to disappear rather than to go back to being
+    /// the pipes the program printed.
+    #[test]
+    fn the_tables_row_offers_on_and_off_and_says_what_off_does() {
+        let placed = open_rows_measured(
+            1.0,
+            Some(SettingsRow::Tables),
+            TabLayoutMode::Horizontal,
+            0.0,
+        );
+        let labels = labels_of(&placed, None, &values());
+        for text in [
+            "Tables",
+            "Draw markdown tables in output; off shows the pipe text",
+            "On",
+            "Off",
+        ] {
+            assert!(
+                labels.iter().any(|label| label.text == text),
+                "{text:?} is part of the row and is not drawn; drawn: {:?}",
+                labels.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(SettingsRow::Tables.option_count(), 2);
+        assert_eq!(
+            SettingsRow::Tables.category(),
+            SettingsCategory::RenderedBlocks,
+            "it stands with the two formula switches, which is where the reader looks for it"
+        );
+        assert!(
+            !SettingsRow::Tables.advanced(),
+            "the Rendered blocks page has no Advanced group and this row does not open one"
+        );
+        assert_eq!(
+            visible_rows(TabLayoutMode::Horizontal)
+                .into_iter()
+                .filter(|row| row.category() == SettingsCategory::RenderedBlocks)
+                .collect::<Vec<_>>(),
+            vec![
+                SettingsRow::Formulas,
+                SettingsRow::InlineFormulas,
+                SettingsRow::Tables
+            ],
+            "and it stands last of the three, under the two it is a variant of"
+        );
+    }
+
+    /// PIN: the Tables row's own items ask for the Tables setting and nothing else asks for it.
+    #[test]
+    fn only_the_tables_rows_items_ask_for_the_tables_setting() {
+        assert_eq!(
+            tables_requested(SettingsTarget::Choice(SettingsRow::Tables, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            tables_requested(SettingsTarget::Choice(SettingsRow::Tables, 1)),
+            Some(false)
+        );
+        assert_eq!(
+            tables_requested(SettingsTarget::Choice(SettingsRow::Tables, 2)),
+            None,
+            "there is no third option to ask for"
+        );
+        for target in [
+            SettingsTarget::Choice(SettingsRow::Formulas, 0),
+            SettingsTarget::Choice(SettingsRow::InlineFormulas, 0),
+            SettingsTarget::Combo(SettingsRow::Tables),
+            SettingsTarget::Scrim,
+        ] {
+            assert_eq!(tables_requested(target), None, "{target:?}");
+        }
+        assert_eq!(
+            display_formulas_requested(SettingsTarget::Choice(SettingsRow::Tables, 0)),
+            None,
+            "and the formula switch is not moved by the tables row"
+        );
+    }
+
+    /// PIN: the Tables row draws the value it is given, both ways round.
+    #[test]
+    fn the_tables_rows_tick_follows_the_stored_value() {
+        for (tables, expected) in [(true, 0usize), (false, 1usize)] {
+            let values = SettingsValues { tables, ..values() };
+            assert_eq!(
+                SettingsRow::Tables.selected_index(&values),
+                Some(expected),
+                "tables={tables} must tick item {expected}"
+            );
+        }
+    }
+
     /// PIN: clicking an item asks for exactly the value that item stands for,
     /// and clicking anything else asks for nothing.
     #[test]
@@ -11984,6 +12108,7 @@ mod tests {
                 SettingsRow::SplitDirection,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::Tables,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
@@ -12010,6 +12135,7 @@ mod tests {
                 SettingsRow::SplitDirection,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
+                SettingsRow::Tables,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
@@ -12017,7 +12143,7 @@ mod tests {
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \
-             two formula rows together as the whole of the Rendered blocks page, \
+             three block rows together as the whole of the Rendered blocks page, \
              and the PSReadLine row last because it is the whole of the Terminal \
              page.
 

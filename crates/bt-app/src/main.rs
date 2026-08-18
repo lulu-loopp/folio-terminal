@@ -55,6 +55,7 @@ mod seed;
 mod settings;
 mod shell_integration;
 mod shortcuts;
+mod table_block;
 mod termscroll;
 mod text_field;
 mod toast;
@@ -782,7 +783,7 @@ struct MarkdownBlockIntrinsic {
 /// exactly what the drawing pass walks: a list's items, a quote's lines, a
 /// table's rows.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct MarkdownBlockLayout {
+pub(crate) struct MarkdownBlockLayout {
     /// Where the block's own box starts inside the content, margins already
     /// collapsed with its neighbour's.
     top: f32,
@@ -809,6 +810,18 @@ struct MarkdownBlockLayout {
 }
 
 impl MarkdownBlockLayout {
+    /// A table's own four numbers, in one constructor, so a caller that is not laying out a
+    /// document (a terminal block) fills the same fields the document path fills.
+    pub(crate) fn table(columns: Vec<f32>, width: f32, rows: Vec<f32>, height: f32) -> Self {
+        Self {
+            top: 0.0,
+            height,
+            rows,
+            columns,
+            width,
+        }
+    }
+
     /// A block with no rows of its own: a paragraph, a heading, a fence, a rule.
     fn solid(height: f32) -> Self {
         Self {
@@ -1234,7 +1247,7 @@ const PREVIEW_IMAGE_FIT_HEIGHT_FRACTION: f32 = 0.70;
 /// a heading is set at belongs to the rectangle, because a run carries no size
 /// of its own. It carries a *ratio* of the rectangle's, which is the one thing
 /// an inline code span needs and the only caller that asks for it.
-fn markdown_runs(
+pub(crate) fn markdown_runs(
     spans: &[preview::Span],
     palette: &bt_render::ChromePalette,
     heading: bool,
@@ -2164,7 +2177,7 @@ fn build_preview_markdown_body(
                     color: palette.preview_grid_line,
                 });
             }
-            preview::MarkdownBlock::Table { rows } => {
+            preview::MarkdownBlock::Table { rows, alignments } => {
                 push_markdown_table(
                     MarkdownSink {
                         quads,
@@ -2173,6 +2186,7 @@ fn build_preview_markdown_body(
                         region,
                     },
                     rows,
+                    alignments,
                     placed,
                     [left, top],
                     metrics,
@@ -2621,7 +2635,7 @@ fn markdown_fence_width(
 /// The measurer is injected for the same reason it is for a fence. `heading`
 /// tells it which row it is measuring, because a heading cell is set bold and a
 /// bold cell is wider than the same words are not.
-fn markdown_table_columns(
+pub(crate) fn markdown_table_columns(
     rows: &[preview::TableRow],
     metrics: seats::PreviewMarkdownMetrics,
     mut measure: impl FnMut(&[preview::Span], bool) -> f32,
@@ -2650,12 +2664,12 @@ fn markdown_table_columns(
 /// place this block is being drawn — and because a painter reached eight
 /// parameters the moment links joined the fills and the text, which is one
 /// parameter past where a call site stops being readable at a glance.
-struct MarkdownSink<'a> {
-    quads: &'a mut Vec<bt_render::PreviewQuad>,
-    paragraphs: &'a mut Vec<bt_render::PreviewParagraph>,
-    links: &'a mut Vec<PreviewLinkSite>,
+pub(crate) struct MarkdownSink<'a> {
+    pub(crate) quads: &'a mut Vec<bt_render::PreviewQuad>,
+    pub(crate) paragraphs: &'a mut Vec<bt_render::PreviewParagraph>,
+    pub(crate) links: &'a mut Vec<PreviewLinkSite>,
     /// The scrolling block being filled, or `None` for the page itself.
-    region: Option<usize>,
+    pub(crate) region: Option<usize>,
 }
 
 /// One markdown table, drawn in the csv grid's own chrome.
@@ -2664,9 +2678,10 @@ struct MarkdownSink<'a> {
 /// draws in two dimensions and inlining it would put a nested loop in the middle
 /// of a match arm list. The geometry it reads was all decided by
 /// [`Runtime::measure_markdown_table`]; nothing here computes a width.
-fn push_markdown_table(
+pub(crate) fn push_markdown_table(
     sink: MarkdownSink<'_>,
     rows: &[preview::TableRow],
+    alignments: &[bt_detect::table::ColumnAlignment],
     placed: &MarkdownBlockLayout,
     origin: [f32; 2],
     metrics: seats::PreviewMarkdownMetrics,
@@ -2754,8 +2769,20 @@ fn push_markdown_table(
                     // refused. The pane scrolls to the table instead.
                     wrap: false,
                     letter_spacing_em: 0.0,
-                    align_right: false,
-                    align_center: false,
+                    // **The colons in the separator row, and nothing else.** GFM
+                    // gives a column three things it can ask for and a fourth
+                    // state — asking for nothing — and the fourth is not "left":
+                    // a column that declared nothing is set the way ordinary
+                    // text is set, which is what a heading cell over a column of
+                    // numbers relies on. Only a declaration moves a cell.
+                    align_right: matches!(
+                        alignments.get(column),
+                        Some(bt_detect::table::ColumnAlignment::Right)
+                    ),
+                    align_center: matches!(
+                        alignments.get(column),
+                        Some(bt_detect::table::ColumnAlignment::Center)
+                    ),
                 });
             }
             cell_left += outer;
@@ -4033,6 +4060,16 @@ struct Runtime {
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
+    /// The picture of every rendered table on the glass, keyed by the block's own source text,
+    /// beside the type size and the three inks it was laid out with.
+    ///
+    /// **Keyed by the source rather than by the artifact key** because two panes showing the same
+    /// table are showing the same picture, and because the source is the one identity both sides
+    /// of this hand-off can see — `bt-render` reads it off the placement it is already holding.
+    /// The stamp is what makes the entry answerable: a table laid out at 12.5px in a dark palette
+    /// is not the picture to draw after the reader has changed either, and a cached picture with
+    /// no record of what it was cached for could only ever be right by luck.
+    table_paints: HashMap<String, TablePaint>,
     /// **The repositories the kernel has been asked to report changes in**
     /// (R31's D).
     ///
@@ -13232,7 +13269,15 @@ impl SplitSeed {
 // Eight, and every one of them is a different question the answer to which
 // cannot be derived from the others: identity, shape, the two rendering
 // facts, the wake channel, the probe bytes, the place, and the seed. Bundling
-/// The two formula switches a new pane must be born obeying.
+/// One rendered table's picture and what it was laid out for.
+struct TablePaint {
+    paint: bt_render::TableBlockPaint,
+    /// The terminal's font size in physical pixels, as bits, and the three inks the shared painter
+    /// reads. A change to any of them is a picture that has to be laid out again.
+    stamp: (u32, [u8; 3], [u8; 3], [u8; 3]),
+}
+
+/// The Rendered-blocks switches a new pane must be born obeying.
 ///
 /// One struct rather than two `bool` parameters because they would sit adjacent
 /// in every signature that carries them, and adjacent bools of the same type are
@@ -13245,6 +13290,8 @@ struct FormulaSwitches {
     display: bool,
     /// "Inline formulas" — detection; a lone `$…$` in command output may be typeset.
     inline: bool,
+    /// "Tables" - presentation only; a proven pipe table may be a block.
+    tables: bool,
 }
 
 impl FormulaSwitches {
@@ -13252,6 +13299,7 @@ impl FormulaSwitches {
         Self {
             display: settings.display_formulas,
             inline: settings.inline_formulas,
+            tables: settings.tables,
         }
     }
 }
@@ -13435,6 +13483,7 @@ fn create_leaf_session(
     // obey, which is exactly why this builder exists (see above).
     session.set_display_math_bands(formulas.display);
     session.set_inline_math_bands(formulas.inline);
+    session.set_table_bands(formulas.tables);
     session.set_layout_key(window_layout_key(
         columns,
         renderer.metrics().dpi_milli(),
@@ -15023,6 +15072,7 @@ impl Runtime {
             math_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
+            table_paints: HashMap::new(),
             files_worker,
             files_worker_running: true,
             files_worker_notice_pending: false,
@@ -18876,6 +18926,7 @@ impl Runtime {
             sidebar: self.rail.mode,
             display_formulas: self.settings_store.loaded().display_formulas,
             inline_formulas: self.settings_store.loaded().inline_formulas,
+            tables: self.settings_store.loaded().tables,
             git_panel: self.settings_store.loaded().git_panel,
             split_direction: self.settings_store.loaded().split_direction,
             language: self.settings_store.loaded().language,
@@ -19834,6 +19885,9 @@ impl Runtime {
         if let Some(enabled) = settings::display_formulas_requested(target) {
             self.apply_display_formulas(enabled)?;
         }
+        if let Some(enabled) = settings::tables_requested(target) {
+            self.apply_tables(enabled)?;
+        }
         if let Some(enabled) = settings::inline_formulas_requested(target) {
             self.apply_inline_formulas(enabled)?;
         }
@@ -20034,6 +20088,7 @@ impl Runtime {
             | Row::TabLayout
             | Row::Formulas
             | Row::InlineFormulas
+            | Row::Tables
             | Row::GitPanel
             | Row::DefaultProfile
             | Row::Language
@@ -20639,6 +20694,164 @@ impl Runtime {
             source: FrameSource::Expose,
         })?;
         Ok(true)
+    }
+
+    /// Point the "Tables" switch at `enabled` (2026-08-18).
+    ///
+    /// Presentation, so it is [`Self::apply_display_formulas`] exactly: every pane in every tab,
+    /// an immediate write, and one frame's cost. Every session keeps the tables it has proven —
+    /// the switch only decides whether a proven one is allowed to stand over its own pipe text —
+    /// so turning it off shows the text again and turning it on brings the same blocks back with
+    /// nothing re-scanned.
+    fn apply_tables(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.tables = enabled;
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        for tab in &mut self.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.session.set_table_bands(enabled);
+            }
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
+    /// The stamp a table picture laid out now would carry.
+    fn table_paint_stamp(
+        &self,
+        palette: &bt_render::ChromePalette,
+    ) -> (u32, [u8; 3], [u8; 3], [u8; 3]) {
+        (
+            self.renderer.metrics().font_size_px.to_bits(),
+            palette.preview_grid_line,
+            palette.preview_table_head_text,
+            palette.files_row_hover,
+        )
+    }
+
+    /// Lay one table out at this window's current metrics and inks.
+    ///
+    /// `None` only when `source` is not a table, which cannot happen for a proven block and is
+    /// answered honestly rather than asserted: the source travels through the transcript, and a
+    /// function that took an unparseable one on trust would be a panic waiting for a reflow.
+    fn build_table_block(&mut self, source: &str) -> Option<table_block::TableBlock> {
+        let lines: Vec<&str> = source.lines().collect();
+        let span = bt_detect::table::table_at(&lines)?;
+        let metrics = table_block::metrics(self.renderer.metrics().font_size_px);
+        let palette = bt_render::chrome_palette();
+        let renderer = &mut self.renderer;
+        Some(table_block::build(
+            &span,
+            metrics,
+            &palette,
+            |cell, heading| {
+                let runs = markdown_runs(cell, &palette, heading);
+                renderer.measure_preview_paragraph_width(
+                    &runs,
+                    metrics.font_size,
+                    metrics.line_height,
+                )
+            },
+        ))
+    }
+
+    /// Make the renderer's table pictures agree with the tables actually on the glass.
+    ///
+    /// Three things at once, and they are one pass because they are one question — *which pictures
+    /// does the next frame need, and are the ones we have still the right ones*: a table no frame
+    /// shows any more is dropped, a table whose type size or palette has moved under it is laid
+    /// out again, and a table nothing has drawn yet is laid out for the first time. The renderer is
+    /// only told when something actually moved, so a window full of unchanged tables costs one map
+    /// walk a frame and no allocation at all.
+    fn refresh_table_paints(&mut self, sources: &[String]) {
+        let palette = bt_render::chrome_palette();
+        let stamp = self.table_paint_stamp(&palette);
+        let mut changed = false;
+        if self.table_paints.len() != sources.len()
+            || sources
+                .iter()
+                .any(|source| !self.table_paints.contains_key(source))
+        {
+            self.table_paints
+                .retain(|source, _| sources.contains(source));
+            changed = true;
+        }
+        let stale: Vec<String> = sources
+            .iter()
+            .filter(|source| {
+                self.table_paints
+                    .get(*source)
+                    .is_none_or(|held| held.stamp != stamp)
+            })
+            .cloned()
+            .collect();
+        for source in stale {
+            let Some(block) = self.build_table_block(&source) else {
+                continue;
+            };
+            self.table_paints.insert(
+                source,
+                TablePaint {
+                    paint: block.paint,
+                    stamp,
+                },
+            );
+            changed = true;
+        }
+        if changed {
+            let paints = self
+                .table_paints
+                .iter()
+                .map(|(source, held)| (source.clone(), held.paint.clone()))
+                .collect();
+            self.renderer.set_table_blocks(paints);
+        }
+    }
+
+    /// Every rendered table a set of frames is showing, by source.
+    fn table_sources<'a>(
+        frames: impl Iterator<Item = &'a bt_viewport::ViewportFrame>,
+    ) -> Vec<String> {
+        let mut sources: Vec<String> = frames
+            .flat_map(|frame| frame.math_blocks.iter())
+            .filter(|placement| {
+                placement.artifact.kind == bt_viewport::RgbaArtifactKind::Table
+                    && placement.display == bt_viewport::MathBlockDisplay::Rendered
+            })
+            .map(|placement| placement.artifact.source.clone())
+            .collect();
+        sources.sort();
+        sources.dedup();
+        sources
+    }
+
+    /// A proven table's "raster": its extent, and no pixels.
+    ///
+    /// The decoration pipeline asks a worker for a picture and gets back a size and some bytes;
+    /// this answers the size half honestly and the bytes half with nothing, which is exactly what
+    /// a table is — see [`bt_render::TableBlockPaint`]. The size is what the block reports as its
+    /// artifact extent, so it is what decides how many transcript rows the block covers, and it is
+    /// measured with the same shaper that will draw it.
+    fn table_raster(&mut self, source: &str) -> std::result::Result<MathRaster, MathRenderError> {
+        let block = self
+            .build_table_block(source)
+            .ok_or(MathRenderError::NotDetected)?;
+        Ok(MathRaster {
+            rgba: Vec::new(),
+            width_px: block.width_px,
+            height_px: block.height_px,
+            content_height_px: block.height_px,
+            ascent_px: 0.0,
+            descent_px: 0.0,
+            baseline_px: 0.0,
+            render_time: Duration::ZERO,
+            inline_runs: Vec::new(),
+        })
     }
 
     /// Point the "Inline formulas" switch at `enabled` (user ruling 2026-08-10).
@@ -25387,7 +25600,7 @@ impl Runtime {
         blocks
             .iter()
             .map(|block| match block {
-                preview::MarkdownBlock::Table { rows } => {
+                preview::MarkdownBlock::Table { rows, .. } => {
                     let count = rows.iter().map(Vec::len).max().unwrap_or(0);
                     if count == 0 {
                         return MarkdownBlockIntrinsic::default();
@@ -35516,20 +35729,42 @@ impl Runtime {
                     // A pane closed while its work was in flight simply has no session to take it.
                     changed |= match completion.completion {
                         DecorationWorkerCompletion::Math { task, result } => match *task {
-                            SessionMathTask::Frozen(task) => target_index.is_some_and(|index| {
-                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
-                                    .is_some_and(|session| {
-                                        session.complete_worker_result(task, result)
-                                    });
-                                target_active && applied
-                            }),
-                            SessionMathTask::Live(task) => target_index.is_some_and(|index| {
-                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
-                                    .is_some_and(|session| {
-                                        session.complete_live_worker_result(task, result)
-                                    });
-                                target_active && applied
-                            }),
+                            // **A table's picture is made here and not on the worker thread.** The
+                            // worker did the half that is genuinely off-thread — proving the block
+                            // — and stopped, because the other half needs the shaper that lives on
+                            // this one. What comes back for a table is therefore an empty raster
+                            // and the real extent is measured now, before the session is told
+                            // anything, so the record it stores is the size the block will draw at.
+                            SessionMathTask::Frozen(task) => {
+                                let result = if task.span.kind == bt_detect::BlockKind::Table {
+                                    self.table_raster(&task.span.render_source)
+                                } else {
+                                    result
+                                };
+                                target_index.is_some_and(|index| {
+                                    let applied =
+                                        leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                            .is_some_and(|session| {
+                                                session.complete_worker_result(task, result)
+                                            });
+                                    target_active && applied
+                                })
+                            }
+                            SessionMathTask::Live(task) => {
+                                let result = if task.span.kind == bt_detect::BlockKind::Table {
+                                    self.table_raster(&task.span.render_source)
+                                } else {
+                                    result
+                                };
+                                target_index.is_some_and(|index| {
+                                    let applied =
+                                        leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                            .is_some_and(|session| {
+                                                session.complete_live_worker_result(task, result)
+                                            });
+                                    target_active && applied
+                                })
+                            }
                         },
                         DecorationWorkerCompletion::InlineImage { task, result } => {
                             if target_active {
@@ -43053,6 +43288,18 @@ impl Runtime {
         // Before the frame is borrowed: this samples the tweens and re-places
         // the preview raster, both of which want the renderer mutably.
         let bodies = self.pane_draws(now);
+        // The retained picture is the same picture, but the palette and the type size under it may
+        // have moved since it was presented — a theme switch re-presents without re-projecting.
+        // So the pictures are re-checked here for the same reason the tweens are re-sampled.
+        let table_sources = Self::table_sources(
+            self.last_presented_frame.iter().chain(
+                self.tabs[self.active_tab]
+                    .sessions
+                    .values()
+                    .filter_map(|leaf| leaf.last_presented_frame.as_ref()),
+            ),
+        );
+        self.refresh_table_paints(&table_sources);
         let frame = self
             .last_presented_frame
             .as_ref()
@@ -43217,6 +43464,10 @@ impl Runtime {
                     clip: viewport,
                 }
             });
+        let table_sources = Self::table_sources(
+            std::iter::once(&frame).chain(unfocused_frames.iter().map(|(_, it)| it)),
+        );
+        self.refresh_table_paints(&table_sources);
         let mut seat_frames = Vec::with_capacity(unfocused_frames.len() + 1);
         seat_frames.push(bt_render::SeatFrame {
             seat: focused_body.viewport,
@@ -60139,7 +60390,7 @@ mod tests {
         // ③ Every table has a heading row and at least one body row — a table
         //    of one row is a separator that was read as content.
         for block in &blocks {
-            if let preview::MarkdownBlock::Table { rows } = block {
+            if let preview::MarkdownBlock::Table { rows, .. } = block {
                 assert!(
                     rows.len() >= 2,
                     "a table needs its heading and something under it: {rows:?}"
@@ -60193,7 +60444,7 @@ mod tests {
             .collect();
         assert!(fences >= 1, "the fixture carries a fence");
         assert_eq!(tables.len(), 2, "and a wide table and a narrow one");
-        if let preview::MarkdownBlock::Table { rows } = tables[0] {
+        if let preview::MarkdownBlock::Table { rows, .. } = tables[0] {
             assert!(
                 rows[0].len() >= 8,
                 "the wide table is at least eight across"
@@ -60238,7 +60489,7 @@ mod tests {
             "① the fence asks for its longest line and its own chrome"
         );
 
-        let preview::MarkdownBlock::Table { rows } = tables[0] else {
+        let preview::MarkdownBlock::Table { rows, .. } = tables[0] else {
             unreachable!("filtered above")
         };
         let columns = markdown_table_columns(rows, metrics_at_1, |cell, _| {
@@ -60656,6 +60907,7 @@ mod tests {
             },
             preview::MarkdownBlock::Table {
                 rows: vec![cells("first"), cells("last")],
+                alignments: vec![bt_detect::table::ColumnAlignment::None; 1],
             },
         ];
         let fence_height =
@@ -60830,7 +61082,7 @@ mod tests {
                             + metrics.line_height * text.lines().count().max(1) as f32,
                     )
                 },
-                preview::MarkdownBlock::Table { rows } => {
+                preview::MarkdownBlock::Table { rows, .. } => {
                     let columns = markdown_table_columns(rows, metrics, |cell_spans, _| {
                         cell_spans
                             .iter()
@@ -61055,7 +61307,7 @@ mod tests {
         let intrinsic: Vec<MarkdownBlockIntrinsic> = blocks
             .iter()
             .map(|block| match block {
-                preview::MarkdownBlock::Table { rows } => {
+                preview::MarkdownBlock::Table { rows, .. } => {
                     let columns = markdown_table_columns(rows, metrics, |cell_spans, _| {
                         intrinsic_calls.set(intrinsic_calls.get() + 1);
                         cell_spans

@@ -687,6 +687,19 @@ pub enum Text {
     CapCmd,
     /// A profile served by no script at all.
     CapNone,
+
+    // ── the Rendered blocks page's third row (2026-08-18) ──────────────────
+    //
+    // Appended here rather than beside `RowInlineFormulas`, which is where this
+    // file's own grouping discipline would put it, and the reason is the day
+    // rather than the subject: three lanes were adding rows to this table at
+    // once, and a new entry in the middle of the settings family is a conflict
+    // in every one of the three. The order of this enum carries no meaning —
+    // `visible_rows` decides what the dialog shows and in what order — so the
+    // cost of appending is one paragraph of explanation and the cost of slotting
+    // was three merges.
+    RowTables,
+    DescTables,
 }
 
 impl Text {
@@ -1173,6 +1186,18 @@ impl Text {
                 "目录与超链接；没有提示符标记，没有退出码",
             ),
             Self::CapNone => pick(lang, "No shell integration", "无 shell 集成"),
+            // 「表格」is what every Chinese markdown editor calls this object, so
+            // the row reads as the same noun the reader already knows.
+            Self::RowTables => pick(lang, "Tables", "表格"),
+            // Says what Off does, which is the rule `DescFormulas` states: a
+            // reader who does not see the word "text" will expect the table to
+            // disappear rather than to go back to being the pipes it was
+            // printed as.
+            Self::DescTables => pick(
+                lang,
+                "Draw markdown tables in output; off shows the pipe text",
+                "绘制输出里的 markdown 表格；关闭则显示管道符原文",
+            ),
         }
     }
 
@@ -1188,7 +1213,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 174] = [
+    pub const ALL: [Self; 176] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1363,6 +1388,8 @@ impl Text {
         Self::CapWslBash,
         Self::CapCmd,
         Self::CapNone,
+        Self::RowTables,
+        Self::DescTables,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

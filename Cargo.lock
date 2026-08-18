@@ -253,6 +253,7 @@ name = "bt-app"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bt-detect",
  "bt-doc",
  "bt-layout",
  "bt-math",

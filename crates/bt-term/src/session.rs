@@ -22,7 +22,7 @@ use bt_detect::{
     resolve_live_detection_tasks,
 };
 use bt_doc::{
-    AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
+    AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
     DetectionRevision, GridGeneration, GridPoint, HistoryDocument, InlineRunPlacement,
     InvalidSourceTransition, LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId,
     SourceLifecycle, VersionStamp, ViewGeneration, compare_anchors, content_anchor_between,
@@ -792,6 +792,16 @@ pub struct DualPlaneSession {
     /// rows, and turning it on would leave them at source forever. `set_inline_math_bands`
     /// therefore drives the same `redetect` route a detector change has always used.
     inline_math_bands: bool,
+    /// Whether proven GFM pipe tables are allowed to be drawn as blocks (the "Tables" switch on
+    /// the Rendered blocks page).
+    ///
+    /// A **presentation** policy bit, and the sibling of `display_math_bands` in every respect —
+    /// same two read points, same one-frame cost, same records left untouched underneath. It is a
+    /// second switch rather than a second meaning for the first because the two features fail
+    /// differently: a `$$` pair is a delimiter a program prints on purpose, while a pipe is the
+    /// most ordinary punctuation a log line carries, so a reader who wants typeset formulas and
+    /// every pipe in their output left alone has to be able to say exactly that.
+    table_bands: bool,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
     /// At most one outstanding resample per image occurrence, so the queue is bounded by the
@@ -1123,6 +1133,7 @@ impl DualPlaneSession {
             // setting in right after construction.
             display_math_bands: true,
             inline_math_bands: true,
+            table_bands: true,
             inline_image_tasks: VecDeque::new(),
             local_image_path_tasks: VecDeque::new(),
             inline_image_scale_tasks: VecDeque::new(),
@@ -1318,6 +1329,46 @@ impl DualPlaneSession {
     pub fn set_display_math_bands(&mut self, enabled: bool) -> bool {
         let changed = self.display_math_bands != enabled;
         self.display_math_bands = enabled;
+        changed
+    }
+
+    /// Is the resident line immediately above `id` shaped like a table row? The other half of
+    /// [`may_arm_table`]'s two-line question, asked of the frozen document.
+    fn history_row_above_is_table_row(&self, id: TranscriptId) -> bool {
+        self.document
+            .entries()
+            .range(..id)
+            .next_back()
+            .is_some_and(|(_, entry)| bt_detect::table::is_row_shaped(&entry.line.text))
+    }
+
+    /// Which of the two Rendered-blocks switches decides this block, and what it says.
+    ///
+    /// One question asked in one place, because the two switches are read at two points each (the
+    /// frozen plane and the live one) and four copies of `if kind == Table` is four chances for
+    /// them to disagree about what "off" means.
+    fn blocks_of_kind_are_drawn(&self, kind: BlockKind) -> bool {
+        match kind {
+            BlockKind::Math => self.display_math_bands,
+            BlockKind::Table => self.table_bands,
+        }
+    }
+
+    /// Whether proven pipe tables are allowed to be drawn as blocks.
+    #[must_use]
+    pub fn table_bands(&self) -> bool {
+        self.table_bands
+    }
+
+    /// Point the "Tables" switch at `enabled`, reporting whether that changed anything.
+    ///
+    /// Presentation, exactly like [`Self::set_display_math_bands`] and for exactly its reason: the
+    /// scan that proved a header row stands over a delimiter row is still true with the blocks
+    /// off, so nothing is re-scanned and nothing is thrown away. The pipe text comes back on the
+    /// next frame, and turning the switch on again re-arms the same records from memory.
+    pub fn set_table_bands(&mut self, enabled: bool) -> bool {
+        let changed = self.table_bands != enabled;
+        self.table_bands = enabled;
         changed
     }
 
@@ -2505,6 +2556,7 @@ impl DualPlaneSession {
                     render_source: String::new(),
                     delimiter_kind: DelimiterKind::Dollars,
                     mode: MathMode::Display,
+                    kind: BlockKind::Math,
                     cell_segments: Vec::new(),
                     inline_runs: Vec::new(),
                 },
@@ -4257,10 +4309,15 @@ impl DualPlaneSession {
         inputs: Arc<[LiveDetectionInput]>,
         initial_context: DetectionContext,
     ) -> Vec<LiveDetectionTask> {
-        if !inputs
+        let armed = inputs
             .iter()
             .any(|input| may_arm_math(input.text.trim(), self.inline_math_bands, || input.site))
-        {
+            || inputs.windows(2).any(|pair| {
+                may_arm_table(pair[1].text.trim(), || {
+                    bt_detect::table::is_row_shaped(pair[0].text.trim())
+                })
+            });
+        if !armed {
             return Vec::new();
         }
         let stable = vec![true; self.live_rows.len()];
@@ -5743,6 +5800,8 @@ impl DualPlaneSession {
                 self.document.entries().get(id).is_some_and(|entry| {
                     may_arm_math(&entry.line.text, inline_formulas, || {
                         self.history_inline_site(**id)
+                    }) || may_arm_table(&entry.line.text, || {
+                        self.history_row_above_is_table_row(**id)
                     })
                 })
             })
@@ -5763,9 +5822,11 @@ impl DualPlaneSession {
                 .and_then(|context| context.required_start(*id))
                 .is_some_and(|start| start <= last_visible);
             if overlaps_visible
-                && may_arm_math(&entry.line.text, inline_formulas, || {
+                && (may_arm_math(&entry.line.text, inline_formulas, || {
                     self.history_inline_site(*id)
-                })
+                }) || may_arm_table(&entry.line.text, || {
+                    self.history_row_above_is_table_row(*id)
+                }))
             {
                 candidates.insert(*id);
             }
@@ -6166,12 +6227,10 @@ impl DualPlaneSession {
             .decorations
             .iter()
             .filter_map(|(id, record)| {
-                (self.display_math_bands
-                    && !record.show_source
-                    && record
-                        .span
-                        .as_ref()
-                        .is_some_and(|span| span.mode == MathMode::Display))
+                (!record.show_source
+                    && record.span.as_ref().is_some_and(|span| {
+                        span.mode == MathMode::Display && self.blocks_of_kind_are_drawn(span.kind)
+                    }))
                 .then(|| {
                     projected_frozen_artifact(
                         record,
@@ -6220,36 +6279,35 @@ impl DualPlaneSession {
             .live_decorations
             .values()
             .filter_map(|record| {
-                (self.display_math_bands
-                    && !record.show_source
-                    && record.span.mode == MathMode::Display)
-                    .then(|| {
-                        projected_live_artifact(
-                            record,
-                            self.layout_key,
-                            self.math_band(),
-                            self.math_vertical_padding_subpixels(),
-                        )
-                    })
-                    .flatten()
-                    .map(|artifact| ProjectedLiveMathArtifact {
-                        occurrence_id: record.identity.occurrence_id,
-                        screen: record.screen,
-                        start: record.start,
-                        end: record.end,
-                        band_start_row: record.band_start_row,
-                        band_end_row: record.band_end_row,
-                        clipped_top_rows: record.clipped_top_rows,
-                        clipped_bottom_rows: record.clipped_bottom_rows,
-                        occluded_source_rows: record.placement.occluded_source_rows,
-                        occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
-                        transition_stale: record.artifact.is_none()
-                            && record.stale_artifact.is_some(),
-                        frozen_prefix: record.frozen_prefix.clone(),
-                        staging_prefix: record.staging_prefix.clone(),
-                        generation: record.generation,
-                        artifact,
-                    })
+                (!record.show_source
+                    && record.span.mode == MathMode::Display
+                    && self.blocks_of_kind_are_drawn(record.span.kind))
+                .then(|| {
+                    projected_live_artifact(
+                        record,
+                        self.layout_key,
+                        self.math_band(),
+                        self.math_vertical_padding_subpixels(),
+                    )
+                })
+                .flatten()
+                .map(|artifact| ProjectedLiveMathArtifact {
+                    occurrence_id: record.identity.occurrence_id,
+                    screen: record.screen,
+                    start: record.start,
+                    end: record.end,
+                    band_start_row: record.band_start_row,
+                    band_end_row: record.band_end_row,
+                    clipped_top_rows: record.clipped_top_rows,
+                    clipped_bottom_rows: record.clipped_bottom_rows,
+                    occluded_source_rows: record.placement.occluded_source_rows,
+                    occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
+                    transition_stale: record.artifact.is_none() && record.stale_artifact.is_some(),
+                    frozen_prefix: record.frozen_prefix.clone(),
+                    staging_prefix: record.staging_prefix.clone(),
+                    generation: record.generation,
+                    artifact,
+                })
             })
             .collect::<Vec<_>>();
         live_artifacts.extend(self.inline_images.values().filter_map(|record| {
@@ -8370,9 +8428,10 @@ impl DualPlaneSession {
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
-        let armed_for_math = may_arm_math(&entry.line.text, self.inline_math_bands, || {
-            inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
-        });
+        let armed_for_math =
+            may_arm_math(&entry.line.text, self.inline_math_bands, || {
+                inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
+            }) || may_arm_table(&entry.line.text, || self.history_row_above_is_table_row(id));
         let versions = VersionStamp {
             source: entry.line.source_generation,
             detection: self.detection_revision,
@@ -8664,9 +8723,11 @@ impl DualPlaneSession {
             .entries()
             .iter()
             .filter_map(|(id, entry)| {
-                may_arm_math(&entry.line.text, inline_formulas, || {
+                (may_arm_math(&entry.line.text, inline_formulas, || {
                     self.history_inline_site(*id)
-                })
+                }) || may_arm_table(&entry.line.text, || {
+                    self.history_row_above_is_table_row(*id)
+                }))
                 .then_some(*id)
             })
             .collect::<Vec<_>>();
@@ -8755,6 +8816,37 @@ impl DualPlaneSession {
     /// snapshot is neutral. At a clean frontier point the dumb parity and the resync agree, so this
     /// holds; it fails safe for a mid-block first line left by a partial history eviction (no proven
     /// neutral prefix), in which case the caller falls back to the `required_start` hint.
+    /// The earliest resident line a table ending at `candidate` could have begun at.
+    ///
+    /// **A scan window is only ever as wide as the question it has to answer**, and for `$$` that
+    /// width is the certified frontier — the last place the parser was provably between blocks. A
+    /// table has no such phase to carry: it is proven by two adjacent lines and extended by every
+    /// row after them, so what its window has to reach is simply the top of the run of rows this
+    /// candidate sits in. Walk back while the line above is still shaped like a row, stop at the
+    /// first line that is not, and stop at the byte cap the whole scanner is bounded by.
+    ///
+    /// `None` when the candidate is not a row at all, which is the ordinary case and costs one
+    /// pipe scan of one line.
+    fn frozen_table_window_start(&self, candidate: TranscriptId) -> Option<TranscriptId> {
+        let entries = self.document.entries();
+        bt_detect::table::body_row(&entries.get(&candidate)?.line.text)?;
+        let mut start = candidate;
+        let mut bytes = entries[&candidate].line.text.len();
+        for (id, entry) in entries.range(..candidate).rev() {
+            if !bt_detect::table::is_row_shaped(&entry.line.text) {
+                break;
+            }
+            bytes = bytes
+                .saturating_add(entry.line.text.len())
+                .saturating_add(1);
+            if bytes > MAX_MATH_SOURCE_BYTES {
+                break;
+            }
+            start = *id;
+        }
+        (start != candidate).then_some(start)
+    }
+
     fn frozen_anchor_is_neutral(&self, anchor: TranscriptId) -> bool {
         self.frozen_detection_contexts
             .get(&anchor)
@@ -8798,7 +8890,19 @@ impl DualPlaneSession {
         // let the worker's resync abandon a lost-opener `$$` phantom, instead of trusting the
         // poisoned dumb-parity `required_start`. Used only when the window fits the source-byte cap
         // from a proven-`Known` neutral anchor; otherwise fall back to the `required_start` hint.
-        if let Some(anchor) = self.frozen_certified_anchor()
+        // The window starts at whichever reaches further back: the certified frontier, which is
+        // what a `$$` needs, or the top of the run of table rows this candidate sits in, which is
+        // what a table needs. Neither subsumes the other — the frontier advances through a table's
+        // own rows because a pipe row is a perfectly neutral line for the display parser — and a
+        // window that answered only the first question could never see a table's header row.
+        let anchor = match (
+            self.frozen_certified_anchor(),
+            self.frozen_table_window_start(candidate_id),
+        ) {
+            (Some(certified), Some(table)) => Some(certified.min(table)),
+            (certified, table) => certified.or(table),
+        };
+        if let Some(anchor) = anchor
             && anchor <= candidate_id
             && self.frozen_anchor_is_neutral(anchor)
             && let Some(inputs) = self.frozen_window_inputs(anchor, candidate_id)
@@ -9031,6 +9135,9 @@ pub fn render_detection_task(
     if !resolve_detection_task(task) {
         return Err(MathRenderError::NotDetected);
     }
+    if task.span.kind == BlockKind::Table {
+        return Ok(unrendered_table_raster());
+    }
     let line = task
         .inputs
         .iter()
@@ -9060,6 +9167,15 @@ pub fn render_live_detection_task(
     if !resolve_live_detection_task(task) {
         return Err(MathRenderError::NotDetected);
     }
+    if task.span.kind == BlockKind::Table {
+        if task.screen == ScreenId::Primary {
+            extend_live_task_band(task);
+        } else {
+            task.band_start_row = task.start.row;
+            task.band_end_row = task.end.row;
+        }
+        return Ok(unrendered_table_raster());
+    }
     if task.screen == ScreenId::Primary {
         extend_live_task_band(task);
     } else {
@@ -9082,6 +9198,33 @@ pub fn render_live_detection_task(
             mode: task.span.mode,
         },
     )
+}
+
+/// A proven table's answer from the worker: the block, and no picture.
+///
+/// **The worker's half of a table is the proof, not the paint.** Everything expensive about
+/// deciding that a header row stands over a delimiter row belongs off the presentation thread, and
+/// it has just been done by `resolve_detection_task` above. What is left — how wide each column
+/// has to be to hold its widest cell — is a question only the window's own shaper can answer, and
+/// that shaper is on the thread this one exists to keep free. So the raster comes back empty and
+/// `bt-app` measures the block before handing it to the session; see
+/// `bt_render::TableBlockPaint`.
+///
+/// A zero extent rather than a guess: a size invented here would be the size the record kept if
+/// the measuring step were ever skipped, and a wrong height is rows of transcript covered by
+/// nothing.
+fn unrendered_table_raster() -> MathRaster {
+    MathRaster {
+        rgba: Vec::new(),
+        width_px: 0,
+        height_px: 0,
+        content_height_px: 0,
+        ascent_px: 0.0,
+        descent_px: 0.0,
+        baseline_px: 0.0,
+        render_time: Duration::ZERO,
+        inline_runs: Vec::new(),
+    }
 }
 
 fn render_task_math(
@@ -9380,11 +9523,13 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
     let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
     PlaceholderArtifact {
         key: shared_math_artifact_key(
+            task.span.kind,
             task.span.mode,
             &task.span.render_source,
             task.versions.layout,
             task.versions.detection,
         ),
+        kind: task.span.kind,
         block_end: task.block_end,
         height_subpixels,
         width_px: raster.width_px,
@@ -9401,11 +9546,13 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
     let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
     PlaceholderArtifact {
         key: shared_math_artifact_key(
+            task.span.kind,
             task.span.mode,
             &task.span.render_source,
             task.layout,
             task.detection_revision,
         ),
+        kind: task.span.kind,
         block_end: TranscriptId(0),
         height_subpixels,
         width_px: raster.width_px,
@@ -9419,12 +9566,14 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
 }
 
 fn shared_math_artifact_key(
+    kind: BlockKind,
     mode: MathMode,
     source: &str,
     layout: LayoutKey,
     detection: DetectionRevision,
 ) -> String {
     let mut hasher = DefaultHasher::new();
+    kind.hash(&mut hasher);
     mode.hash(&mut hasher);
     source.hash(&mut hasher);
     layout.hash(&mut hasher);
@@ -9435,11 +9584,13 @@ fn shared_math_artifact_key(
 fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
     PlaceholderArtifact {
         key: shared_math_artifact_key(
+            task.span.kind,
             task.span.mode,
             &task.span.render_source,
             task.layout,
             task.detection_revision,
         ),
+        kind: task.span.kind,
         block_end: TranscriptId(0),
         height_subpixels: SUBPIXELS_PER_PX,
         width_px: 1,
@@ -9527,7 +9678,10 @@ fn project_artifact_at_scale(
             .saturating_mul(i64::from(scale_milli))
             / 1000,
         mode: artifact.mode,
-        kind: bt_viewport::RgbaArtifactKind::Math,
+        kind: match artifact.kind {
+            BlockKind::Math => bt_viewport::RgbaArtifactKind::Math,
+            BlockKind::Table => bt_viewport::RgbaArtifactKind::Table,
+        },
         vertical_padding_subpixels,
         render_scale_milli: scale_milli,
         source,
@@ -9950,6 +10104,26 @@ fn may_arm_math(text: &str, inline_formulas: bool, site: impl FnOnce() -> Inline
         || (inline_formulas && may_contain_inline_math(text) && site().permits_inline())
 }
 
+/// The arming pre-filter for tables: could this line be the *last* line of a table?
+///
+/// **Two lines, because two lines is where the answer lives.** A table is proven by a header row
+/// standing over a delimiter row, so no single line can be a table and no single line can be ruled
+/// out by itself either — the delimiter row `|---|---|` is armed by the header above it, and every
+/// body row by the row above *it*. So the question this asks is the smallest one that can have an
+/// answer: *this line is a row, and the line before it is a row too.*
+///
+/// It is deliberately not gated on the "Tables" switch, and that is the same ruling
+/// `display_math_bands` carries: the switch is presentation, so detection keeps running with it
+/// off and turning it back on costs one frame instead of a re-scan.
+///
+/// Two adjacent log lines that both happen to carry a pipe will arm and then prove nothing. That
+/// is the honest cost of a two-line question, it is bounded by one scan of an already-bounded
+/// window, and the alternative — remembering which lines were part of a table — would be a second
+/// piece of state saying what the transcript already says.
+fn may_arm_table(text: &str, previous_is_row: impl FnOnce() -> bool) -> bool {
+    bt_detect::table::is_row_shaped(text) && previous_is_row()
+}
+
 fn empty_live_math_span() -> MathSpan {
     MathSpan {
         byte_start: 0,
@@ -9958,6 +10132,7 @@ fn empty_live_math_span() -> MathSpan {
         render_source: String::new(),
         delimiter_kind: DelimiterKind::Dollars,
         mode: MathMode::Display,
+        kind: BlockKind::Math,
         cell_segments: Vec::new(),
         inline_runs: Vec::new(),
     }
@@ -10673,6 +10848,7 @@ fn live_task_is_current(
         render_source: String::new(),
         delimiter_kind: DelimiterKind::Dollars,
         mode: MathMode::Display,
+        kind: BlockKind::Math,
         cell_segments: Vec::new(),
         inline_runs: Vec::new(),
     };
@@ -10716,6 +10892,9 @@ fn live_candidate_rows(
     // the same verdict the scanner will, or the prefilter would either queue rows the scan drops or
     // — far worse — drop rows the scan would have rendered.
     let mut logical_site = None;
+    // The other half of [`may_arm_table`]'s two-line question, asked of the live grid: a logical
+    // row arms only when the logical row before it was a row too.
+    let mut previous_logical_is_row = false;
     for input in inputs {
         logical_text.push_str(&input.text);
         logical_site = Some(match logical_site {
@@ -10730,9 +10909,9 @@ fn live_candidate_rows(
             continue;
         }
         if !hidden_code_prefix
-            && may_arm_math(&logical_text, inline_formulas, || {
+            && (may_arm_math(&logical_text, inline_formulas, || {
                 logical_site.unwrap_or(InlineMathSite::Ineligible)
-            })
+            }) || may_arm_table(&logical_text, || previous_logical_is_row))
             && let Some(row) = logical_grid_rows
                 .last()
                 .copied()
@@ -10744,6 +10923,7 @@ fn live_candidate_rows(
         if hidden_code_prefix && !context.is_commonmark_code() {
             hidden_code_prefix = false;
         }
+        previous_logical_is_row = bt_detect::table::is_row_shaped(&logical_text);
         logical_text.clear();
         logical_grid_rows.clear();
         logical_site = None;
@@ -11182,6 +11362,15 @@ impl MathBand {
     /// The scale this artifact is drawn at: the layout's own scale, reduced when the formula is
     /// too wide for the band.
     fn fit_scale_milli(self, artifact: &PlaceholderArtifact, base_scale_milli: u32) -> u32 {
+        // **A table is not fitted.** Shrinking a formula to its band trades a little size for
+        // seeing the whole expression at once, and an expression only reads as one thing. A table
+        // reads column by column, so the same trade buys nothing and costs the text its size — the
+        // preview settled this on 2026-08-13 ("a table is as wide as its own columns, and the pane
+        // scrolls to it rather than compressing them") and a table in a terminal pane is the same
+        // object under the same rule. The horizontal offset carries the remainder.
+        if artifact.kind == BlockKind::Table {
+            return base_scale_milli;
+        }
         math_fit_scale_milli(
             artifact.width_px,
             math_block_available_width_px(
@@ -11368,7 +11557,7 @@ mod publication_revision_tests {
 
     use super::DualPlaneSession;
 
-    fn nz(value: u32) -> NonZeroU32 {
+    pub(super) fn nz(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
     }
 
@@ -11397,7 +11586,7 @@ mod tests {
     use bt_transcript::TerminalColor;
     use proptest::prelude::*;
 
-    fn nz(value: u32) -> NonZeroU32 {
+    pub(super) fn nz(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
     }
 
@@ -11852,7 +12041,7 @@ mod tests {
         }));
     }
 
-    fn synthetic_raster(width_px: u32, height_px: u32) -> MathRaster {
+    pub(super) fn synthetic_raster(width_px: u32, height_px: u32) -> MathRaster {
         MathRaster {
             rgba: vec![255; width_px as usize * height_px as usize * 4],
             width_px,
@@ -11877,8 +12066,37 @@ mod tests {
             profile_rev: 0,
         };
         assert_ne!(
-            shared_math_artifact_key(MathMode::Display, "x", layout, DetectionRevision(1)),
-            shared_math_artifact_key(MathMode::Inline, "x", layout, DetectionRevision(1)),
+            shared_math_artifact_key(
+                BlockKind::Math,
+                MathMode::Display,
+                "x",
+                layout,
+                DetectionRevision(1)
+            ),
+            shared_math_artifact_key(
+                BlockKind::Math,
+                MathMode::Inline,
+                "x",
+                layout,
+                DetectionRevision(1)
+            ),
+        );
+        assert_ne!(
+            shared_math_artifact_key(
+                BlockKind::Math,
+                MathMode::Display,
+                "x",
+                layout,
+                DetectionRevision(1)
+            ),
+            shared_math_artifact_key(
+                BlockKind::Table,
+                MathMode::Display,
+                "x",
+                layout,
+                DetectionRevision(1)
+            ),
+            "two renderers reading the same bytes are two artifacts, not one cache entry"
         );
     }
 
@@ -23650,5 +23868,364 @@ mod math_overflow_tests {
             0,
         ));
         assert_eq!(horizontal, 0);
+    }
+}
+
+/// The table half of the rendered-block machinery, proven through a real session.
+///
+/// Everything here is the *same* machinery the formula tests above exercise, asked the same
+/// questions with `|` where they used `$$`. That is the claim the feature makes — one pipeline,
+/// one lifecycle, one cap, one copy path — and a test file that proved it only for formulas would
+/// let the two drift apart the first time either moved.
+#[cfg(test)]
+mod pipe_table_blocks {
+    use super::tests::{nz, synthetic_raster};
+    use super::*;
+
+    const TABLE: &[u8] =
+        b"| name | count |\r\n| --- | ---: |\r\n| alpha | 3 |\r\n| beta | 41 |\r\n";
+
+    /// Feed a table into scrollback on a grid too short to hold it, and finish every task the
+    /// session asks for.
+    ///
+    /// A four-row grid because a table that never scrolls off the live plane is never a *frozen*
+    /// decoration, and the frozen plane is the one these tests are about.
+    fn frozen_table_session(raster: MathRaster) -> DualPlaneSession {
+        let mut session = DualPlaneSession::new(nz(60), nz(4));
+        session.feed(TABLE).unwrap();
+        session
+            .feed(
+                b"tail one
+tail two
+tail three
+tail four
+",
+            )
+            .unwrap();
+        drain_tasks(&mut session, &raster);
+        session
+    }
+
+    fn drain_tasks(session: &mut DualPlaneSession, raster: &MathRaster) {
+        while let Some(mut task) = session.take_worker_task() {
+            if resolve_detection_task(&mut task) {
+                assert!(session.complete_worker_result(task, Ok(raster.clone())));
+            } else {
+                assert!(session.complete_worker_result(task, Err(MathRenderError::NotDetected)));
+            }
+        }
+    }
+
+    /// How many frozen records hold a proven table.
+    ///
+    /// **One, however many rows the table has**, and that is the assertion worth making rather
+    /// than counting completions: every row of a table after the delimiter row is a fresh
+    /// candidate that resolves to the *same* block, keyed at the header, one row longer. Counting
+    /// completions would count the growth; counting records counts the table.
+    fn ready_tables(session: &DualPlaneSession) -> usize {
+        session
+            .decorations
+            .values()
+            .filter(|record| {
+                record.decoration == DecorationLifecycle::Ready
+                    && record
+                        .span
+                        .as_ref()
+                        .is_some_and(|span| span.kind == BlockKind::Table)
+            })
+            .count()
+    }
+
+    fn frame_of(session: &mut DualPlaneSession) -> (ViewportProjection, ViewportFrame) {
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        (projection, frame)
+    }
+
+    fn table_blocks(frame: &ViewportFrame) -> Vec<&MathBlockPlacement> {
+        frame
+            .math_blocks
+            .iter()
+            .filter(|block| block.artifact.kind == bt_viewport::RgbaArtifactKind::Table)
+            .collect()
+    }
+
+    #[test]
+    fn a_pipe_table_in_scrollback_becomes_one_block_over_its_own_rows() {
+        let mut session = frozen_table_session(synthetic_raster(300, 96));
+        assert_eq!(ready_tables(&session), 1, "one table, one record");
+        let (_, frame) = frame_of(&mut session);
+        let blocks = table_blocks(&frame);
+        assert_eq!(blocks.len(), 1, "the table is drawn, exactly once");
+        assert_eq!(blocks[0].display, MathBlockDisplay::Rendered);
+        assert_eq!(
+            blocks[0].source, "| name | count |\n| --- | ---: |\n| alpha | 3 |\n| beta | 41 |",
+            "the block's source is the bytes the shell wrote, delimiter row included"
+        );
+        assert_eq!(
+            blocks[0].anchor,
+            MathBlockAnchor::History {
+                run: None,
+                start: TranscriptId(1),
+                end: TranscriptId(4),
+            },
+            "and it owns the four rows the table was printed on"
+        );
+    }
+
+    /// PIN: the promise the whole feature rests on. A rendered table is a *view* over frozen text,
+    /// so selecting the pane and copying gives back the pipes, never the picture.
+    #[test]
+    fn copying_a_rendered_table_yields_the_pipe_text_that_was_printed() {
+        let mut session = frozen_table_session(synthetic_raster(300, 96));
+        assert_eq!(ready_tables(&session), 1);
+        let (_, frame) = frame_of(&mut session);
+        assert!(
+            table_blocks(&frame)
+                .iter()
+                .any(|block| block.display == MathBlockDisplay::Rendered),
+            "the table really is drawn, so this is a copy out from under a block"
+        );
+        let selection = session
+            .select_all_selection()
+            .expect("a pane with rows in it has something to select");
+        session.set_view_selection(Some(selection));
+        let copied = session.selection_text().unwrap_or_default();
+        for line in [
+            "| name | count |",
+            "| --- | ---: |",
+            "| alpha | 3 |",
+            "| beta | 41 |",
+        ] {
+            assert!(
+                copied.contains(line),
+                "{line:?} must come back on the clipboard: {copied:?}"
+            );
+        }
+    }
+
+    /// PIN: the "Tables" switch turns off **drawing**, not detection — `display_formulas`' own
+    /// ruling, applied to the row beside it. Off shows the pipes again; on brings the same proven
+    /// block back with no task taken.
+    #[test]
+    fn turning_tables_off_shows_the_pipe_text_and_leaves_detection_running() {
+        let mut session = frozen_table_session(synthetic_raster(300, 96));
+        assert_eq!(ready_tables(&session), 1);
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let held = session.decorations.len();
+
+        assert!(session.set_table_bands(false));
+        session.refresh_projection(&mut projection);
+        let source = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            table_blocks(&source).is_empty(),
+            "the switch is off, so no table product may reach the frame"
+        );
+        let plane = crate::observe_formula_frame(&source).source_plane;
+        assert!(
+            plane.contains("| name | count |") && plane.contains("| alpha | 3 |"),
+            "and the pipe text stands in the cells the block used to cover: {plane:?}"
+        );
+        assert_eq!(
+            session.decorations.len(),
+            held,
+            "the switch must not retire the record it hides"
+        );
+
+        assert!(session.set_table_bands(true));
+        session.refresh_projection(&mut projection);
+        let again = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(table_blocks(&again).len(), 1, "on again, from memory alone");
+        assert!(
+            session.take_worker_task().is_none(),
+            "flipping the switch must not cost a single re-detection"
+        );
+        assert!(
+            !session.set_table_bands(true),
+            "setting the switch to the value it already holds is not a change"
+        );
+    }
+
+    /// PIN: two switches, two answers. A reader who wants formulas and not tables — or the other
+    /// way round — is asking for exactly what the two rows say, and one gate answering for both
+    /// would silently make them one row.
+    #[test]
+    fn the_two_rendered_block_switches_are_independent() {
+        let mut session = frozen_table_session(synthetic_raster(300, 96));
+        assert_eq!(ready_tables(&session), 1);
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+
+        assert!(session.set_display_math_bands(false));
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            table_blocks(&frame).len(),
+            1,
+            "the formula switch does not reach the table"
+        );
+
+        assert!(session.set_table_bands(false));
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            frame.math_blocks.is_empty(),
+            "and with both off, nothing is drawn at all"
+        );
+    }
+
+    /// PIN: `Maximum height` bounds a table exactly as it bounds a formula — the block is cut to
+    /// the cap and the remainder becomes an interior scroll, never a reflow.
+    #[test]
+    fn a_table_taller_than_the_maximum_height_is_cut_to_it_and_scrolls_inside_itself() {
+        let mut session = frozen_table_session(synthetic_raster(300, 200));
+        assert_eq!(ready_tables(&session), 1);
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = table_blocks(&frame);
+        let anchor = blocks[0].anchor.clone();
+        let uncapped = blocks[0].clip_height_subpixels;
+        assert!(
+            uncapped >= 200 * SUBPIXELS_PER_PX,
+            "with no cap the block stands at its own height: {uncapped}"
+        );
+        assert!(
+            !session.scroll_math_block(&anchor, 0, 20),
+            "and there is nothing to scroll inside it"
+        );
+
+        session.set_math_layout_options(MathLayoutOptions {
+            line_wrapping: true,
+            block_max_height_px: Some(nz(60)),
+            ..MathLayoutOptions::default()
+        });
+        assert!(session.scroll_math_block(&anchor, 0, 20));
+        let capped = session.viewport_frame(&mut projection).unwrap();
+        let blocks = table_blocks(&capped);
+        assert_eq!(blocks[0].clip_height_subpixels, 60 * SUBPIXELS_PER_PX);
+        assert_eq!(blocks[0].vertical_scroll_px, 20);
+    }
+
+    /// PIN: a table is never shrunk to fit the pane, and a formula still is.
+    ///
+    /// The two answers differ because the two objects are read differently — an expression reads
+    /// as one thing and a table reads column by column — and this is the assertion that keeps the
+    /// branch from being tidied away into one rule for both.
+    #[test]
+    fn an_over_wide_table_keeps_its_size_where_an_over_wide_formula_is_fitted() {
+        let mut session = frozen_table_session(synthetic_raster(4_000, 96));
+        let (_, frame) = frame_of(&mut session);
+        let blocks = table_blocks(&frame);
+        assert_eq!(
+            blocks[0].artifact.render_scale_milli, 1000,
+            "a table wider than its pane is scrolled to, not squeezed"
+        );
+
+        let mut formulas = DualPlaneSession::new(nz(60), nz(4));
+        formulas
+            .feed(b"$$x$$\r\nmore\r\nmore\r\nmore\r\nmore\r\n")
+            .unwrap();
+        drain_tasks(&mut formulas, &synthetic_raster(4_000, 96));
+        let (_, formula_frame) = frame_of(&mut formulas);
+        let formula = formula_frame
+            .math_blocks
+            .iter()
+            .find(|block| block.artifact.kind == bt_viewport::RgbaArtifactKind::Math)
+            .expect("the formula is drawn");
+        assert!(
+            formula.artifact.render_scale_milli < 1000,
+            "and the formula beside it is still fitted to its band"
+        );
+    }
+
+    /// PIN: a near miss proves nothing, through the whole session and not only the recogniser.
+    #[test]
+    fn a_log_line_full_of_pipes_never_becomes_a_block() {
+        let mut session = DualPlaneSession::new(nz(60), nz(12));
+        session
+            .feed(
+                b"12:00:01 INFO | starting\r\n12:00:02 INFO | ready\r\n+---+---+\r\n| a | b |\r\n+---+---+\r\ntail\r\n",
+            )
+            .unwrap();
+        while let Some(mut task) = session.take_worker_task() {
+            let resolved = resolve_detection_task(&mut task);
+            assert!(
+                !resolved,
+                "nothing in this output is a table: {:?}",
+                task.span.original_source
+            );
+            assert!(session.complete_worker_result(task, Err(MathRenderError::NotDetected)));
+        }
+        let (_, frame) = frame_of(&mut session);
+        assert!(
+            table_blocks(&frame).is_empty(),
+            "and no table product reaches the frame"
+        );
+    }
+
+    /// PIN: a table streams in and the block grows with it, which is what the arming rule is for.
+    /// One record, keyed at the header, ending further down each time a row lands.
+    ///
+    /// A one-row grid so that every line freezes the moment the next one arrives: this is the
+    /// frozen plane's own account of streaming, and a taller grid would keep the whole table live
+    /// and prove nothing about it.
+    #[test]
+    fn a_table_arriving_a_row_at_a_time_grows_one_block_rather_than_stacking_them() {
+        let mut session = DualPlaneSession::new(nz(60), nz(1));
+        let raster = synthetic_raster(300, 40);
+        let mut ends = Vec::new();
+        for line in [
+            "| name | count |",
+            "| --- | ---: |",
+            "| alpha | 3 |",
+            "| beta | 41 |",
+            "tail",
+        ] {
+            session.feed(line.as_bytes()).unwrap();
+            session.feed(b"\r\n").unwrap();
+            drain_tasks(&mut session, &raster);
+            ends.push(
+                session
+                    .decorations
+                    .values()
+                    .filter(|record| {
+                        record
+                            .span
+                            .as_ref()
+                            .is_some_and(|span| span.kind == BlockKind::Table)
+                    })
+                    .filter_map(|record| record.block_end)
+                    .max(),
+            );
+        }
+        assert_eq!(
+            ends,
+            vec![
+                None,
+                Some(TranscriptId(2)),
+                Some(TranscriptId(3)),
+                Some(TranscriptId(4)),
+                Some(TranscriptId(4)),
+            ],
+            "a header row alone is not a table; the delimiter row proves one the moment it \
+             freezes; every row after it extends the same block; and the line that is not a row \
+             ends it where it stood"
+        );
+        assert_eq!(
+            ready_tables(&session),
+            1,
+            "one table is one block, however it arrived"
+        );
     }
 }

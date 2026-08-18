@@ -1,6 +1,7 @@
 //! Conservative block-level `$$...$$` detection and the dual lifecycle/version gate.
 
 mod ledger;
+pub mod table;
 pub use ledger::{
     ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,
     SourceIntegrityAnnotation, StructuralDelimiterKind, TokenFate,
@@ -9,11 +10,12 @@ use ledger::{OwnershipRecorder, source_line_of, structural_kind};
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use bt_doc::{DecorationIntent, HistoryDocument};
 pub use bt_doc::{
-    DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint, InlineRunPlacement,
-    LayoutKey, MathMode, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
+    BlockKind, DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint,
+    InlineRunPlacement, LayoutKey, MathMode, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle,
+    VersionStamp, ViewGeneration,
 };
+use bt_doc::{DecorationIntent, HistoryDocument};
 use bt_transcript::{SourceGeneration, TranscriptId};
 
 pub const MAX_MATH_SOURCE_BYTES: usize = 8 * 1024;
@@ -59,6 +61,11 @@ pub enum DelimiterKind {
     Dollars,
     Brackets,
     Environment(String),
+    /// A GFM pipe table's own "delimiter": the `|---|:--:|` row. It carries no
+    /// payload because, unlike the three above, the row is not a token to be
+    /// paired — it is the proof, and it has already been read by the time an
+    /// occurrence exists.
+    Table,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +95,9 @@ pub struct MathOccurrence {
     pub render_source: String,
     pub delimiter_kind: DelimiterKind,
     pub mode: MathMode,
+    /// Which renderer owns this occurrence. See [`BlockKind`] for why one field
+    /// on one occurrence type is the whole of the difference.
+    pub kind: BlockKind,
     pub cell_segments: Vec<MathCellSegment>,
     pub inline_runs: Vec<InlineMathRun>,
 }
@@ -104,6 +114,10 @@ pub struct InlineMathRun {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlaceholderArtifact {
     pub key: String,
+    /// Which renderer produced these pixels, carried so the presentation layer can answer the two
+    /// questions that differ — whether an over-wide block is shrunk to fit or scrolled at full
+    /// size, and which of the two switches on the Rendered blocks page decides it is drawn.
+    pub kind: BlockKind,
     pub block_end: TranscriptId,
     pub height_subpixels: i64,
     pub rgba: Arc<[u8]>,
@@ -213,6 +227,7 @@ impl MathOccurrence {
             && self.render_source == other.render_source
             && self.delimiter_kind == other.delimiter_kind
             && self.mode == other.mode
+            && self.kind == other.kind
             && self.inline_runs == other.inline_runs
     }
 }
@@ -360,6 +375,7 @@ impl DecorationRecord {
                 render_source: String::new(),
                 delimiter_kind: DelimiterKind::Dollars,
                 mode: MathMode::Display,
+                kind: BlockKind::Math,
                 cell_segments: Vec::new(),
                 inline_runs: Vec::new(),
             },
@@ -894,6 +910,7 @@ fn inline_group(id: TranscriptId, line: &str, runs: Vec<InlineMathRun>) -> Optio
             .join("; "),
         delimiter_kind: DelimiterKind::Dollars,
         mode: MathMode::Inline,
+        kind: BlockKind::Math,
         cell_segments,
         inline_runs: runs,
     })
@@ -1146,7 +1163,8 @@ fn scan_math_blocks_impl<'a>(
     // direction of a symmetric `$$` is genuinely undecidable (M1.9p), so the resync must stay off and
     // the ambiguous opener is suppressed as it always has been — never re-paired on a guess.
     let frozen_resync = frozen_resync && initial_context.prefix == PrefixKnowledge::Known;
-    let mut fence = initial_context.fence;
+    let initial_fence = initial_context.fence;
+    let mut fence = initial_fence;
     let mut opening = initial_context.opening.map(|(_, delimiter)| ActiveOpening {
         start_index: None,
         delimiter,
@@ -1319,6 +1337,7 @@ fn scan_math_blocks_impl<'a>(
                         original.to_owned(),
                         render,
                         delimiter,
+                        BlockKind::Math,
                     ),
                 });
             }
@@ -1369,6 +1388,7 @@ fn scan_math_blocks_impl<'a>(
                     original.to_owned(),
                     render,
                     delimiter,
+                    BlockKind::Math,
                 ),
             });
             continue;
@@ -1457,6 +1477,7 @@ fn scan_math_blocks_impl<'a>(
                     original,
                     render,
                     active.delimiter,
+                    BlockKind::Math,
                 ),
             });
             continue;
@@ -1504,7 +1525,89 @@ fn scan_math_blocks_impl<'a>(
     if let Some(slot) = final_neutral {
         *slot = opening.is_none() && fence.is_none();
     }
+    append_table_blocks(&lines, initial_fence, &mut result);
     result
+}
+
+/// Find every GFM pipe table in the same window the display-math scan just read, and append it to
+/// the same result.
+///
+/// **A second walk rather than a branch inside the first, and that is the design.** The math loop
+/// above is a delimiter state machine: it carries an opening across lines, abandons poisoned
+/// openers, honours a clip witness, and feeds an ownership ledger — every one of those is a fact
+/// about `$$`, and a table has none of them. A table is decided by two adjacent lines and nothing
+/// else, which is a different shape of question and gets its own loop. What the two share is the
+/// *context* they read in, and that is shared literally: the CommonMark fence state carried in and
+/// tracked here is the same rule, so a table inside a ``` fence is no more a table than a `$$`
+/// inside one is mathematics.
+///
+/// Math wins any overlap. It cannot happen with a well-formed input — a `$$` body is not a pipe
+/// row over a delimiter row — but "cannot happen" is not a reason to leave two blocks claiming one
+/// line, and the display scan is the older and stricter claim.
+fn append_table_blocks(
+    lines: &[(TranscriptId, &str)],
+    initial_fence: Option<(char, usize)>,
+    result: &mut MathScanResult,
+) {
+    if lines.len() < 2 {
+        return;
+    }
+    let texts: Vec<&str> = lines.iter().map(|(_, text)| *text).collect();
+    let mut claimed = vec![false; lines.len()];
+    for block in &result.blocks {
+        for (index, (id, _)) in lines.iter().enumerate() {
+            if *id >= block.start && *id <= block.end {
+                claimed[index] = true;
+            }
+        }
+    }
+    let mut fence = initial_fence;
+    let mut index = 0;
+    while index < lines.len() {
+        let text = texts[index];
+        if let Some(marker) = commonmark_fence_marker(text) {
+            match fence {
+                Some(active) if commonmark_fence_closes(text, active) => fence = None,
+                None => fence = Some(marker),
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        if fence.is_some() || claimed[index] || commonmark_indented_code(text) {
+            index += 1;
+            continue;
+        }
+        let Some(span) = table::table_at(&texts[index..]) else {
+            index += 1;
+            continue;
+        };
+        let end_index = index + span.line_count - 1;
+        if claimed[index..=end_index].iter().any(|it| *it) {
+            index += 1;
+            continue;
+        }
+        let source = joined_range(lines, index, end_index, 0, texts[end_index].len());
+        result.blocks.push(DetectedMathBlock {
+            start: lines[index].0,
+            end: lines[end_index].0,
+            span: occurrence(
+                lines,
+                OccurrenceRange {
+                    start_index: index,
+                    end_index,
+                    byte_start: 0,
+                    byte_end: texts[end_index].len(),
+                },
+                source.clone(),
+                source,
+                DelimiterKind::Table,
+                BlockKind::Table,
+            ),
+        });
+        index = end_index + 1;
+    }
+    result.blocks.sort_by_key(|block| block.start);
 }
 
 /// Record a structural display delimiter that appears inside a CommonMark fenced code context as a
@@ -1630,6 +1733,7 @@ fn occurrence(
     original_source: String,
     render_source: String,
     delimiter_kind: DelimiterKind,
+    kind: BlockKind,
 ) -> MathOccurrence {
     let cell_segments = (range.start_index..=range.end_index)
         .map(|index| {
@@ -1661,6 +1765,7 @@ fn occurrence(
         render_source,
         delimiter_kind,
         mode: MathMode::Display,
+        kind,
         cell_segments,
         inline_runs: Vec::new(),
     }
@@ -1992,6 +2097,9 @@ fn closing_delimiter(text: &str, delimiter: &DelimiterKind) -> Option<(usize, us
             let start = trimmed_end.checked_sub(2)?;
             (text.get(start..trimmed_end) == Some(r"\]")).then_some((start, trimmed_end))
         }
+        // A table has no closing delimiter to look for: it ends at the first line that is not one
+        // of its rows, which `table::table_at` has already decided.
+        DelimiterKind::Table => None,
         DelimiterKind::Environment(environment) => {
             let closing = format!(r"\end{{{environment}}}");
             // A display environment closer is routinely followed by sentence punctuation when it
@@ -2748,6 +2856,7 @@ pub fn render_placeholder(task: &DetectionTask) -> PlaceholderArtifact {
             "math:{}:{}:{}",
             task.transcript_id.0, task.span.byte_start, task.versions.detection.0
         ),
+        kind: task.span.kind,
         block_end: task.block_end,
         height_subpixels: 64 * SUBPIXELS_PER_PX,
         rgba: Arc::from(vec![0; 4]),
@@ -4132,6 +4241,7 @@ abla f",
                 render_source: String::new(),
                 delimiter_kind: DelimiterKind::Dollars,
                 mode: MathMode::Display,
+                kind: BlockKind::Math,
                 cell_segments: Vec::new(),
                 inline_runs: Vec::new(),
             },
@@ -5321,6 +5431,169 @@ abla	imes\mathbf F)\cdot\mathbf n",
         assert!(
             detect_math_blocks(lines).is_empty(),
             "prose bodies and inline superstrings stay rejected behind a list marker"
+        );
+    }
+}
+
+/// The table half of the scanner: proven in the same window, under the same code-fence context,
+/// and never at the cost of a formula.
+#[cfg(test)]
+mod pipe_tables_in_a_scan {
+    use super::*;
+
+    fn scan(lines: &[&str]) -> Vec<DetectedMathBlock> {
+        let numbered: Vec<(TranscriptId, &str)> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, text)| (TranscriptId(index as u64 + 1), *text))
+            .collect();
+        detect_math_blocks(numbered)
+    }
+
+    #[test]
+    fn a_table_in_command_output_is_one_block_over_its_own_lines() {
+        let blocks = scan(&[
+            "here is what came back:",
+            "| name | count |",
+            "| --- | ---: |",
+            "| alpha | 3 |",
+            "| beta | 41 |",
+            "done.",
+        ]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].start, TranscriptId(2));
+        assert_eq!(blocks[0].end, TranscriptId(5));
+        assert_eq!(blocks[0].span.kind, BlockKind::Table);
+        assert_eq!(blocks[0].span.mode, MathMode::Display);
+        assert_eq!(blocks[0].span.delimiter_kind, DelimiterKind::Table);
+        assert_eq!(
+            blocks[0].span.original_source,
+            "| name | count |\n| --- | ---: |\n| alpha | 3 |\n| beta | 41 |",
+            "the block's source is the terminal's own bytes, delimiter row included"
+        );
+        assert_eq!(
+            blocks[0].span.cell_segments.len(),
+            4,
+            "one segment per source row, so the rows it covers are the rows it clears"
+        );
+    }
+
+    #[test]
+    fn a_table_inside_a_code_fence_is_not_a_table() {
+        assert!(
+            scan(&["```markdown", "| a | b |", "|---|---|", "| 1 | 2 |", "```",]).is_empty(),
+            "a fence suppresses a table for the same reason it suppresses a formula"
+        );
+    }
+
+    #[test]
+    fn an_indented_code_block_is_not_a_table_either() {
+        assert!(
+            scan(&["    | a | b |", "    |---|---|", "    | 1 | 2 |"]).is_empty(),
+            "four spaces is CommonMark's own code block"
+        );
+    }
+
+    #[test]
+    fn a_formula_and_a_table_in_one_window_are_two_blocks_in_document_order() {
+        let blocks = scan(&[
+            "| a | b |",
+            "|---|---|",
+            "| 1 | 2 |",
+            "",
+            "$$",
+            "x = 1",
+            "$$",
+        ]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].span.kind, BlockKind::Table);
+        assert_eq!(
+            (blocks[0].start, blocks[0].end),
+            (TranscriptId(1), TranscriptId(3))
+        );
+        assert_eq!(blocks[1].span.kind, BlockKind::Math);
+        assert_eq!(
+            (blocks[1].start, blocks[1].end),
+            (TranscriptId(5), TranscriptId(7))
+        );
+    }
+
+    #[test]
+    fn two_tables_separated_by_prose_are_two_blocks() {
+        let blocks = scan(&[
+            "| a |", "|---|", "| 1 |", "and then", "| b |", "|---|", "| 2 |",
+        ]);
+        assert_eq!(blocks.len(), 2);
+        assert!(
+            blocks
+                .iter()
+                .all(|block| block.span.kind == BlockKind::Table)
+        );
+        assert_eq!(
+            (blocks[0].start, blocks[0].end),
+            (TranscriptId(1), TranscriptId(3))
+        );
+        assert_eq!(
+            (blocks[1].start, blocks[1].end),
+            (TranscriptId(5), TranscriptId(7))
+        );
+    }
+
+    /// The near-miss corpus, run through the real scanner rather than the recogniser alone.
+    #[test]
+    fn the_near_miss_corpus_produces_no_block_at_all() {
+        for sample in [
+            vec!["2026-08-18 INFO | starting", "2026-08-18 INFO | ready"],
+            vec!["│ a │ b │", "├───┼───┤", "│ 1 │ 2 │"],
+            vec!["+---+---+", "| a | b |", "+---+---+"],
+            vec!["if [ -f x ] || [ -f y ]; then", "  echo both", "fi"],
+            vec!["| a | b | c |", "| --- | --- |", "| 1 | 2 | 3 |"],
+            vec!["| a | b |", "| --a-- | --- |", "| 1 | 2 |"],
+            vec!["Total", "-----", "42"],
+        ] {
+            assert!(
+                scan(&sample).is_empty(),
+                "no block may be proven from {sample:?}"
+            );
+        }
+    }
+
+    /// The user's real-world sample. GFM's own answer is that this is a table; see
+    /// [`crate::table`]'s module doc for the spec rule and the citation.
+    #[test]
+    fn the_empty_first_heading_sample_is_a_table_and_keeps_its_bytes() {
+        let blocks = scan(&[
+            "| | 计划发卡 β 峰 | 时间 |",
+            "|---|---|---|",
+            "| 甲 | 12.5 | 08:00 |",
+            "| 乙 | 9.0 | 09:30 |",
+        ]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].span.kind, BlockKind::Table);
+        assert_eq!(
+            blocks[0].span.original_source.lines().next(),
+            Some("| | 计划发卡 β 峰 | 时间 |")
+        );
+    }
+
+    /// Streaming: the same window, one line longer each time. Nothing is a block until the
+    /// delimiter row lands, and from then on each arriving row extends the same block.
+    #[test]
+    fn a_table_arriving_a_row_at_a_time_renders_as_soon_as_it_is_provable_and_then_grows() {
+        let full = ["| a | b |", "|---|---|", "| 1 | 2 |", "| 3 | 4 |"];
+        let mut ends = Vec::new();
+        for length in 1..=full.len() {
+            let blocks = scan(&full[..length]);
+            ends.push(blocks.first().map(|block| block.end));
+        }
+        assert_eq!(
+            ends,
+            vec![
+                None,
+                Some(TranscriptId(2)),
+                Some(TranscriptId(3)),
+                Some(TranscriptId(4)),
+            ]
         );
     }
 }
