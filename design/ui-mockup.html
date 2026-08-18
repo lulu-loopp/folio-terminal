@@ -2305,7 +2305,18 @@
 
      A label that does not fit the half ellipsises in the button and is read
      whole in the menu — which is what `.combo-menu`'s `min-width: 100%` floor is
-     for, and why the ellipsis lives on `.value` and not on the popup. */
+     for, and why the ellipsis lives on `.value` and not on the popup.
+
+     ONE COLUMN PER PAGE (user ruling 2026-08-17). Measured per row, the pickers
+     came out ragged on the left — Theme 118, Light scheme 132, Terminal font
+     220 — and a control column whose left edge wanders is not read as a column.
+     So the native build sizes every picker on a page to the widest of that
+     page's rows, folded Advanced rows included (opening the group must not move
+     the buttons above it), still floored at 118 and capped at the half. This
+     prototype cannot express "the widest sibling on the page" in CSS without a
+     grid track shared across rows; the pictures below are therefore drawn with
+     the same fixed width per section by hand, which is the look the rule
+     produces. */
   .combo { position: relative; flex: none; max-width: 50%; }
   .combo > button {
     min-width: 118px; max-width: 100%;

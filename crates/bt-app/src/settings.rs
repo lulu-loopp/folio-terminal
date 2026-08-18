@@ -1954,6 +1954,20 @@ impl SettingsContent<'_> {
             .collect()
     }
 
+    /// Every row of one page, showing or folded.
+    ///
+    /// What the page *has*, as opposed to what is on screen: the width of its
+    /// control column is measured over this ([`page_combo_width`]), so that
+    /// opening the disclosure moves no button above it.
+    #[must_use]
+    pub fn category_rows(&self, category: SettingsCategory) -> Vec<SettingsRow> {
+        self.rows
+            .iter()
+            .copied()
+            .filter(|row| row.category() == category)
+            .collect()
+    }
+
     /// The rows of one page that live under its disclosure, showing or not.
     ///
     /// What the group is *for*, as opposed to what is on screen: the heading is
@@ -4187,6 +4201,18 @@ pub fn layout_for_menu(
     // drawn, the boxes hit-tested and the height reserved are three readings of
     // one derivation rather than three rules kept in agreement by hand.
     let mut cursor = clip[1] - scroll;
+    // **One width for every picker on the page** (user ruling 2026-08-17): the
+    // control column is read as a column, and a column whose left edge wanders
+    // from row to row is not one. Measured over *all* of the page's rows, the
+    // folded ones included, so opening the advanced group never moves the
+    // buttons above it. See `page_combo_width`.
+    let button = page_combo_width(
+        &content_of.category_rows(category),
+        scale,
+        border,
+        row_right - row_left,
+        measure,
+    );
     let mut placed_groups: Vec<GroupLayout> = Vec::new();
     let mut placed_rows: Vec<RowLayout> = Vec::new();
     let mut placed_advanced: Option<AdvancedLayout> = None;
@@ -4209,7 +4235,6 @@ pub fn layout_for_menu(
                 let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
                 cursor += metrics.row_height;
                 let combo_top = top + (metrics.row_content_height - combo_height) / 2.0;
-                let button = combo_width(row, scale, border, row_right - row_left, measure);
                 let combo = [
                     row_right - button,
                     combo_top,
@@ -4579,11 +4604,13 @@ fn widest_option(row: SettingsRow, scale: f32, measure: &mut dyn FnMut(&str, f32
 /// control that cannot say its own value is a control that has to be opened
 /// before it can be read.
 ///
-/// Per row, because it is per row that the words differ: each button holds its
-/// own longest option and nothing wider. The measuring is the caller's — the
-/// same division `push_combo`'s ellipsis and `menu_layout`'s width already run
-/// on — and the cap is [`COMBO_MAX_ROW_SHARE`], because the other half of the
-/// row is the sentence saying what the control does.
+/// Per row, this answer is what *that* row's words need; the page then takes
+/// the widest of its rows' answers ([`page_combo_width`]), because a column of
+/// controls is read as a column and one whose left edge wandered from row to
+/// row would not be. The measuring is the caller's — the same division
+/// `push_combo`'s ellipsis and `menu_layout`'s width already run on — and the
+/// cap is [`COMBO_MAX_ROW_SHARE`], because the other half of the row is the
+/// sentence saying what the control does.
 fn combo_width(
     row: SettingsRow,
     scale: f32,
@@ -4609,6 +4636,29 @@ fn combo_width(
     (chrome + widest_option(row, scale, measure))
         .ceil()
         .clamp(floor, ceiling)
+}
+
+/// **How wide every picker on a page is** (user ruling 2026-08-17).
+///
+/// The widest of the page's rows' own answers, so that `Split direction`'s
+/// `Auto (longer edge)` is printed whole *and* the `Theme` button beside it
+/// stands on the same left edge — the macOS/Windows settings look the mock-up's
+/// `min-width: 118px` implied while every list was one short word. Folded
+/// (advanced) rows count too: a column that widened when the group opened would
+/// move every button above it under the pointer.
+///
+/// A page with no picker at all keeps the floor, which is what a slider row is
+/// laid out against.
+fn page_combo_width(
+    rows: &[SettingsRow],
+    scale: f32,
+    border: f32,
+    row_span: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> f32 {
+    rows.iter()
+        .map(|row| combo_width(*row, scale, border, row_span, measure))
+        .fold(COMBO_MIN_WIDTH_LOGICAL_PX * scale, f32::max)
 }
 
 /// What a rail of this many words costs, pills and the gaps between them.
@@ -6570,10 +6620,9 @@ mod tests {
             .option_labels()
             .map(|label| measure(label, font))
             .fold(0.0_f32, f32::max);
-        assert_eq!(
-            width(split),
-            (chrome + widest).ceil(),
-            "the row whose longest answer is {:?} is exactly wide enough for it",
+        assert!(
+            width(split) >= (chrome + widest).ceil(),
+            "the row whose longest answer is {:?} is at least wide enough for it",
             SettingsRow::SplitDirection
                 .option_labels()
                 .max_by_key(|label| label.chars().count())
@@ -6582,6 +6631,28 @@ mod tests {
         assert!(
             width(split) > COMBO_MIN_WIDTH_LOGICAL_PX,
             "and that is wider than the floor, which is what the bug was about"
+        );
+        // **One column** (user ruling 2026-08-17): every picker on the page is
+        // the page's widest, folded rows included, so the buttons share one left
+        // edge and opening the advanced group moves nothing above it.
+        let page_widest = placed
+            .rows
+            .iter()
+            .map(|row| width(row.combo))
+            .fold(0.0_f32, f32::max);
+        for row in &placed.rows {
+            assert_eq!(
+                width(row.combo),
+                page_widest,
+                "{:?}'s picker stands on the page's one column",
+                row.row
+            );
+        }
+        let folded = shaped(SettingsCategory::Appearance, AdvancedOpen::default(), None);
+        assert_eq!(
+            width(combo_of(&folded, SettingsRow::Theme)),
+            page_widest,
+            "and the column is the same width with the advanced group folded"
         );
         // The value the button draws is now the whole word, not a prefix of it.
         let labels = labels_of(&placed, None, values());
@@ -6596,13 +6667,17 @@ mod tests {
             drawn.text
         );
 
-        // The floor: every option of the Theme row is one short word.
-        let theme = combo_of(&placed, SettingsRow::Theme);
-        assert_eq!(
-            width(theme),
-            COMBO_MIN_WIDTH_LOGICAL_PX,
-            "a picker of short answers keeps the design's own column"
-        );
+        // The floor: a page whose every option is one short word keeps the
+        // design's own column — `Rendered blocks` is such a page today.
+        let short = shaped(SettingsCategory::RenderedBlocks, every_group_open(), None);
+        for row in &short.rows {
+            assert_eq!(
+                width(row.combo),
+                COMBO_MIN_WIDTH_LOGICAL_PX,
+                "a page of short answers keeps the design's own column ({:?})",
+                row.row
+            );
+        }
 
         // The cap: a row whose options are absurd still leaves the sentence half
         // the row. Stated through the geometry rather than through a real row,
