@@ -297,9 +297,9 @@ mod windows_impl {
 
     use windows::Win32::{
         Foundation::{
-            COLORREF, CloseHandle, ERROR_CANCELLED, GetLastError, GlobalFree, HANDLE, HGLOBAL,
-            HWND, LPARAM, LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError, WAIT_EVENT,
-            WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
+            COLORREF, CloseHandle, ERROR_CANCELLED, GENERIC_WRITE, GetLastError, GlobalFree,
+            HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError,
+            WAIT_EVENT, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
         },
         Globalization::{GetUserDefaultUILanguage, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME},
         Graphics::DirectComposition::{
@@ -321,8 +321,9 @@ mod windows_impl {
             MONITORINFO, MonitorFromWindow,
         },
         Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
-            FILE_NOTIFY_CHANGE, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
+            FILE_FLAGS_AND_ATTRIBUTES, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE,
+            FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
             FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
             ReadDirectoryChangesW,
@@ -332,6 +333,10 @@ mod windows_impl {
                 CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
             },
+            // The front door's console half. `folio.exe --help` has to reach
+            // whoever typed it, and on Windows that is a console this process may
+            // not own — see `write_to_console`.
+            Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleWindow, WriteConsoleW},
             DataExchange::{
                 CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
                 OpenClipboard, SetClipboardData,
@@ -360,8 +365,9 @@ mod windows_impl {
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
                 GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
                 HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
-                HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MF_STRING,
-                MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
+                HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed,
+                MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO, MessageBoxW,
+                NCCALCSIZE_PARAMS, PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
                 SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
                 SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
@@ -3210,6 +3216,107 @@ mod windows_impl {
                 body()
             })
     }
+
+    /// Put one block of text where the person who started this process will see
+    /// it, and say whether there was anywhere to put it.
+    ///
+    /// **The one thing a Windows GUI program cannot do is print.** `folio.exe`
+    /// answers `--help` and refuses a mistyped flag, and both answers are text —
+    /// but a process launched from Explorer, from a shortcut or by a shell that
+    /// does not wait for it has no console of its own to write to, and `println!`
+    /// on such a process writes to a handle nobody is reading. `bt-app`'s front
+    /// door therefore asks *this*, and falls back to [`message_box`] when the
+    /// answer is `false`.
+    ///
+    /// Two steps, in this order:
+    ///
+    /// 1. **A console this process already has** — which today it always does,
+    ///    because `folio.exe` is still a console-subsystem binary. `GetConsoleWindow`
+    ///    is the test, and a non-null answer means the second step must be
+    ///    skipped: `AttachConsole` fails with `ERROR_ACCESS_DENIED` on a process
+    ///    that is already attached, and reading that as "no console" would send
+    ///    a usage block to a message box on the one machine configuration where
+    ///    the console was right there.
+    /// 2. **The parent's console**, through `ATTACH_PARENT_PROCESS`. This is the
+    ///    half written for the day the binary becomes a windows-subsystem one —
+    ///    which the Explorer verb wants, since a right-click that flashes a
+    ///    console window is a right-click that looks broken. It fails, correctly,
+    ///    when the parent has no console either: a double-click from Explorer,
+    ///    or a launch by the shell's COM activation.
+    ///
+    /// The text goes to `CONOUT$` rather than to `std::io::stdout`, and that is
+    /// not belt-and-braces. `AttachConsole` gives the process a console; it does
+    /// not reliably rewrite the three standard handles the C runtime and Rust's
+    /// `Stdout` resolve through, and on a process that was started with its
+    /// output redirected it must not — the redirection is the caller's. Opening
+    /// the console's own pseudo-file names exactly one destination: the screen
+    /// the console is drawn on.
+    ///
+    /// `WriteConsoleW` and not `WriteFile`, so that the UTF-16 goes to the
+    /// console as characters. A console's code page is very often 936 or 437 on
+    /// the machines this product runs on, and a byte-oriented write would put
+    /// mojibake on the screen for the half of this text that is Chinese.
+    pub fn write_to_console(text: &str) -> bool {
+        let attached = unsafe { !GetConsoleWindow().is_invalid() }
+            || unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok();
+        if !attached {
+            return false;
+        }
+        let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let Ok(handle) = (unsafe {
+            CreateFileW(
+                PCWSTR(name.as_ptr()),
+                GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+        }) else {
+            return false;
+        };
+        // A console line ends in CRLF. `ENABLE_PROCESSED_OUTPUT` will usually
+        // turn a bare LF into one, but "usually" is a mode the caller of this
+        // process can have turned off, and the failure it produces is a usage
+        // block drawn as a staircase down the right of the screen.
+        let units: Vec<u16> = text
+            .replace("\r\n", "\n")
+            .replace('\n', "\r\n")
+            .encode_utf16()
+            .collect();
+        let mut written = 0u32;
+        let wrote = unsafe { WriteConsoleW(handle, &units, Some(&mut written), None) }.is_ok();
+        let _ = unsafe { CloseHandle(handle) };
+        wrote
+    }
+
+    /// Say one thing in a box, with no window behind it.
+    ///
+    /// **The single message box this product is allowed to raise**, and the
+    /// reason it is allowed is the reason every other one is not: there is no
+    /// window yet. Everything Folio says once it has a window it says on a card
+    /// anchored at the surface the news is about (`Runtime::toast`); a modal is
+    /// how a program interrupts you, and a program that has drawn nothing has
+    /// nothing to interrupt.
+    ///
+    /// `HWND::default()` is the ownerless box: the process has no window to be
+    /// modal to, which is the whole situation. `MB_SETFOREGROUND` because the
+    /// caller is a shell or Explorer that has just taken the focus back — a box
+    /// nobody sees is the same as no box, and this one carries the only
+    /// explanation of a launch that is about to exit.
+    pub fn message_box(title: &str, text: &str) {
+        let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            MessageBoxW(
+                Some(HWND::default()),
+                PCWSTR(text.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+            );
+        }
+    }
 }
 
 /// The three scheduling bands this application's threads run in.
@@ -3262,11 +3369,11 @@ pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FolderPicker, ImagePicker, ImeSystemCaret,
     MathContextMenu, PROGRAM_REFUSED, client_area_animation_enabled, clipboard_text,
     current_thread_priority, documents_directory, get_dpi_for_window, get_window_rect,
-    get_work_area, install_window_class_background, is_window_minimized, monospace_font_families,
-    open_local_file, open_local_path, os_ui_language, recycle, request_window_close,
-    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_outer_rect, set_window_topmost, shell_execute, spawn_at_priority,
-    system_backdrop_available, wheel_scroll_amount,
+    get_work_area, install_window_class_background, is_window_minimized, message_box,
+    monospace_font_families, open_local_file, open_local_path, os_ui_language, recycle,
+    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
+    set_system_backdrop, set_window_outer_rect, set_window_topmost, shell_execute,
+    spawn_at_priority, system_backdrop_available, wheel_scroll_amount, write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.

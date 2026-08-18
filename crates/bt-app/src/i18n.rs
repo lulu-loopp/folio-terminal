@@ -1716,6 +1716,181 @@ fn refusal_in_lang(lang: Lang, file: &str, error: &bt_term::BackgroundImageError
     }
 }
 
+// ── the front door's own words (Windows landing block, slice 0) ────────────
+
+/// Everything `folio.exe` says about its own command line.
+///
+/// **A second small table rather than ten free functions**, and the shape is
+/// [`Text`]'s and not the value-carrying family's above: every one of these
+/// carries a value, so none of them can be a `&'static str` — but every one of
+/// them also has to be readable *in a named language*, which the ambient
+/// `current()` the family below reads cannot give a test. `crate::seats`'s own
+/// note states the suite's rule in as many words: [`install`] is a process-wide
+/// answer and a test that moved it would move it under every other test running
+/// beside it. So the column is a parameter, exactly as it is for `Text::in_lang`
+/// and for the three PSReadLine row lines, and [`Self::text`] is the ambient
+/// reading the product actually uses.
+///
+/// Five of these are said on a card the moment a window opens; five are said in
+/// a console or a message box on a launch that never opens one. The pins for
+/// what each of them is *for* are in `crate::cli`, beside the fault and the
+/// refusal that raise them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CliText<'a> {
+    /// The whole of what `--help` answers with, and what sits under every
+    /// refusal.
+    ///
+    /// **The profile ids are the payload**, built from `profiles::PROFILES` at
+    /// the call site. Written into the literal they would be two lists of five,
+    /// in two languages, that nothing would update the day a profile is added —
+    /// and a usage block that lies about what `--profile` takes is worse than
+    /// one that omits the list.
+    ///
+    /// The flag names are not translated, for the reason this file's header
+    /// gives about `git` and `LaTeX`: they are what a person types, and a
+    /// translated `--cwd` would be a switch this program has not got.
+    Usage { profile_ids: &'a str },
+    /// A flag that takes a value, given without one.
+    MissingValue(&'a str),
+    /// A flag this build has not got.
+    UnknownFlag(&'a str),
+    /// A flag given twice — refused rather than resolved, see
+    /// `crate::cli::CliFault::Repeated`.
+    RepeatedFlag(&'a str),
+    /// A second bare path. One command line names one place.
+    ExtraPath(&'a str),
+    /// `--cwd` named something that is not a folder.
+    ///
+    /// The second sentence is the half the reader cannot see for themselves: the
+    /// window in front of them looks exactly like a window opened with no
+    /// arguments at all, and without it a folder that was deleted and a shortcut
+    /// that lost its arguments read identically.
+    NoSuchFolder(&'a str),
+    /// `--profile` named an id this build has not got. The id keeps its quotes
+    /// for [`unknown_profile_banner_text`]'s reason: it came from outside and may
+    /// be anything, including nothing but spaces.
+    NoSuchProfile(&'a str),
+    /// The bare path named nothing at all.
+    NoSuchPath(&'a str),
+    /// A real folder the chosen profile has no name for — a UNC share handed to
+    /// WSL, and nothing else on this machine.
+    UnreachableFolder {
+        profile_title: &'a str,
+        folder: &'a str,
+    },
+    /// A bare folder given alongside `--cwd`.
+    PlaceAlreadyNamed(&'a str),
+}
+
+impl CliText<'_> {
+    /// This line in the language the window is drawing in.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.in_lang(current())
+    }
+
+    /// This line in a named language.
+    #[must_use]
+    pub fn in_lang(&self, lang: Lang) -> String {
+        match self {
+            Self::Usage { profile_ids } => match lang {
+                Lang::English => format!(
+                    "folio [--cwd <folder>] [--profile <id>] [<path>]\n\n\
+                     \x20 --cwd <folder>    the first pane opens in that folder\n\
+                     \x20 --profile <id>    the first pane's shell: {profile_ids}\n\
+                     \x20 <path>            a folder opens a pane there; a file opens a preview\n\
+                     \x20 -h, --help        this text"
+                ),
+                Lang::Chinese => format!(
+                    "folio [--cwd <文件夹>] [--profile <id>] [<路径>]\n\n\
+                     \x20 --cwd <文件夹>    第一个窗格在这个文件夹里打开\n\
+                     \x20 --profile <id>    第一个窗格用哪种 shell：{profile_ids}\n\
+                     \x20 <路径>            文件夹等同 --cwd，文件则打开预览\n\
+                     \x20 -h, --help        显示这段说明"
+                ),
+            },
+            Self::MissingValue(flag) => match lang {
+                Lang::English => format!("{flag} takes a value."),
+                Lang::Chinese => format!("{flag} 后面要跟一个值。"),
+            },
+            Self::UnknownFlag(flag) => match lang {
+                Lang::English => format!("There is no {flag} option."),
+                Lang::Chinese => format!("没有 {flag} 这个选项。"),
+            },
+            Self::RepeatedFlag(flag) => match lang {
+                Lang::English => format!("{flag} was given twice."),
+                Lang::Chinese => format!("{flag} 给了两次。"),
+            },
+            Self::ExtraPath(path) => match lang {
+                Lang::English => format!("One path at a time — {path} is the second."),
+                Lang::Chinese => format!("一次只能给一个路径，{path} 是第二个。"),
+            },
+            Self::NoSuchFolder(folder) => match lang {
+                Lang::English => {
+                    format!("No folder at {folder}. This pane opened where a new one would.")
+                }
+                Lang::Chinese => format!("{folder} 不是一个文件夹，这个窗格开在新窗格的默认位置。"),
+            },
+            Self::NoSuchProfile(id) => match lang {
+                Lang::English => {
+                    format!("No profile called {id:?}. This pane opened with the default.")
+                }
+                Lang::Chinese => format!("没有叫 {id:?} 的配置，这个窗格用了默认配置。"),
+            },
+            Self::NoSuchPath(path) => match lang {
+                Lang::English => format!("There is no {path}."),
+                Lang::Chinese => format!("{path} 不存在。"),
+            },
+            Self::UnreachableFolder {
+                profile_title,
+                folder,
+            } => match lang {
+                Lang::English => format!(
+                    "{profile_title} has no name for {folder}. This pane opened at its own start."
+                ),
+                Lang::Chinese => {
+                    format!("{profile_title} 无法表示 {folder}，这个窗格开在它自己的起始位置。")
+                }
+            },
+            Self::PlaceAlreadyNamed(folder) => match lang {
+                Lang::English => {
+                    format!("--cwd already said where to open, so {folder} was not used.")
+                }
+                Lang::Chinese => format!("--cwd 已经说了在哪里打开，{folder} 没有被采用。"),
+            },
+        }
+    }
+
+    /// One of each, for the tests that have to walk the whole table.
+    ///
+    /// Written out rather than derived, for [`Text::ALL`]'s reason and with the
+    /// one difference this table's payloads force: a variant added without a line
+    /// here fails nothing at compile time, so the `match` in
+    /// `every_line_of_the_front_door_reads_in_both_languages` is exhaustive over
+    /// the enum and this list is checked against its own length.
+    ///
+    /// The samples deliberately contain no Han characters of their own, so that
+    /// the Chinese column's own words are what the Han test finds.
+    #[cfg(test)]
+    pub const SAMPLES: [Self; 10] = [
+        Self::Usage {
+            profile_ids: "pwsh, winps",
+        },
+        Self::MissingValue("--cwd"),
+        Self::UnknownFlag("--nope"),
+        Self::RepeatedFlag("--profile"),
+        Self::ExtraPath(r"D:\b"),
+        Self::NoSuchFolder(r"D:\gone"),
+        Self::NoSuchProfile("fish"),
+        Self::NoSuchPath(r"D:\gone"),
+        Self::UnreachableFolder {
+            profile_title: "WSL",
+            folder: r"\\server\share",
+        },
+        Self::PlaceAlreadyNamed(r"D:\b"),
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1781,6 +1956,84 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), Text::ALL.len());
+    }
+
+    /// PIN — **the front door's table has two columns too**, and the same three
+    /// properties hold on it as on `Text`.
+    ///
+    /// Written as one test over one list rather than folded into the three
+    /// above, because `CliText` is a different shape: its lines carry values, so
+    /// they are `String`s built per call and cannot go in an array of
+    /// `&'static str`. What is being pinned is identical — a variant with one
+    /// column filled in, a variant whose "translation" is the English, and a
+    /// Chinese column with no Chinese in it.
+    ///
+    /// The exhaustive `match` is the mechanism that makes the list complete: a
+    /// variant added without a line in `SAMPLES` fails to compile here.
+    #[test]
+    fn every_line_of_the_front_door_reads_in_both_languages() {
+        for sample in CliText::SAMPLES {
+            // Exhaustive on purpose — see this test's own note.
+            match sample {
+                CliText::Usage { .. }
+                | CliText::MissingValue(_)
+                | CliText::UnknownFlag(_)
+                | CliText::RepeatedFlag(_)
+                | CliText::ExtraPath(_)
+                | CliText::NoSuchFolder(_)
+                | CliText::NoSuchProfile(_)
+                | CliText::NoSuchPath(_)
+                | CliText::UnreachableFolder { .. }
+                | CliText::PlaceAlreadyNamed(_) => {}
+            }
+            let english = sample.in_lang(Lang::English);
+            let chinese = sample.in_lang(Lang::Chinese);
+            assert!(
+                !english.trim().is_empty() && !chinese.trim().is_empty(),
+                "{sample:?} has nothing to say in one of them"
+            );
+            assert_ne!(
+                english, chinese,
+                "{sample:?} was never translated — it says {english:?} in both columns"
+            );
+            assert!(
+                chinese
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "{sample:?} reads {chinese:?}, which has no Chinese in it"
+            );
+            for word in english.split(|c: char| !c.is_ascii_alphabetic()) {
+                assert!(
+                    !["we", "our", "ours", "us", "ourselves"]
+                        .contains(&word.to_ascii_lowercase().as_str()),
+                    "{sample:?} says {word:?}: {english:?}"
+                );
+            }
+        }
+    }
+
+    /// PIN — the usage block is a block: one line per thing it can be told, each
+    /// line indented under the summary, in both languages.
+    ///
+    /// A `\n` lost from the middle of that literal produces a paragraph that
+    /// still contains every word and is unreadable in a console, which nothing
+    /// else here would catch.
+    #[test]
+    fn the_usage_block_keeps_its_shape_in_both_languages() {
+        for lang in Lang::ALL {
+            let usage = CliText::Usage {
+                profile_ids: "pwsh, winps",
+            }
+            .in_lang(lang);
+            let lines: Vec<&str> = usage.lines().collect();
+            assert_eq!(lines.len(), 6, "{lang:?}: {usage}");
+            assert!(lines[0].starts_with("folio [--cwd "), "{lang:?}");
+            assert!(lines[1].is_empty(), "{lang:?}");
+            for line in &lines[2..] {
+                assert!(line.starts_with("  "), "{lang:?}: {line:?} is not indented");
+            }
+            assert!(usage.contains("pwsh, winps"), "{lang:?}");
+        }
     }
 
     /// PIN — the two columns are actually two.
