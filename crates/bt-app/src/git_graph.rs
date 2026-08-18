@@ -1538,6 +1538,66 @@ pub fn graph_toolbar_rects(
     }
 }
 
+/// What stands **inside** the toolbar's search field once the count and the `×`
+/// have taken their ends.
+///
+/// One derivation, three readers: the painter writes the count and the query
+/// into these boxes, the caret is drawn inset into [`Self::caret`], and the
+/// window hands that same caret line to the IME so the candidate list stands
+/// under the field. The count's right edge decides where the text run ends, so
+/// the caret's clamp cannot be computed from the field's rectangle alone — which
+/// is the whole reason this is a function and not three lines in `build`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphSearchField {
+    /// `3 of 17`, right-aligned against the `×` — `None` when there is no count
+    /// to draw and nothing takes that end.
+    pub count: Option<[f32; 4]>,
+    /// The run the query is laid out in and clipped to.
+    pub text: [f32; 4],
+    /// The caret's **line box**: its x from the measured prefix, its top and
+    /// bottom the field's own. The bar the reader sees is this inset by
+    /// [`GRAPH_SEARCH_CARET_INSET_LOGICAL_PX`]; the IME is told the whole line,
+    /// because what it is being asked is which line it must not cover.
+    pub caret: [f32; 4],
+}
+
+/// Lay the search field's insides out, or `None` when this width draws no field.
+#[must_use]
+pub fn graph_search_field(
+    rects: GraphToolbarRects,
+    toolbar: &GraphToolbar,
+    scale: f32,
+) -> Option<GraphSearchField> {
+    let field = rects.search?;
+    let pad = (GRAPH_TOOL_PADDING_X_LOGICAL_PX * scale).round();
+    let tool_gap = (GRAPH_TOOL_GAP_LOGICAL_PX * scale).round();
+    let caret_width = (GRAPH_SEARCH_CARET_LOGICAL_PX * scale).round().max(1.0);
+    let text_left = field[0] + pad;
+    // The count holds the trailing end, and the `×` holds the end after that:
+    // the text's room is what is left, so a long query is cut by the field
+    // rather than running under the number that describes it.
+    let mut right = rects
+        .search_clear
+        .map_or(field[2] - pad, |cross| cross[0] - tool_gap);
+    let count = (!toolbar.search_count.is_empty()).then(|| {
+        let box_ = [
+            (right - toolbar.search_count_width).max(text_left),
+            field[1],
+            right,
+            field[3],
+        ];
+        right = box_[0] - tool_gap;
+        box_
+    });
+    let text = [text_left, field[1], right.max(text_left), field[3]];
+    let x = (text_left + toolbar.caret_x).min(text[2] - caret_width);
+    Some(GraphSearchField {
+        count,
+        text,
+        caret: [x, field[1], x + caret_width, field[3]],
+    })
+}
+
 /// What the toolbar draws, measured (T1).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphToolbar {
@@ -3523,22 +3583,9 @@ fn push_toolbar(
         palette.git_head_muted,
     ));
 
-    if let Some(field) = rects.search {
+    if let (Some(field), Some(inside)) = (rects.search, graph_search_field(rects, toolbar, scale)) {
         tool_ground(sprites, field, GraphTool::Search, toolbar.search_focused);
-        let text_left = field[0] + pad;
-        // The count holds the trailing end, and the `×` holds the end after
-        // that: the text's room is what is left, so a long query is cut by the
-        // field rather than running under the number that describes it.
-        let mut right = rects
-            .search_clear
-            .map_or(field[2] - pad, |x| x[0] - tool_gap);
-        if !toolbar.search_count.is_empty() {
-            let count_rect = [
-                (right - toolbar.search_count_width).max(text_left),
-                field[1],
-                right,
-                field[3],
-            ];
+        if let Some(count_rect) = inside.count {
             labels.push(ChromeLabel {
                 text: toolbar.search_count.clone(),
                 rect: count_rect,
@@ -3551,9 +3598,8 @@ fn push_toolbar(
                 tabular_numerals: true,
                 clip: Some(clip(count_rect)),
             });
-            right = count_rect[0] - tool_gap;
         }
-        let text_rect = [text_left, field[1], right.max(text_left), field[3]];
+        let text_rect = inside.text;
         labels.push(ChromeLabel {
             text: toolbar.search.clone(),
             rect: text_rect,
@@ -3574,11 +3620,10 @@ fn push_toolbar(
             clip: Some(clip(text_rect)),
         });
         if toolbar.search_focused {
-            let caret = (GRAPH_SEARCH_CARET_LOGICAL_PX * scale).round().max(1.0);
             let inset = (GRAPH_SEARCH_CARET_INSET_LOGICAL_PX * scale).round();
-            let x = (text_left + toolbar.caret_x).min(text_rect[2] - caret);
+            let line = inside.caret;
             quads.push(ChromeQuad {
-                rect: clip([x, field[1] + inset, x + caret, field[3] - inset]),
+                rect: clip([line[0], line[1] + inset, line[2], line[3] - inset]),
                 color: palette.accent,
             });
         }

@@ -4099,6 +4099,15 @@ struct Runtime {
     preedit: Option<Preedit>,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
+    /// The tab-rename caret's line box in window pixels, as the strip last drew
+    /// it — the one caret in this window whose geometry cannot be re-derived.
+    ///
+    /// See [`Runtime::measure_open_rename`], which writes it: the editor's box is
+    /// a share of a strip solve that lives and dies inside one chrome build, so
+    /// the painter leaves the rectangle behind rather than making the reader
+    /// rebuild the strip to find out where the letters went. Every other field
+    /// answers [`Runtime::field_ime_caret`] from a layout the window keeps.
+    rename_caret_line: Option<[f32; 4]>,
     cursor_blink: CursorBlink,
     /// Whether the window holds focus.
     ///
@@ -5966,6 +5975,84 @@ enum ImeOwner {
     Search,
     /// The shell — the only owner that has a PTY, and the only one that gets it.
     Shell,
+}
+
+#[cfg(test)]
+impl ImeOwner {
+    /// Every rung, for the tests that have to prove a decision is total.
+    ///
+    /// Written out rather than derived: the compiler already refuses a `match`
+    /// that forgets a variant, and what this buys is the *other* half — a table
+    /// that has to answer for every rung, checked by walking it. Test-only
+    /// because nothing that ships iterates the rungs; the window is always
+    /// holding exactly one.
+    const ALL: [Self; 8] = [
+        Self::Rename,
+        Self::GraphSearch,
+        Self::GitPrompt,
+        Self::Modal,
+        Self::FilesTree,
+        Self::Preview,
+        Self::Search,
+        Self::Shell,
+    ];
+}
+
+/// **Where the candidate window hangs**, as a function of the rung
+/// (user report, 2026-08-17).
+///
+/// # The bug this exists to close
+///
+/// `ime_owner` said where composed *text* goes and nothing said where the
+/// composition is *drawn from*. Two surfaces published a caret rectangle — the
+/// grid, out of the frame it had just composed, and the preview, out of its own
+/// body — and every other rung published nothing at all. So a reader who pressed
+/// `Ctrl+F`, typed `mina` in Chinese and watched `mi'na'l` appear correctly
+/// inside the capsule found the candidate list in the bottom-right corner of the
+/// window, because `set_ime_cursor_area` had not been called since the throttle
+/// was reset and IMM32 was placing the list off a rectangle nobody had set. The
+/// tab-name editor and the branch prompt had the same hole; the rename's own
+/// comment admitted it ("the candidate window is placed from the terminal's
+/// caret, which is not where these letters are going").
+///
+/// # Why a source and not a rectangle
+///
+/// One rung's caret cannot be produced the way the others are: the grid's is a
+/// property of a **composed frame**, computed in the seat's coordinates by the
+/// renderer and translated by [`window_ime_cursor_area`], and it exists only
+/// inside the pass that made the picture. So the total decision is made here, on
+/// nothing but the rung, and the two answers it can give are "ask the frame" and
+/// "ask the field" — [`Runtime::field_ime_caret`] then measures whichever field
+/// that is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImeCaretSource {
+    /// The grid's own cursor, out of the frame being published.
+    TerminalCursor,
+    /// A caret this window can measure off a layout it keeps — the four one-line
+    /// fields and the preview's document, which differ in what they measure and
+    /// not in when they can be asked.
+    Field,
+    /// **Nothing is being typed into.** A popup made of verbs and a files column
+    /// both swallow compositions outright ([`ImeOwner::Modal`],
+    /// [`ImeOwner::FilesTree`]), so there is no caret to follow — and the
+    /// candidate window is left exactly where it was rather than dragged to a
+    /// caret that is not receiving anything.
+    Nowhere,
+}
+
+/// The rung, resolved to where its caret comes from. **Total**, and the one place
+/// that decides.
+#[must_use]
+fn ime_caret_source(owner: ImeOwner) -> ImeCaretSource {
+    match owner {
+        ImeOwner::Rename
+        | ImeOwner::GraphSearch
+        | ImeOwner::GitPrompt
+        | ImeOwner::Preview
+        | ImeOwner::Search => ImeCaretSource::Field,
+        ImeOwner::Modal | ImeOwner::FilesTree => ImeCaretSource::Nowhere,
+        ImeOwner::Shell => ImeCaretSource::TerminalCursor,
+    }
 }
 
 /// The ladder, as a function of who holds the keyboard.
@@ -14563,6 +14650,7 @@ impl Runtime {
             preedit: None,
             ime_active: false,
             ime_cursor_throttle: ImeCursorThrottle::default(),
+            rename_caret_line: None,
             cursor_blink: CursorBlink::new(Instant::now()),
             motion: read_motion_preference(),
             // A window is focused when it opens, and `CursorBlink` starts from
@@ -17932,9 +18020,12 @@ impl Runtime {
         // minus its trailing cluster. Measured against the strip's box while the
         // rail was on screen, the caret walked out of a box that was not there.
         //
-        // Both branches answer the same pair — how wide the editor's box is, and
-        // what size its text is set in — so everything below is one arithmetic
-        // that never learns which axis it ran on.
+        // Both branches answer the same pair — **the box the editor is drawn in**
+        // and what size its text is set in — so everything below is one
+        // arithmetic that never learns which axis it ran on. The whole box and
+        // not its width, because the caret published to the IME needs the box's
+        // top and bottom as well: the candidate list has to stand under the tab,
+        // not over the letters.
         let measured = match self.rail.layout {
             seats::TabLayoutMode::Vertical => {
                 let (_, height) = self.renderer.presentation_geometry().swapchain_size;
@@ -17957,7 +18048,7 @@ impl Runtime {
                         scale,
                     );
                     (right > row.title[0]).then_some((
-                        right - row.title[0],
+                        [row.title[0], row.body[1], right, row.body[3]],
                         bt_render::RAIL_TAB_FONT_LOGICAL_PX * scale,
                     ))
                 })
@@ -17978,25 +18069,26 @@ impl Runtime {
                         content.badge_text_width,
                         scale,
                     )?;
-                    Some((
-                        title_box[2] - title_box[0],
-                        bt_render::WINDOW_TAB_FONT_LOGICAL_PX * scale,
-                    ))
+                    Some((title_box, bt_render::WINDOW_TAB_FONT_LOGICAL_PX * scale))
                 })
             }
         };
         let Some(content) = tabs.get_mut(index) else {
             return;
         };
-        let Some((box_width, font_px)) = measured else {
+        let Some((title_box, font_px)) = measured else {
             // A squeezed tab draws no title, so there is no box to be the editor
             // and nothing to show. The draft is not lost — it is still in
             // `self.rename`, and widening the window brings it back mid-word. A
             // rail row whose trailing cluster has eaten the whole run is the same
             // sentence on the other axis.
             content.edit = None;
+            // And an editor with no box has no caret to publish: the IME is told
+            // so rather than left holding the last rectangle this tab had.
+            self.rename_caret_line = None;
             return;
         };
+        let box_width = title_box[2] - title_box[0];
         let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
             .round()
             .max(1.0);
@@ -18059,6 +18151,14 @@ impl Runtime {
             selection_px,
             caret_lit: self.rename_blink.visible(),
         });
+        // **Written here because here is the only place the box exists.** The
+        // editor's rectangle is a function of the strip's own solve, which is
+        // built and thrown away inside this pass; every other field in this
+        // window can re-derive its caret from a layout the window keeps, and this
+        // one cannot. So the painter records the line it drew and the IME reads
+        // it — one derivation still, taken at the moment it is true.
+        let x = (title_box[0] + caret_px).min(title_box[2] - caret_width);
+        self.rename_caret_line = Some([x, title_box[1], x + caret_width, title_box[3]]);
     }
 
     /// Where the profile picker hangs right now, or `None` when it is shut.
@@ -23179,12 +23279,82 @@ impl Runtime {
         })
     }
 
-    /// Offer the preview's caret to the IME, if the preview is the one composing.
-    fn offer_preview_ime_caret(&mut self) {
+    /// The caret of whichever **field** holds the keyboard, in window pixels.
+    ///
+    /// Reached only through [`ime_caret_source`], which is why the three rungs
+    /// that are not a field answer `None` here rather than being asked to
+    /// invent one: this function measures, it does not decide.
+    ///
+    /// Every arm reads the rectangle its **painter** used — the capsule's own
+    /// `caret_line`, the toolbar's `graph_search_field`, the prompt's
+    /// `caret_line`, the strip's recorded box — because a candidate list placed
+    /// from a second derivation is a list that stands beside the caret it claims
+    /// to follow. The `y`/`height` are the field's whole line box rather than
+    /// the bar drawn inside it: what winit is being told is which strip of the
+    /// window the candidate list may not cover, and a rectangle inset by the
+    /// caret's own four pixels is four pixels of the field the list would sit on.
+    fn field_ime_caret(&mut self, owner: ImeOwner) -> Option<ImeCursorArea> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let line = match owner {
+            ImeOwner::Rename => self.rename_caret_line?,
+            ImeOwner::GraphSearch => {
+                let PreviewSurface::Seat(seat) = self.preview_keyboard_surface()? else {
+                    return None;
+                };
+                let rects = self.graph_toolbar_rects(seat)?;
+                let toolbar = self.git_graphs_shown.get(&seat)?.toolbar.as_ref()?;
+                git_graph::graph_search_field(rects, toolbar, scale)?.caret
+            }
+            ImeOwner::GitPrompt => self.git_menu_layout()?.prompt_rects()?.caret_line(scale),
+            // The document's own caret, which is measured in rows and columns
+            // rather than in a prefix's width — the one field here whose box is
+            // not a box somebody typed a line into.
+            ImeOwner::Preview => return self.preview_ime_cursor_area(),
+            ImeOwner::Search => {
+                let capsule = self.search_capsule()?;
+                let (_, _, caret_x) = self.search_field_look();
+                capsule.caret_line(caret_x, scale)
+            }
+            // Not a field. `ime_caret_source` sends neither of these here, and a
+            // rectangle invented for them would be a candidate list following a
+            // caret that is receiving nothing.
+            ImeOwner::Modal | ImeOwner::FilesTree | ImeOwner::Shell => return None,
+        };
+        Some(ime_cursor_area_of(line))
+    }
+
+    /// **The one door.** Whoever holds the keyboard hands the IME its caret.
+    ///
+    /// `grid` is the frame just composed, when this is being called from the pass
+    /// that made one; without it the terminal's rung simply has nothing to say
+    /// this turn, which is correct — the grid's caret moves when a frame moves.
+    ///
+    /// Called from the event loop's own tail as well as from the publish, so
+    /// "every frame the caret can move" needs no list of the ways it can move: a
+    /// keystroke, a scroll, a resize and a capsule relaid all wake the loop, and
+    /// [`ImeCursorThrottle`] turns a burst of identical rectangles into nothing
+    /// and a burst of moving ones into one call per 60Hz slot.
+    fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
         if !self.ime_active {
             return;
         }
-        let Some(area) = self.preview_ime_cursor_area() else {
+        let owner = ime_owner(self.keyboard_owner());
+        let area = match ime_caret_source(owner) {
+            ImeCaretSource::Nowhere => return,
+            ImeCaretSource::Field => self.field_ime_caret(owner),
+            // Only while the shell is the one composing. A terminal that keeps
+            // printing behind a preview being typed into still publishes frames,
+            // and each of them used to drag the candidate window back to the
+            // grid's caret — under the pointer's own reading, the candidate list
+            // would sit over the shell while the letters went into the file.
+            ImeCaretSource::TerminalCursor => grid.map(|frame| {
+                window_ime_cursor_area(
+                    self.renderer.seat_viewport(),
+                    self.renderer.ime_cursor_area(frame),
+                )
+            }),
+        };
+        let Some(area) = area else {
             return;
         };
         if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
@@ -23699,10 +23869,11 @@ impl Runtime {
         self.refresh_preview_body();
         self.refresh_chrome();
         // The caret has very likely just moved, and the candidate list has to
-        // follow it. Here rather than in the IME handler because *every* way the
-        // caret moves — a click, an arrow, a commit, a scroll — comes through
-        // this door, which is the same argument `reveal_preview_caret` makes.
-        self.offer_preview_ime_caret();
+        // follow it. Kept here as well as in the loop's tail because this door
+        // is *earlier*: the body has already been rebuilt, so the rectangle is
+        // the new one, and the candidate window moves with the same present the
+        // letters do rather than one wake-up behind them.
+        self.offer_ime_caret(None);
         self.present_chrome_change()
     }
 
@@ -25274,20 +25445,10 @@ impl Runtime {
             }
             return Ok(false);
         }
-        // Only while the shell is the one composing. A terminal that keeps
-        // printing behind a preview being typed into still publishes frames, and
-        // each of them used to drag the candidate window back to the grid's
-        // caret — under the pointer's own reading, the candidate list would sit
-        // over the shell while the letters went into the file.
-        if self.ime_active && matches!(ime_owner(self.keyboard_owner()), ImeOwner::Shell) {
-            let area = window_ime_cursor_area(
-                self.renderer.seat_viewport(),
-                self.renderer.ime_cursor_area(&composed.frame),
-            );
-            if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
-                self.apply_ime_cursor_area(area);
-            }
-        }
+        // The frame is offered rather than read: this is the only moment the
+        // grid's caret exists, and [`Runtime::offer_ime_caret`] decides whether
+        // the grid is the rung that owns it.
+        self.offer_ime_caret(Some(&composed.frame));
         self.session
             .record_published_frame(&composed.frame, trigger.occurred_at);
         self.flush_resize_trace();
@@ -42195,6 +42356,15 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             return;
         }
         runtime.session_store.flush_if_due(now);
+        // **The one rule, in the one place it can be kept.** Whichever rung holds
+        // the keyboard publishes its caret here, at the tail of every pass —
+        // which is what "every frame the caret can move" means without anybody
+        // having to enumerate the ways it moves: typing, scrolling, resizing and
+        // a capsule relaid all wake this loop, and the throttle below turns a
+        // rectangle that did not move into no call at all. The terminal's rung
+        // says nothing here and everything in `publish_frame_inner`, because its
+        // caret is a property of a frame and there is no frame at this point.
+        runtime.offer_ime_caret(None);
         runtime.flush_ime_cursor_area(now);
         if let Err(error) = runtime.finish_resize_if_quiescent(now) {
             self.fail(event_loop, error);
@@ -43980,6 +44150,26 @@ fn solve_seats(
 ///
 /// The identity for a lone leaf is the point: its seat origin is `(0, 0)`, so
 /// this is the number that was passed before seats existed.
+/// A caret's line box, as winit and IMM32 want it: a whole-pixel origin and a
+/// size, both in window pixels.
+///
+/// The **size is the line**, not the bar: `set_ime_cursor_area` places the
+/// candidate window clear of `position + size`, so handing it the caret's own
+/// hairline height would hang the list halfway up the field it is meant to stand
+/// under. One pixel is the floor on both axes because a zero-sized exclusion
+/// rectangle is not one.
+#[must_use]
+fn ime_cursor_area_of(line: [f32; 4]) -> ImeCursorArea {
+    let x = line[0].round();
+    let y = line[1].round();
+    ImeCursorArea {
+        x: x as i32,
+        y: y as i32,
+        width: (line[2].round() - x).max(1.0) as u32,
+        height: (line[3].round() - y).max(1.0) as u32,
+    }
+}
+
 fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorArea {
     ImeCursorArea {
         x: area.x.saturating_add_unsigned(seat.x),
@@ -59343,6 +59533,124 @@ mod tests {
                 "{owner:?}: a composition reaches the PTY exactly when a caret \
                  may blink, and never on any other terms"
             );
+        }
+    }
+
+    /// PIN (user report, 2026-08-17) — **every rung says where its caret comes
+    /// from, and the sweep proves the ladder can produce no other rung.**
+    ///
+    /// The bug was a hole in a mapping nobody had written down: two surfaces
+    /// published a caret rectangle and the other six published nothing, so a
+    /// query composed in the search capsule got its candidate list wherever the
+    /// window's last published caret happened to be. The cure is one total
+    /// decision, and totality is the thing to hold: a rung added tomorrow either
+    /// names a source here or fails to compile, and a rung the ladder can reach
+    /// that is missing from [`ImeOwner::ALL`] fails below.
+    ///
+    /// The three answers are the three kinds of caret this window has, and each
+    /// is asserted by name rather than by "not the others":
+    ///
+    /// - the **grid's**, which only a composed frame can produce, so it is
+    ///   published from `publish_frame_inner` and nowhere else;
+    /// - a **field's**, measured off a layout the window keeps — the capsule, the
+    ///   graph's toolbar, the branch prompt, the tab editor, the preview's body;
+    /// - **nowhere**, which is a popup of verbs and a files column: both swallow
+    ///   compositions outright, so there is no caret to follow and the candidate
+    ///   window is left where it is rather than dragged somewhere nothing is
+    ///   being typed.
+    ///
+    /// MUTATIONS: send `ImeOwner::Search` to `Nowhere` and the capsule's rung goes
+    /// red — which is the reported bug, stated; send `Modal` to `Field` and the
+    /// popup's does; drop a variant from `ALL` and the sweep catches it.
+    #[test]
+    fn every_rung_of_the_ime_ladder_says_where_its_caret_comes_from() {
+        for owner in ImeOwner::ALL {
+            let source = ime_caret_source(owner);
+            let expected = match owner {
+                ImeOwner::Shell => ImeCaretSource::TerminalCursor,
+                ImeOwner::Modal | ImeOwner::FilesTree => ImeCaretSource::Nowhere,
+                ImeOwner::Rename
+                | ImeOwner::GraphSearch
+                | ImeOwner::GitPrompt
+                | ImeOwner::Preview
+                | ImeOwner::Search => ImeCaretSource::Field,
+            };
+            assert_eq!(
+                source, expected,
+                "{owner:?} hangs the candidate window off {source:?}"
+            );
+        }
+        // The capsule is the rung the report was about, and it is a field: the
+        // one answer that is *not* "the terminal's cursor" for a surface standing
+        // on a terminal.
+        assert_eq!(
+            ime_caret_source(ImeOwner::Search),
+            ImeCaretSource::Field,
+            "a query composed in the capsule is composed in the capsule"
+        );
+        // Seven bits, exactly as the sweep above: every rung the ladder can
+        // reach has to be in the table this test walks, or the table is proving
+        // something about a smaller ladder than the one that ships.
+        for bits in 0..128u8 {
+            let owner = ime_owner(KeyboardOwner {
+                rename: bits & 1 != 0,
+                menu_or_dialog: bits & 2 != 0,
+                files_tree: bits & 4 != 0,
+                preview: bits & 8 != 0,
+                graph_search: bits & 16 != 0,
+                git_prompt: bits & 32 != 0,
+                search: bits & 64 != 0,
+            });
+            assert!(
+                ImeOwner::ALL.contains(&owner),
+                "{owner:?} is a rung the ladder produces and the caret table does \
+                 not list"
+            );
+        }
+    }
+
+    /// PIN (user report, 2026-08-17) — **the rectangle the capsule's rung hands
+    /// winit stands inside the capsule's own field box.**
+    ///
+    /// [`search::Capsule::caret_line`] is asserted where it is written; what is
+    /// asserted here is the last step, which is the window's: rounding a line box
+    /// to the whole-pixel origin-and-size pair `set_ime_cursor_area` takes must
+    /// not push the rectangle out of the field, and the **size must stay the
+    /// line's** — a height rounded to zero is a candidate window with no
+    /// clearance to stand clear of, which is how it ends up over the field it is
+    /// supposed to sit under.
+    ///
+    /// MUTATIONS: floor the origin and ceil the far edge and the containment
+    /// assertion goes red on a fractional scale; use the caret's width for the
+    /// height and the "under the field" assertion does.
+    #[test]
+    fn the_capsule_hands_the_ime_a_box_inside_its_own_field() {
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let capsule = search::lay_out([0.0, 0.0, 900.0, 600.0], None, scale, 36.0 * scale);
+            for caret_x in [0.0f32, 3.5, 17.0, 61.25, 10_000.0] {
+                let line = capsule.caret_line(caret_x, scale);
+                let area = ime_cursor_area_of(line);
+                let right = area.x + i32::try_from(area.width).expect("a caret is not that wide");
+                let bottom = area.y + i32::try_from(area.height).expect("nor that tall");
+                assert!(
+                    f64::from(area.x) >= f64::from(capsule.field[0]).floor()
+                        && f64::from(right) <= f64::from(capsule.field[2]).ceil(),
+                    "{scale}x, prefix {caret_x}: {area:?} is not in {:?}",
+                    capsule.field
+                );
+                assert!(
+                    f64::from(area.y) >= f64::from(capsule.field[1]).floor()
+                        && f64::from(bottom) <= f64::from(capsule.field[3]).ceil(),
+                    "{scale}x, prefix {caret_x}: {area:?} does not sit on the \
+                     field's own line"
+                );
+                assert_eq!(
+                    area.height,
+                    (capsule.field[3].round() - capsule.field[1].round()).max(1.0) as u32,
+                    "{scale}x: the candidate window is placed clear of the whole \
+                     field, not of the caret's hairline"
+                );
+            }
         }
     }
 
