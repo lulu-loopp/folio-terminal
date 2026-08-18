@@ -4137,6 +4137,14 @@ struct Runtime {
     /// Whether this Windows knows what a system backdrop is, asked once
     /// (`bt_platform::system_backdrop_available`).
     acrylic_available: bool,
+    /// The last dark/light this window told DWM it was wearing
+    /// (`bt_platform::set_window_dark_mode`), or `None` before it has said
+    /// anything (§7.1.6c-4f amendment).
+    ///
+    /// **What was said, not what DWM did with it.** A Windows too old for the
+    /// attribute refuses every call identically, so re-asking on each palette
+    /// change would buy nothing and cost a line of stderr per theme switch.
+    dwm_dark_mode: Option<bool>,
     /// Whether this window's surface really is composited with premultiplied
     /// alpha, read off the renderer's own `alpha_report` rather than assumed.
     translucency_available: bool,
@@ -15046,6 +15054,7 @@ impl Runtime {
             settings_slider_drag: None,
             settings_menu_bar_drag: None,
             acrylic_available,
+            dwm_dark_mode: None,
             translucency_available,
             custom_window_frame,
             compositor,
@@ -15250,6 +15259,10 @@ impl Runtime {
         {
             eprintln!("recoverable always-on-top failure: {error}");
         }
+        // Before the backdrop and not after it, though the measurement says
+        // either would do: this is also the border's colour, and a window that
+        // wore a light border for its first frame would have flickered.
+        runtime.apply_window_dark_mode()?;
         if acrylic_available
             && runtime.settings_store.loaded().acrylic
             && let Err(error) = bt_platform::set_system_backdrop(hwnd, true)
@@ -20780,6 +20793,10 @@ impl Runtime {
     /// still wearing the old ones, which reads as a redraw bug rather than as a
     /// step nobody ran.
     fn adopt_new_palette(&mut self) -> Result<()> {
+        // The window's own colours moved, so what the window has told DWM about
+        // them may have gone stale — and DWM's acrylic plate and border are
+        // drawn from that statement, not from anything in this process's frame.
+        self.apply_window_dark_mode()?;
         install_theme_class_background(&self.window)?;
         self.sync_math_layout_key();
         // The one thing a rail's key cannot see. A palette is not a fact about a
@@ -21059,6 +21076,30 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    /// **Which canvas this window tells DWM it is wearing** (§7.1.6c-4f
+    /// amendment) — and therefore how dark DWM tints the acrylic plate behind
+    /// the ground, and what colour it draws the window's one-pixel border.
+    ///
+    /// Read off `background_rgb()` and not off the settings file, for
+    /// `scheme_in_force`'s reason: the answer has to be about the colours the
+    /// glass is actually showing. A `BT_BG` override, or a "dark scheme" whose
+    /// file happens to name a pale background, both get the plate their own
+    /// luma asks for rather than the one their row is called.
+    ///
+    /// Best-effort and silent about the ordinary case: an old Windows refuses
+    /// the attribute and keeps the border it had.
+    fn apply_window_dark_mode(&mut self) -> Result<()> {
+        let Some(dark) = dwm_dark_mode_owed(self.dwm_dark_mode, bt_render::background_rgb()) else {
+            return Ok(());
+        };
+        let hwnd = window_hwnd(&self.window)?;
+        self.dwm_dark_mode = Some(dark);
+        if let Err(error) = bt_platform::set_window_dark_mode(hwnd, dark) {
+            eprintln!("recoverable dark-mode failure: {error}");
+        }
+        Ok(())
     }
 
     /// Windows' own blur behind the ground.
@@ -45372,6 +45413,25 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
     }
 }
 
+/// The `DWMWA_USE_IMMERSIVE_DARK_MODE` a painted background asks for, or `None`
+/// when the window has already said it (§7.1.6c-4f amendment).
+///
+/// **Keyed on the painted background's own luma**, at the one threshold the
+/// whole product takes its dark/light decision at
+/// (`bt_render::background_is_light`) — so this cannot become a second opinion
+/// about which canvas is on screen. The scheme's *name* has no vote: a user
+/// whose Dark scheme file names a pale background gets the light plate that
+/// background asks for, which is the same rule `scheme_in_force` follows.
+///
+/// **`None` is not "no", it is "already said".** A window that has never spoken
+/// is told even when the answer is the light one DWM assumes by default: the
+/// default is DWM's assumption, not this window's statement, and the two part
+/// company the moment anything else on the machine changes it.
+fn dwm_dark_mode_owed(said: Option<bool>, background: [u8; 3]) -> Option<bool> {
+    let dark = !bt_render::background_is_light(background);
+    (said != Some(dark)).then_some(dark)
+}
+
 fn render_cursor_style(style: SessionCursorStyleV1) -> CursorStyle {
     match style {
         SessionCursorStyleV1::Bar => CursorStyle::Bar,
@@ -50130,6 +50190,47 @@ mod tests {
         assert_eq!(resolved_theme_change(Light, OsLight), None);
         assert_eq!(resolved_theme_change(Dark, OsDark), None);
         assert_eq!(resolved_theme_change(Dark, OsLight), None);
+    }
+
+    /// PIN — §7.1.6c-4f amendment: the acrylic plate follows the scheme in
+    /// force, and this is the whole of the decision that makes it.
+    ///
+    /// Red gate: the window used to declare nothing at all, so DWM tinted its
+    /// plate light whatever the scheme was — measured on a light desktop with
+    /// Solarized Dark at 30 %, a pane body read `(156,177,183)` instead of the
+    /// `(99,120,126)` the flag buys. A version of this that keyed on the theme
+    /// *row* rather than on the painted background would pass the first two
+    /// cases and fail the last two.
+    #[test]
+    fn the_dwm_plate_is_told_which_canvas_is_actually_painted() {
+        const SOLARIZED_DARK: [u8; 3] = [0x00, 0x2B, 0x36];
+        const FOLIO_LIGHT: [u8; 3] = [0xFA, 0xFA, 0xFA];
+
+        // A window that has never spoken says it either way: DWM's default is
+        // DWM's assumption, not this window's statement.
+        assert_eq!(dwm_dark_mode_owed(None, SOLARIZED_DARK), Some(true));
+        assert_eq!(dwm_dark_mode_owed(None, FOLIO_LIGHT), Some(false));
+        // Said once, not said again — the whole point of remembering it.
+        assert_eq!(dwm_dark_mode_owed(Some(true), SOLARIZED_DARK), None);
+        assert_eq!(dwm_dark_mode_owed(Some(false), FOLIO_LIGHT), None);
+        // A canvas that moved is a statement that has to move with it, in both
+        // directions — this is the theme switch and the scheme switch alike.
+        assert_eq!(dwm_dark_mode_owed(Some(false), SOLARIZED_DARK), Some(true));
+        assert_eq!(dwm_dark_mode_owed(Some(true), FOLIO_LIGHT), Some(false));
+        // The luma decides, not the row's name: a "dark scheme" file naming a
+        // pale background gets the light plate that background asks for, and a
+        // "light scheme" naming a near-black one gets the dark plate. This is
+        // `scheme_in_force`'s rule, at `background_is_light`'s one threshold.
+        assert_eq!(dwm_dark_mode_owed(None, [0xEE, 0xEE, 0xE8]), Some(false));
+        assert_eq!(dwm_dark_mode_owed(None, [0x10, 0x10, 0x12]), Some(true));
+        // And the threshold itself is borrowed, never restated here.
+        for background in [SOLARIZED_DARK, FOLIO_LIGHT, [0x7F, 0x7F, 0x7F]] {
+            assert_eq!(
+                dwm_dark_mode_owed(None, background),
+                Some(!bt_render::background_is_light(background)),
+                "the plate and the canvas must take one decision, not two"
+            );
+        }
     }
 
     /// What a program inside a pane is told when it asks, on each canvas.
