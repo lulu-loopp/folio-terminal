@@ -119,6 +119,17 @@ struct Canvas {
     /// ink: `:root` writes `--border: rgba(0,0,0,.088)` while `--hover` on the
     /// same canvas is `rgba(55,53,47,.055)`, and the two are different colours.
     shade: [u8; 3],
+    /// `--thumb` and `--thumb-hover`, in thousandths of the ink over
+    /// `--termbg`.
+    ///
+    /// Struck alphas rather than a rung of the ink ladder, because the design
+    /// declares them as their own pair and gives paper two hundredths more than
+    /// night on both (`.24`/`.42` against `.22`/`.40`): ink laid on paper covers
+    /// less ground per unit of alpha than ink laid on night, and folding the two
+    /// into one number would leave the light bar the fainter of the two on the
+    /// canvas it is already hardest to see against.
+    thumb: i32,
+    thumb_hover: i32,
     /// A divider under the pointer, in thousandths of the ink over `--win`.
     ///
     /// A struck step rather than a token: night wants .220 and paper .306, and
@@ -159,6 +170,8 @@ const NIGHT: Canvas = Canvas {
     border: 94,
     border_soft: 60,
     shade: [0xff, 0xff, 0xff],
+    thumb: 220,
+    thumb_hover: 400,
     divider_hover: 220,
     highlights: [
         [0xae, 0x75, 0xd7],
@@ -192,6 +205,8 @@ const PAPER: Canvas = Canvas {
     border: 88,
     border_soft: 55,
     shade: [0x00, 0x00, 0x00],
+    thumb: 240,
+    thumb_hover: 420,
     divider_hover: 306,
     highlights: [
         [0x91, 0x53, 0xbe],
@@ -444,6 +459,8 @@ impl ChromePalette {
             command_tick_crest: ink_over([0x00, 0x00, 0x00], accent, 860),
             command_tick_fail_crest: canvas.err_deep,
             command_tick_search_crest: ink2(termbg),
+            scroll_thumb: ink_over(termbg, source, canvas.thumb),
+            scroll_thumb_hover: ink_over(termbg, source, canvas.thumb_hover),
             menu_surface: menu,
             menu_border: canvas.shade,
             menu_border_alpha: ((255 * canvas.border + 500) / 1000) as u8,
@@ -543,6 +560,59 @@ mod tests {
     #[test]
     fn the_derivation_reproduces_the_light_palette_byte_for_byte() {
         assert_palettes_match("light", ChromePalette::derive(&FOLIO_LIGHT), LIGHT_CHROME);
+    }
+
+    /// PIN — **the two thumb tokens are the mock-up's own declarations**
+    /// (P2-9 slice 1).
+    ///
+    /// `design/ui-mockup.html` 53-54 and 75-76 declare `--thumb` and
+    /// `--thumb-hover` as four `rgba()` literals, and line 95 lays them straight
+    /// on the terminal's canvas (`scrollbar-color: var(--thumb) transparent`).
+    /// This restates that composite here rather than trusting the two struck
+    /// tables to have been transcribed correctly — the formula and the CSS have
+    /// to meet somewhere, and the tables are the thing being checked.
+    #[test]
+    fn the_scroll_thumb_is_the_mock_ups_own_alpha_over_the_terminals_canvas() {
+        // `body.dark { --thumb: rgba(255,255,255,.22); --thumb-hover: … .4 }`
+        // over `--termbg: #1B1B1B`.
+        let night = ChromePalette::derive(&FOLIO_DARK);
+        assert_eq!(
+            night.scroll_thumb,
+            ink_over(FOLIO_DARK.background, [0xff, 0xff, 0xff], 220)
+        );
+        assert_eq!(
+            night.scroll_thumb_hover,
+            ink_over(FOLIO_DARK.background, [0xff, 0xff, 0xff], 400)
+        );
+        // `:root { --thumb: rgba(55,53,47,.24); --thumb-hover: … .42 }` over
+        // `--termbg: #FFFFFF`.
+        let paper = ChromePalette::derive(&FOLIO_LIGHT);
+        assert_eq!(
+            paper.scroll_thumb,
+            ink_over(FOLIO_LIGHT.background, [0x37, 0x35, 0x2f], 240)
+        );
+        assert_eq!(
+            paper.scroll_thumb_hover,
+            ink_over(FOLIO_LIGHT.background, [0x37, 0x35, 0x2f], 420)
+        );
+        // And hover is a *step*, not a redeclaration: on both canvases it moves
+        // further from the ground than the resting mark does, which is what
+        // "brought forward" has to mean for a colour.
+        for (name, canvas, palette) in [
+            ("night", FOLIO_DARK.background, night),
+            ("paper", FOLIO_LIGHT.background, paper),
+        ] {
+            let distance = |ink: [u8; 3]| {
+                (0..3)
+                    .map(|channel| i32::from(ink[channel]) - i32::from(canvas[channel]))
+                    .map(i32::abs)
+                    .sum::<i32>()
+            };
+            assert!(
+                distance(palette.scroll_thumb_hover) > distance(palette.scroll_thumb),
+                "{name}: the hovered mark must be the louder of the two"
+            );
+        }
     }
 
     #[test]
@@ -753,6 +823,8 @@ mod tests {
             command_tick_crest,
             command_tick_fail_crest,
             command_tick_search_crest,
+            scroll_thumb,
+            scroll_thumb_hover,
             menu_surface,
             menu_border,
             menu_border_alpha,

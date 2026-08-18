@@ -52,6 +52,17 @@
     --ok: #1a7f37;
     --thumb: rgba(55,53,47,.24);
     --thumb-hover: rgba(55,53,47,.42);
+    /* The two above are worn by every scrollbar in this product, including the
+       one the browser cannot draw for us — see the block under `scrollbar-width`
+       below for the terminal pane's own thumb. Its geometry is theme-independent,
+       so it is declared once here and never overridden in body.dark. */
+    --thumb-lane: 8px;     /* reserved down every terminal pane's right edge */
+    --thumb-w: 4px;        /* the mark itself, centred in that lane */
+    --thumb-r: 2px;        /* 4px wide with a 2px radius is a stadium */
+    --thumb-min: 24px;     /* the floor under the proportional length */
+    --thumb-reach: 11px;   /* how far in it takes a hand: lane + the rail's gap */
+    --thumb-rest: 900ms;   /* how long it stays after its last reason */
+    --thumb-fade: 180ms;   /* and how long it takes to go */
     --termbg: #FFFFFF;
     --cursor: #37352F;
     --shadow: 0 16px 48px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.06);
@@ -93,6 +104,43 @@
   body { color-scheme: light; }
   body.dark { color-scheme: dark; }
   body, body * { scrollbar-width: thin; scrollbar-color: var(--thumb) transparent; }
+  /* ── the terminal pane's own thumb (P2-9 slice 1, 2026-08-18) ───────────────
+     The rule above is the *page's* scrollbars: everything the browser draws for
+     us, in the one thin form this window allows. A terminal pane's bar is not
+     one of those. The native window draws it itself, in the eight-pixel lane
+     reserved down every pane's right edge since 2026-08-16 — the lane the
+     command rail measures its own inset from, because "the rail and the thumb
+     are different instruments and may not share a lane" (1361-1363). Nothing in
+     this stylesheet can express that bar, so its spec is stated here, in these
+     tokens, so that the two scrollbars in this product stay one idea.
+
+       lane            var(--thumb-lane)   reserved; nothing else draws in it
+       thumb width     var(--thumb-w)      centred: 2px of terminal either side
+       thumb radius    var(--thumb-r)      a stadium, like .cmdtick beside it
+       minimum length  var(--thumb-min)    below it a long document's honest
+                                           share is a sliver nobody can take
+       track           none                `scrollbar-color: … transparent`
+                                           above is this bar's track too
+       rest            var(--thumb)        .22 night / .24 paper, over --termbg
+       hover, held     var(--thumb-hover)  .4 / .42 — brightness and NEVER
+                                           width: a wider bar would cover the
+                                           right-most character cell, which is
+                                           the thing the lane exists to prevent
+       reach           var(--thumb-reach)  lane + the 3px gap to the rail, i.e.
+                                           every pixel the lane arithmetic set
+                                           aside and none of the rail's
+
+     Visibility, which a page scrollbar has no equivalent of and which is half
+     of what makes this "a mark on the text" rather than furniture: no bar at
+     all with no scrollback, and none on the alternate screen (vim's canvas is
+     not this document). It is up while the view is away from the live bottom,
+     while a hand is in the lane, and while one is holding it. With none of
+     those true it keeps the last of them for var(--thumb-rest) and then eases
+     out over var(--thumb-fade) — prefers-reduced-motion keeps the wait and
+     drops the fade, because a wait is not a transition.
+
+     Left for later slices of P2-9: the capacity expansion this bar is a picture
+     of, regex search, and the horizontal bar a no-wrap mode would need. */
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {

@@ -43,6 +43,7 @@ mod seed;
 mod settings;
 mod shell_integration;
 mod shortcuts;
+mod termscroll;
 mod text_field;
 mod toast;
 mod tooltip;
@@ -3510,6 +3511,19 @@ struct LeafSession {
     program: Option<PathBuf>,
     session: DualPlaneSession,
     projection: ViewportProjection,
+    /// **The last moment this pane's scroll bar had a reason to be up** — a
+    /// wheel, a keyboard page, a jump, or a pointer in its lane (P2-9 slice 1).
+    ///
+    /// On the leaf and not on the window, because the reason belongs to the
+    /// pane: two panes can be at two different points of their own fades, and a
+    /// single window-level clock would put out a bar the other pane's gesture
+    /// had just lit. It travels with the leaf through a tear-out for the same
+    /// reason [`Self::profile`] does — the pane that was scrolled is still the
+    /// pane that was scrolled after it lands in another tab.
+    ///
+    /// Set to the leaf's own birth, which costs nothing: a pane with no
+    /// scrollback yet draws no bar whatever this says.
+    thumb_awake: Instant,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -3753,6 +3767,26 @@ struct TabState {
     /// Which bar the pointer is on — the surface *and* the axis, because a
     /// surface can wear two and only the one under the hand lights.
     preview_body_hover: Option<(PreviewSurface, preview::ScrollAxis)>,
+    /// **A terminal pane's scroll thumb in hand** (P2-9 slice 1) — the two
+    /// above again, for the instrument in the reserved lane.
+    ///
+    /// The seat and the grip and nothing else, on [`PreviewBodyDrag`]'s
+    /// discipline and for its reason: the bar's geometry is re-read from the
+    /// current projection on every move, because the answer to "where is this
+    /// thumb" must not be a second copy of the scroll state.
+    terminal_thumb_drag: Option<TerminalThumbDrag>,
+    /// Which pane's lane the pointer is in, which is what lights that pane's
+    /// mark and what holds it on the glass while a hand is near.
+    terminal_thumb_hover: Option<SeatId>,
+    /// Whether any thumb was owed a frame on the **last** pass.
+    ///
+    /// The latch `toasts_owe_frame` is, and for its reason: a fade that has just
+    /// finished owes exactly one more frame — the one that does not draw it —
+    /// and "is a fade running" is false by then. Without this the mark would
+    /// stay on the glass at full strength until some unrelated event happened to
+    /// rebuild the overlay, which is the difference between a bar that goes away
+    /// and a bar that goes away when you next touch something.
+    terminal_thumb_owed_frame: bool,
     /// The surface and link under the pointer, the link held **by its box**
     /// rather than by an index into that surface's list — so a rebuild that moves
     /// or removes it simply stops matching, and there is no stale subscript to
@@ -5816,6 +5850,18 @@ struct PreviewBodyDrag {
     axis: preview::ScrollAxis,
     /// How far into the thumb's own length the hand took hold, so the thumb
     /// stays under the pointer rather than jumping its centre there.
+    grab: f32,
+}
+
+/// **A terminal pane's scroll thumb in hand** (P2-9 slice 1).
+///
+/// [`PreviewBodyDrag`] with a seat where the surface was. It carries the grip
+/// for the same reason and to the same end: a thumb taken by its foot stays
+/// taken by its foot, so the document does not jump the moment it is grabbed.
+#[derive(Clone, Copy, Debug)]
+struct TerminalThumbDrag {
+    seat: SeatId,
+    /// How far below the thumb's own top edge the hand took hold.
     grab: f32,
 }
 
@@ -10404,6 +10450,18 @@ struct OverlayStack {
     /// it has to stand above its own window and below the next one, so it rides
     /// in [`Self::float`] beside the window it belongs to.
     preview_bars: Vec<marks::OverlayLayer>,
+    /// **A terminal pane's scroll thumb** (P2-9 slice 1), beside the preview's
+    /// bar and on its argument: it belongs *to* a pane rather than floating over
+    /// the window, and every surface above is entitled to cover it.
+    ///
+    /// Below [`Self::command_rail`] and not beside it, because unlike the
+    /// preview's bar these two genuinely can be up together — one terminal pane
+    /// wears both. They never overlap a pixel (that is what
+    /// [`bt_render::TERMINAL_SCROLL_LANE_LOGICAL_PX`] is for), so the order is a
+    /// statement rather than a fix: the rail is a list of places you can go and
+    /// the thumb is where you are, and if the lane arithmetic were ever broken
+    /// the rail is the one that should be seen to survive.
+    terminal_bars: Vec<marks::OverlayLayer>,
     /// `.cmdrail { z-index: 5 }` — **a terminal pane's command marks**, beside
     /// the preview's bar and for its argument.
     ///
@@ -10532,6 +10590,7 @@ impl OverlayStack {
     fn flattened(self) -> Vec<marks::OverlayLayer> {
         let Self {
             preview_bars,
+            terminal_bars,
             command_rail,
             rail,
             ground,
@@ -10550,6 +10609,7 @@ impl OverlayStack {
         } = self;
         [
             preview_bars,
+            terminal_bars,
             command_rail,
             rail,
             ground,
@@ -13269,6 +13329,7 @@ fn create_leaf_session(
         program: resolved_program,
         session,
         projection,
+        thumb_awake: Instant::now(),
         grid,
         conpty_grid: grid,
         pending_pty_resize: None,
@@ -13579,6 +13640,9 @@ fn assemble_tab_state(
         preview_block_hover: None,
         preview_body_drag: None,
         preview_body_hover: None,
+        terminal_thumb_drag: None,
+        terminal_thumb_hover: None,
+        terminal_thumb_owed_frame: false,
         preview_link_hover: None,
     };
     debug_assert!(
@@ -17293,6 +17357,11 @@ impl Runtime {
             anchor,
             started: Instant::now(),
         });
+        // A jump is a scroll, and the bar says where the jump landed
+        // (P2-9 slice 1). Only the clock is set here, for the same reason the
+        // overlay is not rebuilt below: the frame this jump lands on has not
+        // been composed yet.
+        self.wake_terminal_thumb(seat);
         // The pane's own repaint, and **not** an overlay rebuild beside it. The
         // band is placed out of the frame that is on the glass, and the frame
         // showing this jump has not been composed yet — an overlay built here
@@ -17663,6 +17732,9 @@ impl Runtime {
                 source: anchor,
                 local_offset: search::landing_offset_subpixels(pane_height),
             }));
+        // A hit scrolled to is a scroll, and the bar says where it landed
+        // (P2-9 slice 1).
+        self.wake_terminal_thumb(seat);
         Ok(())
     }
 
@@ -18646,6 +18718,7 @@ impl Runtime {
             // a surface floating over the window at all — see
             // [`OverlayStack::preview_bars`].
             preview_bars: self.preview_seat_bar_layers(),
+            terminal_bars: self.terminal_bar_layers(),
             command_rail: self.command_rail_layers(),
             rail: self.rail_overlay_layers(),
             ground: ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now)),
@@ -22983,6 +23056,264 @@ impl Runtime {
         }
         self.preview_body_hover = over;
         self.repaint_preview()
+    }
+
+    // ─────────────────── the terminal pane's own scroll bar ───────────────────
+    //
+    // P2-9 slice 1. Everything below reads [`termscroll`] and adds nothing to
+    // it: the geometry, the visibility rule and both maps a hand can run
+    // backwards live there, where they can be asked the questions a hand asks
+    // without a window, a shell or a GPU.
+
+    /// One terminal pane's body, or `None` when there is no bar to stand on it.
+    ///
+    /// **The alternate screen is suppressed here**, the way it is for the search
+    /// capsule ([`Self::seat_can_search`], D-5) and for the rail
+    /// ([`cmdrail::host_rect`]): §3.2 keeps the two screens in isolated anchor
+    /// namespaces, so the primary history's extent says nothing about what
+    /// `vim` is drawing, and a lane that took presses over somebody else's
+    /// canvas would scroll a document that is not on screen.
+    fn terminal_scroll_body(&self, seat: SeatId) -> Option<[f32; 4]> {
+        let leaf = self.sessions.get(&seat)?;
+        if leaf.session.terminal_modes().alternate_screen {
+            return None;
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+        Some([
+            body.x as f32,
+            body.y as f32,
+            (body.x + body.width) as f32,
+            (body.y + body.height) as f32,
+        ])
+    }
+
+    /// One pane's bar, from that pane's own projection.
+    ///
+    /// The three numbers are read off [`bt_viewport::ViewportProjection`] and
+    /// nowhere else — the extent it clamps the wheel by, the page it measures
+    /// that against, and where the view currently stands. A bar derived from
+    /// anything else would be a second opinion about how far the view can go.
+    fn terminal_scroll_bar(&self, seat: SeatId) -> Option<termscroll::TerminalScrollBar> {
+        let body = self.terminal_scroll_body(seat)?;
+        let leaf = self.sessions.get(&seat)?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        termscroll::bar(
+            body,
+            leaf.projection.scroll_extent_subpixels(),
+            leaf.projection.viewport_height_subpixels(),
+            leaf.projection.scroll_offset_subpixels(),
+            scale,
+        )
+    }
+
+    /// The pane whose lane the pointer is in, and that pane's bar.
+    fn terminal_bar_under(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(SeatId, termscroll::TerminalScrollBar)> {
+        let at = [position.x as f32, position.y as f32];
+        let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
+        let bar = self.terminal_scroll_bar(seat)?;
+        bar.lane_holds(at).then_some((seat, bar))
+    }
+
+    /// Note that this pane's bar has a reason to be up **now** — the moment its
+    /// rest is later measured from.
+    ///
+    /// Every gesture that moves the view says so through here: the wheel, the
+    /// keyboard's pages and ends, a jump off the rail, a drag of the thumb
+    /// itself and the pointer merely being in the lane. One door, because the
+    /// one thing that must not happen is a gesture that scrolls the pane and
+    /// leaves its picture of the scroll invisible.
+    fn wake_terminal_thumb(&mut self, seat: SeatId) {
+        let active = self.active_tab;
+        if let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) {
+            leaf.thumb_awake = Instant::now();
+        }
+    }
+
+    /// The same, followed by the rebuild a moved thumb needs.
+    ///
+    /// The overlay is built on demand rather than every frame, so a scroll that
+    /// only republished the pane would move the text under a thumb that stayed
+    /// where it was. `present_chrome_change` costs nothing when a frame is
+    /// already pending, which is the usual case on the wheel path.
+    fn woke_terminal_thumb(&mut self, seat: SeatId) -> Result<()> {
+        self.wake_terminal_thumb(seat);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Put one pane's view at `wanted` subpixels above the live bottom.
+    ///
+    /// Expressed as a delta through `scroll_by_subpixels` rather than as a
+    /// setter of its own, so the clamp stays in the one place that owns it —
+    /// the drag and the wheel end up at the same extent by the same arithmetic.
+    fn scroll_seat_to_subpixels(&mut self, seat: SeatId, wanted: i64) -> Result<()> {
+        let active = self.active_tab;
+        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        let current = leaf.projection.scroll_offset_subpixels();
+        if current == wanted {
+            return Ok(());
+        }
+        leaf.projection.scroll_by_subpixels(wanted - current);
+        self.woke_terminal_thumb(seat)?;
+        self.repaint_pane_change(seat)
+    }
+
+    /// A press in a terminal pane's lane.
+    ///
+    /// Returns whether the press was the bar's. Two gestures, told apart by
+    /// where in the lane the press landed and by nothing else: on the thumb it
+    /// takes hold of it, and anywhere else on the track it pages toward the
+    /// press — the platform's convention, and
+    /// [`termscroll::TerminalScrollBar::paged_from`] owns both halves of it.
+    fn press_terminal_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((seat, bar)) = self.terminal_bar_under(position) else {
+            return Ok(false);
+        };
+        let at = [position.x as f32, position.y as f32];
+        self.terminal_thumb_hover = Some(seat);
+        if bar.thumb_holds(at) {
+            self.terminal_thumb_drag = Some(TerminalThumbDrag {
+                seat,
+                // Where in the thumb the hand took hold, so the mark stays under
+                // the pointer rather than jumping its top edge there.
+                grab: bar.grip(at[1]),
+            });
+            self.woke_terminal_thumb(seat)?;
+            return Ok(true);
+        }
+        let offset = self
+            .sessions
+            .get(&seat)
+            .map_or(0, |leaf| leaf.projection.scroll_offset_subpixels());
+        self.scroll_seat_to_subpixels(seat, bar.paged_from(offset, at[1]))?;
+        Ok(true)
+    }
+
+    /// The pointer travelling with a terminal thumb in hand.
+    ///
+    /// The bar is re-derived from the current projection on every move — output
+    /// arriving under the hand lengthens the document, and a gesture holding a
+    /// copy of the geometry it started with would drift away from the text it is
+    /// scrolling.
+    fn drag_terminal_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.terminal_thumb_drag else {
+            return Ok(false);
+        };
+        // The gesture's own pane, not the one under the pointer: a hand that has
+        // left the pane it took hold in is still holding that pane's thumb.
+        let Some(bar) = self.terminal_scroll_bar(drag.seat) else {
+            // The scrollback stopped overflowing, or the program went full
+            // screen under the hand. The gesture still owns the pointer until
+            // the button comes up; there is simply nothing left for it to move.
+            return Ok(true);
+        };
+        self.scroll_seat_to_subpixels(drag.seat, bar.dragged_to(position.y as f32, drag.grab))?;
+        Ok(true)
+    }
+
+    /// Light the lane the pointer is in, and put the last one out.
+    fn note_terminal_thumb_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<()> {
+        let over = position
+            .and_then(|position| self.terminal_bar_under(position))
+            .map(|(seat, _)| seat);
+        // The clock is bumped whether or not the hover changed: a pointer moving
+        // about inside the lane has a standing reason to keep the mark up, and
+        // the rest it will eventually fade from is measured from the last moment
+        // it was in there.
+        if let Some(seat) = over {
+            self.wake_terminal_thumb(seat);
+        }
+        if over == self.terminal_thumb_hover {
+            return Ok(());
+        }
+        if let Some(seat) = self.terminal_thumb_hover {
+            self.wake_terminal_thumb(seat);
+        }
+        self.terminal_thumb_hover = over;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Every terminal pane's mark, one layer each.
+    ///
+    /// The state machine is asked **before** the geometry, which is the right
+    /// way round: [`termscroll::visibility`] owns both suppressions, so a pane
+    /// with no scrollback and a pane running `vim` are refused by the rule
+    /// rather than by a `None` falling out of the arithmetic further down.
+    fn terminal_bar_layers(&self) -> Vec<marks::OverlayLayer> {
+        let palette = bt_render::chrome_palette();
+        let now = Instant::now();
+        let motion = self.motion;
+        self.sessions
+            .iter()
+            .filter_map(|(seat, leaf)| {
+                let situation = termscroll::ThumbSituation {
+                    has_history: leaf.projection.scroll_extent_subpixels() > 0,
+                    alternate_screen: leaf.session.terminal_modes().alternate_screen,
+                    scrolled: leaf.projection.is_scrolled(),
+                    near: self.terminal_thumb_hover == Some(*seat),
+                    held: self
+                        .terminal_thumb_drag
+                        .is_some_and(|drag| drag.seat == *seat),
+                    since_rest: now.saturating_duration_since(leaf.thumb_awake),
+                };
+                let thumb = termscroll::visibility(situation, motion, |x| cubic_bezier(x, EASE));
+                let bar = self.terminal_scroll_bar(*seat)?;
+                termscroll::layer(&bar, thumb, &palette)
+            })
+            .collect()
+    }
+
+    /// The thumbs' own clock, run once per pass.
+    ///
+    /// The same shape as [`Self::advance_toasts`] and for the same reason: a bar
+    /// left alone runs out its rest and fades with the pointer and the keyboard
+    /// both still, and nothing else in this window would wake the loop to take
+    /// it off the glass. The latch is what makes the *last* frame happen — the
+    /// pass on which the fade has finished is the pass that must draw the pane
+    /// without it, and by then there is no fade left to ask about.
+    fn advance_terminal_thumbs(&mut self, now: Instant) -> Result<()> {
+        let owed = self.terminal_thumb_deadline(now).is_some();
+        if !owed && !self.terminal_thumb_owed_frame {
+            return Ok(());
+        }
+        self.terminal_thumb_owed_frame = owed;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// When any terminal thumb next owes a frame.
+    ///
+    /// Only the panes that are actually resting: one standing on a reason —
+    /// held, hovered, or parked in history — is not going anywhere, and a pane
+    /// with no scrollback has nothing on the glass to take off it.
+    fn terminal_thumb_deadline(&self, now: Instant) -> Option<Instant> {
+        let motion = self.motion;
+        self.sessions
+            .iter()
+            .filter(|(seat, leaf)| {
+                leaf.projection.scroll_extent_subpixels() > 0
+                    && !leaf.session.terminal_modes().alternate_screen
+                    && !leaf.projection.is_scrolled()
+                    && self.terminal_thumb_hover != Some(**seat)
+                    && self
+                        .terminal_thumb_drag
+                        .is_none_or(|drag| drag.seat != **seat)
+            })
+            .filter_map(|(_, leaf)| termscroll::fade_deadline(leaf.thumb_awake, now, motion))
+            .min()
     }
 
     /// The markdown link under the pointer, if there is one, and the surface it
@@ -36635,6 +36966,9 @@ impl Runtime {
         let subpixels =
             i64::from(rows).saturating_mul(self.projection.cell_height_subpixels().get());
         self.projection.scroll_by_subpixels(subpixels);
+        // `Shift`+`PageUp`/`PageDown` is a scroll like any other, so it lights
+        // the bar like any other (P2-9 slice 1).
+        self.woke_terminal_thumb(self.focused_leaf)?;
         self.publish_interaction_frame()
     }
 
@@ -36813,6 +37147,13 @@ impl Runtime {
         if self.drag_preview_body_thumb(position)? {
             return Ok(());
         }
+        // A terminal pane's thumb owns the pointer on the same terms and outside
+        // its own lane for the same reason: a drag that stopped tracking when
+        // the hand wandered eleven pixels inboard would make the far end of a
+        // sixty-thousand-line scrollback a matter of aim.
+        if self.drag_terminal_thumb(position)? {
+            return Ok(());
+        }
         if self.drag_preview_block_thumb(position)? {
             return Ok(());
         }
@@ -36824,6 +37165,10 @@ impl Runtime {
             && self.dirty_gate_layout().is_none()
             && self.chrome_target_at(position).is_none();
         self.note_preview_body_hover(free.then_some(position))?;
+        // The lane the pointer is in — the fact that lights one pane's mark and
+        // holds it on the glass. Answered `None` behind an overlay for the
+        // reason the bars above it are: a scrim never leaves a bar lit under it.
+        self.note_terminal_thumb_hover(free.then_some(position))?;
         self.note_preview_block_hover(free.then_some(position))?;
         self.note_preview_link_hover(free.then_some(position))?;
         self.note_preview_hex_hover(free.then_some(position));
@@ -38915,6 +39260,15 @@ impl Runtime {
                 self.repaint_preview()?;
                 return Ok(true);
             }
+            // The terminal's own thumb, on the same terms: the offset it wrote
+            // on the way is the answer, so letting go only settles which ink it
+            // wears and restarts the clock that will take it off the glass.
+            if let Some(drag) = self.terminal_thumb_drag.take() {
+                self.wake_terminal_thumb(drag.seat);
+                self.note_terminal_thumb_hover(Some(position))?;
+                self.repaint_pane_change(drag.seat)?;
+                return Ok(true);
+            }
             if self.preview_block_drag.take().is_some() {
                 self.note_preview_block_hover(Some(position))?;
                 self.repaint_preview()?;
@@ -39031,6 +39385,18 @@ impl Runtime {
             // block in it and over every link in those — and a press on it was
             // never a press on what it is standing over.
             if self.press_preview_body_thumb(position)? {
+                return Ok(true);
+            }
+            // **And a terminal pane's, on exactly those terms** (P2-9 slice 1).
+            // The lane is the outermost band a terminal pane has; a press in it
+            // was never a press on the cells it stands beside, and answering it
+            // here — above `press_reaches_no_grid` and therefore above both the
+            // selection drag and the child's own mouse tracking — is what makes
+            // the two true at once: the pane does not select text while the
+            // thumb is being dragged, and a full-screen mouse-reporting program
+            // does not swallow the bar (§7.1.5f's own ordering: a target this
+            // window recognises comes before the program's tracking).
+            if self.press_terminal_thumb(position)? {
                 return Ok(true);
             }
             // A link is a control standing in the prose and answers before the
@@ -40938,6 +41304,11 @@ impl Runtime {
             return Ok(());
         };
         leaf.projection.scroll_by_subpixels(take);
+        // A notch is a reason for the bar to be up, and a moved view is a moved
+        // thumb: the overlay is built on demand, so a wheel that only
+        // republished the pane would slide the text under a mark that stayed
+        // where it was (P2-9 slice 1).
+        self.woke_terminal_thumb(seat)?;
         self.repaint_pane_change(seat)
     }
 
@@ -41441,10 +41812,12 @@ impl Runtime {
                 }
                 Key::Named(NamedKey::Home) if self.modifiers == ModifiersState::CONTROL => {
                     self.projection.scroll_to_top();
+                    self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
                 }
                 Key::Named(NamedKey::End) if self.modifiers == ModifiersState::CONTROL => {
                     self.projection.scroll_to_bottom();
+                    self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
                 }
                 _ => {}
@@ -42884,6 +43257,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // The scroll thumb's rest and fade, beside the rail's clocks because it
+        // is the same shape once more, and on the same pane's own edge (P2-9
+        // slice 1).
+        if let Err(error) = runtime.advance_terminal_thumbs(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // The glance card's own 350ms, beside the layout peek's and for the same
         // reason it stands where it does: it is a *peek*, and a peek that has
         // matured is already on screen when everything above it asks.
@@ -42987,6 +43367,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // three has landed, which is what makes a rail under a still hand cost
             // no wake-ups.
             runtime.command_rail_deadline(now),
+            // A terminal thumb's rest and the fade after it — and nothing at all
+            // for a pane with no scrollback, a pane parked in history (its bar
+            // is standing, not fading) or a pane whose fade has landed.
+            runtime.terminal_thumb_deadline(now),
             // The peek's 350ms while one is settling, and nothing afterwards:
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
@@ -45087,6 +45471,7 @@ mod tests {
         };
         let stack = OverlayStack {
             preview_bars: mark(0),
+            terminal_bars: mark(16),
             command_rail: mark(13),
             rail: mark(1),
             ground: mark(2),
@@ -45110,10 +45495,10 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 13, 1, 2, 14, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11],
-            "bottom to top: pane bars, command rails, rail, ground, search capsule, schematic, \
-             float, modal, file menu, pane menu, git menu, terminal menu, notices, tip, glance, \
-             ghost"
+            vec![0, 16, 13, 1, 2, 14, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11],
+            "bottom to top: pane bars, terminal thumbs, command rails, rail, ground, search \
+             capsule, schematic, float, modal, file menu, pane menu, git menu, terminal menu, \
+             notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -45127,6 +45512,13 @@ mod tests {
         assert!(
             at(5) > at(4),
             "the settings panel is painted over the floating window, not under it"
+        );
+        // P2-9 slice 1: the two instruments that share a terminal pane's right
+        // edge. They never overlap a pixel, so this is a statement about which
+        // one survives if the lane arithmetic is ever broken.
+        assert!(
+            at(13) > at(16),
+            "the command rail is painted over the scroll thumb beside it"
         );
         assert!(
             at(4) > at(2) && at(4) > at(1),
@@ -62657,6 +63049,7 @@ mod tests {
             program: None,
             session,
             projection,
+            thumb_awake: Instant::now(),
             grid,
             conpty_grid: grid,
             last_finished_command: None,
