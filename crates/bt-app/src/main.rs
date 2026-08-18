@@ -8903,6 +8903,68 @@ fn tab_owes_frame<T: PartialEq>(last_drawn: Option<T>, showing: T) -> bool {
     last_drawn != Some(showing)
 }
 
+/// Everything one tab's trailing run is standing under, on the frame it is
+/// asked about.
+///
+/// Four booleans rather than four call-site conditions, because the run is
+/// **one run** and the two numbers it wears have to be decided together: the
+/// pin and the folder share `reveal` as their width (`seats::rail_geometry`,
+/// `seats::tab_strip_geometry` — `box × reveal`, from the one declaration
+/// `.tab .pin, .vtab .pin` the mock-up writes for both axes), so a rule that
+/// opened one without the other cannot be expressed by this geometry at all.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TabTriggerHand {
+    /// The tab is pinned: its pin is a statement rather than an offer, and
+    /// stands whatever the pointer is doing (mock-up 324, 347-349).
+    pinned: bool,
+    /// The pointer is somewhere on this tab — its body, its `×`, its pin or
+    /// its folder ([`Runtime::hovered_tab`]).
+    hovered: bool,
+    /// The pointer is on the folder itself.
+    on_trigger: bool,
+    /// **A peek this tab's folder summoned is on screen**
+    /// ([`Runtime::peeking_tab`]).
+    peeking: bool,
+}
+
+/// `(how open the trailing run stands, how lit the folder is)` for one tab.
+///
+/// The width first. H76/H104's ladder gives the folder three rungs of *light* —
+/// dark at rest, half-lit while the pointer is anywhere on the tab, full while
+/// it is on the trigger itself, with the active tab exempt from none of it —
+/// and the run it stands in is opened by the pointer alone.
+///
+/// **And by a peek hanging off it, which is this function's reason for
+/// existing.** A folder that has summoned a float is a folder still in use: the
+/// hand walks off the tab and *into the window it just opened*, which is the
+/// whole of what a peek is for (§7.1.2「hover 瞬态 peek …离开宽限 220ms」 — a
+/// grace exists precisely because the pointer is expected to leave the trigger).
+/// A run that closed on that move took the trigger's rectangle with it, and a
+/// trigger with no rectangle is a trigger that has **died** as far as
+/// [`Runtime::trigger_rect`] can tell — which is the question
+/// [`Runtime::advance_float`] asks before it takes a peek down whose header has
+/// gone away. So the peek dissolved on the first move toward it, every time,
+/// and the folder it came from blinked out from under it (user report,
+/// 2026-08-17). Held open, the trigger also stays *hittable*, which is what
+/// `drive_float_hover`'s `on_trigger` reads when the hand comes back and what
+/// §7.1.2's「再点触发器」needs to exist at all.
+///
+/// Only the transient peek is named here, and only a **tab**'s trigger: a
+/// pinned float is exempt from that dismissal by ruling, and a pane head's
+/// folder is not reveal-scaled — it has its box at rest and only its opacity
+/// moves ([`seats::pane_head_geometry`]).
+fn tab_trailing_targets(hand: TabTriggerHand) -> (f32, f32) {
+    let run = hand.pinned || hand.hovered || hand.peeking;
+    let lit = if hand.on_trigger || hand.peeking {
+        1.0
+    } else if hand.hovered {
+        seats::TAB_FILES_TRIGGER_REVEAL
+    } else {
+        0.0
+    };
+    (f32::from(u8::from(run)), lit)
+}
+
 /// Whether a tab's latched attention has already been spent by being looked at.
 ///
 /// Watching is consuming (user ruling). A terminal you are sitting in front of
@@ -34993,6 +35055,7 @@ impl Runtime {
             Some(seats::ChromeTarget::TabFiles(index)) => Some(index),
             _ => None,
         };
+        let peeking = self.peeking_tab();
         let mut owes_frame = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             // A new progress reading starts the arc easing toward it. This runs
@@ -35000,13 +35063,13 @@ impl Runtime {
             // keep reporting, and its tab is exactly the one the user cannot
             // otherwise see.
             tab.sync_ring(now);
-            // A pinned tab holds its pin open; an unpinned one offers it only
-            // while you are on the tab (mock-up 324, 347-349).
-            tab.pin_reveal.retarget(
-                f32::from(u8::from(tab.pinned || hovered == Some(index))),
-                now,
-                motion,
-            );
+            let (run, lit) = tab_trailing_targets(TabTriggerHand {
+                pinned: tab.pinned,
+                hovered: hovered == Some(index),
+                on_trigger: trigger_hovered == Some(index),
+                peeking: peeking == Some(index),
+            });
+            tab.pin_reveal.retarget(run, now, motion);
             // The reveal has to be *compared*, not merely sampled: `tab_owes_frame`
             // asks what would be drawn against what was drawn, and a width that
             // nothing compares would animate without ever scheduling a present.
@@ -35017,20 +35080,7 @@ impl Runtime {
                 tab.last_drawn_pin_reveal = Some(drawn);
                 owes_frame = true;
             }
-            // H76's three rungs: dark at rest, half-lit while the pointer is
-            // anywhere on the tab, full while it is on the trigger itself. The
-            // active tab is not exempt — H104.
-            tab.files_lit.retarget(
-                if trigger_hovered == Some(index) {
-                    1.0
-                } else if hovered == Some(index) {
-                    seats::TAB_FILES_TRIGGER_REVEAL
-                } else {
-                    0.0
-                },
-                now,
-                motion,
-            );
+            tab.files_lit.retarget(lit, now, motion);
             let drawn = tab.drawn_files_lit(now, motion);
             if tab.last_drawn_files_lit != Some(drawn) {
                 tab.last_drawn_files_lit = Some(drawn);
@@ -35312,6 +35362,22 @@ impl Runtime {
                 | seats::ChromeTarget::TabFiles(index),
             ) => Some(index),
             _ => None,
+        }
+    }
+
+    /// Which tab's folder summoned the peek that is on screen, if any.
+    ///
+    /// The peek slot alone — `FloatHost::peek` — because this is the only float
+    /// whose life is spent by [`Self::advance_float`]'s "the header it hangs
+    /// from has gone" rule, and a pinned window is exempt from that rule by
+    /// ruling (§7.1.2). A float torn off a docked column carries no trigger at
+    /// all, and one summoned from a pane head names a leaf rather than a tab;
+    /// both answer `None` here, and both are right to — see
+    /// [`tab_trailing_targets`].
+    fn peeking_tab(&self) -> Option<usize> {
+        match self.float.peek().and_then(|win| win.origin)? {
+            float::FloatTrigger::Tab(id) => self.tabs.iter().position(|tab| tab.id == id),
+            float::FloatTrigger::Pane(_) => None,
         }
     }
 
@@ -48165,6 +48231,80 @@ mod tests {
         assert!(
             tab_owes_frame(Some(quiet_tab), ringing),
             "a bell on a still tab must still light its dot"
+        );
+    }
+
+    /// PIN (user report, 2026-08-17) — **a peek is a thing you walk into, so
+    /// the folder that opened it stays where it is.**
+    ///
+    /// The bug this is the red gate for: hovering a tab's folder in the
+    /// sidebar opened the files peek, and the peek vanished the instant the
+    /// pointer moved off the button and onto the window it had just summoned.
+    /// Nothing about the float's own grace was wrong —
+    /// `FloatHost::hold`/`release` were reading the pointer as *inside* and
+    /// cancelling the dismissal correctly. What took it down was
+    /// [`Runtime::advance_float`]'s other rule, the one for a peek whose header
+    /// has died: a tab's trailing run is hover-revealed and its boxes are
+    /// `width × reveal`, so leaving the tab shrank the folder to nothing,
+    /// [`Runtime::trigger_rect`] answered `None`, and a trigger that is merely
+    /// *not under the pointer* was read as a trigger that no longer exists.
+    ///
+    /// Red gate: drop `peeking` from either half of [`tab_trailing_targets`]
+    /// and the corresponding half here goes red. The width matters because the
+    /// rectangle is what the dismissal, the hit test and「再点触发器」all read;
+    /// the light matters because a control whose popup is open must not look
+    /// like a control at rest.
+    #[test]
+    fn a_folder_that_has_a_peek_hanging_off_it_keeps_its_box_and_its_light() {
+        let resting = TabTriggerHand::default();
+        assert_eq!(
+            tab_trailing_targets(resting),
+            (0.0, 0.0),
+            "a tab nobody is pointing at wears no run at all"
+        );
+
+        let peeking = TabTriggerHand {
+            peeking: true,
+            ..TabTriggerHand::default()
+        };
+        let (run, lit) = tab_trailing_targets(peeking);
+        assert_eq!(
+            run, 1.0,
+            "the pointer has walked into the peek, and the trigger it came from \
+             still has to have a rectangle for `trigger_rect` to find"
+        );
+        assert_eq!(
+            lit, 1.0,
+            "and it is the open one, so it wears the rung it wore when it was \
+             pressed rather than the dark it wears at rest"
+        );
+
+        // The ladder it was built on is untouched: H76/H104's three rungs of
+        // light, and a run opened by the pointer or by the pin.
+        let on_tab = TabTriggerHand {
+            hovered: true,
+            ..TabTriggerHand::default()
+        };
+        assert_eq!(
+            tab_trailing_targets(on_tab),
+            (1.0, seats::TAB_FILES_TRIGGER_REVEAL),
+            "half-lit while the pointer is anywhere on the tab"
+        );
+        assert_eq!(
+            tab_trailing_targets(TabTriggerHand {
+                on_trigger: true,
+                ..on_tab
+            }),
+            (1.0, 1.0),
+            "full while it is on the folder itself"
+        );
+        assert_eq!(
+            tab_trailing_targets(TabTriggerHand {
+                pinned: true,
+                ..TabTriggerHand::default()
+            }),
+            (1.0, 0.0),
+            "a pinned tab holds its run open and its folder dark"
         );
     }
 
