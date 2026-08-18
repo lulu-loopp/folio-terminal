@@ -5126,4 +5126,176 @@ mod tests {
         assert_eq!(prompt_copies, 1);
         assert_eq!(glyphs(&input), glyphs(&expected_after_edit));
     }
+
+    /// The width the 2026-08-17 seat recording's prompt occupies:
+    /// `(base) PS D:\Documents\SyncFolder\Developer\WorldQuant\user_package\user_package>` plus
+    /// the trailing space PowerShell's default prompt ends with. Synthesised rather than taken
+    /// from that path, because only the cell count is load-bearing and no probe should depend on
+    /// one machine's directory tree.
+    const NARROW_START_PROMPT_CELLS: u16 = 82;
+    /// A width that prompt does *not* fit in, so `ReadLine` starts with it already wrapped.
+    const NARROW_START_COLUMNS: u16 = 62;
+    /// A width it does fit in. `82 % 62 == 20` is the stale anchor column the widening leaves.
+    const NARROW_START_WIDENED_COLUMNS: u16 = 82;
+
+    /// **Who owns the 2026-08-17 report**: a history recall drawn into the middle of a prompt that
+    /// fits the pane, leaving the prompt's head and its tail with a blanked span between them.
+    ///
+    /// It reads like a terminal bug and is not one. `_initialX` is the edit anchor's column *at the
+    /// current buffer width* — it is already `PromptCells % width` — and the fork's
+    /// `_initialPromptCells` (`2.4.6-bt.anchorfix`) is seeded from it. So when `ReadLine` starts on
+    /// a buffer narrower than the prompt, the seed is the reduced column rather than the prompt's
+    /// true cell width: the one case the fork's own commit message names as uncovered, and the case
+    /// upstream's `_initialX %= BufferWidth` gets wrong identically. Widening restores that reduced
+    /// column. Nothing shows while the input is empty, which is why no resize appears to be
+    /// involved; the first history recall then draws from column 20 of the prompt's own row, and
+    /// the down-arrow blanks exactly that span:
+    ///
+    /// ```text
+    /// PPPPPPPPPPPPPPPPPPPP                                    PPPPPPPPPPPPPPPPPPPPPPPPPP
+    /// ```
+    ///
+    /// What this test pins is *ownership*, against the only witness that is not our own parser:
+    /// `BTDUMP` reads the child's own console text buffer through `GetBufferContents`. Every
+    /// visible row of that buffer must equal the row this workspace's grid drew from the same
+    /// session's VT stream. While it does, the carved prompt is the child's own screen state, no
+    /// correct terminal could render anything else, and the grid must not be taught to hide it —
+    /// the repair belongs where the anchor is computed. `RecomputeInitialCoords` can derive it
+    /// after a reflow from the physical cursor and the rendered text's display offset, which is
+    /// exactly what `scripts/shell-integration/folio.ps1` already does by hand for the versions it
+    /// repairs through the resize chord.
+    ///
+    /// Reproduced on both ConPTY implementations and both PowerShell generations; the reasoning
+    /// and the two candidate repairs are recorded in `docs/DESIGN.md` §7.1.6c-3b.
+    #[test]
+    #[ignore = "upstream ownership record: drives a real interactive PowerShell through ConPTY"]
+    fn a_recall_carved_into_the_prompt_is_the_child_s_own_console_buffer() {
+        let rows = 20_u16;
+        // The prompt is one repeated glyph and carries no `>`: the read-back below delimits each
+        // row with one, so a prompt that ended in `>` would truncate its own row.
+        let startup = format!(
+            "{PROBE_STARTUP_COMMON} function global:prompt {{ 'P' * {NARROW_START_PROMPT_CELLS} }}; \
+             function global:BTSEED {{ param($cmd) \
+             [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory(); \
+             [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($cmd) }}; Clear-Host",
+        );
+        let mut oracle =
+            InteractiveOracle::spawn_shell_with("pwsh.exe", &startup, NARROW_START_COLUMNS, rows);
+        let prompt_head = "P".repeat(NARROW_START_COLUMNS as usize);
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while Instant::now() < deadline {
+            oracle.pump_once();
+            if oracle
+                .terminal
+                .visible_text()
+                .iter()
+                .any(|row| row.starts_with(&prompt_head))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        oracle.pump_until_quiet(Duration::from_secs(20));
+        oracle.write_line("BTSEED 'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS'");
+        oracle.pump_until_quiet(Duration::from_secs(10));
+
+        // The product's own resize staging: one transaction, one committed pseudoconsole size.
+        oracle.terminal.begin_resize_transaction();
+        oracle.resize_terminal(NARROW_START_WIDENED_COLUMNS, rows);
+        oracle.resize_conpty(NARROW_START_WIDENED_COLUMNS, rows);
+        oracle.terminal.reconcile_resize_transaction_to_viewport();
+        oracle.pump_for(Duration::from_millis(600));
+        oracle.pump_until_quiet(Duration::from_secs(10));
+        oracle.terminal.finish_resize_transaction();
+
+        for keys in [b"\x1b[A".as_slice(), b"\x1b[B".as_slice()] {
+            let mark = oracle.raw_output.len();
+            oracle.session.write(keys).unwrap();
+            oracle.pump_for(Duration::from_millis(800));
+            eprintln!(
+                "BT_PSREADLINE_RECALL keys={} bytes={}",
+                escaped(keys),
+                escaped(&oracle.raw_output[mark..])
+            );
+        }
+
+        // Accepting the empty line leaves the recalled span exactly as the down-arrow left it and
+        // opens a fresh prompt to type the read-back on. Typing it on the corrupted prompt would
+        // draw over the very row this test compares.
+        oracle.session.write(b"\r").unwrap();
+        oracle.pump_until_quiet(Duration::from_secs(10));
+        // Two agreeing snapshots across a quiet pump are the premise this comparison rests on: the
+        // child is done drawing. Without it, a screen still settling would be read here and read
+        // again by the child a moment later, and the two would differ over timing rather than over
+        // anything either of them believes.
+        let mut ours = oracle.terminal.visible_text();
+        for _ in 0..10 {
+            oracle.pump_for(Duration::from_millis(200));
+            oracle.pump_until_quiet(Duration::from_secs(10));
+            let again = oracle.terminal.visible_text();
+            if again == ours {
+                break;
+            }
+            ours = again;
+        }
+        let ours = ours;
+        for (index, row) in ours.iter().enumerate() {
+            if !row.is_empty() {
+                eprintln!("BT_PSREADLINE_RECALL_GRID r{index}<{row}>");
+            }
+        }
+        let last_written = ours
+            .iter()
+            .rposition(|row| !row.is_empty())
+            .expect("the grid cannot be blank with a prompt on it");
+
+        let start = oracle.raw_output.len();
+        oracle.write_line(&format!("BTDUMP {rows}"));
+        oracle.wait_for_output_since(start, b"BTDUMPEND");
+        oracle.pump_until_quiet(Duration::from_secs(20));
+        let emitted = String::from_utf8_lossy(&oracle.raw_output[start..]).into_owned();
+        let dump = emitted
+            .rsplit("BTDUMPBEGIN")
+            .next()
+            .and_then(|tail| tail.split("BTDUMPEND").next())
+            .map(|body| body.replace(['\r', '\n'], ""))
+            .expect("the read-back command must answer");
+        eprintln!("BT_PSREADLINE_RECALL_CONHOST <{dump}>");
+        oracle.session.shutdown().unwrap();
+
+        // Row indices are only comparable while the child's viewport sits at its buffer's origin,
+        // which is what a pseudoconsole gives it. Say so rather than assume it.
+        let geometry = format!(
+            " w={NARROW_START_WIDENED_COLUMNS} bh={rows} wp=0,0 ws={NARROW_START_WIDENED_COLUMNS}x{rows} "
+        );
+        assert!(
+            dump.contains(&geometry),
+            "the read-back geometry is not the pseudoconsole's own; wanted {geometry:?} in {dump}"
+        );
+        let theirs: Vec<String> = (0..rows)
+            .map(|row| {
+                let opening = format!("R{row}<");
+                let tail = dump
+                    .split(&opening)
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("row {row} is missing from the read-back: {dump}"));
+                tail.split('>')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect();
+        // Every row above the prompt the read-back was typed on. That last row is excluded because
+        // the child drew the command onto it *after* `ours` was taken, so it is the one row the two
+        // are not describing at the same moment.
+        for row in 0..last_written {
+            assert_eq!(
+                ours[row].trim_end(),
+                theirs[row],
+                "row {row} of this grid is not the row the child's own console buffer holds; \
+                 grid={ours:?} conhost={theirs:?}"
+            );
+        }
+    }
 }
