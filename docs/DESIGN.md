@@ -564,6 +564,31 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **7.1.7 规格债（M2 原生 UI 开工前必须闭合,承载于专门的 UI-SPEC 文档）。** 本节裁决了方向与语义;以下形式化工作有意后置——原型仍在演化（文件预览特性将再动树 schema）,现在穷举会返工：① 布局求解器的输入/输出与不变量级形式规格（fixed/flex 混合 row 的完整分配公式、含 fixed 子树的 rebalance 算法、ratio 序列化精度与 clamp、rim/edge 重叠优先级与角落选边、高度方向的让步链、「折叠占位」的几何/命中/焦点/展开条件）;② 持久化 schema v1 全字段定义（顶层版本、tab 顺序、类型与缺省、未知字段策略、open/sel 的稳定 ID 格式）;③ Restart shell 的完整进程契约（elevation/token 处理——最可能被平台收窄的承诺,见审核记录）;④ 极小窗口下浮窗约束冲突的完整优先级表。审核依据：`docs/reviews/`（2026-07-16/17 两轮）。
 
+### 7.2 命令行入口 CLI（Windows landing 块 slice 0，2026-08-18，已落地）
+
+**文法。** `folio [--cwd <folder>] [--profile <id>] [--] [<path>]`，外加 `-h` / `--help` / `/?`，以及保留但不做事的 `-Embedding`。落在 `crates/bt-app/src/cli.rs`：`parse` 纯、总，只认语法不问机器；`resolve` 拿着这份请求去问这台机器与这个 build 的 profile 表，唯一的不纯输入（一个路径是文件夹、是文件、还是不存在）由调用方传进来，所以「文件夹没了怎么办」整条规则能被一个不碰磁盘的测试钉住。**没有引入任何解析依赖**（§8 政策；仓库本来就没有 clap），四个 flag 一个位置参数手写。
+
+* `--flag value` 与 `--flag=value` 等价；后者不是装饰，是**唯一能给出以 `-` 开头的值**的写法——分离式写法遇到下一个 token 以 `-` 开头一律判为「值忘了给」，因为 `folio --cwd --profile pwsh` 是忘了写文件夹，不是想要一个叫 `--profile` 的文件夹。
+* `--` 之后全是位置参数。同一个 flag 给两次 = 拒绝，不做 last-wins（§一「不要启发式」：用户在这个输入上最明确，程序不替他猜）。
+* 位置参数**只能有一个**：是文件夹就等同 `--cwd`，是文件就**开一个预览**（`Runtime::open_preview`，与双击文件行同一扇门），都不是就报卡片。文件只指认一份文档、不指认一个地方，所以 `folio note.md` 的终端仍开在新窗格的默认位置。
+* `--cwd` 与位置文件夹同时给出 = `--cwd` 说了算，被丢掉的那个在卡片里被点名。
+* **命令行写的永远是 Windows 路径**（`%V` 是，`cmd` 行也是），落到 pane 之前经 `profiles::translate_cwd` 换进该 profile 的名字空间（`D:\Developer` → WSL 的 `/mnt/d/Developer`），换不过去的（UNC 之于 WSL）出卡片，绝不静默落到 HOME。
+* 每一件「要求了但没做到」的事都出**一张 Error toast 点名它**，绝不静默替换（与 §7.1.4 逐叶降级、`LeafSeed::unknown_profile_id` 同一条诚实）：文件夹不在、profile id 不认识、路径不存在、profile 说不出这个文件夹、`--cwd` 已经说过了。窗口照开。
+
+**退出码与出口。** `--help` = 0，任何语法错误 = 2，其余（正常启动）不退出。GUI 程序没有 console，所以文本先走 `bt_platform::write_to_console`：进程已有 console 就写它，没有就 `AttachConsole(ATTACH_PARENT_PROCESS)` 接父进程的；两条都不成才弹**本产品唯一允许的 message box**——此时窗口尚不存在，没有任何表面可以挂卡片，静默退出等于骗人。文本经 `CONOUT$` + `WriteConsoleW` 送出（不是 `stdout`：`AttachConsole` 不保证重写标准句柄，而且中文在 936/437 代码页上按字节写出去就是乱码）。用词进 `i18n::CliText`，双语，形状随 `Text::in_lang`（值型字符串也要能被指定语言读，否则测试只能去动进程级的 `install`）。
+
+**与会话恢复的合成规则（本节的裁决）。** `--cwd` / `--profile` / `<path>` 三者任一出现 = **调用者要一个属于他自己的新地方**，于是：
+
+1. 命令行的 tab **排在最前，并且是激活的那个**（`launch_active_tab`）。要求了 `D:\proj` 却落在复活出来的第三个 tab 上，等于在看不见的地方兑现了这个参数。
+2. **pinned 的 tab 照常打开**，排在它旁边——pin 本身就是已经给过的答复（§7.1.4 / mock-up 7426-7431），命令行不重开这个问题。
+3. **未 pin 的 tab 照常进 restore 提示**，规则不变：非模态、不自动恢复、恢复=追加。
+4. **命令行的 tab 不是占位（placeholder）**。占位只为「什么都没 pin，窗口总得有点东西」而存在；用户点名了文件夹的那个 pane 是他要的东西，`answer_restore` 不许把它扫掉。
+5. **§7.1.4 的「孤零零一个未 pin 的 tab 直接复活、不问」在有命令行时暂停**。那条捷径成立的前提是「拒绝就只剩一个开在错文件夹里的新 shell，严格更差」；被告知了文件夹的这次启动已经开在对的地方，拒绝就是保留他要的东西——问题重新成立，于是照问。
+
+三条纯函数钉住它：`plan_launch(saved, active, cli_wants_pane)`、`launch_active_tab(...)`、`cli::resolve(...)`。
+
+**Explorer 右键动词（slice 2，本片不注册任何注册表项）。** 动词的 `command` 值就是 `"…\folio.exe" --cwd "%V"`（spike §4 的三棵 `HKCU\Software\Classes\...\shell\Folio` 树，`Background` 只认 `%V`）。spike 的探针日志同时记下了本片存在的理由：`%V` 作为**参数**到达，而被启动进程的工作目录是 exe 自己的目录——所以 `--cwd` 是必须的，且 Folio 永远不读 `current_dir()`。今天单窗口，动词只能「起一个新进程」；多窗块之后再谈开新窗还是开新 tab。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。

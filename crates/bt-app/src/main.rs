@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod cli;
 mod cmdrail;
 mod file_peek;
 mod files;
@@ -4873,6 +4874,12 @@ struct Runtime {
     /// there is no window to hang a notice on until then, and a notice printed
     /// into a window that does not exist is a notice nobody reads.
     keybindings_fault: Option<String>,
+    /// What the command line asked for and this launch could not do, until it has
+    /// been said. Held for [`Self::announce_keybindings_fault`]'s reason exactly:
+    /// the arguments were read before there was a window, and a card needs one.
+    cli_refusals: Vec<cli::CliRefusal>,
+    /// A document named on the command line, until there is a pane to put it in.
+    cli_preview: Option<PathBuf>,
     /// The one store that pin, Recent and undo-close all draw from — kept beside
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
@@ -12414,7 +12421,27 @@ struct LaunchPlan {
     placeholder: bool,
 }
 
-fn plan_launch(saved: &[TabV1], active: usize) -> LaunchPlan {
+/// Which tab a launch opens on, once the command line's tab — if there is one —
+/// is in front of the revived ones.
+///
+/// **A command line takes the seat.** Somebody who typed `folio --cwd D:\proj`
+/// asked to be put in `D:\proj`, and a launch that revived four pinned tabs and
+/// landed on the third of them would have honoured the argument somewhere behind
+/// what is on screen.
+///
+/// Pure and named rather than written inline, because the `+1` it does not need
+/// is the bug it would otherwise have: `active_open` indexes `plan.open`, and
+/// that index stops being the index of the same tab the moment anything is put
+/// in front of it.
+fn launch_active_tab(cli_wants_pane: bool, active_open: Option<usize>, tabs: usize) -> usize {
+    debug_assert!(tabs > 0, "a launch always opens at least one tab");
+    if cli_wants_pane {
+        return 0;
+    }
+    active_open.unwrap_or(0).min(tabs.saturating_sub(1))
+}
+
+fn plan_launch(saved: &[TabV1], active: usize, cli_wants_pane: bool) -> LaunchPlan {
     let mut open = Vec::new();
     let mut ask = Vec::new();
     let mut active_open = None;
@@ -12433,7 +12460,14 @@ fn plan_launch(saved: &[TabV1], active: usize) -> LaunchPlan {
     // tabs?" has no other tabs to name, and declining would hand back a fresh
     // shell in the wrong folder — a strictly worse version of the same single
     // tab. There is no question to ask, so we do not ask one.
-    if open.is_empty() && ask.len() == 1 {
+    //
+    // **A command line suspends it** (§7.2), because it removes the premise. The
+    // rule holds only while declining leaves the user worse off than not being
+    // asked, and it does that only because the alternative on offer is a fresh
+    // shell in the wrong folder. A launch that was *told* which folder has
+    // already opened one in the right one: declining now keeps exactly what was
+    // asked for, so the question is a real question and is asked.
+    if open.is_empty() && ask.len() == 1 && !cli_wants_pane {
         return LaunchPlan {
             open: ask,
             ask: Vec::new(),
@@ -12442,7 +12476,11 @@ fn plan_launch(saved: &[TabV1], active: usize) -> LaunchPlan {
         };
     }
     LaunchPlan {
-        placeholder: open.is_empty(),
+        // **A command line's tab is not scaffolding.** The placeholder exists
+        // because nothing was pinned and the window needed *something*; a pane
+        // somebody named a folder for is the thing they asked for, and a Restore
+        // accepted later must never sweep it away.
+        placeholder: open.is_empty() && !cli_wants_pane,
         open,
         ask,
         active_open,
@@ -14356,6 +14394,7 @@ impl Runtime {
         event_loop: &ActiveEventLoop,
         proxy: EventLoopProxy<AppEvent>,
         startup_started: Instant,
+        cli: &cli::CliRequest,
     ) -> Result<Self> {
         let trace_startup = std::env::var_os("BT_STARTUP_TRACE").is_some();
         let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
@@ -14447,6 +14486,11 @@ impl Runtime {
         wsl::start(profile_programs.program(profiles::index_of_id("wsl")));
         let default_profile =
             profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
+        // The command line, put to this machine: the folder asked about, the
+        // profile looked up in this build's table, and the crossing into that
+        // profile's namespace. Everything it could not honour comes back in the
+        // plan's own list and is said on a card once the window is up.
+        let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
             // "新 tab，和启动" — one setting for both (mock-up 7575: `bootFresh()`
@@ -14627,9 +14671,47 @@ impl Runtime {
             LaunchPlan::default()
         } else {
             let loaded = session_store.loaded();
-            plan_launch(&loaded.tabs, loaded.active_tab as usize)
+            plan_launch(
+                &loaded.tabs,
+                loaded.active_tab as usize,
+                cli_plan.wants_pane,
+            )
         };
-        let restored_roots: Vec<_> = if plan.open.is_empty() {
+        // **The tab the command line asked for, in front of the revived ones**
+        // (§7.2). It is built here rather than by `revive_plan` because it comes
+        // from a command line and not from a file: there is no tree to rebuild,
+        // no files column to re-root and no pool to refill — one terminal seat,
+        // one seed, and the seed is the whole of what was asked for.
+        let cli_root = cli_plan.wants_pane.then(|| {
+            let seats = seats::Seats::lone_terminal();
+            let leaves = seats
+                .terminals()
+                .into_iter()
+                .map(|seat| {
+                    (
+                        seat,
+                        LeafSeed {
+                            profile: cli_plan.profile,
+                            cwd: cli_plan.cwd.clone(),
+                            // A profile the command line named and this build has
+                            // not got is reported on a card naming the id, not by
+                            // the leaf banner: the banner is for a *saved* pane
+                            // whose shell has gone, and a launch argument has a
+                            // reader standing right there.
+                            unknown_profile_id: None,
+                        },
+                    )
+                })
+                .collect();
+            (
+                seats,
+                TabSeed::default(),
+                leaves,
+                BTreeMap::new(),
+                PreviewRestore::default(),
+            )
+        });
+        let restored_roots: Vec<_> = if plan.open.is_empty() && cli_root.is_none() {
             vec![(
                 seats::Seats::lone_terminal(),
                 TabSeed::default(),
@@ -14638,7 +14720,10 @@ impl Runtime {
                 PreviewRestore::default(),
             )]
         } else {
-            plan.open.iter().map(revive_plan).collect()
+            cli_root
+                .into_iter()
+                .chain(plan.open.iter().map(revive_plan))
+                .collect()
         };
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
@@ -14682,8 +14767,9 @@ impl Runtime {
             conpty_sources.push(conpty_source);
         }
         // The tab you were on comes back on top, if it was one of the ones that
-        // came back. A placeholder shell is index 0 either way.
-        let active_tab = plan.active_open.unwrap_or(0).min(tabs.len() - 1);
+        // came back. A placeholder shell is index 0 either way, and so is a tab
+        // the command line asked for.
+        let active_tab = launch_active_tab(cli_plan.wants_pane, plan.active_open, tabs.len());
         let recent = seed::SeedVault::from_persisted(&session_store.loaded().recent);
         let pending_restore = plan.ask.clone();
         let has_question = !pending_restore.is_empty();
@@ -14896,6 +14982,8 @@ impl Runtime {
             shortcuts,
             keybindings_store,
             keybindings_fault,
+            cli_refusals: std::mem::take(&mut cli_plan.refusals),
+            cli_preview: cli_plan.preview.take(),
             recent,
             pending_restore,
             // "It opens BEFORE it asks — like a browser, which lands you on
@@ -19746,6 +19834,34 @@ impl Runtime {
             None,
             fault,
         )
+    }
+
+    /// Discharge what the command line is still owed, on the window it opened.
+    ///
+    /// **The order is deliberate: the document first, the refusals after.** A
+    /// preview opening mints a seat and re-solves the layout, and a card is
+    /// anchored at a surface — raising the cards first would anchor them against
+    /// a layout about to change under them. The preview lands in the active tab,
+    /// which §7.2 has just made the command line's own tab whenever it asked for
+    /// one, so `folio --cwd D:\proj notes.md` puts the document beside the shell
+    /// it asked for rather than into somebody's restored work.
+    ///
+    /// One card per refusal, and a command line can produce at most two of them
+    /// (a folder and a profile); the cap is `toast::Toasts`' own and is the same
+    /// cap every other multi-card report in this window lives under.
+    fn honour_command_line(&mut self) -> Result<()> {
+        if let Some(path) = self.cli_preview.take() {
+            self.open_preview(path)?;
+        }
+        for refusal in std::mem::take(&mut self.cli_refusals) {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                refusal.notice(),
+            )?;
+        }
+        Ok(())
     }
 
     /// One press, while a shortcut row is listening.
@@ -42458,14 +42574,19 @@ struct FolioApp {
     runtime: Option<Runtime>,
     proxy: EventLoopProxy<AppEvent>,
     startup_started: Instant,
+    /// What the process was started with, held until there is a window to honour
+    /// it in. Parsed in `main` and resolved in [`Runtime::create`], because
+    /// resolving it needs the default profile, which needs `settings.json`.
+    cli: cli::CliRequest,
 }
 
 impl FolioApp {
-    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+    fn new(proxy: EventLoopProxy<AppEvent>, cli: cli::CliRequest) -> Self {
         Self {
             runtime: None,
             proxy,
             startup_started: Instant::now(),
+            cli,
         }
     }
 }
@@ -42488,7 +42609,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if self.runtime.is_some() {
             return;
         }
-        match Runtime::create(event_loop, self.proxy.clone(), self.startup_started) {
+        match Runtime::create(
+            event_loop,
+            self.proxy.clone(),
+            self.startup_started,
+            &self.cli,
+        ) {
             Ok(runtime) => {
                 self.runtime = Some(runtime);
                 // A shortcut file that could not be read owes the user a sentence
@@ -42498,6 +42624,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // inside it.
                 if let Some(runtime) = self.runtime.as_mut()
                     && let Err(error) = runtime.announce_keybindings_fault()
+                {
+                    self.fail(event_loop, error);
+                    return;
+                }
+                // The command line's own two debts, in the same place and for the
+                // same reason: a document to show, and whatever could not be
+                // honoured. Both need a window — the preview needs a seat solved
+                // against a real rectangle, and a card needs a surface to be
+                // anchored at — so neither can be discharged inside `create`.
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.honour_command_line()
                 {
                     self.fail(event_loop, error);
                     return;
@@ -44854,6 +44991,31 @@ fn install_panic_log_hook() {
     }));
 }
 
+/// Put a usage block where the caller of a launch that is about to exit will
+/// see it.
+///
+/// **The language first.** This is the one place the window's own words are said
+/// before there is a window, so the language has to be resolved here rather than
+/// in `Runtime::create` — through the same two calls that one makes, because a
+/// user who set `English` on a Chinese machine set it for everything this
+/// product says and not only for the parts of it that have pixels.
+///
+/// Then the console, then the box. [`bt_platform::write_to_console`] answers
+/// `false` exactly when there is nowhere to print — a double-click, an Explorer
+/// verb, a shell that did not wait — and that is the one situation in which this
+/// product raises a message box: there is no window to put a card on, and
+/// exiting in silence would be a program that refused an argument and never said
+/// so.
+fn report_at_the_front_door(fault: &cli::CliFault) {
+    i18n::install(resolved_language(
+        persist::SettingsStore::open().loaded().language,
+    ));
+    let text = cli::refusal_text(fault);
+    if !bt_platform::write_to_console(&format!("{text}\n")) {
+        bt_platform::message_box(APP_NAME, &text);
+    }
+}
+
 fn panic_log_path() -> PathBuf {
     std::env::temp_dir().join(PANIC_LOG_FILENAME)
 }
@@ -44865,6 +45027,18 @@ fn append_panic_report(path: &std::path::Path, report: &str) -> std::io::Result<
 
 fn main() -> Result<()> {
     install_panic_log_hook();
+    // **The command line, before there is anything for it to be wrong about.**
+    // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
+    // and the event loop, and the reason is what a refusal costs: a syntax error
+    // answered after `EventLoop::build` would have created a window, a swap
+    // chain and a shell in order to tell somebody they typed `--cdw`.
+    let request = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(request) => request,
+        Err(fault) => {
+            report_at_the_front_door(&fault);
+            std::process::exit(fault.exit_code());
+        }
+    };
     // **The thread that owns the window says so, before it owns one.** Every
     // worker this process starts is spawned into the band below normal
     // (`bt_platform::spawn_at_priority`), and this is the other half of that
@@ -44876,7 +45050,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
-    let mut application = FolioApp::new(event_loop.create_proxy());
+    let mut application = FolioApp::new(event_loop.create_proxy(), request);
     event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error))
@@ -45917,7 +46091,7 @@ mod tests {
             saved_tab("pwsh", "C:\\b", None, true),
             saved_tab("pwsh", "C:\\c", None, false),
         ];
-        let plan = plan_launch(&saved, 0);
+        let plan = plan_launch(&saved, 0, false);
 
         assert_eq!(plan.open, vec![saved[1].clone()], "the pinned one, alone");
         assert_eq!(
@@ -45944,8 +46118,8 @@ mod tests {
             saved_tab("pwsh", "C:\\c", None, true),
         ];
         // index 2 of the saved list is the second *pinned* tab.
-        assert_eq!(plan_launch(&saved, 2).active_open, Some(1));
-        assert_eq!(plan_launch(&saved, 1).active_open, Some(0));
+        assert_eq!(plan_launch(&saved, 2, false).active_open, Some(1));
+        assert_eq!(plan_launch(&saved, 1, false).active_open, Some(0));
     }
 
     /// The boundary ruled in this ticket: "Reopen your **other** tabs?" needs
@@ -45955,7 +46129,7 @@ mod tests {
     #[test]
     fn a_lone_unpinned_tab_is_restored_rather_than_asked_about() {
         let saved = [saved_tab("pwsh", "C:\\only", None, false)];
-        let plan = plan_launch(&saved, 0);
+        let plan = plan_launch(&saved, 0, false);
 
         assert_eq!(plan.open, saved.to_vec(), "it simply comes back");
         assert!(plan.ask.is_empty(), "nothing to ask");
@@ -45968,7 +46142,7 @@ mod tests {
             saved_tab("pwsh", "C:\\a", None, false),
             saved_tab("pwsh", "C:\\b", None, false),
         ];
-        let plan = plan_launch(&two, 0);
+        let plan = plan_launch(&two, 0, false);
         assert!(plan.open.is_empty());
         assert_eq!(plan.ask.len(), 2);
         assert!(
@@ -45979,10 +46153,91 @@ mod tests {
 
     #[test]
     fn a_first_launch_with_nothing_saved_asks_nothing_and_stands_something_up() {
-        let plan = plan_launch(&[], 0);
+        let plan = plan_launch(&[], 0, false);
         assert!(plan.open.is_empty());
         assert!(plan.ask.is_empty(), "no prompt on a first run");
         assert!(plan.placeholder);
+    }
+
+    /// PIN (§7.2) — **a command line is not a placeholder**, so a Restore
+    /// accepted afterwards cannot sweep it away.
+    ///
+    /// The placeholder exists for one situation: nothing was pinned, and the
+    /// window needed *something* to be a window with. A pane somebody named a
+    /// folder for is not that; it is the thing they asked for, and
+    /// `answer_restore` retires the placeholder without asking.
+    ///
+    /// MUTATION: drop the `&& !cli_wants_pane` from `placeholder` and this
+    /// fails — and on the real machine, `folio --cwd D:\proj` followed by
+    /// "Restore" would close the pane in `D:\proj` while the shells it revived
+    /// came up.
+    #[test]
+    fn a_tab_the_command_line_asked_for_is_never_the_launch_placeholder() {
+        let two = [
+            saved_tab("pwsh", "C:\\a", None, false),
+            saved_tab("pwsh", "C:\\b", None, false),
+        ];
+        assert!(plan_launch(&two, 0, false).placeholder, "the red half");
+        let plan = plan_launch(&two, 0, true);
+        assert!(!plan.placeholder);
+        assert!(plan.open.is_empty(), "nothing was pinned, so nothing opens");
+        assert_eq!(plan.ask.len(), 2, "and the question is still asked");
+
+        // The same on a first run with nothing saved at all: there is one tab and
+        // it is the one that was asked for.
+        let plan = plan_launch(&[], 0, true);
+        assert!(!plan.placeholder);
+        assert!(plan.ask.is_empty());
+    }
+
+    /// PIN (§7.2) — **a command line turns a lone saved tab back into a
+    /// question.**
+    ///
+    /// The one-tab shortcut above holds because declining leaves the user with a
+    /// fresh shell in the wrong folder, which is strictly worse than the tab it
+    /// replaced. A launch that was told the folder has already opened one in the
+    /// right one, so that premise is gone and the question is a real question.
+    ///
+    /// MUTATION: drop the `&& !cli_wants_pane` from the shortcut and this fails
+    /// — `folio --cwd D:\proj` would silently revive last night's tab beside the
+    /// one that was asked for, with no prompt and no way to say no.
+    #[test]
+    fn a_command_line_turns_a_lone_saved_tab_back_into_a_question() {
+        let saved = [saved_tab("pwsh", "C:\\only", None, false)];
+        let plan = plan_launch(&saved, 0, true);
+        assert!(plan.open.is_empty(), "nothing comes back unasked");
+        assert_eq!(plan.ask, saved.to_vec(), "it is the prompt's question");
+        assert_eq!(plan.active_open, None);
+
+        // A *pinned* tab is an answer already given, and a command line does not
+        // reopen that question either: it opens alongside.
+        let pinned = [saved_tab("pwsh", "C:\\only", None, true)];
+        let plan = plan_launch(&pinned, 0, true);
+        assert_eq!(plan.open, pinned.to_vec());
+        assert!(plan.ask.is_empty());
+    }
+
+    /// PIN (§7.2) — **the command line's tab takes the seat**, and without one
+    /// the tab you were on still does.
+    ///
+    /// MUTATION: return `active_open.unwrap_or(0)` unconditionally and the
+    /// first case fails — `folio --cwd D:\proj` with two pinned tabs saved would
+    /// honour the argument behind the tab it landed on.
+    #[test]
+    fn a_command_line_takes_the_seat_and_otherwise_the_tab_you_were_on_keeps_it() {
+        assert_eq!(launch_active_tab(true, None, 1), 0);
+        assert_eq!(
+            launch_active_tab(true, Some(1), 3),
+            0,
+            "the revived tabs shifted along behind it"
+        );
+        assert_eq!(launch_active_tab(false, Some(1), 3), 1);
+        assert_eq!(launch_active_tab(false, None, 3), 0);
+        assert_eq!(
+            launch_active_tab(false, Some(9), 3),
+            2,
+            "an index off the end of a shorter list is the last tab, never a panic"
+        );
     }
 
     /// A tab's identity is the terminal it holds, wherever that sits in the tree.

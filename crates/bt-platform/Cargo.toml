@@ -18,6 +18,9 @@ windows = { version = "0.62.2", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    # `AttachConsole` / `WriteConsoleW`: the only way a Windows program with no
+    # console of its own can answer `--help` on the console that started it.
+    "Win32_System_Console",
     "Win32_System_DataExchange",
     # `ReadDirectoryChangesW`'s three companions: the overlapped completion
     # (`Win32_System_IO`), and the events the watcher thread waits on and the
