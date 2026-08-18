@@ -348,11 +348,13 @@ mod windows_impl {
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::GetKeyboardLayout,
             Shell::{
-                Common::COMDLG_FILTERSPEC, DefSubclassProc, FOLDERID_Documents, FOS_FILEMUSTEXIST,
-                FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog,
-                IFileOpenDialog, IShellItem, KF_FLAG_DEFAULT, RemoveWindowSubclass,
-                SHCreateItemFromParsingName, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
-                SetWindowSubclass, ShellExecuteW,
+                Common::COMDLG_FILTERSPEC, DefSubclassProc, FO_DELETE, FOF_ALLOWUNDO,
+                FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
+                FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+                FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, KF_FLAG_DEFAULT,
+                RemoveWindowSubclass, SHCreateItemFromParsingName, SHFILEOPSTRUCTW,
+                SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH, SetWindowSubclass,
+                ShellExecuteW,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
@@ -2209,6 +2211,62 @@ mod windows_impl {
         })
     }
 
+    /// **Send one file to the Recycle Bin** (§7.1.6c-4d).
+    ///
+    /// The whole of the difference between this and `std::fs::remove_file` is
+    /// the promise the card makes: `Delete scheme` says the file was moved to
+    /// the Recycle Bin, so it has to be findable there. A colour scheme is a
+    /// file the user wrote by hand — often over an afternoon — and a delete
+    /// button in a settings dialog that destroys one is a button nobody can
+    /// afford to press by accident.
+    ///
+    /// `SHFileOperationW` rather than `IFileOperation`: the newer interface
+    /// wants an apartment and an `IShellItem` per file, and what is being asked
+    /// here is one path with one flag. The flags say exactly that and no more —
+    /// no confirmation (the dialog already knows what it is deleting), no
+    /// progress UI and no error UI for a single small file, and **`ALLOWUNDO`
+    /// paired with `WANTNUKEWARNING`**: a file the bin cannot take must raise
+    /// the shell's own "this will be deleted permanently" prompt rather than be
+    /// destroyed silently, because "moved to the Recycle Bin" would then be a
+    /// sentence this product had told and not kept.
+    ///
+    /// `Ok(false)` is the user answering that prompt with no: nothing happened,
+    /// and it is not an error.
+    ///
+    /// The path is passed **double-NUL terminated**, which is this API's list
+    /// convention: a single terminator would leave the shell reading whatever
+    /// follows the buffer as the second file to delete.
+    pub fn recycle(path: &std::path::Path) -> Result<bool, String> {
+        let mut wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .chain(std::iter::once(0))
+            .collect();
+        if wide.iter().filter(|unit| **unit == 0).count() != 2 {
+            return Err("a path with an interior NUL is not a file name".to_owned());
+        }
+        let mut operation = SHFILEOPSTRUCTW {
+            wFunc: FO_DELETE,
+            pFrom: PCWSTR(wide.as_mut_ptr()),
+            fFlags: (FOF_ALLOWUNDO
+                | FOF_NOCONFIRMATION
+                | FOF_WANTNUKEWARNING
+                | FOF_NOERRORUI
+                | FOF_SILENT)
+                .0 as u16,
+            ..Default::default()
+        };
+        // SAFETY: `operation` is exclusively borrowed for the call and `wide`
+        // outlives it, holding a double-NUL-terminated UTF-16 path as `pFrom`
+        // requires. The call performs no callbacks and returns a status code.
+        let status = unsafe { SHFileOperationW(&raw mut operation) };
+        if status != 0 {
+            return Err(format!("SHFileOperationW failed: {status}"));
+        }
+        Ok(!operation.fAnyOperationsAborted.as_bool())
+    }
+
     /// Paint this window's own background in `rgb`, or in **nothing** at all.
     ///
     /// `None` installs the null brush, and that is what a translucent ground is
@@ -3205,10 +3263,10 @@ pub use windows_impl::{
     MathContextMenu, PROGRAM_REFUSED, client_area_animation_enabled, clipboard_text,
     current_thread_priority, documents_directory, get_dpi_for_window, get_window_rect,
     get_work_area, install_window_class_background, is_window_minimized, monospace_font_families,
-    open_local_file, open_local_path, os_ui_language, request_window_close, reveal_in_explorer,
-    set_clipboard_text, set_current_thread_priority, set_system_backdrop, set_window_outer_rect,
-    set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
-    wheel_scroll_amount,
+    open_local_file, open_local_path, os_ui_language, recycle, request_window_close,
+    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
+    set_window_outer_rect, set_window_topmost, shell_execute, spawn_at_priority,
+    system_backdrop_available, wheel_scroll_amount,
 };
 
 /// The bands, asked of the kernel rather than of the source.

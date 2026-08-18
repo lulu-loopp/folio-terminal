@@ -197,14 +197,32 @@ const COMBO_FONT_LOGICAL_PX: f32 = 13.0;
 /// 7.33px wide in the mock-up, so its em box is the tightest bound that cannot
 /// cut the glyph, and a bound is all the value's own rectangle needs.
 const COMBO_CHEVRON_FONT_LOGICAL_PX: f32 = 8.5;
-// ── `.slider` (§7.1.6c-4b) ─────────────────────────────────────────────────
-// The dialog's second control form, and the first added since it was built. It
-// occupies the combo's column EXACTLY: 76 of track + 8 of gap + 34 of number is
-// 118, which is `COMBO_MIN_WIDTH_LOGICAL_PX`, so the right edge of every control
-// in the dialog is still one line. `the_slider_occupies_the_combos_column`
-// holds the three to that sum rather than trusting three literals to keep
-// agreeing.
-const SLIDER_TRACK_WIDTH_LOGICAL_PX: f32 = 76.0;
+// ── `.slider` (§7.1.6c-4b, widened 2026-08-18) ────────────────────────────
+// The dialog's second control form, and the first added since it was built.
+//
+// **It occupies the page's control column, whatever that page's column is**
+// (user ruling 2026-08-18). It used to occupy a fixed 118 — 76 of track + 8 of
+// gap + 34 of number — which was exactly right on the day it was written,
+// because 118 was every control's width. §7.1.6c-5 then made the column *the
+// widest word on the page*, and a row that kept its own 118 stopped starting
+// where its neighbours start: on the Appearance page the two sliders' left
+// edges sat some 90px inside the combos above them, which is the ragged left
+// edge that ruling was written to abolish, appearing in the one control form it
+// did not reach.
+//
+// So the number the slider owns is the **value slot**, not the track: 34 of
+// right-aligned digits against the column's trailing edge, 8 of gap, and the
+// track takes everything that is left. At the column's 118 floor that leaves
+// the original 76 to the pixel, which is what
+// `the_slider_occupies_the_combos_column` now pins — the old geometry as the
+// special case of the new one rather than as a second rule. A longer track is a
+// finer drag for the same 5% step, which is a bonus and not the reason.
+/// Test-only, because it is a **consequence** and not an input: nothing draws
+/// it, and a constant the product carried only so that a pin could read it would
+/// be shipped weight (`SettingsValues::sample`'s own note).
+#[cfg(test)]
+const SLIDER_TRACK_WIDTH_AT_THE_FLOOR_LOGICAL_PX: f32 =
+    COMBO_MIN_WIDTH_LOGICAL_PX - SLIDER_GAP_LOGICAL_PX - SLIDER_VALUE_WIDTH_LOGICAL_PX;
 const SLIDER_TRACK_HEIGHT_LOGICAL_PX: f32 = 4.0;
 const SLIDER_THUMB_LOGICAL_PX: f32 = 12.0;
 const SLIDER_GAP_LOGICAL_PX: f32 = 8.0;
@@ -383,6 +401,29 @@ const RESET_ADVANCED_WIDTH_LOGICAL_PX: f32 = 140.0;
 /// longer: `Customise scheme…` is the widest label any `.btn` in this dialog
 /// carries, and a button sized to a shorter one would print it cut.
 const CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX: f32 = 152.0;
+/// `Delete scheme` — the third verb the foot carries (§7.1.6c-4d, user ruling
+/// 2026-08-18).
+///
+/// The `Reset`'s 140 and not the `Customise`'s 152, on the same measure: it is
+/// two words with no ellipsis after them, because unlike its neighbour it
+/// finishes what it names. A press sends one file to the Recycle Bin and the
+/// card says so; nothing is handed back to the reader to go on doing.
+const DELETE_SCHEME_WIDTH_LOGICAL_PX: f32 = 140.0;
+/// The line above the scheme foot's verbs, where they say what they will do.
+///
+/// `.row .desc`'s own line box, because that is what it is: one muted line under
+/// a control saying the one thing worth saying about it. It exists because the
+/// foot line itself has **no room** — 504px of row less 448px of three buttons
+/// and their gaps leaves 48, which is not a sentence — and because a reason
+/// that appeared only when a verb went dark would make an Advanced group change
+/// height according to which colour scheme is in force.
+///
+/// So the line is **always there and always says something**: which file
+/// `Delete scheme` would send to the bin, or why there is no file. That is the
+/// greyed-row idiom's "the reason lives in the description line" carried onto a
+/// verb, and it is the only shape of it whose geometry does not depend on a
+/// value.
+const FOOT_HINT_LINE_LOGICAL_PX: f32 = 12.0 * 1.5;
 /// The gap between two verbs standing on one foot line.
 ///
 /// The `.btn` row's own `gap: 8px`. It exists because the foot became a *row*
@@ -1193,10 +1234,23 @@ pub struct SliderGeometry {
     pub value: [f32; 4],
 }
 
+/// The track's length inside a control column of this width.
+///
+/// **The column decides, the value slot is the only reservation.** One
+/// derivation with three readers — the geometry, the press and the drag — so
+/// that a track drawn one width and measured against another is not a shape this
+/// file can take.
+fn slider_track_width(combo: [f32; 4], scale: f32) -> f32 {
+    let reserved = (SLIDER_GAP_LOGICAL_PX + SLIDER_VALUE_WIDTH_LOGICAL_PX) * scale;
+    (combo[2] - combo[0] - reserved).max(0.0)
+}
+
 /// Solve one slider's geometry inside the box the row gave its control.
 ///
-/// `combo` is the row's control rectangle — the same 118-wide box a picker would
-/// have had, which is what keeps the two forms in one column.
+/// `combo` is the row's control rectangle — **the same box a picker on this page
+/// would have had**, which is what keeps the two forms in one column at both
+/// edges: the track starts where a button starts, and the number ends where a
+/// chevron ends.
 #[must_use]
 pub fn slider_geometry(
     combo: [f32; 4],
@@ -1205,7 +1259,7 @@ pub fn slider_geometry(
     value: u8,
 ) -> SliderGeometry {
     let px = |logical: f32| logical * scale;
-    let track_width = px(SLIDER_TRACK_WIDTH_LOGICAL_PX);
+    let track_width = slider_track_width(combo, scale);
     let track_height = px(SLIDER_TRACK_HEIGHT_LOGICAL_PX);
     let thumb = px(SLIDER_THUMB_LOGICAL_PX);
     let middle = (combo[1] + combo[3]) / 2.0;
@@ -1226,10 +1280,12 @@ pub fn slider_geometry(
             centre + thumb / 2.0,
             middle + thumb / 2.0,
         ],
+        // Against the column's own trailing edge, which is the combos' —
+        // right-aligned digits under a right-aligned chevron.
         value: [
-            track[2] + px(SLIDER_GAP_LOGICAL_PX),
+            combo[2] - px(SLIDER_VALUE_WIDTH_LOGICAL_PX),
             combo[1],
-            track[2] + px(SLIDER_GAP_LOGICAL_PX + SLIDER_VALUE_WIDTH_LOGICAL_PX),
+            combo[2],
             combo[3],
         ],
     }
@@ -1242,7 +1298,7 @@ pub fn slider_geometry(
 /// rather than wherever the arithmetic ran out.
 #[must_use]
 pub fn slider_value_at(combo: [f32; 4], scale: f32, range: SliderRange, x: f32) -> u8 {
-    let track_width = SLIDER_TRACK_WIDTH_LOGICAL_PX * scale;
+    let track_width = slider_track_width(combo, scale);
     if track_width <= 0.0 {
         return range.min;
     }
@@ -1653,13 +1709,17 @@ impl SettingsRow {
     /// **Whether this row lives under its page's `Advanced` disclosure** (user
     /// ruling 2026-08-17).
     ///
-    /// The ruling named the eight rows by hand and named the seven that stay on
-    /// top by hand, so this function is that list and not a heuristic. What the
-    /// list encodes, read back: a row is advanced when a reader who has never
-    /// wanted it would be *slowed down* by it — a window's ground, its blur, its
-    /// posture, where a rail sits and which way an untold split cuts are all
-    /// answers to questions most people never ask, and all eight of them were
-    /// standing between `Theme` and `Terminal font`.
+    /// The ruling named the rows by hand and named the ones that stay on top by
+    /// hand, so this function is that list and not a heuristic. What the list
+    /// encodes, read back: a row is advanced when a reader who has never wanted
+    /// it would be *slowed down* by it — a window's ground, its blur, its
+    /// posture and which way an untold split cuts are all answers to questions
+    /// most people never ask, and every one of them was standing between
+    /// `Theme` and `Terminal font`.
+    ///
+    /// **`Sidebar` is the one row that went in and came back out** (user ruling
+    /// 2026-08-18): it is conditional on `Tab layout`, and a conditional row is
+    /// only legible beside the row that conditions it. See the arm below.
     ///
     /// **`General`, `Terminal` and `Rendered blocks` have no advanced rows**, and
     /// the reasoning is per row rather than per page: `Language`, `Git panel`
@@ -1679,16 +1739,7 @@ impl SettingsRow {
             | Self::BackgroundOpacity
             | Self::Acrylic
             | Self::AlwaysOnTop
-            // Where a vertical rail sits, and which way an untold split cuts.
-            //
-            // `Sidebar` moving here **breaks its old adjacency to `Tab layout`**,
-            // which every previous slice preserved on the ground that it reads
-            // as that row's dependent. The ruling overrules it, and the
-            // disclosure is why it can: the dependency was legible because the
-            // two rows touched, and now the *condition* is legible instead —
-            // the row is not in the group at all while the tabs run along the
-            // top, exactly as before.
-            | Self::Sidebar
+            // Which way an untold split cuts.
             | Self::SplitDirection => true,
             Self::Theme
             | Self::LightScheme
@@ -1697,6 +1748,16 @@ impl SettingsRow {
             | Self::FontSize
             | Self::Cursor
             | Self::TabLayout
+            // **Out again** (user ruling 2026-08-18). The 2026-08-17 ruling
+            // filed it under the disclosure and broke its adjacency to
+            // `Tab layout` on the ground that the *condition* carries the
+            // dependency once the group does the hiding. In use it does not:
+            // a row that only exists under a vertical rail, filed two headings
+            // away from the row that turns the rail on, is a row nobody
+            // discovers — the disclosure hid the answer to the question the
+            // row above it had just raised. So the old adjacency is the ruling
+            // again, and it is where `visible_rows` puts it.
+            | Self::Sidebar
             | Self::Formulas
             | Self::InlineFormulas
             | Self::GitPanel
@@ -1995,6 +2056,14 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         SettingsRow::Cursor,
         SettingsRow::TabLayout,
     ];
+    // **Directly under the row it depends on** (user ruling 2026-08-18, which
+    // returns it here from the Advanced group 2026-08-17 had filed it in). It
+    // is the one conditional row in the dialog, and a row that only exists
+    // while the rail is on has to stand where the rail was just switched on —
+    // two headings away it is a row nobody finds.
+    if tab_layout == TabLayoutMode::Vertical {
+        rows.push(SettingsRow::Sidebar);
+    }
     // ── Appearance, advanced ──
     //
     // The window's ground, read downwards as one sentence (§7.1.6c-4b): is
@@ -2011,9 +2080,6 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::BackgroundOpacity);
     rows.push(SettingsRow::Acrylic);
     rows.push(SettingsRow::AlwaysOnTop);
-    if tab_layout == TabLayoutMode::Vertical {
-        rows.push(SettingsRow::Sidebar);
-    }
     rows.push(SettingsRow::SplitDirection);
     // ── the other three pages, none of which has an advanced row ──
     rows.push(SettingsRow::Formulas);
@@ -2265,6 +2331,20 @@ pub struct SettingsValues {
     /// day a second window target appears is the day an assumption here would
     /// draw a slider that moves and changes nothing.
     pub translucency_available: bool,
+    /// Whether the scheme the window is **actually wearing** came out of the
+    /// user's own folder (§7.1.6c-4d).
+    ///
+    /// The one thing `Delete scheme` needs to know, asked here rather than at
+    /// the press for [`SettingsRow::option_enabled`]'s reason: a rule spelled
+    /// only at the click lights a button that then does nothing, and a rule
+    /// spelled only at the draw leaves a dark button that still acts.
+    ///
+    /// **"Actually wearing" is by the canvas's luma**, which is the question
+    /// `Customise scheme…` asks and the question the chrome asks — under a
+    /// `BT_BG` override the theme setting and the canvas disagree on purpose,
+    /// and the file this verb would send to the bin is the one whose colours
+    /// are on screen.
+    pub scheme_in_force_is_user_file: bool,
 }
 
 #[cfg(test)]
@@ -2311,6 +2391,9 @@ impl SettingsValues {
             // `false` themselves.
             acrylic_available: true,
             translucency_available: true,
+            // A bundled scheme, which is what a fresh install wears: the tests
+            // that are *about* the delete verb set this themselves.
+            scheme_in_force_is_user_file: false,
         }
     }
 }
@@ -2639,7 +2722,8 @@ impl SettingsPanel {
             | SettingsTarget::RestoreAll
             | SettingsTarget::Advanced(_)
             | SettingsTarget::ResetAdvanced(_)
-            | SettingsTarget::CustomiseScheme => self.focus = Some(target),
+            | SettingsTarget::CustomiseScheme
+            | SettingsTarget::DeleteScheme => self.focus = Some(target),
             // An item's own row is what the keyboard lands on: the menu is about
             // to close, and a focus naming an item of a shut picker names
             // nothing.
@@ -3019,6 +3103,13 @@ impl SettingsPanel {
                 // of which this type can reach.
                 | SettingsTarget::CustomiseScheme),
             ) => SettingsKeyVerdict::Chose(target),
+            // A verb with nothing to act on refuses Enter, exactly as a greyed
+            // row does: the ring may stand on it and the reason beside it may be
+            // read, and nothing more.
+            Some(SettingsTarget::DeleteScheme) if !delete_scheme_enabled(values) => {
+                SettingsKeyVerdict::Inert
+            }
+            Some(target @ SettingsTarget::DeleteScheme) => SettingsKeyVerdict::Chose(target),
             _ => SettingsKeyVerdict::Inert,
         }
     }
@@ -3339,6 +3430,7 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
             // and Space turn it, which is the whole of "keyboard focusable".
             PageItem::Disclosure(_) => Some(SettingsTarget::Advanced(category)),
             PageItem::Customise => Some(SettingsTarget::CustomiseScheme),
+            PageItem::Delete => Some(SettingsTarget::DeleteScheme),
             PageItem::Reset => Some(SettingsTarget::ResetAdvanced(category)),
             PageItem::Heading(_) => None,
         })
@@ -3419,6 +3511,28 @@ pub enum SettingsTarget {
     /// qualify. [`SettingsLayout`] holds one box for it and a page that does not
     /// draw it holds `None`, which is the same shape `restore_all` has.
     CustomiseScheme,
+    /// `Delete scheme` (§7.1.6c-4d, user ruling 2026-08-18).
+    ///
+    /// [`Self::CustomiseScheme`]'s twin and carries no category for the same
+    /// reason: there is one scheme in force and this verb sends *its* file to
+    /// the Recycle Bin.
+    DeleteScheme,
+}
+
+/// **Whether `Delete scheme` can act** (§7.1.6c-4d, user ruling 2026-08-18).
+///
+/// One reading, asked by the hit test, by `activate` and by the draw alike —
+/// [`SettingsRow::option_enabled`]'s ruling on a verb instead of on an item, and
+/// it is the same ruling because it is the same failure: spelled only at the
+/// click it lights a button that does nothing, spelled only at the draw it
+/// leaves a dark button that still acts.
+///
+/// A bundled scheme travels inside the executable and has no file anywhere to
+/// send to the Recycle Bin; the stored default (`""`) is a bundled scheme by
+/// definition. Both come back `false`, and the foot says why.
+#[must_use]
+pub fn delete_scheme_enabled(values: SettingsValues) -> bool {
+    values.scheme_in_force_is_user_file
 }
 
 /// One row's three boxes, and which row they belong to.
@@ -3545,6 +3659,16 @@ pub struct SettingsLayout {
     /// `Customise scheme…`, on the same terms: only while the group holding it
     /// is open, and only on a page that offers a scheme.
     customise_scheme: Option<[f32; 4]>,
+    /// `Delete scheme`, on exactly those terms again.
+    delete_scheme: Option<[f32; 4]>,
+    /// The muted line **above** the foot's verbs, where `Delete scheme` says
+    /// what it will do or why it cannot (§7.1.6c-4d).
+    ///
+    /// `None` exactly when `delete_scheme` is: it belongs to the foot the two
+    /// scheme verbs stand on, and a page without them has nothing to explain.
+    /// Present in both of the verb's states, because the alternative is an
+    /// Advanced group whose height depends on which colour scheme is in force.
+    delete_reason: Option<[f32; 4]>,
     /// The open menu's border box and its items, top to bottom in its row's own
     /// option order. Empty when the menu is shut.
     ///
@@ -3640,6 +3764,13 @@ impl SettingsLayout {
         self.customise_scheme
     }
 
+    /// The open group's `Delete scheme`, or `None` when this page has none.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn delete_scheme(&self) -> Option<[f32; 4]> {
+        self.delete_scheme
+    }
+
     /// The open picker's scrollable body, or `None` while none is open.
     ///
     /// The wheel's catchment inside a menu, and the box its items are cut to —
@@ -3729,6 +3860,7 @@ impl SettingsLayout {
             SettingsTarget::Advanced(_) => self.advanced.map(|group| group.band),
             SettingsTarget::ResetAdvanced(_) => self.reset_advanced,
             SettingsTarget::CustomiseScheme => self.customise_scheme,
+            SettingsTarget::DeleteScheme => self.delete_scheme,
             SettingsTarget::Nav(_)
             | SettingsTarget::Close
             | SettingsTarget::Scrim
@@ -4364,6 +4496,8 @@ pub fn layout_for_menu(
     let mut placed_advanced: Option<AdvancedLayout> = None;
     let mut reset_advanced: Option<[f32; 4]> = None;
     let mut customise_scheme: Option<[f32; 4]> = None;
+    let mut delete_scheme: Option<[f32; 4]> = None;
+    let mut delete_reason: Option<[f32; 4]> = None;
     for item in &items {
         match *item {
             PageItem::Heading(group) => {
@@ -4452,9 +4586,35 @@ pub fn layout_for_menu(
             PageItem::Customise => {
                 cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
                 let button = px(CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX);
+                let right = row_right
+                    - px(RESET_ADVANCED_WIDTH_LOGICAL_PX
+                        + FOOT_BUTTON_GAP_LOGICAL_PX
+                        + DELETE_SCHEME_WIDTH_LOGICAL_PX
+                        + FOOT_BUTTON_GAP_LOGICAL_PX);
+                // **The hint line first**, across the whole row: the verbs
+                // fill their own line to within 48px, so the one thing they say
+                // about themselves has to stand above them. Always placed, never
+                // conditional on a value — the draw picks which of two sentences
+                // goes in it, and the box is the same either way.
+                delete_reason = Some([
+                    row_left,
+                    cursor,
+                    row_right,
+                    cursor + px(FOOT_HINT_LINE_LOGICAL_PX),
+                ]);
+                cursor += px(FOOT_HINT_LINE_LOGICAL_PX);
+                customise_scheme = Some([
+                    right - button,
+                    cursor,
+                    right,
+                    cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
+                ]);
+            }
+            PageItem::Delete => {
+                let button = px(DELETE_SCHEME_WIDTH_LOGICAL_PX);
                 let right =
                     row_right - px(RESET_ADVANCED_WIDTH_LOGICAL_PX + FOOT_BUTTON_GAP_LOGICAL_PX);
-                customise_scheme = Some([
+                delete_scheme = Some([
                     right - button,
                     cursor,
                     right,
@@ -4607,6 +4767,8 @@ pub fn layout_for_menu(
         advanced: placed_advanced,
         reset_advanced,
         customise_scheme,
+        delete_scheme,
+        delete_reason,
         menu: popup.as_ref().map(|menu| menu.frame),
         items: popup
             .as_ref()
@@ -4637,6 +4799,9 @@ enum PageItem {
     /// (§7.1.6c-4c). It stands on the same foot line as [`Self::Reset`], to its
     /// left, and opens that line.
     Customise,
+    /// `Delete scheme`, between the two (§7.1.6c-4d). Reads left to right as
+    /// the life of a copy: make one, throw one away, put the page back.
+    Delete,
     /// `Reset to defaults`, which only an open group has: a verb inside a
     /// collapsed group is a verb nobody can see.
     Reset,
@@ -4687,6 +4852,9 @@ fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<P
                 .any(|row| matches!(row, SettingsRow::LightScheme | SettingsRow::DarkScheme))
             {
                 items.push(PageItem::Customise);
+                // Derived from the same rows and for the same reason: the verb
+                // deletes the file behind the scheme those rows select.
+                items.push(PageItem::Delete);
             }
             items.push(PageItem::Reset);
         }
@@ -4712,6 +4880,8 @@ struct StackMetrics {
     disclosure_height: f32,
     /// A closing verb and the air above it.
     foot_advance: f32,
+    /// The muted line a scheme foot puts above its verbs.
+    foot_hint_advance: f32,
 }
 
 impl StackMetrics {
@@ -4735,6 +4905,7 @@ impl StackMetrics {
                 + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX),
             disclosure_height: px(DISCLOSURE_HEIGHT_LOGICAL_PX),
             foot_advance: px(FOOT_MARGIN_TOP_LOGICAL_PX) + px(BUTTON_HEIGHT_LOGICAL_PX),
+            foot_hint_advance: px(FOOT_HINT_LINE_LOGICAL_PX),
         }
     }
 
@@ -4745,12 +4916,15 @@ impl StackMetrics {
             PageItem::Row(_) => self.row_height,
             PageItem::Disclosure(_) => self.disclosure_height,
             PageItem::Reset => self.foot_advance,
-            // Nothing: the foot is one line and `Reset` is what advances past
-            // it. This is the measuring half of the placing loop's `if
-            // customise_scheme.is_none()`, and the two say the same sentence
-            // from opposite ends — which is why the page height a group with
-            // two verbs reports is the same as the one it reported with one.
-            PageItem::Customise => 0.0,
+            // The hint line the scheme verbs stand under, and nothing else: the
+            // verbs themselves are on `Reset`'s line and `Reset` is what
+            // advances past it. This is the measuring half of the placing loop's
+            // `if customise_scheme.is_none()`, and the two say the same sentence
+            // from opposite ends — which is why a foot carrying one verb, two or
+            // three is one and the same height, and why the third verb (2026-08-18)
+            // needed no number here at all.
+            PageItem::Customise => self.foot_hint_advance,
+            PageItem::Delete => 0.0,
         }
     }
 
@@ -4775,7 +4949,10 @@ impl StackMetrics {
 ///
 /// Zero for a slider, which has no options: the honest measurement of a control
 /// that never opens a menu is no words at all, and the floor in [`combo_width`]
-/// then gives it the 118px column `slider_geometry` is built against.
+/// then gives it the 118px column [`slider_geometry`] falls back to. **A slider
+/// takes the page column, it does not set it** (user ruling 2026-08-18): the
+/// zero here is what makes the two halves of that sentence one arithmetic
+/// rather than a special case in [`page_combo_width`].
 fn widest_option(row: SettingsRow, scale: f32, measure: &mut dyn FnMut(&str, f32) -> f32) -> f32 {
     let font = COMBO_FONT_LOGICAL_PX * scale;
     row.option_labels()
@@ -5115,6 +5292,16 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
     {
         return SettingsTarget::CustomiseScheme;
     }
+    // The other half of `delete_scheme_enabled`: a verb that cannot act is not
+    // a target either, so the press falls through to `Panel` and the pointer
+    // never lights it.
+    if let Some(delete) = layout.delete_scheme
+        && layout.shows(delete)
+        && contains(delete, x, y)
+        && delete_scheme_enabled(values)
+    {
+        return SettingsTarget::DeleteScheme;
+    }
     if contains(layout.frame, x, y) {
         return SettingsTarget::Panel;
     }
@@ -5444,6 +5631,7 @@ pub fn build(
         layout,
         hover,
         focus,
+        values,
         scale,
         border,
         palette,
@@ -5652,6 +5840,7 @@ fn push_advanced_group(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
     focus: Option<SettingsTarget>,
+    values: SettingsValues,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
@@ -5717,6 +5906,62 @@ fn push_advanced_group(
             stack
                 .quads
                 .extend(focus_ring(customise, scale, palette.accent));
+        }
+    }
+    // The third verb, and the only `.btn` in this dialog that can be dark. The
+    // greyed-row idiom moved onto a button: the fill and the border are the
+    // button's own, the word goes to the hint ink, and the reason takes the
+    // empty half of the line it is standing on.
+    if let Some(delete) = layout.delete_scheme {
+        let enabled = delete_scheme_enabled(values);
+        push_button(
+            &mut stack.quads,
+            &mut stack.labels,
+            delete,
+            Text::DeleteScheme.text(),
+            enabled && hover == Some(SettingsTarget::DeleteScheme),
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if !enabled {
+            // The word goes to the hint ink. The label was pushed by
+            // `push_button` and is recoloured here rather than through a colour
+            // parameter, because within one layer the renderer draws every fill
+            // before any text — so the button's own rectangle is already down,
+            // and teaching every caller of `push_button` about a state only this
+            // one has would be the more expensive half of the same edit.
+            if let Some(label) = stack.labels.last_mut() {
+                label.color = palette.menu_item_hint_text;
+            }
+        }
+        // The line above them, in either state: what this verb will do to which
+        // file, or why there is no file for it to do it to.
+        if let Some(hint) = layout.delete_reason {
+            let font = px(ROW_DESC_FONT_LOGICAL_PX);
+            let text = if enabled {
+                Text::DeleteSchemeUserFile.text()
+            } else {
+                Text::DeleteSchemeBundled.text()
+            };
+            stack.labels.push(ChromeLabel {
+                text: ellipsized(text, hint[2] - hint[0], font, measure),
+                rect: hint,
+                font_size_px: font,
+                color: palette.menu_item_hint_text,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
+        if focus == Some(SettingsTarget::DeleteScheme) {
+            stack
+                .quads
+                .extend(focus_ring(delete, scale, palette.accent));
         }
     }
     if let Some(reset) = layout.reset_advanced {
@@ -7310,17 +7555,22 @@ mod tests {
         }
     }
 
-    /// PIN (§7.1.6c-4c) — **the Advanced foot is a row of two verbs on one
-    /// line**, `Customise scheme…` then `Reset to defaults`, and only on a page
-    /// that offers a scheme to customise.
+    /// PIN (§7.1.6c-4c, extended 2026-08-18) — **the Advanced foot is a row of
+    /// verbs on one line**, `Customise scheme…`, `Delete scheme` and then
+    /// `Reset to defaults`, and the first two only on a page that offers a
+    /// scheme.
     ///
     /// The one-line claim is the interesting one: the group's height is the same
-    /// as it was with one verb, which is what says the two arms of the placing
-    /// loop and the two arms of the measuring loop agree.
+    /// as it was with one verb and with two, which is what says the arms of the
+    /// placing loop and the arms of the measuring loop agree. §7.1.6c-4c wrote
+    /// that down as the reason a third verb would need no numbers changed, and
+    /// the third verb is here.
     ///
-    /// Red gate: give `PageItem::Customise` a `foot_advance` of its own and the
-    /// height assertion goes red; place it before the disclosure and the order
-    /// one does.
+    /// Red gate: give `PageItem::Customise` or `PageItem::Delete` a
+    /// `foot_advance` of its own and the page grows a line it did not have,
+    /// which `the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll`
+    /// reads off the height; place either before the disclosure and the order
+    /// assertions here go red.
     #[test]
     fn the_advanced_foot_carries_both_verbs_on_one_line() {
         let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
@@ -7328,19 +7578,26 @@ mod tests {
         let customise = open
             .customise_scheme()
             .expect("the page with the scheme rows has the copy verb");
+        let delete = open
+            .delete_scheme()
+            .expect("and, since 2026-08-18, the verb that undoes a copy");
 
         assert_eq!(customise[1], reset[1], "one line, not two");
         assert_eq!(customise[3], reset[3]);
+        assert_eq!(delete[1], reset[1], "nor three");
+        assert_eq!(delete[3], reset[3]);
         assert_eq!(width(customise), CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX);
+        assert_eq!(width(delete), DELETE_SCHEME_WIDTH_LOGICAL_PX);
         assert!(
-            customise[2] < reset[0],
-            "the copy verb stands to the left of the reset, clear of it"
+            customise[2] < delete[0] && delete[2] < reset[0],
+            "left to right: make a copy, throw one away, put the page back"
         );
         assert_eq!(
-            reset[0] - customise[2],
+            delete[0] - customise[2],
             FOOT_BUTTON_GAP_LOGICAL_PX,
             "with the button row's own gap between them"
         );
+        assert_eq!(reset[0] - delete[2], FOOT_BUTTON_GAP_LOGICAL_PX);
 
         // Asked at the foot of the page, where the verb is: an open group takes
         // the page past the dialog's 600px cap, so the line both verbs stand on
@@ -7386,6 +7643,107 @@ mod tests {
             None,
             "the copy verb belongs to the page the scheme rows are on"
         );
+        assert_eq!(terminal.delete_scheme(), None, "and so does its opposite");
+    }
+
+    /// PIN (user ruling 2026-08-18) — **`Delete scheme` acts only on a file the
+    /// user owns, and says why when it cannot.**
+    ///
+    /// A bundled scheme travels inside the executable, and the stored default is
+    /// a bundled scheme by definition; neither has a file in the folder to send
+    /// to the Recycle Bin. The verb is greyed rather than hidden, for the
+    /// greyed-row ruling's reason — the reason is what a reader came for — and
+    /// the greying is one reading, refused by the hit test and by `activate`
+    /// alike.
+    ///
+    /// Red gate: drop the `delete_scheme_enabled` clause out of `hit` and the
+    /// press assertion goes red; drop it out of `activate` and the Enter one
+    /// does; draw the word in the title ink unconditionally and the last does.
+    #[test]
+    fn delete_scheme_is_live_only_for_a_scheme_the_user_owns() {
+        let bundled = values();
+        assert!(
+            !delete_scheme_enabled(bundled),
+            "a fresh install wears a bundled scheme and has nothing to delete"
+        );
+        let owned = SettingsValues {
+            scheme_in_force_is_user_file: true,
+            ..values()
+        };
+        assert!(delete_scheme_enabled(owned));
+
+        let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
+        let at_foot = shaped_scrolled(
+            SettingsCategory::Appearance,
+            every_group_open(),
+            None,
+            open.max_scroll(),
+        );
+        let delete = at_foot.delete_scheme().expect("the verb is on the page");
+        let (x, y) = centre(delete);
+
+        assert_eq!(
+            hit(&at_foot, bundled, x, y),
+            SettingsTarget::Panel,
+            "a verb that cannot act takes no press: the pointer never lights it"
+        );
+        assert_eq!(
+            hit(&at_foot, owned, x, y),
+            SettingsTarget::DeleteScheme,
+            "and does the moment there is a file behind it"
+        );
+
+        // The ring may stand on it either way — a ring is not an action — and
+        // Enter is what the two answers differ on.
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content(&rows, &lines));
+        panel.select_category(SettingsCategory::Appearance);
+        panel.press(SettingsTarget::DeleteScheme);
+        assert_eq!(panel.focus(), Some(SettingsTarget::DeleteScheme));
+        assert_eq!(
+            panel.activate(content(&rows, &lines), bundled),
+            SettingsKeyVerdict::Inert,
+            "Enter on a verb with nothing to act on does nothing"
+        );
+        assert_eq!(
+            panel.activate(content(&rows, &lines), owned),
+            SettingsKeyVerdict::Chose(SettingsTarget::DeleteScheme)
+        );
+
+        // And the reason is on screen, in the hint ink, on the muted line above
+        // the verbs — **in both states**, so an Advanced group's height does not
+        // depend on which colour scheme happens to be in force.
+        let hint = at_foot.delete_reason.expect("the foot has its hint line");
+        assert_eq!(hint[3], delete[1], "the line sits directly above the verbs");
+        assert_eq!(hint[0], at_foot.rows[0].band[0], "and spans the whole row");
+        let greyed = labels_of(&at_foot, None, bundled);
+        let said = greyed
+            .iter()
+            .find(|label| label.text == Text::DeleteSchemeBundled.text())
+            .expect("a greyed verb says why");
+        assert_eq!(said.rect, hint);
+        assert_eq!(
+            greyed
+                .iter()
+                .find(|label| label.text == Text::DeleteScheme.text())
+                .expect("the word is still drawn")
+                .color,
+            chrome_palette().menu_item_hint_text,
+            "the word goes to the hint ink, which is what greyed means here"
+        );
+        let live = labels_of(&at_foot, None, owned);
+        assert!(
+            live.iter()
+                .any(|label| label.text == Text::DeleteSchemeUserFile.text()),
+            "and a live verb says what it will do instead"
+        );
+        assert!(
+            !live
+                .iter()
+                .any(|label| label.text == Text::DeleteSchemeBundled.text())
+        );
     }
 
     /// PIN (§7.1.6c-4c) — **a picker re-lists when the catalogue's revision
@@ -7427,9 +7785,9 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling 2026-08-17) — **`Advanced` is a page's own group: its
-    /// rows are the eight the ruling named, they come last, and while it is
-    /// collapsed they are nowhere.**
+    /// PIN (user ruling 2026-08-17, amended 2026-08-18) — **`Advanced` is a
+    /// page's own group: its rows are the seven the ruling leaves in it, they
+    /// come last, and while it is collapsed they are nowhere.**
     ///
     /// The list is the ruling read literally and not a heuristic. The second
     /// half is `visible_rows`' own contiguity discipline one level down: the
@@ -7437,7 +7795,7 @@ mod tests {
     /// right stack only while the everyday rows come first.
     ///
     /// Red gate: file `Theme` as advanced and the first assertion goes red; move
-    /// `Background image` above `Cursor` in `visible_rows` and the second does.
+    /// `Background image` above `Cursor` in `visible_rows` and the last does.
     #[test]
     fn every_page_puts_its_everyday_rows_above_its_advanced_ones() {
         assert_eq!(
@@ -7454,11 +7812,25 @@ mod tests {
                 SettingsRow::AlwaysOnTop,
                 SettingsRow::SplitDirection
             ],
-            "the ruling's own eight, less the conditional Sidebar row"
+            "the group the 2026-08-18 ruling leaves standing"
         );
+        // **`Sidebar` came back out** (user ruling 2026-08-18). It is an
+        // everyday row again and it is back where it was born — directly under
+        // the row it depends on, so the dependency is legible from the page and
+        // not only from the condition.
         assert!(
-            SettingsRow::Sidebar.advanced(),
-            "and Sidebar is the eighth, in the dialog whenever it is a row at all"
+            !SettingsRow::Sidebar.advanced(),
+            "Sidebar is an everyday row again"
+        );
+        let railed = visible_rows(TabLayoutMode::Vertical);
+        let at = railed
+            .iter()
+            .position(|row| *row == SettingsRow::Sidebar)
+            .expect("a vertical tab layout grows the Sidebar row");
+        assert_eq!(
+            railed[at - 1],
+            SettingsRow::TabLayout,
+            "and it stands directly under the row that conditions it"
         );
         assert!(
             !SettingsRow::PsReadLine.advanced(),
@@ -10288,26 +10660,78 @@ mod tests {
 
     // ── the window's ground (§7.1.6c-4b) ───────────────────────────────────
 
-    /// PIN — the slider occupies the picker's column exactly, so the right edge
-    /// of every control in the dialog is still one line.
+    /// PIN (§7.1.6c-4b, user ruling 2026-08-18) — **the slider occupies the
+    /// page's control column, whichever page it is on**: both edges, not just
+    /// the right one.
     ///
-    /// Held as a *sum* and not as three literals: the day somebody widens the
-    /// number to fit four digits is the day the track has to give back eight
-    /// pixels, and three constants that each look reasonable on their own are
-    /// how a column comes to be 126 wide in one row and 118 in the next.
+    /// The right edge was always true and was always the whole of what this pin
+    /// checked, because on the day it was written every control was 118 wide.
+    /// §7.1.6c-5 made the column the widest word on the page and the slider kept
+    /// its 118 — so on the Appearance page, whose column is set by
+    /// `Auto (longer edge)`, the two tracks began some ninety pixels inside the
+    /// buttons above them. **A control column whose left edge wanders is not
+    /// read as a column**, which is the same sentence that ruling was written
+    /// from.
+    ///
+    /// The old geometry survives as the floor's special case: a column at
+    /// `COMBO_MIN_WIDTH_LOGICAL_PX` still leaves the track exactly 76.
+    ///
+    /// Red gate: give the track a width of its own again and the `starts in the
+    /// same column` assertion goes red on the page whose column is wider than
+    /// the floor — which is every page that has a slider.
     #[test]
     fn the_slider_occupies_the_combos_column() {
         assert_eq!(
-            SLIDER_TRACK_WIDTH_LOGICAL_PX + SLIDER_GAP_LOGICAL_PX + SLIDER_VALUE_WIDTH_LOGICAL_PX,
+            SLIDER_TRACK_WIDTH_AT_THE_FLOOR_LOGICAL_PX
+                + SLIDER_GAP_LOGICAL_PX
+                + SLIDER_VALUE_WIDTH_LOGICAL_PX,
             COMBO_MIN_WIDTH_LOGICAL_PX
         );
-        let placed = open(1.0, false);
+        // Measured with the fixture that actually measures words, because the
+        // claim is about a column WIDER than the floor — a flat measure would
+        // hand every row 118 and prove exactly the thing that was already true.
+        let rows = flat_rows();
+        let placed = layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            content(&rows, &[]),
+            PAGE,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut measure,
+        )
+        .expect("this window can host the dialog");
         let picker = combo_of(&placed, SettingsRow::Theme);
+        assert!(
+            width(picker) > COMBO_MIN_WIDTH_LOGICAL_PX,
+            "this page column is wider than the floor, or the pin proves nothing"
+        );
         for row in [SettingsRow::ImageOpacity, SettingsRow::BackgroundOpacity] {
             let control = combo_of(&placed, row);
             assert_eq!(control[0], picker[0], "{row:?} starts in the same column");
             assert_eq!(control[2], picker[2], "{row:?} ends in the same column");
+            // And the parts inside it: the number keeps its slot against the
+            // trailing edge, the track absorbs the rest.
+            let geometry = slider_geometry(control, 1.0, SliderRange { min: 0, max: 100 }, 50);
+            assert_eq!(width(geometry.value), SLIDER_VALUE_WIDTH_LOGICAL_PX);
+            assert_eq!(geometry.value[2], control[2]);
+            assert_eq!(
+                width(geometry.track),
+                width(control) - SLIDER_GAP_LOGICAL_PX - SLIDER_VALUE_WIDTH_LOGICAL_PX,
+                "{row:?}: the track is what the column has left"
+            );
         }
+        // A column at the floor gives back exactly the geometry §7.1.6c-4b
+        // shipped, which is what makes the widening a generalisation rather than
+        // a second rule.
+        let floor_column = [0.0, 0.0, COMBO_MIN_WIDTH_LOGICAL_PX, 27.5];
+        let at_floor = slider_geometry(floor_column, 1.0, SliderRange { min: 0, max: 100 }, 0);
+        assert_eq!(
+            width(at_floor.track),
+            SLIDER_TRACK_WIDTH_AT_THE_FLOOR_LOGICAL_PX
+        );
     }
 
     /// PIN — a slider's parts come out of one derivation, and the thumb travels
@@ -10327,8 +10751,8 @@ mod tests {
         assert_eq!(floor.track[0], control[0]);
         assert_eq!(
             width(floor.track),
-            SLIDER_TRACK_WIDTH_LOGICAL_PX,
-            "the track is the track's width and not the control's"
+            width(control) - SLIDER_GAP_LOGICAL_PX - SLIDER_VALUE_WIDTH_LOGICAL_PX,
+            "the track is the column less the number's own slot"
         );
         assert_eq!(
             (floor.thumb[0] + floor.thumb[2]) / 2.0,
@@ -10883,13 +11307,13 @@ mod tests {
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
+                SettingsRow::Sidebar,
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
                 SettingsRow::ImageOpacity,
                 SettingsRow::BackgroundOpacity,
                 SettingsRow::Acrylic,
                 SettingsRow::AlwaysOnTop,
-                SettingsRow::Sidebar,
                 SettingsRow::SplitDirection,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
@@ -10898,19 +11322,20 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 SettingsRow::PsReadLine
             ],
-            "Sidebar keeps its place among the advanced rows, next to the \
-             other row about where a thing goes; the two font rows stay next to \
-             each other because they are one decision in two halves, the two \
-             formula rows together as the whole of the Rendered blocks page, and \
-             the PSReadLine row last because it is the whole of the Terminal \
+            "Sidebar stands directly under `Tab layout`; the two font rows stay \
+             next to each other because they are one decision in two halves, the \
+             two formula rows together as the whole of the Rendered blocks page, \
+             and the PSReadLine row last because it is the whole of the Terminal \
              page.
 
-             **Sidebar no longer touches `Tab layout`** (§7.1.6c-5): the ruling \
-             filed it under `Advanced` and left `Tab layout` on top, so the \
-             adjacency that used to carry the dependency is gone and the \
-             condition carries it alone — the row is not in this list at all \
-             while the tabs run across the top, which is what the two halves of \
-             this pin are actually about"
+             **Sidebar touches `Tab layout` again** (user ruling 2026-08-18, \
+             reversing §7.1.6c-5's filing of it under `Advanced`): the condition \
+             on its own is not legible — a row that appears only under a \
+             vertical rail, two headings below the row that turns the rail on \
+             and behind a collapsed disclosure, is a row a reader never meets. \
+             The adjacency carries the dependency and the condition still keeps \
+             it out of the horizontal list entirely, which is what the two \
+             halves of this pin are about"
         );
     }
 
@@ -11215,11 +11640,13 @@ mod tests {
                     .filter(|row| row.advanced())
                     .map(|row| row.control_target()),
             )
-            // The foot's two verbs, left to right as they are drawn — the walk
-            // down the page and the walk down the Tab order are still one walk
-            // now that the foot is a row rather than a button (§7.1.6c-4c).
+            // The foot's three verbs, left to right as they are drawn — the
+            // walk down the page and the walk down the Tab order are still one
+            // walk now that the foot is a row rather than a button
+            // (§7.1.6c-4c, and a third verb on it since §7.1.6c-4d).
             .chain([
                 SettingsTarget::CustomiseScheme,
+                SettingsTarget::DeleteScheme,
                 SettingsTarget::ResetAdvanced(PAGE),
             ])
             .collect();
@@ -11227,7 +11654,7 @@ mod tests {
         // And a shut group is a group whose rows and whose verb are nowhere in
         // the order: a ring on a control nobody can see is a dialog that looks
         // like it has swallowed the keyboard, which is the conditional Sidebar
-        // row's own lesson with eight rows in it.
+        // row's own lesson with the whole group in it.
         let shut = content_with(&flat, &lines, AdvancedOpen::default());
         assert_eq!(
             focus_order(shut, PAGE),

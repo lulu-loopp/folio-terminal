@@ -12348,6 +12348,41 @@ mod tests {
             translucent.r < opaque.r,
             "premultiplication darkens toward the desktop, never toward white"
         );
+
+        // **And in the other state** (user report 2026-08-18): a ground that
+        // names a picture answers with the same clear as one that does not.
+        // That is the whole of what the failed-decode path relies on — a file
+        // that will not open leaves `image: None` on a ground whose alpha the
+        // reader set, and the window must be exactly as see-through as it
+        // would have been with the picture.
+        //
+        // Red gate: make `theme_clear_color` read anything off `image` and one
+        // of these two goes red.
+        let with_picture = WindowGround {
+            alpha: 0.6,
+            image: Some(std::sync::Arc::new(BackgroundImage {
+                key: "image:probe".to_owned(),
+                rgba: std::sync::Arc::from(vec![255_u8, 0, 0, 255]),
+                width_px: 1,
+                height_px: 1,
+            })),
+            ..WindowGround::opaque()
+        };
+        let _ = set_window_ground(with_picture.clone());
+        assert_eq!(
+            theme_clear_color(),
+            translucent,
+            "a ground with a picture clears to the same value as one without"
+        );
+        let _ = set_window_ground(WindowGround {
+            image: None,
+            ..with_picture
+        });
+        assert_eq!(
+            theme_clear_color(),
+            translucent,
+            "and so does the ground a refused picture leaves behind"
+        );
     }
 
     /// PIN — the ground quad is the whole surface, six vertices, one opacity and

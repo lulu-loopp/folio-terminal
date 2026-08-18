@@ -258,6 +258,25 @@ impl Catalogue {
             .map(|entry| entry.file.as_str())
     }
 
+    /// The **user's own** file behind a scheme on this canvas, when there is
+    /// one (§7.1.6c-4d).
+    ///
+    /// [`Self::file_of`] with the one extra clause `Delete scheme` turns on: a
+    /// bundled scheme travels inside the executable and has no file in the
+    /// folder to send anywhere, so it answers `None` and the verb is dark. Asked
+    /// as a question rather than by handing out the entry list, which is the
+    /// rule stated on [`Self::entries`] — every reader of this catalogue names
+    /// what it wants to know.
+    #[must_use]
+    pub fn user_file_of(&self, name: &str, light: bool) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.light == light && entry.name == name && entry.origin == SchemeOrigin::User
+            })
+            .map(|entry| entry.file.as_str())
+    }
+
     /// The reason a named file was skipped, if it was.
     #[must_use]
     pub fn reject_reason(&self, file: &str) -> Option<&str> {
@@ -1126,6 +1145,56 @@ mod tests {
         let second = rescan_verdict(&without, ["", "Mine"], [None, None], in_force, None);
         assert!(second.gone.is_empty(), "said once");
         assert_eq!(second.schemes.1, bt_render::FOLIO_DARK);
+    }
+
+    /// PIN (user ruling 2026-08-18) — **a deletion this window made raises one
+    /// card, not two.**
+    ///
+    /// `Delete scheme` recycles the file, falls the row back to the default and
+    /// raises an `Ok` card naming the file and where it went. The folder's
+    /// watcher then sees the same deletion, and its standing answer to "the
+    /// selected scheme's file is gone" is a fall to the default **and an Info
+    /// card** — right for a file that left behind this window's back, wrong for
+    /// one this window just deleted, because the press already said so.
+    ///
+    /// The suppression is arithmetic and not a flag: the verdict is derived from
+    /// the two **stored names**, the press has already made this one the empty
+    /// default, and a default resolves to a bundled scheme that cannot go
+    /// missing. There is nothing to silence because there is nothing to report.
+    ///
+    /// Red gate: leave the stored name alone in `delete_scheme_in_force` — the
+    /// "one card" half of it — and the first assertion here goes red with the
+    /// second card the reader would have seen.
+    #[test]
+    fn a_deletion_this_window_made_raises_one_card_not_two() {
+        let after = Catalogue::build(bundled_sources());
+        let in_force = (bt_render::FOLIO_LIGHT, bt_render::FOLIO_DARK);
+
+        // What the watcher reaches after the press: the file is gone from the
+        // folder *and* the row has already fallen back to the default.
+        let watched = rescan_verdict(&after, ["", ""], [None, None], in_force, None);
+        assert!(
+            watched.gone.is_empty(),
+            "the press said it; the watcher must not say it again"
+        );
+        assert_eq!(watched.report, None);
+        assert_eq!(watched.schemes.0, bt_render::FOLIO_LIGHT);
+        assert_eq!(watched.schemes.1, bt_render::FOLIO_DARK);
+
+        // And the rule it is not allowed to break: the *other* row's file
+        // leaving the folder behind this window's back is still one card.
+        let elsewhere = rescan_verdict(
+            &after,
+            ["Mine", ""],
+            [Some(("Mine".to_owned(), "mine.json".to_owned())), None],
+            in_force,
+            None,
+        );
+        assert_eq!(
+            elsewhere.gone,
+            [("Mine".to_owned(), "Folio Light".to_owned())],
+            "a file that left on its own is still news"
+        );
     }
 
     /// A name nobody ever held is not news: a `settings.json` edited by hand can
