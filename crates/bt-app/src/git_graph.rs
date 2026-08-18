@@ -3622,10 +3622,10 @@ fn push_toolbar(
         if toolbar.search_focused {
             let inset = (GRAPH_SEARCH_CARET_INSET_LOGICAL_PX * scale).round();
             let line = inside.caret;
-            quads.push(ChromeQuad {
-                rect: clip([line[0], line[1] + inset, line[2], line[3] - inset]),
-                color: palette.accent,
-            });
+            quads.push(ChromeQuad::ink(
+                clip([line[0], line[1] + inset, line[2], line[3] - inset]),
+                palette.accent,
+            ));
         }
         if let Some(cross) = rects.search_clear {
             sprites.push(ChromeSprite::new(
