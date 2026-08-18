@@ -1945,15 +1945,28 @@ impl DualPlaneSession {
         }
         let result = (|| {
             for chunk in bytes.chunks(PARSE_QUANTUM) {
-                let events = self.terminal.feed(chunk);
-                let damage = self.terminal.take_damage();
-                self.apply_events(events, observed_at)?;
-                self.observe_live_damage(damage, observed_at);
-                self.sync_staging_tail();
+                // The quantum is a *budget*, not the unit a fact is read in. The
+                // adapter hands back a segment at a time and pauses at every
+                // shell-integration marker (`TerminalAdapter::feed`), so a
+                // marker whose meaning is the grid underneath it — `B` and `C`
+                // name cells — is applied while that grid is still the one the
+                // shell was describing, however much output shares the read.
+                let mut events = self.terminal.feed(chunk);
+                loop {
+                    let damage = self.terminal.take_damage();
+                    self.apply_events(events, observed_at)?;
+                    self.observe_live_damage(damage, observed_at);
+                    self.sync_staging_tail();
+                    if !self.terminal.stream_paused() {
+                        break;
+                    }
+                    events = self.terminal.resume_stream();
+                }
             }
             Ok(())
         })();
         if result.is_err() {
+            self.terminal.discard_paused_stream();
             self.cursor_logical_line_memory = None;
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
@@ -2832,6 +2845,7 @@ impl DualPlaneSession {
         screen: ScreenId,
         point: GridPoint,
         marker: ShellIntegrationMarker,
+        observed_at: Instant,
     ) {
         let phase = self.shell_phases.get(&screen).copied();
         match marker {
@@ -2903,7 +2917,7 @@ impl DualPlaneSession {
                 }
                 if screen == ScreenId::Primary && self.command_marks.has_open_command() {
                     let executed = self.register_command_mark_anchor(screen, point);
-                    self.command_marks.note_executed(executed);
+                    self.command_marks.note_executed(executed, observed_at);
                 }
                 // A repeated `C` with no `D` between them closes the stale region before opening
                 // the new one, so at most one output region per screen is ever open and none can
@@ -2927,7 +2941,8 @@ impl DualPlaneSession {
                 self.close_open_semantic_output_region(screen, point);
                 if screen == ScreenId::Primary && self.command_marks.has_open_command() {
                     let finished = self.register_command_mark_anchor(screen, point);
-                    self.command_marks.note_finished(finished, exit_code);
+                    self.command_marks
+                        .note_finished(finished, exit_code, observed_at);
                 }
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Finished);
@@ -2960,16 +2975,27 @@ impl DualPlaneSession {
     /// different rules. Trimmed, because the witness includes whatever padding the line editor left
     /// between the prompt and the cursor, and the rail's glance card is a one-liner.
     ///
-    /// **The one case that yields nothing, stated so nobody debugs it twice.** The witness is read
-    /// off the *live grid*, and the session applies a parse quantum's directives after the vendor
-    /// has already consumed the whole quantum — so if a single PTY read carries `C` **and** enough
-    /// output to scroll the command's own prompt row off the grid, the start anchor has already
-    /// migrated to staging by the time this runs and there is nothing left to read. The text is
-    /// then empty, and empty is what the ledger reports: a glance card that says nothing is a
-    /// smaller failure than one that says the wrong command. Ordinary delivery does not hit it —
-    /// the read that carries `C` cannot also carry output the command has not produced yet — and
-    /// `a_command_whose_output_arrives_in_the_same_read_keeps_its_mark_and_admits_it_has_no_text`
-    /// pins both halves.
+    /// **How the coalesced read stopped costing the text.** The witness is read off the *live
+    /// grid*, so it is only true if the grid under it is still the one the shell was describing.
+    /// It used not to be: the session applied a whole parse quantum's directives after the vendor
+    /// had consumed all of it, so one PTY read carrying `C` **and** enough output to scroll the
+    /// prompt row away left nothing to read and the card said a muted "command". That was never
+    /// exotic — a wake-coalesced drain hands over one read of up to 256 KiB, and a chatty child
+    /// puts `C` and a screenful of its own output in it routinely.
+    ///
+    /// The fix is where the fact is read, not where it is used: `TerminalAdapter::feed` pauses its
+    /// action stream at every shell-integration marker and `feed_at` applies what it has before
+    /// resuming, so `C` is handled against the grid that stood at `C`. Nothing here special-cases
+    /// a flood; the general rule is that a marker naming a cell is read at the moment it names it.
+    ///
+    /// **What still yields nothing**, stated so nobody debugs it twice: a command whose typed line
+    /// scrolls off the grid *while it is being typed* — a paste taller than the pane — has no
+    /// prompt row left at `C` for anyone to read, at any quantum. The text is then empty, and
+    /// empty is what the ledger reports: a glance card that says nothing is a smaller failure than
+    /// one that says the wrong command.
+    /// `a_command_whose_output_arrives_in_the_same_read_keeps_its_mark_and_its_text` pins the
+    /// coalesced read; `a_command_typed_past_the_top_of_the_grid_has_no_text_left_to_read` pins
+    /// the residue.
     fn absorb_command_text(&mut self, screen: ScreenId, region_index: usize) {
         if screen != ScreenId::Primary {
             return;
@@ -3202,15 +3228,61 @@ impl DualPlaneSession {
             .filter(|(generation, row)| {
                 *generation == self.grid_generation.0 && start.row <= *row && *row < close.row
             })
-            .find_map(|(_, row)| {
-                let captured = self.terminal.visible_row(*row)?;
-                let (text, boundaries) = captured_row_text_and_boundaries(&captured);
-                (!text.is_empty()).then(|| GridPoint {
-                    row: *row,
-                    column: boundaries.last().map_or(0, |(_, column)| *column),
-                })
+            .find_map(|(_, row)| self.semantic_input_row_end(*row))
+            // **And when the write record has been retired out from under it, the grid itself.**
+            //
+            // The Enter that submits a command is the newline that scrolls a full screen, and a
+            // scroll bumps `grid_generation` — which is exactly how the record above is retired
+            // (`retire_semantic_input_writes`'s doc says so). So on any pane with no room left,
+            // and only there, the loop above finds nothing and the region collapsed onto its own
+            // start: a zero-width span, an empty witness, and a glance card reading a muted
+            // "command" for a line still plainly on screen one row higher. A busy pane is *always*
+            // full, so this was not a corner.
+            //
+            // The rows between `B` and the close are this region's by construction — that is what
+            // a half-open `[B, C)` means — so reading the last of them that carries anything past
+            // `B` asks the grid the same question the record answers, in a form no scroll can
+            // retire. The record stays first because it is the more specific witness (it knows
+            // *this* region wrote, not merely that something is there), and it stays unrebased
+            // because its other reader, `typed_writes_precede_the_cursor`, wants exactly the
+            // conservative reading it has.
+            .or_else(|| {
+                (start.row..close.row)
+                    .rev()
+                    .find(|row| self.semantic_input_row_holds_content(*row, start))
+                    .and_then(|row| self.semantic_input_row_end(row))
             })
             .unwrap_or(*start)
+    }
+
+    /// The coordinate one past the last grapheme on `row`, or `None` for a row with nothing on it.
+    fn semantic_input_row_end(&self, row: u32) -> Option<GridPoint> {
+        let captured = self.terminal.visible_row(row)?;
+        let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+        (!text.is_empty()).then(|| GridPoint {
+            row,
+            column: boundaries.last().map_or(0, |(_, column)| *column),
+        })
+    }
+
+    /// Does `row` carry anything the region owns — that is, anything at or after `start` on the
+    /// row `start` is on, and anything at all on the rows below it?
+    ///
+    /// The column test on the first row is what keeps the prompt out of the answer: a region whose
+    /// command was never typed sits on a row that is *not* empty, and calling that row content
+    /// would end the region past the prompt it begins after.
+    fn semantic_input_row_holds_content(&self, row: u32, start: &GridPoint) -> bool {
+        let Some(captured) = self.terminal.visible_row(row) else {
+            return false;
+        };
+        let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+        let from = if row == start.row {
+            byte_offset_at_column(&boundaries, start.column, text.len())
+        } else {
+            0
+        };
+        text.get(from..)
+            .is_some_and(|tail| tail.chars().any(|glyph| !glyph.is_whitespace()))
     }
 
     /// ED 2 blanks the viewport in place: no row is removed, so no generation moves and the write
@@ -5812,32 +5884,96 @@ impl DualPlaneSession {
     /// be two opinions about where the transcript starts, and the copy would be cut with one of
     /// them from a selection made with the other.
     fn copyable_rows(&self) -> Vec<CopyRow> {
-        let screen = if self.terminal.modes().alternate_screen {
-            ScreenId::Alternate
-        } else {
-            ScreenId::Primary
-        };
-        let mut rows = Vec::new();
-        if screen == ScreenId::Primary {
-            rows.extend(
-                self.document
-                    .entries()
-                    .values()
-                    .map(|entry| copy_row_from_history(&entry.line)),
-            );
-            rows.extend(
-                self.transcript
-                    .staged_rows()
-                    .map(|row| copy_row_from_staging(row, self.transcript.source_generation())),
-            );
+        if !self.terminal.modes().alternate_screen {
+            return self.primary_rows();
         }
+        // The alternate screen is its own namespace (DESIGN §3.2): no history, no staging, and
+        // rows that are not orderable against the primary document's at all.
         let (_, live_rows) = self.terminal.dimensions();
-        rows.extend((0..live_rows.get()).filter_map(|row| {
-            self.terminal
-                .visible_row(row)
-                .map(|cells| copy_row_from_live(&cells, row, screen, self.grid_generation))
-        }));
+        (0..live_rows.get())
+            .filter_map(|row| {
+                self.terminal.visible_row(row).map(|cells| {
+                    copy_row_from_live(&cells, row, ScreenId::Alternate, self.grid_generation)
+                })
+            })
+            .collect()
+    }
+
+    /// Every row of the primary document, oldest first: frozen history, then staging, then the
+    /// live grid when the live grid *is* the primary one.
+    ///
+    /// The live tail is conditional and that is the only difference from [`Self::copyable_rows`]'s
+    /// primary branch: a session parked on the alternate screen still has a primary history worth
+    /// reading, and its visible rows are somebody else's canvas.
+    fn primary_rows(&self) -> Vec<CopyRow> {
+        let mut rows: Vec<CopyRow> = self
+            .document
+            .entries()
+            .values()
+            .map(|entry| copy_row_from_history(&entry.line))
+            .collect();
+        rows.extend(
+            self.transcript
+                .staged_rows()
+                .map(|row| copy_row_from_staging(row, self.transcript.source_generation())),
+        );
+        if !self.terminal.modes().alternate_screen {
+            let (_, live_rows) = self.terminal.dimensions();
+            rows.extend((0..live_rows.get()).filter_map(|row| {
+                self.terminal.visible_row(row).map(|cells| {
+                    copy_row_from_live(&cells, row, ScreenId::Primary, self.grid_generation)
+                })
+            }));
+        }
         rows
+    }
+
+    /// The last line this command printed that had anything on it — the one the glance card quotes
+    /// when the command failed.
+    ///
+    /// **The span is `[C, D)` and it is the mark's own, not a guess about neighbours.** `C` is
+    /// where the shell said output begins and `D` is where it said the command ended, so the rows
+    /// that overlap that half-open span are exactly this command's output and nothing else's. A
+    /// rule stated over "the next mark's prompt" would have to invent an answer for the newest
+    /// command, for a mark whose successor was evicted, and for the `A`-less shells the ledger
+    /// already tolerates; this one has no such cases, because the boundaries are both facts the
+    /// shell reported about *this* command.
+    ///
+    /// *Last* and *non-empty*, in that order: a failing command's diagnosis is almost always its
+    /// final line, and a shell that leaves a blank line before its prompt would otherwise hand the
+    /// card an empty quote. Whitespace-only rows count as empty for the same reason a padded
+    /// prompt row does not count as typed text.
+    ///
+    /// `None` — and therefore no quoted line at all — whenever there is nothing honest to say: a
+    /// command with no `C` or no `D`, a mark whose id is gone, a span whose rows have all been
+    /// evicted from the transcript, or output that was genuinely blank. The card then stays the
+    /// one line it is for a success.
+    #[must_use]
+    pub fn command_output_last_line(&self, id: CommandMarkId) -> Option<String> {
+        let mark = self.command_marks.get(id)?;
+        let start = self.document.anchor(mark.executed?).ok()?;
+        let end = self.document.anchor(mark.finished?).ok()?;
+        let mut last: Option<String> = None;
+        for row in self.primary_rows() {
+            if !selection_overlaps(&row.start, &row.end, start, end) {
+                continue;
+            }
+            // Cell by cell and not row by row, for the row `C` itself lands on: the shell emits
+            // `C` at the end of the line it echoed the command on, so that row overlaps the span
+            // while contributing none of its characters to it. Taking the whole row would quote
+            // the prompt back at the reader as though the command had printed it.
+            let text: String = row
+                .cells
+                .iter()
+                .filter(|cell| selection_overlaps(&cell.start, &cell.end, start, end))
+                .map(|cell| cell.text.as_str())
+                .collect();
+            let text = text.trim();
+            if !text.is_empty() {
+                last = Some(text.to_owned());
+            }
+        }
+        last
     }
 
     /// The selection `Select all` installs: **the first row's start to the last row's end.**
@@ -7285,7 +7421,12 @@ impl DualPlaneSession {
                         RemovalScreen::Primary => ScreenId::Primary,
                         RemovalScreen::Alternate => ScreenId::Alternate,
                     };
-                    self.handle_shell_integration_marker(screen, GridPoint { row, column }, marker);
+                    self.handle_shell_integration_marker(
+                        screen,
+                        GridPoint { row, column },
+                        marker,
+                        observed_at,
+                    );
                 }
                 LifecycleDirective::WorkingDirectory { uri } => {
                     self.set_reported_working_directory(&uri);
@@ -23163,23 +23304,26 @@ mod tests {
         assert_eq!(session.command_mark(marks[0].id).unwrap(), &marks[0]);
     }
 
-    /// The boundary of what the command text can know, pinned from both sides.
+    /// One read carrying `C` *and* the whole of the command's output — and the text survives it.
     ///
-    /// The session applies a parse quantum's directives after the vendor has consumed the whole
-    /// quantum, so a read that carries `C` *and* a screenful of output has already scrolled the
-    /// command's own prompt row away before the ledger gets to look at it. The mark is still there,
-    /// still ordered, still carrying its exit status — it simply has no text, and says so. The
-    /// third session below is the control: identical bytes, a grid tall enough not to scroll, and
-    /// the text is there. Nothing about this is a fallback; it is one fact the terminal was in no
-    /// position to observe.
+    /// This pinned the opposite once. The session applied a parse quantum's directives only after
+    /// the vendor had consumed all of it, so a coalesced read scrolled the command's own prompt row
+    /// away before the ledger ever looked at it, and the mark arrived with no text. It was not the
+    /// exotic case the old comment claimed: a wake-coalesced drain hands over one read of up to
+    /// `PARSE_QUANTUM`, and a chatty child fills it.
+    ///
+    /// The adapter now pauses its action stream at every shell-integration marker
+    /// (`TerminalAdapter::feed`), so `C` is applied against the grid that stood at `C` no matter
+    /// what shares the read. All three deliveries below — coalesced onto a four-row grid, coalesced
+    /// onto a roomy one, and split the way a real PTY splits it — read the same command.
     #[test]
-    fn a_command_whose_output_arrives_in_the_same_read_keeps_its_mark_and_admits_it_has_no_text() {
+    fn a_command_whose_output_arrives_in_the_same_read_keeps_its_mark_and_its_text() {
         let coalesced =
             b"\x1b]133;A\x07PS> \x1b]133;B\x07echo ok\x1b]133;C\x07\r\none\r\ntwo\r\nthree\r\nfour\r\n\x1b]133;D;7\x07";
 
         let mut scrolled = DualPlaneSession::new(nz(40), nz(4));
         scrolled.feed(coalesced).unwrap();
-        assert_eq!(command_texts(&scrolled), vec![String::new()]);
+        assert_eq!(command_texts(&scrolled), vec!["echo ok".to_owned()]);
         assert_eq!(
             scrolled.command_marks()[0].exit_code,
             Some(7),
@@ -23202,6 +23346,168 @@ mod tests {
             vec!["echo ok".to_owned()],
             "the ordering a real PTY produces reads the text on a four-row grid too"
         );
+    }
+
+    /// The flood the user actually reported: `C` and ten thousand lines of output in one read.
+    ///
+    /// Ten thousand rows past a ten-row grid is every conceivable amount of scrolling, and the mark
+    /// still carries the command. This is the size-independence claim stated as a test — nothing in
+    /// the fix is a threshold.
+    #[test]
+    fn a_command_that_floods_the_grid_in_the_read_that_started_it_still_names_itself() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        let mut stream =
+            b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build --workspace\x1b]133;C\x07".to_vec();
+        for line in 0..10_000 {
+            stream.extend_from_slice(format!("\r\nline {line}").as_bytes());
+        }
+        stream.extend_from_slice(b"\r\n\x1b]133;D;0\x07");
+        assert!(
+            stream.len() < PARSE_QUANTUM,
+            "the point of the test is that it is one quantum"
+        );
+        session.feed(&stream).unwrap();
+
+        assert_eq!(
+            command_texts(&session),
+            vec!["cargo build --workspace".to_owned()]
+        );
+        assert_eq!(session.command_marks()[0].exit_code, Some(0));
+    }
+
+    /// A command typed on a **full** grid: the Enter that submits it scrolls before `C` lands.
+    ///
+    /// This is the shape a busy pane is always in, and it used to cost the command its text.
+    /// `PSConsoleHostReadLine` writes `C` *after* PSReadLine has printed the newline, so on a full
+    /// screen the grid has scrolled by one row in between — and a scroll bumps `grid_generation`,
+    /// which retires every write the region had recorded. `semantic_input_end_point`'s back-off
+    /// then found no live write to sit on and collapsed the region onto its own start, so the
+    /// witness was read across a zero-width span and came out empty. The typed row was never gone;
+    /// only the record of it was, and the grid is asked directly now.
+    ///
+    /// The absolute cursor address is PSReadLine's own redraw, and it is what puts the cursor at
+    /// column zero of the scrolled row when the newline lands — the exact geometry a real
+    /// `BT_PTY_DUMP` of a failing command shows.
+    #[test]
+    fn a_command_typed_on_a_full_grid_survives_the_newline_that_scrolls_it() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        // Three rows of output, so the prompt lands on the last row the grid has.
+        session.feed(b"one\r\ntwo\r\nthree\r\n").unwrap();
+        session.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07").unwrap();
+        // PSReadLine re-addresses and redraws the whole input line on every key.
+        session.feed(b"\x1b[4;5Hcmd /c fail.cmd\x1b[4;20H").unwrap();
+        // Enter, then `C` — the order the integration writes them in, in one read.
+        session.feed(b"\r\n\x1b]133;C\x07").unwrap();
+        session.feed(b"boom\r\n\x1b]133;D;1\x07").unwrap();
+
+        assert_eq!(command_texts(&session), vec!["cmd /c fail.cmd".to_owned()]);
+        assert_eq!(session.command_marks()[0].exit_code, Some(1));
+    }
+
+    /// The residue: what no quantum can rescue.
+    ///
+    /// A typed line taller than the pane — a paste, or a very long command on a short grid — has
+    /// already pushed its own `B` off the top of the screen *before* `C` is emitted. There is no
+    /// earlier moment to read it at; the prompt row is gone from every grid that ever existed after
+    /// it. So the text is empty, honestly, and the rail's card says so in the muted ink.
+    #[test]
+    fn a_command_typed_past_the_top_of_the_grid_has_no_text_left_to_read() {
+        let mut session = DualPlaneSession::new(nz(20), nz(3));
+        let mut stream = b"\x1b]133;A\x07PS> \x1b]133;B\x07".to_vec();
+        // Six wrapped rows of typing on a three-row grid: `B`'s row is three rows above the top.
+        stream.extend_from_slice("x".repeat(120).as_bytes());
+        stream.extend_from_slice(b"\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+        session.feed(&stream).unwrap();
+
+        assert_eq!(
+            command_texts(&session),
+            vec![String::new()],
+            "the row `B` named is above every grid this session has had since"
+        );
+        assert_eq!(
+            session.command_marks()[0].exit_code,
+            Some(0),
+            "everything the shell did report is still recorded"
+        );
+    }
+
+    /// The `C..D` span read backwards: the last line the command actually printed.
+    ///
+    /// This is what the glance card quotes over a failure. The rules it pins are the honest ones —
+    /// the span is the mark's own `[C, D)`, trailing blank rows do not count as the answer, and a
+    /// command with no output at all has none rather than an empty string.
+    #[test]
+    fn a_commands_last_printed_line_is_read_from_its_own_output_span() {
+        let mut session = DualPlaneSession::new(nz(60), nz(12));
+        run_command(&mut session, "cargo build", "warning: unused\r\n", "0");
+        run_command(
+            &mut session,
+            "cargo test",
+            "running 3 tests\r\nerror[E0308]: mismatched types\r\n\r\n",
+            "101",
+        );
+        run_command(&mut session, "true", "", "0");
+
+        let marks: Vec<CommandMarkId> =
+            session.command_marks().iter().map(|mark| mark.id).collect();
+        assert_eq!(
+            session.command_output_last_line(marks[0]).as_deref(),
+            Some("warning: unused")
+        );
+        assert_eq!(
+            session.command_output_last_line(marks[1]).as_deref(),
+            Some("error[E0308]: mismatched types"),
+            "the blank row the shell left before its prompt is not the answer"
+        );
+        assert_eq!(
+            session.command_output_last_line(marks[2]),
+            None,
+            "a command that printed nothing has no line, not an empty one"
+        );
+        // Neighbours do not leak: the first command's span stops at its own `D`, however much the
+        // second one printed after it.
+        assert_eq!(
+            session.command_output_last_line(marks[0]).as_deref(),
+            Some("warning: unused")
+        );
+    }
+
+    /// The clock the card's `· 42s` is read from, and the boundary it is measured between.
+    #[test]
+    fn a_marks_duration_is_the_span_from_c_to_d_and_nothing_wider() {
+        let mut session = DualPlaneSession::new(nz(60), nz(12));
+        let start = Instant::now();
+        // `B` an hour before `C`: the command sat at the prompt while somebody went to lunch.
+        session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07sleep 5", start)
+            .unwrap();
+        session
+            .feed_at(b"\x1b]133;C\x07", start + Duration::from_secs(3600))
+            .unwrap();
+        session
+            .feed_at(
+                b"\r\ndone\r\n\x1b]133;D;0\x07",
+                start + Duration::from_secs(3605),
+            )
+            .unwrap();
+
+        let mark = &session.command_marks()[0];
+        assert_eq!(mark.command_text, "sleep 5");
+        assert_eq!(
+            mark.duration(),
+            Some(Duration::from_secs(5)),
+            "the lunch hour between `B` and `C` is not the command running"
+        );
+
+        // Nothing to measure until `D` has been seen.
+        let mut running = DualPlaneSession::new(nz(60), nz(12));
+        running
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07watch\x1b]133;C\x07",
+                start,
+            )
+            .unwrap();
+        assert_eq!(running.command_marks()[0].duration(), None);
     }
 
     /// The `.cmdtick.fail` datum. Before this ledger the only exit code in the session was a single
