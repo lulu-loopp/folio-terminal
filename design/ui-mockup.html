@@ -2223,7 +2223,21 @@
        overruns that, so a short page leaves its body empty below its rows and
        cannot be scrolled at all. Pages stacked in one box would have handed
        every short page the tallest one's scroll extent, and a bar over nothing. */
-    max-height: calc(100% - 72px);     /* never taller than the window it sits in */
+    /* Never taller than the window it sits in, AND never taller than 600 (user
+       report 2026-08-17). The cap is the ruling above caught by its own
+       consequence: one height means the TALLEST page sets it, the tallest page
+       is the forty-line shortcut table, and the dialog arrived running from the
+       caption to the bottom edge — a whole-window surface, which is the one
+       shape `width: min(720px, 92%)` was chosen to avoid. The height needs the
+       same sentence said on its own axis.
+
+       600 is where an everyday page stops needing a scroll bar: 2 of border and
+       56 of header leave 542 for the body, a page spends 10 + 18 on its own
+       paddings and 10 + 13 + 2 on its one heading, and the 489 left is nine
+       54px rows — or eight of them plus a folded `Advanced` (38.5), which is the
+       shape Appearance has. What is left to scroll is exactly what should: the
+       shortcut table, and an `Advanced` group somebody opened. */
+    max-height: min(600px, calc(100% - 72px));
     display: flex; flex-direction: column;
     background: var(--win);
     border: 1px solid var(--border);
