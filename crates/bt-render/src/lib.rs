@@ -113,7 +113,7 @@ use theme::{
     DEFAULT_STATUS_BACKGROUND_RGB, search_current_ink_rgb, search_current_rgb, search_match_rgb,
     selection_background_rgb,
 };
-pub use theme::{background_is_light, ink_over_bp, schemes_in_force, set_schemes};
+pub use theme::{background_is_light, ink_over_bp, scheme_in_force, schemes_in_force, set_schemes};
 
 /// `mark.srch { border-radius: 3px }` (mock-up 1530) — the corner a found word
 /// wears, and the one thing that tells it apart from a dragged selection at a
@@ -9342,20 +9342,10 @@ fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
 }
 
 fn indexed_color(index: u8) -> [u8; 3] {
-    if index < 16 {
-        return ansi_16_rgb()[index as usize];
-    }
-    if index < 232 {
-        let cube = index - 16;
-        let component = |value: u8| if value == 0 { 0 } else { 55 + 40 * value };
-        return [
-            component(cube / 36),
-            component((cube % 36) / 6),
-            component(cube % 6),
-        ];
-    }
-    let gray = 8 + 10 * (index - 232);
-    [gray, gray, gray]
+    // The 240 above the scheme's sixteen are the protocol's, not this window's,
+    // and they are spelled once in `bt_transcript` because the terminal answers
+    // `OSC 4;N;?` out of the same table this draws from.
+    bt_transcript::indexed_cube_color(index).unwrap_or_else(|| ansi_16_rgb()[index as usize])
 }
 
 #[cfg(test)]

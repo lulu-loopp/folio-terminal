@@ -1759,6 +1759,19 @@ pub(crate) fn scheme_for_theme(theme: Theme) -> ColourScheme {
     }
 }
 
+/// The scheme the canvas on screen is actually wearing.
+///
+/// The one reader outside this crate is the answer to a program's colour query
+/// (`OSC 4/10/11/12;?`). That answer has to be the colours the glass is showing
+/// and not the colours the settings file names, which is why this is keyed on
+/// the painted background's own luma exactly as [`scheme_for_background`] is:
+/// under a `BT_BG` override the two disagree on purpose, and a program told the
+/// settings' colours would dress itself for a canvas nobody is looking at.
+#[must_use]
+pub fn scheme_in_force() -> ColourScheme {
+    scheme_for_background(background_rgb())
+}
+
 /// The pair in force, as `(light, dark)`.
 ///
 /// The one reader is the schemes folder's watcher (§7.1.6c-4c). When the file

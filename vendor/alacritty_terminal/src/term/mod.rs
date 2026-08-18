@@ -161,6 +161,7 @@ bitflags! {
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
         const GRAPHEME_CLUSTERING     = 1 << 23;
+        const THEME_UPDATE_NOTIFICATION = 1 << 24;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -2819,6 +2820,16 @@ impl<T: EventListener> Handler for Term<T> {
             self.mode.insert(TermMode::GRAPHEME_CLUSTERING);
             return;
         }
+        // Folio: DEC 2031, the dark/light change notification kitty, foot,
+        // contour and WezTerm all speak. `vte` has no name for it, so it
+        // arrives as an unknown mode exactly as 2027 above does. Setting it is
+        // a subscription and nothing else: the terminal owes the child a
+        // `CSI ? 997 ; Ps n` when the window changes canvas, and that is sent
+        // by the embedder, which is the only party that knows a canvas moved.
+        if matches!(mode, PrivateMode::Unknown(2031)) {
+            self.mode.insert(TermMode::THEME_UPDATE_NOTIFICATION);
+            return;
+        }
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
@@ -2887,6 +2898,11 @@ impl<T: EventListener> Handler for Term<T> {
         if matches!(mode, PrivateMode::Unknown(2027)) {
             self.grapheme = GraphemeState::default();
             self.mode.remove(TermMode::GRAPHEME_CLUSTERING);
+            return;
+        }
+        // Folio: see `set_private_mode`.
+        if matches!(mode, PrivateMode::Unknown(2031)) {
+            self.mode.remove(TermMode::THEME_UPDATE_NOTIFICATION);
             return;
         }
         let mode = match mode {
@@ -2983,6 +2999,10 @@ impl<T: EventListener> Handler for Term<T> {
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
             },
             PrivateMode::Unknown(2027) => self.mode.contains(TermMode::GRAPHEME_CLUSTERING).into(),
+            PrivateMode::Unknown(2031) => self
+                .mode
+                .contains(TermMode::THEME_UPDATE_NOTIFICATION)
+                .into(),
             PrivateMode::Unknown(_) => ModeState::NotSupported,
         };
 

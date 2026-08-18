@@ -71,12 +71,13 @@ use bt_render::{
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
     WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, compose_preedit, current_cursor_style,
     foreground_rgb, frame_content_digest, frame_is_alternate_screen, preview_image_extent,
-    set_cursor_style, set_theme, theme_revision,
+    scheme_in_force, set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
-    SessionDecorationTask, SessionMathTask, SessionStatus, TerminalModes,
-    normalized_local_image_path_key, render_detection_task, render_live_detection_task,
+    SessionDecorationTask, SessionMathTask, SessionStatus, TerminalCanvas, TerminalModes,
+    TerminalPalette, normalized_local_image_path_key, render_detection_task,
+    render_live_detection_task,
 };
 use bt_transcript::{DEFAULT_STAGING_QUOTA, SourceGeneration, TranscriptId};
 use bt_viewport::{
@@ -14061,6 +14062,41 @@ impl DrainOutcome {
     }
 }
 
+/// The colours a program inside any pane of this process is standing on.
+///
+/// Nineteen colours and the canvas they make, assembled here because this is the
+/// only crate that can see both halves: `bt-render` owns the scheme and the one
+/// luma threshold that sorts dark from light, `bt-term` owns the escape-code
+/// contract that spells the answer. Neither can reach the other, and neither
+/// should — a terminal that derived its own dark/light verdict would be a second
+/// threshold waiting to disagree with the one the window paints by.
+///
+/// The background and the ink are read from the *painted* canvas rather than off
+/// the scheme, because a `BT_BG` override moves the glass without moving the
+/// settings, and what a program asks about is the glass.
+fn terminal_palette_in_force() -> TerminalPalette {
+    terminal_palette(scheme_in_force(), background_rgb(), foreground_rgb())
+}
+
+/// The mapping alone, so it can be pinned without moving process-wide state.
+fn terminal_palette(
+    scheme: bt_render::ColourScheme,
+    background: [u8; 3],
+    foreground: [u8; 3],
+) -> TerminalPalette {
+    TerminalPalette {
+        canvas: if bt_render::background_is_light(background) {
+            TerminalCanvas::Light
+        } else {
+            TerminalCanvas::Dark
+        },
+        background,
+        foreground,
+        cursor: scheme.cursor,
+        ansi: scheme.ansi,
+    }
+}
+
 /// Drain one shell's pipe into its own screen.
 ///
 /// "Name" and not "title", and the difference was a live bug. This used to watch
@@ -14081,6 +14117,12 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
         return Ok(DrainOutcome::default());
     }
     let name_before = leaf.name_evidence();
+    // Told on every turn rather than at each of the half-dozen places a theme,
+    // a scheme or a scheme *file* can change, because a list of those places is
+    // a list somebody has to remember to extend. The call is a comparison and a
+    // nineteen-colour copy; it queues bytes only when the canvas actually moved
+    // and only for a pane that asked to hear about it (DEC 2031).
+    leaf.session.set_color_palette(terminal_palette_in_force());
     let mut changed = false;
     loop {
         let bytes = leaf
@@ -14103,6 +14145,16 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
                 .context("return terminal protocol reply to PTY")?;
         }
         changed = true;
+    }
+    // A canvas notification, and any colour answer queued behind it, is owed to
+    // a child that has said nothing — so the reply channel is drained once more
+    // outside the read loop, which only turns when the child speaks.
+    for reply in leaf.session.take_pty_writes() {
+        leaf.pty
+            .as_mut()
+            .expect("PTY mode checked above")
+            .write(&reply)
+            .context("return terminal protocol reply to PTY")?;
     }
     // The one place a shell is heard to speak. Every leaf of every tab passes
     // through here on every turn of the loop, which is what lets a pane nobody
@@ -49197,6 +49249,36 @@ mod tests {
         assert_eq!(resolved_theme_change(Light, OsLight), None);
         assert_eq!(resolved_theme_change(Dark, OsDark), None);
         assert_eq!(resolved_theme_change(Dark, OsLight), None);
+    }
+
+    /// What a program inside a pane is told when it asks, on each canvas.
+    ///
+    /// The `BT_BG` row is the one that earns this test: the override moves the
+    /// glass without moving the settings, and a window that answered `OSC 11;?`
+    /// out of the *scheme* would send a program off to dress for a canvas nobody
+    /// is looking at. The canvas verdict and the background must both come from
+    /// the painted colour; only the sixteen and the caret come from the scheme.
+    #[test]
+    fn the_colours_a_program_is_told_are_the_ones_the_glass_is_wearing() {
+        use bt_render::{FOLIO_DARK, FOLIO_LIGHT};
+
+        let light = terminal_palette(FOLIO_LIGHT, [0xff, 0xff, 0xff], [0x37, 0x35, 0x2f]);
+        assert_eq!(light.canvas, TerminalCanvas::Light);
+        assert_eq!(light.background, [0xff, 0xff, 0xff]);
+        assert_eq!(light.foreground, [0x37, 0x35, 0x2f]);
+        assert_eq!(light.ansi, FOLIO_LIGHT.ansi);
+        assert_eq!(light.cursor, FOLIO_LIGHT.cursor);
+
+        let dark = terminal_palette(FOLIO_DARK, [0x1b, 0x1b, 0x1b], [0xe1, 0xe1, 0xe1]);
+        assert_eq!(dark.canvas, TerminalCanvas::Dark);
+        assert_eq!(dark.background, [0x1b, 0x1b, 0x1b]);
+        assert_ne!(dark.ansi, light.ansi);
+
+        // A `BT_BG` override: the light scheme is in force by luma, and what the
+        // program is told is the overridden canvas, not the scheme's own white.
+        let overridden = terminal_palette(FOLIO_LIGHT, [0xf0, 0xe8, 0xd8], [0x37, 0x35, 0x2f]);
+        assert_eq!(overridden.canvas, TerminalCanvas::Light);
+        assert_eq!(overridden.background, [0xf0, 0xe8, 0xd8]);
     }
 
     /// **Whose size is it** (user ruling 2026-08-08), as the three rules that decide it.

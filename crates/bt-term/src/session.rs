@@ -56,6 +56,7 @@ use crate::{
         scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
+    palette::TerminalPalette,
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
 };
 
@@ -1203,6 +1204,16 @@ impl DualPlaneSession {
     /// Protocol replies are returned to the owning app, which is the only PTY writer.
     pub fn take_pty_writes(&self) -> Vec<Vec<u8>> {
         self.terminal.take_pty_writes()
+    }
+
+    /// Tell this session's terminal what the window it is drawn in is painted
+    /// in, so a program inside it can ask and get a true answer.
+    ///
+    /// The colours come from the renderer's scheme and the canvas from the
+    /// renderer's one dark/light threshold; nothing in this crate derives
+    /// either. See `crate::palette`.
+    pub fn set_color_palette(&mut self, palette: TerminalPalette) {
+        self.terminal.set_color_palette(palette);
     }
 
     pub fn document(&self) -> &HistoryDocument {

@@ -179,6 +179,43 @@ pub enum TerminalColor {
     Rgb(u8, u8, u8),
 }
 
+/// What [`TerminalColor::Indexed`] means for the 240 slots the *protocol* owns
+/// rather than the palette.
+///
+/// The 256-colour space is two different kinds of thing wearing one numbering.
+/// `0..16` are the scheme's sixteen — nothing here can answer them, and this
+/// returns `None` so that a caller which has no palette cannot be handed a
+/// plausible-looking wrong colour. `16..232` is xterm's 6x6x6 cube and
+/// `232..256` its 24-step grey ramp, and those two are **constants of the
+/// escape-code protocol**: every terminal on earth resolves index 196 to
+/// `#ff0000`, no scheme gets a vote, and a window that answered `OSC 4;196;?`
+/// with something else would simply be wrong.
+///
+/// It lives in the transcript crate because that is the one crate both readers
+/// share. The renderer resolves an `Indexed` cell with it, and the terminal
+/// answers `OSC 4;N;?` with it; before this existed the cube was written out
+/// twice, which is one arithmetic slip away from a window that draws a colour
+/// it does not admit to.
+#[must_use]
+pub fn indexed_cube_color(index: u8) -> Option<[u8; 3]> {
+    if index < 16 {
+        return None;
+    }
+    if index < 232 {
+        let cube = index - 16;
+        // 0, 95, 135, 175, 215, 255 - xterm's own five-step ramp, which is not
+        // linear: the first step is 95 and every later one is 40.
+        let component = |value: u8| if value == 0 { 0 } else { 55 + 40 * value };
+        return Some([
+            component(cube / 36),
+            component((cube % 36) / 6),
+            component(cube % 6),
+        ]);
+    }
+    let grey = 8 + 10 * (index - 232);
+    Some([grey, grey, grey])
+}
+
 bitflags! {
     /// Stable transcript style flags. Bit positions are owned by Folio.
     #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -1036,6 +1073,25 @@ fn normalize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_two_hundred_forty_protocol_slots_are_xterms_and_the_sixteen_are_nobodys() {
+        use super::indexed_cube_color;
+
+        // The scheme's sixteen have no protocol answer.
+        for index in 0..16u8 {
+            assert_eq!(indexed_cube_color(index), None, "index {index}");
+        }
+        // The cube's corners, which every terminal agrees on.
+        assert_eq!(indexed_cube_color(16), Some([0x00, 0x00, 0x00]));
+        assert_eq!(indexed_cube_color(21), Some([0x00, 0x00, 0xff]));
+        assert_eq!(indexed_cube_color(196), Some([0xff, 0x00, 0x00]));
+        assert_eq!(indexed_cube_color(231), Some([0xff, 0xff, 0xff]));
+        // The grey ramp's ends, which stop short of both black and white on
+        // purpose - 8 and 238, not 0 and 255.
+        assert_eq!(indexed_cube_color(232), Some([0x08, 0x08, 0x08]));
+        assert_eq!(indexed_cube_color(255), Some([0xee, 0xee, 0xee]));
+    }
+
     use super::*;
 
     fn nz(value: usize) -> NonZeroUsize {

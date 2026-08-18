@@ -16,7 +16,10 @@ use alacritty_terminal::{
         Config, ScrollOutCause, ScrollRegionScope, TermDamage, TermMode, TranscriptEvent,
         TranscriptScreen, cell::Flags,
     },
-    vte::{Params, Parser, Perform, ansi::Processor},
+    vte::{
+        Params, Parser, Perform,
+        ansi::{Processor, Rgb},
+    },
 };
 use bt_transcript::CapturedRow;
 
@@ -24,6 +27,7 @@ use crate::cell_capture::{
     CapturedRowFingerprint, captured_row_fingerprint, snapshot, to_captured_row,
 };
 use crate::inline_image::{InlineImageStreamAction, Osc1337Scanner, ShellIntegrationMarker};
+use crate::palette::{TerminalCanvas, TerminalPalette};
 
 pub const SCROLLBACK_LINES: usize = 0;
 
@@ -166,10 +170,59 @@ pub enum TerminalDamage {
     Rows(Vec<u32>),
 }
 
+/// One entry in the queue of bytes owed to the child.
+///
+/// Two variants and not one, because a colour query cannot be answered where it
+/// is heard. The vendored terminal raises `Event::ColorRequest` from inside a
+/// `&mut Term` borrow, so the listener that receives it can see neither the
+/// colours the child has already overridden (they live on that same `Term`) nor
+/// the palette the window is wearing (which lives on the adapter). Queuing the
+/// question **in its place in the stream** and resolving it at drain time keeps
+/// the one property that matters: a program which writes `OSC 11;?` and then
+/// `CSI 6n` reads its two answers back in the order it asked them.
+enum PendingReply {
+    /// Bytes the terminal state machine already knows in full - DSR, DA, DECRQM.
+    Bytes(Vec<u8>),
+    /// A colour query, held with the formatter the vendored parser built for it.
+    /// That closure is the only carrier of the terminator the asker used, so
+    /// answering through it is what makes a BEL-terminated query get a
+    /// BEL-terminated reply.
+    Color {
+        index: usize,
+        format: Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>,
+    },
+}
+
+impl PendingReply {
+    /// The bytes to send, or `None` when this window cannot honestly answer.
+    ///
+    /// `overridden` is what the *child* set with `OSC 4/10/11/12;<colour>`,
+    /// which outranks the window palette for the same reason a program's own
+    /// SGR 31 outranks the scheme: the terminal was told, and a terminal that
+    /// forgets what it was told is lying.
+    fn bytes(
+        self,
+        overridden: impl FnOnce(usize) -> Option<Rgb>,
+        palette: Option<&TerminalPalette>,
+    ) -> Option<Vec<u8>> {
+        match self {
+            PendingReply::Bytes(bytes) => Some(bytes),
+            PendingReply::Color { index, format } => {
+                let color = overridden(index).or_else(|| {
+                    palette
+                        .and_then(|palette| palette.color(index))
+                        .map(|[r, g, b]| Rgb { r, g, b })
+                })?;
+                Some(format(color).into_bytes())
+            }
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CaptureListener {
     transcript_events: Arc<Mutex<Vec<TranscriptEvent>>>,
-    pty_writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    pty_writes: Arc<Mutex<Vec<PendingReply>>>,
     adapter_events: Arc<Mutex<Vec<AdapterEvent>>>,
 }
 
@@ -180,7 +233,12 @@ impl EventListener for CaptureListener {
                 .pty_writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(text.into_bytes()),
+                .push(PendingReply::Bytes(text.into_bytes())),
+            Event::ColorRequest(index, format) => self
+                .pty_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(PendingReply::Color { index, format }),
             Event::Title(title) => self
                 .adapter_events
                 .lock()
@@ -257,6 +315,21 @@ pub struct TerminalAdapter {
     /// Each visible row's capture, filed under the fingerprint of the vendor
     /// cells it was made from. See [`Self::visible_row`].
     captured_rows: RefCell<Vec<Option<(CapturedRowFingerprint, CapturedRow)>>>,
+    /// What the window says it is painted in, or `None` while nobody has said.
+    ///
+    /// `None` is a real state and not an oversight: this crate is a logic-only
+    /// terminal that also runs headless in tests and in the `bt-pty` harnesses,
+    /// and a colour query there has no honest answer. It goes unanswered rather
+    /// than answered with a guess - see `crate::palette`.
+    color_palette: Option<TerminalPalette>,
+    /// The canvas last handed to [`Self::set_color_palette`].
+    ///
+    /// Held apart from the palette itself so the DEC 2031 notification fires on
+    /// a *change* and not on every drain. It is updated whether or not anybody
+    /// is subscribed, so that a program which enables 2031 mid-session is not
+    /// immediately told about a switch that happened before it was listening -
+    /// its own `OSC 11;?` is how it learns where it started.
+    announced_canvas: Option<TerminalCanvas>,
 }
 
 struct ResizeCanonical {
@@ -384,7 +457,42 @@ impl TerminalAdapter {
             row_fingerprint_seed,
             captures: Cell::new(0),
             captured_rows: RefCell::new(Vec::new()),
+            color_palette: None,
+            announced_canvas: None,
         }
+    }
+
+    /// Tell this terminal what the window it lives in is painted in.
+    ///
+    /// Idempotent and cheap, so the owning app can call it on every turn of its
+    /// pipe drain rather than maintaining a list of every place a theme can
+    /// change; comparing the canvas here is what makes calling it repeatedly
+    /// free.
+    ///
+    /// A canvas change queues DEC mode 2031's `CSI ? 997 ; Ps n` for a program
+    /// that subscribed to it. Programs that did not subscribe are told nothing:
+    /// the sequence would be read as input by anything that never asked for it.
+    pub fn set_color_palette(&mut self, palette: TerminalPalette) {
+        let moved = self
+            .announced_canvas
+            .is_some_and(|announced| announced != palette.canvas);
+        self.announced_canvas = Some(palette.canvas);
+        self.color_palette = Some(palette);
+        if moved && self.theme_update_notification() {
+            self.listener
+                .pty_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(PendingReply::Bytes(palette.canvas_notification()));
+        }
+    }
+
+    /// Whether the child asked to be told when the window changes canvas
+    /// (DEC private mode 2031).
+    pub fn theme_update_notification(&self) -> bool {
+        self.term
+            .mode()
+            .contains(TermMode::THEME_UPDATE_NOTIFICATION)
     }
 
     pub fn alacritty_history_size(&self) -> usize {
@@ -837,14 +945,22 @@ impl TerminalAdapter {
     }
 
     /// Drain protocol replies generated by the terminal state machine (for example DSR).
+    ///
+    /// Colour queries are resolved here rather than where they were heard, and
+    /// in the order they were asked - see [`PendingReply`].
     pub fn take_pty_writes(&self) -> Vec<Vec<u8>> {
-        std::mem::take(
+        let pending = std::mem::take(
             &mut *self
                 .listener
                 .pty_writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
+        );
+        let colors = self.term.colors();
+        pending
+            .into_iter()
+            .filter_map(|reply| reply.bytes(|index| colors[index], self.color_palette.as_ref()))
+            .collect()
     }
 
     fn drain_adapter_events(&self) -> Vec<AdapterEvent> {
@@ -1643,6 +1759,206 @@ mod tests {
         terminal.feed(b"\x1b[?1049l\x1b[?1007l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
         assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Off);
         assert!(!terminal.modes().alternate_screen);
+    }
+
+    /// The light scheme this product ships, as far as a colour query can see it.
+    fn light_palette() -> TerminalPalette {
+        let mut ansi = [[0x00, 0x00, 0x00]; 16];
+        ansi[2] = [0x00, 0xa6, 0x00];
+        TerminalPalette {
+            canvas: TerminalCanvas::Light,
+            background: [0xff, 0xff, 0xff],
+            foreground: [0x37, 0x35, 0x2f],
+            cursor: [0x37, 0x35, 0x2f],
+            ansi,
+        }
+    }
+
+    fn dark_palette() -> TerminalPalette {
+        TerminalPalette {
+            canvas: TerminalCanvas::Dark,
+            background: [0x1b, 0x1b, 0x1b],
+            foreground: [0xe1, 0xe1, 0xe1],
+            cursor: [0xd4, 0xd4, 0xd4],
+            ansi: [[0x0c, 0x0c, 0x0c]; 16],
+        }
+    }
+
+    #[test]
+    fn a_colour_query_is_answered_out_of_the_palette_the_window_is_wearing() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(light_palette());
+
+        terminal.feed(b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\".to_vec()]
+        );
+
+        terminal.feed(b"\x1b]10;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]10;rgb:3737/3535/2f2f\x1b\\".to_vec()]
+        );
+
+        terminal.feed(b"\x1b]12;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]12;rgb:3737/3535/2f2f\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn osc_4_answers_the_schemes_sixteen_and_the_protocols_two_hundred_forty() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(light_palette());
+
+        terminal.feed(b"\x1b]4;2;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]4;2;rgb:0000/a6a6/0000\x1b\\".to_vec()]
+        );
+
+        // 196 and 255 are the cube and the grey ramp: nobody's scheme, so the
+        // answer must be the same on either canvas.
+        terminal.feed(b"\x1b]4;196;?\x1b\\\x1b]4;255;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![
+                b"\x1b]4;196;rgb:ffff/0000/0000\x1b\\".to_vec(),
+                b"\x1b]4;255;rgb:eeee/eeee/eeee\x1b\\".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_colour_answer_is_terminated_the_way_the_question_was() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(light_palette());
+
+        terminal.feed(b"\x1b]11;?\x07");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]11;rgb:ffff/ffff/ffff\x07".to_vec()]
+        );
+    }
+
+    #[test]
+    fn colour_answers_keep_their_place_in_the_reply_stream() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(light_palette());
+
+        terminal.feed(b"\x1b]11;?\x1b\\\x1b[6n");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![
+                b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\".to_vec(),
+                b"\x1b[1;1R".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_colour_query_before_the_window_has_said_what_it_wears_is_not_answered() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b]11;?\x1b\\\x1b[6n");
+        // Silence for the colour, and the DSR reply still on time behind it.
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[1;1R".to_vec()]);
+    }
+
+    #[test]
+    fn a_new_palette_answers_the_next_query_and_never_the_last_one() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(dark_palette());
+        terminal.feed(b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]11;rgb:1b1b/1b1b/1b1b\x1b\\".to_vec()]
+        );
+
+        terminal.set_color_palette(light_palette());
+        terminal.feed(b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn a_colour_the_child_set_itself_outranks_the_windows_palette() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(light_palette());
+
+        terminal.feed(b"\x1b]11;#123456\x1b\\\x1b]11;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]11;rgb:1212/3434/5656\x1b\\".to_vec()]
+        );
+
+        // And it is still the child's colour after the window repaints itself
+        // in another scheme: the terminal was told, and does not forget.
+        terminal.set_color_palette(dark_palette());
+        terminal.feed(b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]11;rgb:1212/3434/5656\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn a_palette_survives_the_branch_swap_at_the_end_of_a_resize() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(light_palette());
+
+        terminal.begin_resize_transaction();
+        terminal.resize(nz(12), nz(3));
+        terminal.reconcile_resize_transaction_to_viewport();
+        terminal.finish_resize_transaction();
+
+        terminal.feed(b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            terminal.take_pty_writes(),
+            vec![b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn dec_mode_2031_query_set_and_reset_use_standard_decrqm_semantics() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?2031$p");
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?2031;2$y".to_vec()]);
+        assert!(!terminal.theme_update_notification());
+
+        terminal.feed(b"\x1b[?2031h\x1b[?2031$p");
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?2031;1$y".to_vec()]);
+        assert!(terminal.theme_update_notification());
+
+        terminal.feed(b"\x1b[?2031l\x1b[?2031$p");
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?2031;2$y".to_vec()]);
+        assert!(!terminal.theme_update_notification());
+    }
+
+    #[test]
+    fn a_canvas_change_is_announced_only_to_a_pane_that_subscribed_to_it() {
+        let mut unsubscribed = TerminalAdapter::new(nz(8), nz(3));
+        unsubscribed.set_color_palette(dark_palette());
+        unsubscribed.set_color_palette(light_palette());
+        assert!(unsubscribed.take_pty_writes().is_empty());
+
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.set_color_palette(dark_palette());
+        terminal.feed(b"\x1b[?2031h");
+        assert!(terminal.take_pty_writes().is_empty());
+
+        terminal.set_color_palette(light_palette());
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?997;2n".to_vec()]);
+
+        // A repaint in the same canvas is not a change and says nothing.
+        terminal.set_color_palette(light_palette());
+        assert!(terminal.take_pty_writes().is_empty());
+
+        terminal.set_color_palette(dark_palette());
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?997;1n".to_vec()]);
     }
 
     #[test]

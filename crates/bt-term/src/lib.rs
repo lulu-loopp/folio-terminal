@@ -6,6 +6,7 @@ mod command_marks;
 mod diagnostics;
 mod inline_image;
 mod lifecycle;
+mod palette;
 mod scheduling;
 mod session;
 
@@ -36,6 +37,8 @@ pub use inline_image::{
     local_host_name, mebibytes, normalized_local_image_path_key, resolve_relative_image_path,
     scale_inline_image,
 };
+pub use palette::{TerminalCanvas, TerminalPalette};
+
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,
     RowDirective, RowShape, classify, plan_resize,
