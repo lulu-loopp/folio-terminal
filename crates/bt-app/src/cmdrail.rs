@@ -1515,22 +1515,84 @@ pub fn peek_host(rail: &Rail, index: usize) -> Option<[f32; 4]> {
 /// read as the card being broken rather than as the line being gone.
 pub const PEEK_EMPTY_LINE_TEXT: &str = "line";
 
+/// A command's run time, in the coarsest form that is still true.
+///
+/// The ladder is the git panel's ([`crate::git::relative_time`]) with the calendar
+/// half cut off, because a command is not a commit: it spans seconds to hours, so
+/// `{n}s`, `{n}m`, `{n}h` and nothing below or above.
+///
+/// **Under a second says nothing at all.** Most commands are instant, and a card
+/// reading `ls · 0s` would spend a third of its width to tell the reader that
+/// nothing happened; `437ms` is worse, because it is a number nobody glances at.
+/// Silence here is the same silence the exit code keeps for zero — see
+/// [`peek_text`] — and it means the same thing: there is nothing here worth a
+/// reader's eye.
+///
+/// The unit boundary truncates rather than rounds, so a label never claims a
+/// minute that has not elapsed: 119 seconds is `1m`, not `2m`.
+#[must_use]
+pub fn peek_duration(elapsed: Duration) -> Option<String> {
+    let seconds = elapsed.as_secs();
+    if seconds < 1 {
+        return None;
+    }
+    if seconds < 60 {
+        return Some(format!("{seconds}s"));
+    }
+    if seconds < 60 * 60 {
+        return Some(format!("{}m", seconds / 60));
+    }
+    Some(format!("{}h", seconds / (60 * 60)))
+}
+
 /// What the glance card says about one tick, and whether it says it in the muted
 /// ink.
 ///
 /// # The readings
 ///
-/// * a **single command tick** — the command, verbatim; or `"running · {cmd}"`
-///   when `D` never arrived, so there is no status to report and the card says the
-///   one thing that is true of it; or [`PEEK_EMPTY_TEXT`] in the muted ink when
-///   the ledger never got the text at all (`command_marks.rs` leaves it empty when
-///   `C` and the output that scrolled the prompt off the grid arrived in one PTY
-///   read) — *"a one-liner that says nothing would read as a broken card, and the
-///   gap is the ledger's, honestly"*.
+/// * a **single command tick** — the command, then what became of it:
+///   `"cargo test{sep}42s{sep}exit 1"`. Both suffixes are conditional (below);
+///   a fast command that succeeded is still the bare command line it always was.
+/// * a **failed** command adds a **second line**: the last non-empty line of its
+///   own output, as `output_tail` gives it. That line is where the error is,
+///   essentially always, and a card that made the reader open the pane to find
+///   out *what* failed would be a card that stopped one word short. Success cards
+///   stay one line: there is nothing there a reader wants.
+/// * a command that is still running — `"running{sep}{cmd}"`, unchanged. There is
+///   no status to report and no duration either: [`bt_term::CommandMark::duration`]
+///   deliberately refuses to answer with the clock, and a card whose number moved
+///   while it was being read would be churn rather than information.
+/// * [`PEEK_EMPTY_TEXT`] in the muted ink when the ledger never got the text —
+///   which since the adapter began pausing at shell-integration markers means only
+///   a command typed past the top of its own grid (`session.rs`'s
+///   `absorb_command_text`). The *facts* still ride along: a card that withheld
+///   `exit 1` because the text was missing would be punishing the reader for the
+///   ledger's gap, and the muted ink already says which half of the card is the gap.
 /// * a **single match tick** (S4) — the matched line, as `line_text` gives it.
 ///   Not the query and not the match's own substring: the reader knows what they
 ///   typed, and what they are choosing between is the *lines*.
-/// * a **folded bucket** — `"{k} {noun}{sep}latest: {text}"` (mock 8468).
+/// * a **folded bucket** — `"{k} {noun}{sep}latest: {text}"` (mock 8468). The
+///   latest body is the same body a single card would show, suffixes and all; the
+///   quoted output line is not, because a bucket is a *count* and a card that grew
+///   a second line per fold would stop being one.
+///
+/// # `exit 0` is not written, and that is a ruling
+///
+/// A zero exit is the absence of news, and the rail has already said it in the one
+/// place it is cheapest to read: the tick is not red. Writing it would also make
+/// silence ambiguous — `D` can arrive with no status parameter at all
+/// (`exit_code: None`), and that genuinely-unknown case must be silent, so
+/// silence cannot also be made to mean "zero" without the two collapsing into one
+/// another. What the card says is therefore: nothing about the status unless the
+/// status was bad.
+///
+/// # The command is flattened to one line
+///
+/// A witness spans hard row boundaries — a here-string, a PowerShell continuation
+/// — and those arrive as `\n`. The card's second line belongs to the quoted error,
+/// so a command's own row breaks become spaces rather than lines. The transcript
+/// text is not otherwise touched: this is a glance card made of the terminal's own
+/// words, not a paraphrase of them.
 ///
 /// # The noun (B36), and the case the mock-up does not have
 ///
@@ -1557,28 +1619,46 @@ pub const PEEK_EMPTY_LINE_TEXT: &str = "line";
 /// can be both a prompt row and a match, and it is counted in both because it *is*
 /// both.
 #[must_use]
-pub fn peek_text(tick: &Tick, marks: &[CommandMark], line_text: Option<&str>) -> (String, bool) {
-    let (body, muted) = match tick.target {
+pub fn peek_text(
+    tick: &Tick,
+    marks: &[CommandMark],
+    line_text: Option<&str>,
+    output_tail: Option<&str>,
+) -> (String, bool) {
+    let mark = match tick.target {
+        Target::Command(id) => marks.iter().find(|candidate| candidate.id == id),
+        Target::Match(_) => None,
+    };
+    let (mut body, muted) = match tick.target {
         Target::Match(_) => {
             let text = line_text.unwrap_or("").trim();
             if text.is_empty() {
-                (PEEK_EMPTY_LINE_TEXT, true)
+                (PEEK_EMPTY_LINE_TEXT.to_owned(), true)
             } else {
-                (text, false)
+                (text.to_owned(), false)
             }
         }
-        Target::Command(mark) => {
-            let text = marks
-                .iter()
-                .find(|candidate| candidate.id == mark)
-                .map_or("", |mark| mark.command_text.trim());
+        Target::Command(_) => {
+            let text = mark.map_or("", |mark| mark.command_text.trim());
             if text.is_empty() {
-                (PEEK_EMPTY_TEXT, true)
+                (PEEK_EMPTY_TEXT.to_owned(), true)
             } else {
-                (text, false)
+                (text.replace('\n', " "), false)
             }
         }
     };
+    // The two suffixes, in the order they happened: how long it took, then how it
+    // ended. A running command has neither and is spelled by its own prefix below.
+    if let Some(mark) = mark.filter(|mark| !mark.is_running()) {
+        if let Some(elapsed) = mark.duration().and_then(peek_duration) {
+            body.push_str(NAME_PLACE_SEPARATOR);
+            body.push_str(&elapsed);
+        }
+        if let Some(code) = mark.exit_code.filter(|code| *code != 0) {
+            body.push_str(NAME_PLACE_SEPARATOR);
+            body.push_str(&format!("exit {code}"));
+        }
+    }
     if tick.members > 1 {
         let count = match (tick.matched, tick.commanded) {
             (0, commanded) => format!("{commanded} commands"),
@@ -1592,14 +1672,18 @@ pub fn peek_text(tick: &Tick, marks: &[CommandMark], line_text: Option<&str>) ->
     }
     // *"running · {cmd}"* — a command with no `D` yet. Only ever a command: a
     // matched line has no lifetime of its own to report.
-    if let Target::Command(mark) = tick.target
-        && marks
-            .iter()
-            .any(|candidate| candidate.id == mark && candidate.finished.is_none())
-    {
+    if mark.is_some_and(CommandMark::is_running) {
         return (format!("running{NAME_PLACE_SEPARATOR}{body}"), muted);
     }
-    (body.to_owned(), muted)
+    // The quoted error, on its own line. Only for a command the shell called
+    // failed, and only when there is a line to quote.
+    if mark.is_some_and(CommandMark::failed)
+        && let Some(tail) = output_tail.map(str::trim).filter(|tail| !tail.is_empty())
+    {
+        body.push('\n');
+        body.push_str(&tail.replace('\n', " "));
+    }
+    (body, muted)
 }
 
 /// Two inks, `t` of the way from the first to the second.
@@ -1692,6 +1776,8 @@ mod tests {
             finished: exit_code.map(|_| AnchorId(id * 10 + 3)),
             command_text: String::new(),
             exit_code,
+            executed_at: None,
+            finished_at: None,
         }
     }
 
@@ -2323,31 +2409,173 @@ mod tests {
             rect: [0.0; 4],
         };
         assert_eq!(
-            peek_text(&tick(1, 1), &marks, None),
+            peek_text(&tick(1, 1), &marks, None, None),
             ("cargo test --workspace".to_owned(), false)
         );
         assert_eq!(
-            peek_text(&tick(2, 4), &marks, None),
+            peek_text(&tick(2, 4), &marks, None, None),
             ("4 commands · latest: git status".to_owned(), false)
         );
         assert_eq!(
-            peek_text(&tick(4, 1), &marks, None),
+            peek_text(&tick(4, 1), &marks, None, None),
             ("running · sleep 30".to_owned(), false)
         );
         // The ledger's honest empty — a word, in the muted ink.
         assert_eq!(
-            peek_text(&tick(3, 1), &marks, None),
+            peek_text(&tick(3, 1), &marks, None, None),
             ("command".to_owned(), true)
         );
         assert_eq!(
-            peek_text(&tick(3, 9), &marks, None),
+            peek_text(&tick(3, 9), &marks, None, None),
             ("9 commands · latest: command".to_owned(), true)
         );
         // A mark that is no longer in the ledger says the same honest thing rather
         // than nothing at all.
         assert_eq!(
-            peek_text(&tick(99, 1), &marks, None),
+            peek_text(&tick(99, 1), &marks, None, None),
             ("command".to_owned(), true)
+        );
+    }
+
+    /// The duration ladder, as a table.
+    #[test]
+    fn a_run_time_is_said_in_one_coarse_unit_or_not_at_all() {
+        let table = [
+            (0, None),
+            (999, None),
+            (1_000, Some("1s")),
+            (42_000, Some("42s")),
+            (59_999, Some("59s")),
+            (60_000, Some("1m")),
+            (119_000, Some("1m")),
+            (3_599_000, Some("59m")),
+            (3_600_000, Some("1h")),
+            (7_320_000, Some("2h")),
+            (360_000_000, Some("100h")),
+        ];
+        for (millis, expected) in table {
+            assert_eq!(
+                peek_duration(Duration::from_millis(millis)).as_deref(),
+                expected,
+                "{millis}ms"
+            );
+        }
+    }
+
+    /// A finished command's card carries what became of it — and says nothing about
+    /// a success beyond how long it took.
+    #[test]
+    fn a_finished_card_carries_its_duration_and_only_a_bad_exit_code() {
+        let clock = Instant::now();
+        let ran = |id: u64, text: &str, millis: u64, code: i32| CommandMark {
+            command_text: text.to_owned(),
+            exit_code: Some(code),
+            executed_at: Some(clock),
+            finished_at: Some(clock + Duration::from_millis(millis)),
+            ..mark(id, Some(code))
+        };
+        let marks = vec![
+            ran(1, "cargo test", 42_000, 1),
+            ran(2, "cargo fmt", 3_000, 0),
+            // Fast and clean: neither suffix has anything to say.
+            ran(3, "cd ..", 40, 0),
+            // Finished, but the shell reported no status at all.
+            CommandMark {
+                exit_code: None,
+                ..ran(4, "make", 90_000, 0)
+            },
+            // Still running: no duration, no status, and the running prefix.
+            CommandMark {
+                finished: None,
+                finished_at: None,
+                exit_code: None,
+                ..ran(5, "cargo build", 42_000, 0)
+            },
+        ];
+        let tick = |mark: u64| Tick {
+            target: Target::Command(CommandMarkId(mark)),
+            members: 1,
+            matched: 0,
+            commanded: 1,
+            signal: Signal::Command,
+            slot: 0,
+            sub: false,
+            rect: [0.0; 4],
+        };
+        let card = |mark: u64| peek_text(&tick(mark), &marks, None, None).0;
+        assert_eq!(card(1), "cargo test · 42s · exit 1");
+        assert_eq!(card(2), "cargo fmt · 3s");
+        assert_eq!(card(3), "cd ..");
+        assert_eq!(
+            card(4),
+            "make · 1m",
+            "a `D` with no status parameter is not a zero"
+        );
+        assert_eq!(card(5), "running · cargo build");
+    }
+
+    /// The failing command's own last word, on a second line — and nowhere else.
+    #[test]
+    fn a_failed_card_quotes_its_last_output_line_and_a_successful_one_does_not() {
+        let clock = Instant::now();
+        let ran = |id: u64, text: &str, code: i32| CommandMark {
+            command_text: text.to_owned(),
+            executed_at: Some(clock),
+            finished_at: Some(clock + Duration::from_secs(9)),
+            ..mark(id, Some(code))
+        };
+        let marks = vec![ran(1, "cargo build", 1), ran(2, "cargo build", 0)];
+        let tick = |mark: u64, members: usize| Tick {
+            target: Target::Command(CommandMarkId(mark)),
+            members,
+            matched: 0,
+            commanded: members,
+            signal: Signal::Command,
+            slot: 0,
+            sub: false,
+            rect: [0.0; 4],
+        };
+        let quote = Some("error[E0308]: mismatched types");
+        assert_eq!(
+            peek_text(&tick(1, 1), &marks, None, quote).0,
+            "cargo build · 9s · exit 1\nerror[E0308]: mismatched types"
+        );
+        assert_eq!(
+            peek_text(&tick(2, 1), &marks, None, quote).0,
+            "cargo build · 9s",
+            "a success has nothing in its output a glance wants"
+        );
+        assert_eq!(
+            peek_text(&tick(1, 1), &marks, None, Some("   ")).0,
+            "cargo build · 9s · exit 1",
+            "a blank quote is no quote"
+        );
+        // A bucket stays one line: it is a count, and a second line per fold would
+        // stop it being one.
+        assert_eq!(
+            peek_text(&tick(1, 4), &marks, None, quote).0,
+            "4 commands · latest: cargo build · 9s · exit 1"
+        );
+    }
+
+    /// A command that spans rows is still a one-line card; the second line belongs
+    /// to the quoted error and to nothing else.
+    #[test]
+    fn a_command_written_across_rows_is_flattened_into_the_cards_one_line() {
+        let marks = vec![said(1, "git commit -m 'first\nsecond'")];
+        let tick = Tick {
+            target: Target::Command(CommandMarkId(1)),
+            members: 1,
+            matched: 0,
+            commanded: 1,
+            signal: Signal::Command,
+            slot: 0,
+            sub: false,
+            rect: [0.0; 4],
+        };
+        assert_eq!(
+            peek_text(&tick, &marks, None, None).0,
+            "git commit -m 'first second'"
         );
     }
 
@@ -2879,18 +3107,29 @@ mod tests {
             peek_text(
                 &bucket(3, 0, 3, Target::Command(CommandMarkId(1))),
                 &marks,
+                None,
                 None
             ),
             ("3 commands · latest: cargo build".to_owned(), false)
         );
         // All matches — the prototype's search reading.
         assert_eq!(
-            peek_text(&bucket(3, 3, 0, Target::Match(0)), &marks, Some("total 42")),
+            peek_text(
+                &bucket(3, 3, 0, Target::Match(0)),
+                &marks,
+                Some("total 42"),
+                None
+            ),
             ("3 lines · latest: total 42".to_owned(), false)
         );
         // Both — the reading the prototype has no case for.
         assert_eq!(
-            peek_text(&bucket(4, 2, 3, Target::Match(0)), &marks, Some("total 42")),
+            peek_text(
+                &bucket(4, 2, 3, Target::Match(0)),
+                &marks,
+                Some("total 42"),
+                None
+            ),
             ("2 lines, 3 commands · latest: total 42".to_owned(), false)
         );
         // A single match tick reads the line itself, ellipsis and all left to the
@@ -2898,10 +3137,13 @@ mod tests {
         // rather than saying nothing.
         let single = bucket(1, 1, 0, Target::Match(0));
         assert_eq!(
-            peek_text(&single, &marks, Some("  fn main() {  ")),
+            peek_text(&single, &marks, Some("  fn main() {  "), None),
             ("fn main() {".to_owned(), false)
         );
-        assert_eq!(peek_text(&single, &marks, None), ("line".to_owned(), true));
+        assert_eq!(
+            peek_text(&single, &marks, None, None),
+            ("line".to_owned(), true)
+        );
     }
 
     /// **The acceptance anchor.** Open a search, type into it, close it — and the

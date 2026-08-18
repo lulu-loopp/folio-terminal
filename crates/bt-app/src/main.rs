@@ -16675,8 +16675,26 @@ impl Runtime {
                 cmdrail::Target::Match(hit) => self.search_hit_line_text(hit),
                 cmdrail::Target::Command(_) => None,
             };
-            let (text, muted) =
-                cmdrail::peek_text(&tick, leaf.session.command_marks(), line.as_deref());
+            // And the failing command's own last word, read the same way and for
+            // the same reason: it is the one thing a card can add that saves the
+            // reader opening the pane. Asked only of a mark the shell called
+            // failed, so a wall of successful commands walks the transcript
+            // exactly never.
+            let tail = match tick.target {
+                cmdrail::Target::Command(id) => leaf
+                    .session
+                    .command_mark(id)
+                    .is_some_and(bt_term::CommandMark::failed)
+                    .then(|| leaf.session.command_output_last_line(id))
+                    .flatten(),
+                cmdrail::Target::Match(_) => None,
+            };
+            let (text, muted) = cmdrail::peek_text(
+                &tick,
+                leaf.session.command_marks(),
+                line.as_deref(),
+                tail.as_deref(),
+            );
             anchors.push_faced(
                 tooltip::TooltipAnchorId::CommandTick(seat, tick.target),
                 host,
@@ -17419,7 +17437,18 @@ impl Runtime {
             // The finger, and the crest, on the same reading — see
             // [`pointer_cursor`]'s `over_command_tick`.
             self.apply_pointer_cursor();
-            if self.refresh_overlay() {
+            // **The chrome and not just the overlay**, because the crest moving
+            // changes *what can be tipped* and the tippable list is a product of
+            // the chrome build ([`Self::rebuild_tooltip_anchors`], "what the
+            // strip draws is what can be tipped, and both are decided here or
+            // neither is"). Refreshing only the overlay repainted the rail and
+            // left the anchor list as the last chrome build had it — with no
+            // `CommandTick` entry in it at all — so `tooltip_layer` settled its
+            // 380ms, went looking for the anchor it had been promised, found
+            // nothing, and drew no card. Measured on a real window: hovering a
+            // tick lit the rail and never produced a glance card unless some
+            // unrelated event happened to rebuild the chrome underneath it.
+            if self.refresh_chrome() {
                 self.present_chrome_change()?;
             }
         }
@@ -19676,7 +19705,14 @@ impl Runtime {
             let text = if face.wraps() {
                 tooltip::wrap(&text, max_width, &mut measure).join("\n")
             } else {
-                tooltip::ellipsize(&text, max_width, &mut measure)
+                // Per line, because the box is `white-space: pre-line` in both
+                // faces: a `\n` in a nowrap tip is a deliberate second line (the
+                // glance card's quoted error), and cutting the whole string as
+                // one run would swallow it into the first line's ellipsis.
+                text.split('\n')
+                    .map(|line| tooltip::ellipsize(line, max_width, &mut measure))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             };
             let widths: Vec<f32> = text.split('\n').map(&mut measure).collect();
             (text, widths)

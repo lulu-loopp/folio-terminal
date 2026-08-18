@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::hash_map::RandomState,
+    collections::{VecDeque, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
     num::NonZeroU32,
     sync::{Arc, Mutex, MutexGuard},
@@ -298,6 +298,13 @@ pub struct TerminalAdapter {
     parser_sequence_open: bool,
     cursor_row_positioned_explicitly: bool,
     osc1337_scanner: Osc1337Scanner,
+    /// What [`Self::feed`] scanned out of the byte stream and has not handed the
+    /// vendor terminal yet.
+    ///
+    /// It is non-empty only between a shell-integration marker and the caller's
+    /// [`Self::resume_stream`], and that pause is the whole reason the queue
+    /// exists — see [`Self::feed`].
+    pending_stream: VecDeque<InlineImageStreamAction>,
     resize_canonical: Option<ResizeCanonical>,
     staged_resize_history_size: usize,
     columns: NonZeroU32,
@@ -450,6 +457,7 @@ impl TerminalAdapter {
             parser_sequence_open: false,
             cursor_row_positioned_explicitly: false,
             osc1337_scanner: Osc1337Scanner::default(),
+            pending_stream: VecDeque::new(),
             resize_canonical: None,
             staged_resize_history_size: 0,
             columns,
@@ -503,9 +511,60 @@ impl TerminalAdapter {
         (self.columns, self.rows)
     }
 
+    /// Take a slice of the child's output and report what it meant — **stopping
+    /// at the first shell-integration marker in it.**
+    ///
+    /// # Why it stops
+    ///
+    /// The vendor terminal is advanced over whole slices, so everything this
+    /// method hands it has already landed on the grid by the time the caller
+    /// looks at the events. That is harmless for a fact that carries its own
+    /// coordinates (a removed row arrives with the row in it) and ruinous for
+    /// one whose meaning is *the grid at that instant*: an OSC 133 `B`/`C` names
+    /// a cell, and a session that reads that cell after the rest of the slice
+    /// has scrolled the screen reads somebody else's line, or none at all. That
+    /// was the whole of the "a command whose output arrives in the same read has
+    /// no text" defect — one PTY read carrying `C` and a flood.
+    ///
+    /// So the stream pauses there. Everything before the marker is on the grid,
+    /// nothing after it is, and the caller may apply the marker against exactly
+    /// the screen the shell was describing. [`Self::stream_paused`] then answers
+    /// `true` and [`Self::resume_stream`] continues from the same point. Markers
+    /// are a handful per command, so the split costs nothing a flood can feel —
+    /// and it is a rule about *when a fact is read*, not a size to tune.
+    ///
+    /// Bytes that arrive while the stream is paused simply queue behind it; the
+    /// scanner's own state is unaffected, because the split is downstream of it.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<AdapterEvent> {
+        let actions = self.osc1337_scanner.scan(bytes);
+        self.pending_stream.extend(actions);
+        self.pump_stream()
+    }
+
+    /// Is there stream left that [`Self::feed`] deliberately stopped short of?
+    pub fn stream_paused(&self) -> bool {
+        !self.pending_stream.is_empty()
+    }
+
+    /// Continue the stream [`Self::feed`] paused, up to the next marker or its end.
+    pub fn resume_stream(&mut self) -> Vec<AdapterEvent> {
+        self.pump_stream()
+    }
+
+    /// Throw away what the paused stream still holds.
+    ///
+    /// For the one caller that has abandoned the slice it was feeding: a session
+    /// whose parse failed mid-quantum is not going to apply the rest of it, and
+    /// bytes left queued here would otherwise be replayed into the next feed
+    /// against a state that has already been reset.
+    pub fn discard_paused_stream(&mut self) {
+        self.pending_stream.clear();
+    }
+
+    fn pump_stream(&mut self) -> Vec<AdapterEvent> {
         let mut events = Vec::new();
-        for action in self.osc1337_scanner.scan(bytes) {
+        while let Some(action) = self.pending_stream.pop_front() {
+            let marker = matches!(action, InlineImageStreamAction::ShellIntegration(_));
             match action {
                 InlineImageStreamAction::Bytes(bytes) => {
                     self.advance_terminal_bytes(&bytes);
@@ -561,6 +620,9 @@ impl TerminalAdapter {
                     events.extend(self.drain_transcript_events());
                     events.extend(self.drain_grid_write_events());
                 }
+            }
+            if marker {
+                break;
             }
         }
         events

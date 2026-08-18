@@ -20,7 +20,10 @@
 //! exit-code guess from the text. A terminal that guesses which of your commands failed is worse
 //! than one that admits it was never told.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
 use bt_doc::AnchorId;
 
@@ -75,6 +78,23 @@ pub struct CommandMark {
     /// The exit status `D` carried. `None` covers three different silences that a rail must treat
     /// alike: still running, ended without a `D`, and a `D` that carried no status parameter.
     pub exit_code: Option<i32>,
+    /// When `C` was seen, and when `D` was — the two ends of [`Self::duration`].
+    ///
+    /// **`C` and not `B`**, which is the whole of the definition. `B` is when the shell began
+    /// *reading* a line, and the gap between `B` and `C` is the user thinking, going for coffee,
+    /// or leaving the pane open overnight; a card that reported it would call a one-second `ls`
+    /// a nine-hour command. `C` is when the shell said "this is submitted, output starts here",
+    /// so `C..D` is the only span in the `A/B/C/D` cycle that is the command *running*.
+    ///
+    /// [`Instant`] rather than a wall clock: this is an elapsed time and nothing else, and a
+    /// monotonic reading is the one that cannot be moved by an NTP step or a daylight-saving
+    /// boundary halfway through a build. It is therefore also not persistable, which is correct —
+    /// a mark does not outlive its session.
+    ///
+    /// Both stay `None` for a command that never reached the marker that sets them: a `B` straight
+    /// to `D` has no `executed_at`, and a command still running has no `finished_at`.
+    pub executed_at: Option<Instant>,
+    pub finished_at: Option<Instant>,
 }
 
 impl CommandMark {
@@ -87,6 +107,17 @@ impl CommandMark {
     /// one signal that earns permanent colour at rest.
     pub fn failed(&self) -> bool {
         self.exit_code.is_some_and(|code| code != 0)
+    }
+
+    /// How long this command ran: `C` to `D`.
+    ///
+    /// `None` for anything that did not have both ends — still running, never executed, or a shell
+    /// that skipped `C`. There is no elapsed-so-far reading for a running command here on purpose:
+    /// that is a number that changes between two reads of the same mark, and a ledger that answered
+    /// it would be answering with the clock rather than with what it was told.
+    pub fn duration(&self) -> Option<Duration> {
+        let (executed, finished) = (self.executed_at?, self.finished_at?);
+        finished.checked_duration_since(executed)
     }
 }
 
@@ -155,18 +186,21 @@ impl CommandMarkLedger {
             finished: None,
             command_text: String::new(),
             exit_code: None,
+            executed_at: None,
+            finished_at: None,
         });
         self.open = Some(id);
         self.revision += 1;
         id
     }
 
-    /// `C`. The command was submitted; output starts here.
-    pub fn note_executed(&mut self, executed: AnchorId) {
+    /// `C`. The command was submitted; output starts here, and the clock starts here.
+    pub fn note_executed(&mut self, executed: AnchorId, at: Instant) {
         let Some(mark) = self.open_mark_mut() else {
             return;
         };
         mark.executed = Some(executed);
+        mark.executed_at = Some(at);
         self.revision += 1;
     }
 
@@ -188,12 +222,13 @@ impl CommandMarkLedger {
     }
 
     /// `D`. The command ended, with whatever status it reported.
-    pub fn note_finished(&mut self, finished: AnchorId, exit_code: Option<i32>) {
+    pub fn note_finished(&mut self, finished: AnchorId, exit_code: Option<i32>, at: Instant) {
         let Some(mark) = self.open_mark_mut() else {
             return;
         };
         mark.finished = Some(finished);
         mark.exit_code = exit_code;
+        mark.finished_at = Some(at);
         self.open = None;
         self.revision += 1;
     }
