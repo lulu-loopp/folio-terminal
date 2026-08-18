@@ -5342,14 +5342,16 @@ pub fn build_chrome_for_tabs(
         match placement.presentation {
             Presentation::Collapsed(_) => {
                 let hovered = pointer.hover == Some(ChromeTarget::CollapseBar(placement.id));
-                pane_quads.push(ChromeQuad {
+                // A collapsed pane's bar is that pane's whole surface, so it
+                // is a ground and not a strip laid on one.
+                pane_quads.push(ChromeQuad::ground(
                     rect,
-                    color: if hovered {
+                    if hovered {
                         palette.collapse_bar_hover
                     } else {
                         palette.collapse_bar
                     },
-                });
+                ));
                 collapse_bar_contents(
                     rect,
                     scale,
@@ -5415,24 +5417,24 @@ pub fn build_chrome_for_tabs(
                 // gets a floor when it has no body pass of its own, and every
                 // terminal now has one.
                 if placement.kind != SeatKind::Terminal {
-                    pane_quads.push(ChromeQuad {
-                        rect: [head_box[0], head_bottom, head_box[2], head_box[3]],
-                        color: palette.seat_body,
-                    });
+                    pane_quads.push(ChromeQuad::ground(
+                        [head_box[0], head_bottom, head_box[2], head_box[3]],
+                        palette.seat_body,
+                    ));
                 }
-                pane_quads.push(ChromeQuad {
-                    rect: [head_box[0], head_box[1], head_box[2], title_bottom],
-                    color: palette.pane_head,
-                });
+                pane_quads.push(ChromeQuad::ground(
+                    [head_box[0], head_box[1], head_box[2], title_bottom],
+                    palette.pane_head,
+                ));
                 // The hairline that makes the bar a caption rather than a stripe.
                 // It is the head's last row, so it stops where the body begins:
                 // drawn below `head_bottom` it would paint over the terminal's
                 // own first row, which is the bug this reading fixes.
                 if title_bottom < head_bottom {
-                    pane_quads.push(ChromeQuad {
-                        rect: [head_box[0], title_bottom, head_box[2], head_bottom],
-                        color: palette.pane_head_edge,
-                    });
+                    pane_quads.push(ChromeQuad::ink(
+                        [head_box[0], title_bottom, head_box[2], head_bottom],
+                        palette.pane_head_edge,
+                    ));
                 }
                 // `.panehead { gap: 7px; padding: 0 6px 0 12px }` with the seat's
                 // own mark leading: a terminal wears its profile square, a
@@ -6065,10 +6067,7 @@ pub fn build_chrome_for_tabs(
         ];
         // The same ground the bars stand on, because it is the same strip and
         // the sentence is the strip's last line — not a banner laid over it.
-        quads.push(ChromeQuad {
-            rect: row,
-            color: palette.collapse_bar,
-        });
+        quads.push(ChromeQuad::ground(row, palette.collapse_bar));
         let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
         labels.push(ChromeLabel {
             text: overflow_notice(overflow.hidden),
@@ -6136,16 +6135,16 @@ pub fn build_chrome_for_tabs(
         // all, impersonating the one thing that does.
         let lit =
             !pointer.other_drag_in_flight && pointer.hover == Some(ChromeTarget::Divider(slot.id));
-        quads.push(ChromeQuad {
-            rect: slot.band,
-            color: if dragging {
+        quads.push(ChromeQuad::ink(
+            slot.band,
+            if dragging {
                 palette.divider_active
             } else if lit {
                 palette.divider_hover
             } else {
                 palette.divider
             },
-        });
+        ));
         // `.divider::after` (mock-up 1485-1492): a grip, so the boundary reads
         // as something you can grab. `opacity: 0` at rest and 1 on hover or
         // while dragging — so it is simply not drawn otherwise.
@@ -6473,10 +6472,7 @@ fn resizing_cards(
             [rect[0], card[1], card[0], card[3]],
             [card[2], card[1], rect[2], card[3]],
         ] {
-            quads.push(ChromeQuad {
-                rect: band,
-                color: floor,
-            });
+            quads.push(ChromeQuad::ink(band, floor));
         }
         for (corner, at) in [
             (Corner::TopLeft, [card[0], card[1]]),
@@ -6551,10 +6547,10 @@ fn window_chrome(
     // there is deliberately no step at all: the tab *is* `--termbg`, so a line
     // drawn across the bar's foot would be the one thing that severs the tab
     // from the terminal it is shaped to join.
-    quads.push(ChromeQuad {
-        rect: [0.0, 0.0, width, title],
-        color: palette.title_bar,
-    });
+    quads.push(ChromeQuad::ground(
+        [0.0, 0.0, width, title],
+        palette.title_bar,
+    ));
 
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * button).max(0.0);
@@ -6658,14 +6654,14 @@ fn window_chrome(
         let rect = [left, 0.0, (left + button).min(width), title];
         let hovered = hover == Some(target);
         if hovered {
-            quads.push(ChromeQuad {
+            quads.push(ChromeQuad::ink(
                 rect,
-                color: if target == ChromeTarget::CloseWindow {
+                if target == ChromeTarget::CloseWindow {
                     palette.caption_close_hover
                 } else {
                     palette.caption_hover
                 },
-            });
+            ));
         }
         let glyph = (glyph_logical_px * scale).round().max(1.0);
         let glyph_left = ((rect[0] + rect[2]) / 2.0 - glyph / 2.0).round();
@@ -7637,27 +7633,18 @@ fn rail_chrome(
     // above it wears, and that sameness is the point: an open icon rail grows
     // "straight down out of the title bar instead of floating free of it", so
     // the two read as one piece of chrome that got wider.
-    quads.push(ChromeQuad {
-        rect: geometry.body,
-        color: ground,
-    });
+    quads.push(ChromeQuad::ground(geometry.body, ground));
     // `border-right: 1px solid var(--border-soft)`, and only when there is one —
     // a parked rail and the bar above it are one surface, so the only edge that
     // needs drawing is the one an *open* panel presents to the terminal.
     if let Some(edge) = geometry.edge {
-        quads.push(ChromeQuad {
-            rect: edge,
-            color: palette.rail_edge,
-        });
+        quads.push(ChromeQuad::ink(edge, palette.rail_edge));
     }
     // `.pin-seam` (F55/F56) — drawn here and only here (Q187). A quad rather
     // than a sprite because it lies in the column's own 1px gap, where no row
     // fill can reach it.
     if let Some(seam) = geometry.seam {
-        quads.push(ChromeQuad {
-            rect: seam,
-            color: palette.rail_seam,
-        });
+        quads.push(ChromeQuad::ink(seam, palette.rail_seam));
     }
     // `.rail .label` — "Tabs", at 11px/600 with .04em of tracking. `None` in
     // icon mode, where the mock-up removes the heading outright rather than
@@ -10624,15 +10611,9 @@ fn push_files_foot(
     // fill, because it is the same `--hover` over the same `--termbg`, and one
     // pane cannot have two answers to "what does hovering look like here".
     if hovered {
-        quads.push(ChromeQuad {
-            rect: geometry.foot,
-            color: palette.files_row_hover,
-        });
+        quads.push(ChromeQuad::ink(geometry.foot, palette.files_row_hover));
     }
-    quads.push(ChromeQuad {
-        rect: geometry.foot_edge,
-        color: palette.pane_head_edge,
-    });
+    quads.push(ChromeQuad::ink(geometry.foot_edge, palette.pane_head_edge));
     // A path with nowhere to point — an unrooted column, a preview showing
     // nothing — draws the strip and stops. The mark is a verb ("open this
     // folder") and there is nothing to open.
@@ -12811,6 +12792,68 @@ mod tests {
                 .any(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
         );
         assert!(sprites.iter().any(|sprite| sprite.mark == ChromeMark::File));
+    }
+
+    /// PIN (user ruling 2026-08-18, "one translucency") — every surface that
+    /// **is** the window is a [`ChromeSurface::Ground`], and everything struck
+    /// on one is [`ChromeSurface::Ink`].
+    ///
+    /// §7.1.6c-4b's Background opacity row promises "panes **and the window
+    /// ground**", and for nine days only the first noun was kept: the pane
+    /// bodies are the clear and let the desktop through, while the tab strip,
+    /// the rail, every pane head and the floor under a files column were opaque
+    /// lids on the very window they belong to. Measured at 30% over a solid
+    /// `#00C800` desktop: body `(30, 170, 30)`, strip `(37, 37, 37)`, head
+    /// `(27, 27, 27)`.
+    ///
+    /// The list is enumerated rather than sampled, because the failure this
+    /// pins is *one* surface left behind — which is exactly what the screenshot
+    /// showed, and exactly what a spot check passes.
+    ///
+    /// Red gate: drop `::ground` back to `::ink` on any of the four bands and
+    /// the matching assertion fails; call every quad a ground and the ink half
+    /// fails.
+    #[test]
+    fn every_window_ground_surface_is_a_ground_and_every_mark_on_one_is_ink() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+        let (quads, _, _) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
+        let palette = chrome_palette();
+        use bt_render::ChromeSurface;
+
+        let surface_of = |color: [u8; 3]| {
+            quads
+                .iter()
+                .find(|quad| quad.color == color)
+                .map(|quad| quad.surface)
+        };
+        for (name, color) in [
+            ("the tab strip's band", palette.title_bar),
+            ("a pane head's band", palette.pane_head),
+            ("the floor a bodyless seat stands on", palette.seat_body),
+        ] {
+            assert_eq!(
+                surface_of(color),
+                Some(ChromeSurface::Ground),
+                "{name} is the window at that rectangle and must carry its alpha"
+            );
+        }
+        assert_eq!(
+            surface_of(palette.pane_head_edge),
+            Some(ChromeSurface::Ink),
+            "the head's hairline is struck on the head and stays opaque"
+        );
+        assert!(
+            quads
+                .iter()
+                .filter(|quad| quad.surface == ChromeSurface::Ground)
+                .count()
+                >= 3,
+            "the enumeration above must actually have found bands to check"
+        );
     }
 
     /// PIN (D2): the pane head is [`SEAT_TITLE_BAR_LOGICAL_PX`] pixels

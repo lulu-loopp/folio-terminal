@@ -281,6 +281,58 @@ struct BackgroundDecode {
     result: Result<Arc<bt_render::BackgroundImage>, bt_term::BackgroundImageError>,
 }
 
+/// The picture worker's one-slot mailbox, and the arithmetic that lets a clear
+/// win a race against a decode already running (§7.1.6c-4d, clearing arm).
+///
+/// **One slot and not a queue**, for `scheme_watch`'s reason one door over:
+/// there is one ground per window, so a second decode supersedes the first
+/// outright and a queue would only be a way of applying a picture the reader has
+/// already replaced.
+///
+/// **The generation is the whole of the clearing arm.** Every call that changes
+/// what the ground's picture should be withdraws the last question — a row, a
+/// chooser, a reset, and `None` exactly as much as any of them. `None` is the
+/// arm that has to be stated rather than implied: it is the only one that asks
+/// no question at all, so it is the only one where "bump the generation" is not
+/// a side effect of spawning something. Without it, choosing a slow picture and
+/// then choosing `None` would end with the slow picture on screen and `None` in
+/// the file.
+#[derive(Debug, Default)]
+struct BackgroundDecodeMailbox {
+    /// Which request the slot's answer would be an answer to.
+    generation: u64,
+    slot: Arc<std::sync::Mutex<Option<BackgroundDecode>>>,
+}
+
+impl BackgroundDecodeMailbox {
+    /// Withdraw whatever the last ask asked for, and hand back the generation
+    /// the next answer must carry to be adopted.
+    fn withdraw(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
+    }
+
+    /// The slot itself, for the worker to leave its answer in.
+    fn slot(&self) -> Arc<std::sync::Mutex<Option<BackgroundDecode>>> {
+        Arc::clone(&self.slot)
+    }
+
+    /// Take whatever landed, and answer with it only if it is still an answer to
+    /// the question being asked.
+    ///
+    /// A superseded answer is taken out of the slot and dropped in the same
+    /// move: leaving it there would mean the next `BackgroundPictureReady` —
+    /// raised by some *other* decode — finding a stale entry in front of its own.
+    fn take_current(&mut self) -> Option<BackgroundDecode> {
+        let landed = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        (landed.generation == self.generation).then_some(landed)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct TabId(u64);
 
@@ -4063,21 +4115,10 @@ struct Runtime {
     /// [`Self::apply_window_ground`], which is also the one place the two
     /// percentages and the fit reach it.
     background_picture: Option<Arc<bt_render::BackgroundImage>>,
-    /// Where the picture worker leaves its one answer (§7.1.6c-4d).
-    ///
-    /// One slot and not a queue, for `scheme_watch`'s reason one door over:
-    /// there is one ground per window, so a second decode supersedes the first
-    /// outright and a queue would only be a way of applying a picture the reader
-    /// has already replaced.
-    background_decode: Arc<std::sync::Mutex<Option<BackgroundDecode>>>,
-    /// Which request the slot's answer would be an answer to.
-    ///
-    /// Bumped by every call that changes what the ground's picture should be —
-    /// a row, a chooser, a reset, a clear — so an answer that lands after its
-    /// question was withdrawn is dropped rather than drawn. Without it, choosing
-    /// a slow picture and then choosing `None` would end with the slow picture
-    /// on screen and `None` in the file.
-    background_decode_generation: u64,
+    /// Where the picture worker leaves its one answer (§7.1.6c-4d) — see
+    /// [`BackgroundDecodeMailbox`] for the generation that makes a clear win a
+    /// race against a decode already running.
+    background_decode: BackgroundDecodeMailbox,
     /// Which slider the pointer is currently dragging, if any.
     ///
     /// A drag is the press that began it, asked again with a new `x` — see
@@ -14978,8 +15019,7 @@ impl Runtime {
             image_picker,
             image_pick_pending: false,
             background_picture: None,
-            background_decode: Arc::new(std::sync::Mutex::new(None)),
-            background_decode_generation: 0,
+            background_decode: BackgroundDecodeMailbox::default(),
             settings_slider_drag: None,
             settings_menu_bar_drag: None,
             acrylic_available,
@@ -20755,19 +20795,18 @@ impl Runtime {
         // Every call withdraws whatever the last one asked for, `None` included:
         // a clear that raced a slow decode must win, and the generation is how
         // it does.
-        self.background_decode_generation += 1;
+        let generation = self.background_decode.withdraw();
         if stored.is_empty() {
             self.background_picture = None;
             return Ok(());
         }
-        let generation = self.background_decode_generation;
         let ceiling = self.background_picture_ceiling();
         let path = PathBuf::from(&stored);
         let file = path.file_name().map_or_else(
             || stored.clone(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let slot = Arc::clone(&self.background_decode);
+        let slot = self.background_decode.slot();
         let proxy = self.event_proxy.clone();
         // In the workers' band: a wallpaper is never the reason a frame is late.
         bt_platform::spawn_at_priority(
@@ -20826,20 +20865,13 @@ impl Runtime {
     /// Take whatever the picture worker left, if it is still an answer to the
     /// question that is being asked.
     fn adopt_background_picture(&mut self) -> Result<()> {
-        let Some(landed) = self
-            .background_decode
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        else {
+        // A picture the reader has already replaced — or one the reader cleared
+        // while it was still decoding — is dropped in silence by `take_current`:
+        // it answers a row nobody is looking at any more, and a card about it
+        // would be a report on a decision that has been superseded.
+        let Some(landed) = self.background_decode.take_current() else {
             return Ok(());
         };
-        // A picture the reader has already replaced. Dropped in silence: it
-        // answers a row nobody is looking at any more, and a card about it would
-        // be a report on a decision that has been superseded.
-        if landed.generation != self.background_decode_generation {
-            return Ok(());
-        }
         match landed.result {
             Ok(image) => {
                 self.background_picture = Some(image);
@@ -45108,6 +45140,71 @@ mod opening_window_tests {
             attributes.inner_size,
             Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
         );
+    }
+}
+
+#[cfg(test)]
+mod background_mailbox_tests {
+    use super::{BackgroundDecode, BackgroundDecodeMailbox};
+
+    fn land(mailbox: &BackgroundDecodeMailbox, generation: u64) {
+        *mailbox
+            .slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(BackgroundDecode {
+            generation,
+            file: "ridge.jpg".to_owned(),
+            result: Err(bt_term::BackgroundImageError::UnsupportedFormat),
+        });
+    }
+
+    /// PIN (§7.1.6c-4d, clearing arm; user report 2026-08-18) — **`None`
+    /// withdraws the question too.**
+    ///
+    /// `None` is the one answer on this row that starts no worker, so it is the
+    /// one where bumping the generation is not a side effect of spawning
+    /// something and has to be written down. Without it, choosing a slow
+    /// picture and then choosing `None` ends with the slow picture on the
+    /// window and `None` in the file — the two disagreeing for as long as the
+    /// window is open.
+    ///
+    /// Red gate: move the `+= 1` below the empty-path arm — that is, make the
+    /// clear ask nothing and withdraw nothing — and the superseded decode is
+    /// adopted here.
+    #[test]
+    fn a_clear_refuses_the_decode_it_raced() {
+        let mut mailbox = BackgroundDecodeMailbox::default();
+        let chosen = mailbox.withdraw();
+        let cleared = mailbox.withdraw();
+        assert_ne!(
+            chosen, cleared,
+            "a clear is a question withdrawn, and every withdrawal has to move the generation"
+        );
+
+        land(&mailbox, chosen);
+        assert!(
+            mailbox.take_current().is_none(),
+            "the picture the reader cleared must not arrive behind their back"
+        );
+        assert!(
+            mailbox.slot().lock().unwrap().is_none(),
+            "and it is taken out of the slot rather than left in front of the next answer"
+        );
+
+        land(&mailbox, cleared);
+        assert!(
+            mailbox.take_current().is_some(),
+            "an answer to the question actually being asked is still adopted"
+        );
+    }
+
+    /// PIN — an empty mailbox answers nothing, whatever the generation is.
+    #[test]
+    fn an_empty_mailbox_has_nothing_to_adopt() {
+        let mut mailbox = BackgroundDecodeMailbox::default();
+        assert!(mailbox.take_current().is_none());
+        mailbox.withdraw();
+        assert!(mailbox.take_current().is_none());
     }
 }
 

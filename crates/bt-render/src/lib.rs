@@ -2199,6 +2199,9 @@ pub struct GpuContext {
     glyphon_cache: Cache,
     atlas: TextAtlas,
     rect_pipeline: wgpu::RenderPipeline,
+    /// The same pipeline blending `Replace`, for the chrome quads that *are*
+    /// the window's ground — see [`ChromeSurface::Ground`].
+    ground_rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
     math_sampler: wgpu::Sampler,
@@ -2655,6 +2658,63 @@ pub struct ChromeQuad {
     /// `[left, top, right, bottom]`.
     pub rect: [f32; 4],
     pub color: [u8; 3],
+    /// Whether this rectangle **is** the window at that place, or something
+    /// struck on it — see [`ChromeSurface`].
+    pub surface: ChromeSurface,
+}
+
+/// Which of the two things a flat chrome rectangle is (user ruling 2026-08-18,
+/// "one translucency"; `docs/DESIGN.md` §7.1.6c-4b).
+///
+/// §7.1.6c-4b's Background opacity row says "panes **and the window ground**;
+/// text and menus stay opaque", and until this ruling only one of those two
+/// nouns was true: the pane bodies are the clear and were translucent, while
+/// every band the chrome painted — the tab strip, the rail, each pane's head,
+/// the floor under a files column — was an opaque lid laid on top of the very
+/// window it is part of. Measured at 30% over a solid `#00C800` desktop: pane
+/// body `(30, 170, 30)`, tab strip `(37, 37, 37)`, pane head `(27, 27, 27)` —
+/// the ground let the desktop through and the chrome did not.
+///
+/// The distinction is **not** "chrome versus terminal". It is the one the ruling
+/// draws: a *ground* is the window's own surface wearing another name, and takes
+/// the window's alpha; *ink* is everything struck on a ground — a hairline, a
+/// hover fill, a pill, a divider, a caption button's plate — and stays opaque,
+/// because it is a mark on the glass rather than the glass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChromeSurface {
+    /// Struck on a ground, and therefore opaque: the palette pre-composited it
+    /// against the ground it lands on, which is only true of a colour that is
+    /// actually laid over that ground.
+    #[default]
+    Ink,
+    /// The window's ground at this rectangle. Drawn with the clear's own
+    /// premultiplied arithmetic at [`WindowGround::alpha`], so a window at 30%
+    /// is 30% here too — one sheet of glass, not a translucent hole in an
+    /// opaque one.
+    Ground,
+}
+
+impl ChromeQuad {
+    /// A mark on the glass: the overwhelmingly common quad, and what every quad
+    /// was before grounds were told apart from them.
+    #[must_use]
+    pub fn ink(rect: [f32; 4], color: [u8; 3]) -> Self {
+        Self {
+            rect,
+            color,
+            surface: ChromeSurface::Ink,
+        }
+    }
+
+    /// The glass itself at this rectangle.
+    #[must_use]
+    pub fn ground(rect: [f32; 4], color: [u8; 3]) -> Self {
+        Self {
+            rect,
+            color,
+            surface: ChromeSurface::Ground,
+        }
+    }
 }
 
 /// One line of seat chrome text.
@@ -3281,6 +3341,7 @@ impl GpuContext {
         let glyphon_cache = Cache::new(&device);
         let atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
         let rect_pipeline = create_rect_pipeline(&device, format);
+        let ground_rect_pipeline = create_ground_rect_pipeline(&device, format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
             create_math_pipeline(&device, format);
         let (background_pipeline, background_bind_group_layout, background_sampler) =
@@ -3298,6 +3359,7 @@ impl GpuContext {
             glyphon_cache,
             atlas,
             rect_pipeline,
+            ground_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
             math_sampler,
@@ -3396,20 +3458,33 @@ impl GpuContext {
         self.max_texture_dimension_2d
     }
 
-    /// Make sure the device holds this picture, and answer whether it does.
+    /// Make the device hold exactly the ground's picture, and answer whether a
+    /// quad can be drawn from it.
+    ///
+    /// **`None` releases the slot** (§7.1.6c-4d, clearing arm). A ground with no
+    /// picture is a ground with no texture: the reader chose `None`, and a
+    /// wallpaper kept on the device after that is a whole screen of texels — up
+    /// to `MAX_BACKGROUND_IMAGE_RGBA_BYTES` worth — held for a window that has
+    /// no way left to reach it. The slot mirrors the ground in force, so this is
+    /// the one call the frame path makes whether or not there is a picture,
+    /// rather than a call it skips when there is not.
     ///
     /// Content-keyed and idempotent: the overwhelmingly common frame asks for
     /// the key already in the slot and does nothing at all. A different key
     /// replaces the slot outright — there is one ground, so keeping the old
     /// texture around would be keeping a wallpaper nobody can reach.
     ///
-    /// `None` when the picture will not fit this device: a single texture and
+    /// `false` when the picture will not fit this device: a single texture and
     /// not the tiled path `upload_rgba_tiles` uses for formulas, because a
     /// tiled ground would need per-tile UV rectangles under three fits and a
     /// `Repeat` sampler that repeats the *tile* rather than the picture. The
-    /// caller's answer to `None` is to draw the plain clear, which is the same
+    /// caller's answer to `false` is to draw the plain clear, which is the same
     /// answer it gives to "no picture chosen".
-    fn ensure_background_texture(&mut self, image: &ground::BackgroundImage) -> bool {
+    fn hold_background_texture(&mut self, image: Option<&ground::BackgroundImage>) -> bool {
+        let Some(image) = image else {
+            self.background_texture = None;
+            return false;
+        };
         if self
             .background_texture
             .as_ref()
@@ -4671,9 +4746,39 @@ impl WindowRenderer {
         // Seat chrome. Empty whenever the tree is a lone terminal leaf, and every
         // branch below is guarded on emptiness, so a lone leaf issues exactly the
         // command stream it issued before seats existed.
+        //
+        // **Two buffers and not one** (§7.1.6c-4b, "one translucency"): the
+        // grounds carry the window's own alpha and are drawn with the clear's
+        // arithmetic, the ink is opaque and blends over them. Splitting them
+        // costs nothing in order — a ground is the bottom of its own region's
+        // stack by construction, since it is the band the rest is struck on.
+        let ground_alpha = ground::window_ground().alpha;
+        let chrome_ground_rects: Vec<RectInstance> = self
+            .chrome_quads
+            .iter()
+            .filter(|quad| quad.surface == ChromeSurface::Ground)
+            .map(|quad| {
+                premultiplied_surface_pixel_rect(
+                    quad.rect,
+                    quad.color,
+                    ground_alpha,
+                    self.config.width,
+                    self.config.height,
+                )
+            })
+            .collect();
+        let chrome_ground_rect_buffer = (!chrome_ground_rects.is_empty()).then(|| {
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("seat chrome grounds"),
+                    contents: bytemuck::cast_slice(chrome_ground_rects.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let chrome_rects: Vec<RectInstance> = self
             .chrome_quads
             .iter()
+            .filter(|quad| quad.surface == ChromeSurface::Ink)
             .map(|quad| {
                 surface_pixel_rect(quad.rect, quad.color, self.config.width, self.config.height)
             })
@@ -4872,8 +4977,13 @@ impl WindowRenderer {
         // a borrow of the device for its whole life. `None` for the ordinary
         // window: no picture chosen, and then the clear is the entire ground.
         let ground = ground::window_ground();
-        let ground_quad = ground.image.as_ref().and_then(|image| {
-            gpu.ensure_background_texture(image).then(|| {
+        // Asked on every frame and not only when there is a picture: the slot
+        // *is* the ground's picture, so the frame that first has none is the
+        // frame that has to let the last one go.
+        let ground_quad = gpu
+            .hold_background_texture(ground.image.as_deref())
+            .then(|| {
+                let image = ground.image.as_ref().expect("a held texture has a picture");
                 let uv = ground::background_uv_rect(
                     ground.fit,
                     self.config.width,
@@ -4893,8 +5003,7 @@ impl WindowRenderer {
                         )),
                         usage: wgpu::BufferUsages::VERTEX,
                     })
-            })
-        });
+            });
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -4992,7 +5101,11 @@ impl WindowRenderer {
             // Seat chrome last, with the pass restored to the whole window: it is
             // the one class of draw that legitimately owns the space between
             // seats. Skipped entirely when there is no chrome.
-            if chrome_rect_buffer.is_some() || chrome_icon_buffer.is_some() || chrome_prepared {
+            if chrome_ground_rect_buffer.is_some()
+                || chrome_rect_buffer.is_some()
+                || chrome_icon_buffer.is_some()
+                || chrome_prepared
+            {
                 pass.set_viewport(
                     0.0,
                     0.0,
@@ -5002,6 +5115,15 @@ impl WindowRenderer {
                     1.0,
                 );
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                // The grounds first, and with the clear's own blend: each one
+                // *is* the window at its rectangle, so it supersedes whatever is
+                // there rather than sitting on it. Everything below is struck on
+                // what these lay down.
+                if let Some(buffer) = chrome_ground_rect_buffer.as_ref() {
+                    pass.set_pipeline(&gpu.ground_rect_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, 0..chrome_ground_rects.len() as u32);
+                }
                 if let Some(buffer) = chrome_rect_buffer.as_ref() {
                     pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
@@ -6891,6 +7013,30 @@ pub fn crop_to(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 
 fn surface_pixel_rect(rect: [f32; 4], color: [u8; 3], width: u32, height: u32) -> RectInstance {
     surface_pixel_rect_with_alpha(rect, color, 1.0, width, height)
+}
+
+/// The same rectangle as the window's **ground** at that place: premultiplied in
+/// linear light by the ground's alpha, for a pipeline that blends `Replace`.
+///
+/// This is [`ground::premultiplied_clear`] with a rectangle around it, and it
+/// has to be the same arithmetic for the same reason the clear linearises: the
+/// surface is sRGB and premultiplied, so a band that is to sit flush with the
+/// clear must be encoded on the same side of that encode. A straight-alpha
+/// source here is the bug that reads as a ground band brighter than the ground
+/// beside it.
+fn premultiplied_surface_pixel_rect(
+    rect: [f32; 4],
+    color: [u8; 3],
+    alpha: f32,
+    width: u32,
+    height: u32,
+) -> RectInstance {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mut instance = surface_pixel_rect_with_alpha(rect, color, alpha, width, height);
+    for channel in &mut instance.color[..3] {
+        *channel *= alpha;
+    }
+    instance
 }
 
 /// The same rectangle, blended rather than laid down opaque — what the modal
@@ -8851,17 +8997,49 @@ fn create_rect_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    create_rect_pipeline_with_blend(
+        device,
+        format,
+        "terminal rectangle",
+        wgpu::BlendState::ALPHA_BLENDING,
+    )
+}
+
+/// The rectangle pipeline again, blending `Replace` — what a **ground** is drawn
+/// with (§7.1.6c-4b, the one-translucency ruling of 2026-08-18).
+///
+/// A ground is not painted *onto* the window; it **is** the window at that
+/// rectangle, exactly as the clear is and exactly as the picture quad is. Under
+/// `ALPHA_BLENDING` there is no source that leaves the destination at the
+/// ground's own alpha — `a + (1 − a)·A = A` has no solution but `a = 0` — so a
+/// band drawn that way comes out opaque however its alpha is chosen, which is
+/// what made the tab strip and every pane head an opaque lid over a translucent
+/// window. `Replace` with a premultiplied source is the same arithmetic the
+/// clear already runs, written once more where the clear cannot reach.
+fn create_ground_rect_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    create_rect_pipeline_with_blend(device, format, "chrome ground", wgpu::BlendState::REPLACE)
+}
+
+fn create_rect_pipeline_with_blend(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    label: &str,
+    blend: wgpu::BlendState,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("terminal rectangle shader"),
+        label: Some(&format!("{label} shader")),
         source: wgpu::ShaderSource::Wgsl(include_str!("rect.wgsl").into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("terminal rectangle pipeline layout"),
+        label: Some(&format!("{label} pipeline layout")),
         bind_group_layouts: &[],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("terminal rectangle pipeline"),
+        label: Some(&format!("{label} pipeline")),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -8891,7 +9069,7 @@ fn create_rect_pipeline(
                 format,
                 // Only rounded-corner edge instances use fractional alpha. Backgrounds, cursors,
                 // straight box lines, blocks, and underlines retain alpha=1 and stay pixel-sharp.
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(blend),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -14786,6 +14964,96 @@ mod tests {
                 !gpu.adapter_name().is_empty(),
                 "the adapter is kept, not dropped after `new` as it once was"
             );
+        }
+
+        /// PIN (§7.1.6c-4d, clearing arm) — a ground with no picture holds no
+        /// texture.
+        ///
+        /// The frame path used to ask for the texture only when there *was* a
+        /// picture, so `None` never reached the slot and a wallpaper the reader
+        /// had cleared stayed on the device for the life of the process — a
+        /// whole screen of texels, up to the resample ceiling, held for a window
+        /// with no way left to reach it. "The picture on screen stays up while
+        /// the next one decodes" is a rule about the *next* picture; it was
+        /// silently also keeping the last one after there was no next.
+        ///
+        /// Red gate: skip the call on the `None` arm — which is what the frame
+        /// path did — and the last assertion finds the old bind group still
+        /// there.
+        #[test]
+        fn clearing_the_ground_picture_releases_the_texture_it_held() {
+            let mut gpu = context();
+            let image = ground::BackgroundImage {
+                key: "bg:ridge".to_owned(),
+                rgba: std::sync::Arc::from(vec![255u8, 0, 0, 255]),
+                width_px: 1,
+                height_px: 1,
+            };
+            assert!(gpu.hold_background_texture(Some(&image)));
+            assert_eq!(
+                gpu.background_texture.as_ref().map(|(key, _)| key.as_str()),
+                Some("bg:ridge")
+            );
+            // Idempotent: the same picture asks the device nothing.
+            assert!(gpu.hold_background_texture(Some(&image)));
+
+            assert!(
+                !gpu.hold_background_texture(None),
+                "with no picture there is no quad to draw"
+            );
+            assert!(
+                gpu.background_texture.is_none(),
+                "a cleared wallpaper must be let go of, not kept where nothing can reach it"
+            );
+        }
+
+        /// PIN (user ruling 2026-08-18, "one translucency") — a ground band is
+        /// premultiplied by the window's alpha and an ink mark is not.
+        ///
+        /// The two encodings are what the two pipelines require: a ground is
+        /// laid down with `Replace` onto a premultiplied surface, so it must
+        /// arrive as `(A·colour, A)` — the same value
+        /// [`ground::premultiplied_clear`] writes — while ink blends over it
+        /// straight at full alpha. Handing the ground pipeline a straight-alpha
+        /// source is the bug that reads as a band brighter than the ground
+        /// beside it.
+        ///
+        /// Red gate: drop the premultiply and the three colour channels come
+        /// back at full strength.
+        #[test]
+        fn a_ground_band_carries_the_windows_alpha_and_ink_stays_opaque() {
+            const ALPHA: f32 = 0.3;
+            let rect = [0.0, 0.0, 100.0, 20.0];
+            let colour = [200u8, 100, 50];
+            let ink = surface_pixel_rect(rect, colour, 800, 600);
+            let band = premultiplied_surface_pixel_rect(rect, colour, ALPHA, 800, 600);
+
+            assert_eq!(ink.rect, band.rect, "the geometry is the same rectangle");
+            assert!(
+                (ink.color[3] - 1.0).abs() < 1e-6,
+                "a mark on the glass is opaque: {}",
+                ink.color[3]
+            );
+            assert!(
+                (band.color[3] - ALPHA).abs() < 1e-6,
+                "a ground is the window, and the window is {ALPHA}: {}",
+                band.color[3]
+            );
+            for channel in 0..3 {
+                assert!(
+                    (band.color[channel] - ink.color[channel] * ALPHA).abs() < 1e-6,
+                    "channel {channel} must be premultiplied: {} vs {}",
+                    band.color[channel],
+                    ink.color[channel] * ALPHA
+                );
+            }
+            // The band and the clear beside it are the same arithmetic, so a
+            // window with no picture is one flat sheet and not two.
+            let clear = ground::premultiplied_clear(srgb_rgb_to_linear(colour), ALPHA);
+            assert!((band.color[0] - clear.r as f32).abs() < 1e-5);
+            assert!((band.color[1] - clear.g as f32).abs() < 1e-5);
+            assert!((band.color[2] - clear.b as f32).abs() < 1e-5);
+            assert!((band.color[3] - clear.a as f32).abs() < 1e-5);
         }
 
         /// Unequal formats are an error and never a degradation.

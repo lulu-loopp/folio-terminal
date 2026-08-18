@@ -2982,10 +2982,7 @@ fn push_commit(
     let mut lane = |top: f32, bottom: f32| {
         let clipped = crop([lane_x - stroke / 2.0, top, lane_x + stroke / 2.0, bottom]);
         if clipped[3] > clipped[1] {
-            quads.push(ChromeQuad {
-                rect: clipped,
-                color: line_ink,
-            });
+            quads.push(ChromeQuad::ink(clipped, line_ink));
         }
     };
     if !commit.first {
