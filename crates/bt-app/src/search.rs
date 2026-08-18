@@ -835,6 +835,33 @@ pub struct Capsule {
 }
 
 impl Capsule {
+    /// **The caret's line box** — its x from the measured text in front of it, its
+    /// top and bottom the field's own, in physical window pixels.
+    ///
+    /// One derivation with two readers, which is [`hit`]'s own discipline moved to
+    /// the caret: [`build`] insets this to draw the bar, and the window hands the
+    /// very same rectangle to the IME so the candidate list stands under the box
+    /// the letters are going into. A candidate window placed from a second
+    /// computation is a candidate window that drifts off the caret it claims to
+    /// follow — and, before this existed, a search field that published no
+    /// rectangle at all left the list parked in the window's corner (user report,
+    /// 2026-08-17).
+    ///
+    /// The **line box** and not the bar, because the two are asked different
+    /// questions: the bar is the ink an insertion point is drawn in, held four
+    /// pixels off the field's edges so it does not touch them, while the IME is
+    /// being told which line it must not cover — and a rectangle four pixels short
+    /// is four pixels of the field the candidate list is allowed to sit on.
+    #[must_use]
+    pub fn caret_line(&self, caret_x: f32, scale: f32) -> [f32; 4] {
+        let px = |logical: f32| logical * scale;
+        let caret = px(FIELD_CARET_LOGICAL_PX).round().max(1.0);
+        let text_left = self.field[0] + px(FIELD_PADDING_LOGICAL_PX);
+        let text_right = (self.field[2] - px(FIELD_PADDING_LOGICAL_PX)).max(text_left);
+        let x = (text_left + caret_x).min(text_right - caret);
+        [x, self.field[1], x + caret, self.field[3]]
+    }
+
     /// One toggle's box.
     #[must_use]
     pub fn toggle(&self, flag: SearchFlag) -> [f32; 4] {
@@ -1072,16 +1099,10 @@ pub fn build(
         clip: Some(text_rect),
     });
     if look.focused {
-        let caret = px(FIELD_CARET_LOGICAL_PX).round().max(1.0);
         let inset = px(FIELD_CARET_INSET_LOGICAL_PX).round();
-        let x = (text_left + look.caret_x).min(text_rect[2] - caret);
+        let line = capsule.caret_line(look.caret_x, scale);
         quads.push(OverlayQuad {
-            rect: [
-                x,
-                capsule.field[1] + inset,
-                x + caret,
-                capsule.field[3] - inset,
-            ],
+            rect: [line[0], line[1] + inset, line[2], line[3] - inset],
             color: palette.accent,
             alpha: 1.0,
         });
@@ -1858,6 +1879,77 @@ mod tests {
         assert!(capsule.frame[0] <= boxes[0][0]);
         assert!(boxes[8][2] <= capsule.frame[2]);
         assert_eq!(capsule.field[2] - capsule.field[0], FIELD_WIDTH_LOGICAL_PX);
+    }
+
+    /// PIN (user report, 2026-08-17) — **the caret the IME is given is inside the
+    /// field, and it walks with what has been typed in front of it.**
+    ///
+    /// The bug was not a wrong rectangle, it was *no* rectangle: the capsule
+    /// published nothing, so a composition begun in the search field left the
+    /// candidate list wherever the last caret this window published had been —
+    /// the bottom-right of the window in the photograph. What the window hands
+    /// `set_ime_cursor_area` is this line box, so it is asserted here, next to
+    /// the layout that produces it and without a font or a GPU:
+    ///
+    /// - it stands **inside the field's own box**, on both axes, at every prefix
+    ///   including one longer than the field;
+    /// - it spans the field's whole **line** rather than the inset bar the reader
+    ///   sees, because the candidate window is placed clear of what it is given
+    ///   and half a field of clearance is not clearance;
+    /// - it **moves right** as the caret byte moves along the query, which is the
+    ///   half of the report that a fixed rectangle would still have failed.
+    ///
+    /// MUTATIONS: return the field box's left edge instead of the caret's and the
+    /// walk assertion goes red; inset the top and bottom by
+    /// `FIELD_CARET_INSET_LOGICAL_PX` and the line assertion does; drop the clamp
+    /// and the overlong prefix escapes the field.
+    #[test]
+    fn the_field_gives_the_ime_a_caret_inside_itself_that_walks_with_the_query() {
+        let capsule = lay_out(PANE, None, SCALE, 36.0);
+        // A stand-in for the font: what the window passes is a measured width,
+        // and every measured width is a non-negative number of pixels.
+        let advance = 7.0;
+        let inside = |line: [f32; 4]| {
+            line[0] >= capsule.field[0]
+                && line[2] <= capsule.field[2]
+                && line[1] >= capsule.field[1]
+                && line[3] <= capsule.field[3]
+        };
+
+        let empty = capsule.caret_line(0.0, SCALE);
+        assert!(inside(empty), "{empty:?} escapes {:?}", capsule.field);
+        assert_eq!(
+            (empty[1], empty[3]),
+            (capsule.field[1], capsule.field[3]),
+            "the IME is told the line, not the bar drawn inside it"
+        );
+        assert!(empty[2] > empty[0], "a caret with no width is not a caret");
+
+        let mut last = empty;
+        for byte in 1..=4u32 {
+            let line = capsule.caret_line(byte as f32 * advance, SCALE);
+            assert!(inside(line), "{line:?} escapes {:?}", capsule.field);
+            assert!(
+                line[0] > last[0],
+                "the caret stood still at byte {byte}: {line:?} after {last:?}"
+            );
+            assert_eq!(
+                (line[1], line[3]),
+                (empty[1], empty[3]),
+                "a one-line field's caret moves along the line and never off it"
+            );
+            last = line;
+        }
+
+        // A query longer than its box scrolls under the field's own right
+        // padding; the candidate list may not follow it out of the capsule.
+        let overrun = capsule.caret_line(10_000.0, SCALE);
+        assert!(
+            inside(overrun),
+            "{overrun:?} escapes {:?} — a caret past the end of the box is still \
+             in the box",
+            capsule.field
+        );
     }
 
     /// Every control answers a press on itself, and the capsule's own padding answers as its body

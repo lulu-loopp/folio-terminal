@@ -3243,6 +3243,33 @@ pub struct GitPromptRects {
     pub caret_x: f32,
 }
 
+impl GitPromptRects {
+    /// The run the name is laid out in, inside the field's own padding.
+    #[must_use]
+    pub fn text_run(&self, scale: f32) -> [f32; 4] {
+        let px = |logical: f32| logical * scale;
+        let left = self.field[0] + px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
+        let right = self.field[2] - px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
+        [left, self.field[1], right.max(left), self.field[3]]
+    }
+
+    /// **The caret's line box** — its x from [`Self::caret_x`], its top and bottom
+    /// the field's own.
+    ///
+    /// One derivation with two readers, exactly as `search::Capsule::caret_line`
+    /// is: [`git_menu_build`] insets this to draw the bar, and the window hands
+    /// the same rectangle to the IME so a branch name composed in Chinese gets
+    /// its candidate list under the prompt rather than wherever the last caret
+    /// this window published happened to stand.
+    #[must_use]
+    pub fn caret_line(&self, scale: f32) -> [f32; 4] {
+        let text = self.text_run(scale);
+        let caret = (GIT_PROMPT_CARET_LOGICAL_PX * scale).round().max(1.0);
+        let x = (text[0] + self.caret_x).min(text[2] - caret);
+        [x, self.field[1], x + caret, self.field[3]]
+    }
+}
+
 /// Every rectangle a git context menu draws and hit-tests.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GitMenuLayout {
@@ -3251,6 +3278,18 @@ pub struct GitMenuLayout {
     items: Vec<GitMenuItem>,
     separator: Option<[f32; 4]>,
     prompt: Option<GitPromptRects>,
+}
+
+impl GitMenuLayout {
+    /// The prompt's rectangles, when this menu has become one.
+    ///
+    /// Read by the window so the IME can be told where the name is being typed —
+    /// the only thing outside this module that needs a box from inside the menu,
+    /// and it needs the one the painter used.
+    #[must_use]
+    pub fn prompt_rects(&self) -> Option<GitPromptRects> {
+        self.prompt
+    }
 }
 
 /// `.root-menu`'s floor, which is this menu's too: every row here is a verb and
@@ -3473,15 +3512,8 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
             palette.menu_item_hover,
             1.0,
         ));
-        let text_left = rects.field[0] + px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
-        let text_right = rects.field[2] - px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
         let typed = !prompt.text.is_empty();
-        let text_rect = [
-            text_left,
-            rects.field[1],
-            text_right.max(text_left),
-            rects.field[3],
-        ];
+        let text_rect = rects.text_run(layout.scale);
         labels.push(ChromeLabel {
             text: if typed {
                 prompt.text.to_owned()
@@ -3505,16 +3537,10 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
             tabular_numerals: false,
             clip: Some(text_rect),
         });
-        let caret = px(GIT_PROMPT_CARET_LOGICAL_PX).round().max(1.0);
         let inset = px(GIT_PROMPT_CARET_INSET_LOGICAL_PX).round();
-        let caret_x = (text_left + rects.caret_x).min(text_rect[2] - caret);
+        let line = rects.caret_line(layout.scale);
         quads.push(OverlayQuad {
-            rect: [
-                caret_x,
-                rects.field[1] + inset,
-                caret_x + caret,
-                rects.field[3] - inset,
-            ],
+            rect: [line[0], line[1] + inset, line[2], line[3] - inset],
             color: palette.accent,
             alpha: 1.0,
         });
