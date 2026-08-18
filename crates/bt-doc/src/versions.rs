@@ -12,6 +12,31 @@ pub enum MathMode {
     Inline,
 }
 
+/// Which kind of source a proven rendered block was read out of.
+///
+/// **The pipeline is one pipeline and this is the only thing that differs.** A
+/// `$$…$$` formula and a GFM pipe table are both "a span of frozen transcript
+/// lines that a picture stands over, while the bytes underneath stay exactly
+/// where the shell wrote them" — so they share the detection record, the
+/// lifecycle, the four versions, the height cap, the interior scroll, the
+/// occlusion clearing, the copy path and the alternate-screen rule, and they
+/// differ only in who lays the picture out. Splitting them into two pipelines
+/// would mean two answers to every one of those questions, and the second answer
+/// would drift.
+///
+/// A table deliberately carries [`MathMode::Display`] rather than a mode of its
+/// own, because "display" is the *presentation* question — a block on lines of
+/// its own, not a run inside a line — and a table's answer to it is the same as
+/// a `$$` block's. Every rule already written as `mode == Display` is therefore
+/// a rule tables obey by construction rather than by a second match arm.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum BlockKind {
+    #[default]
+    Math,
+    /// A GitHub-Flavoured-Markdown pipe table — see `bt_detect::table`.
+    Table,
+}
+
 /// Where one inline `$…$` run sits inside the composite raster its logical line rendered to.
 ///
 /// A line may carry several runs. They are rasterized one at a time and composited into a single

@@ -36,6 +36,7 @@ pub fn is_banded_artifact(kind: &RgbaArtifactKind) -> bool {
     matches!(
         kind,
         RgbaArtifactKind::Math
+            | RgbaArtifactKind::Table
             | RgbaArtifactKind::InlineImage { .. }
             | RgbaArtifactKind::LocalImagePath { .. }
     )
@@ -49,7 +50,11 @@ pub fn is_banded_artifact(kind: &RgbaArtifactKind) -> bool {
 /// row exclusivity against a local-path band would assert the opposite of its layout.
 pub fn band_owns_its_rows(kind: &RgbaArtifactKind) -> bool {
     match kind {
-        RgbaArtifactKind::Math | RgbaArtifactKind::InlineImage { .. } => true,
+        // A table owns its rows for the same reason a formula does: the picture stands where the
+        // pipe text stood, so those rows are blanked and belong to that block alone.
+        RgbaArtifactKind::Math | RgbaArtifactKind::Table | RgbaArtifactKind::InlineImage { .. } => {
+            true
+        }
         RgbaArtifactKind::LocalImagePath { .. } => false,
     }
 }

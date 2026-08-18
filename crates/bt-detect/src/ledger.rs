@@ -530,6 +530,12 @@ pub(crate) fn structural_kind(kind: &DelimiterKind, opening: bool) -> Structural
                 StructuralDelimiterKind::BracketClose
             }
         }
+        // A table never reaches here: the ledger accounts for structural `$$`/`\[`/`egin`
+        // tokens the display scanner paired or refused, and a table's `|---|` row is neither
+        // paired nor refused — it is read once, in one place, by `table::table_at`. `Dollars` is
+        // the inert answer, chosen because a delimiter kind that cannot occur must still not
+        // invent a ledger category nobody counts.
+        DelimiterKind::Table => StructuralDelimiterKind::Dollars,
         DelimiterKind::Environment(name) => {
             if opening {
                 StructuralDelimiterKind::EnvironmentOpen(name.clone())

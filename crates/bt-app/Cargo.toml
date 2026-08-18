@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+bt-detect = { path = "../bt-detect" }
 bt-doc = { path = "../bt-doc" }
 bt-layout = { path = "../bt-layout" }
 bt-math = { path = "../bt-math" }

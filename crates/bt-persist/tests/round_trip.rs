@@ -560,7 +560,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 11,
+        SETTINGS_SCHEMA_VERSION, 12,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -575,7 +575,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          one bump because four of them describe one ground nobody can set a \
          quarter of, and because a schema version is a file format rather than a \
          changelog — and the Advanced disclosure's own list the v10→v11, one key \
-         on its own day"
+         on its own day, and the Tables switch the v11-to-v12, one key on \n         its own day again"
     );
     assert!(
         defaults.advanced_open.is_empty(),
@@ -1011,6 +1011,53 @@ fn settings_v10_migrates_with_every_group_shut_and_v11_keeps_the_pages_it_names(
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, named);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (the Tables switch) - a v11 file migrates to v12 with tables on, and a v12 file that turns
+/// them off is read as turning them off.
+///
+/// The migration half pins that the step carries a behaviour forward rather than choosing a new
+/// default. A v11 build drew no tables at all, so its file records no preference about them; what
+/// it records is silence, and the honest reading of silence is the product's own answer, which is
+/// the same `true` a fresh install gets. Writing `false` would be inventing a refusal nobody made.
+/// The v12 half pins the opposite failure: a reader who *did* say no must be heard, through the
+/// write and the read both.
+#[test]
+fn settings_v11_migrates_with_tables_on_and_v12_keeps_the_answer_it_was_given() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v11_advanced_open.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.tables,
+        "a v11 file never answered this question, so the product answers it"
+    );
+    assert!(
+        !migrated.display_formulas,
+        "one key crosses; every sibling crosses untouched"
+    );
+    assert_eq!(migrated.terminal_font_size, 22);
+
+    let (off, report) = read_settings(&fixture_path("settings_v12_tables_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(off.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(!off.tables, "a reader who said no is heard");
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v12-tables-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &off).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""tables": false"#),
+        "the switch is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, off);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -46,6 +46,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (8, migrate_settings_v8_to_v9),
     (9, migrate_settings_v9_to_v10),
     (10, migrate_settings_v10_to_v11),
+    (11, migrate_settings_v11_to_v12),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -265,6 +266,20 @@ fn migrate_settings_v10_to_v11(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(11));
         object.insert("advanced_open".to_owned(), Value::Array(Vec::new()));
+    }
+    value
+}
+
+/// One key, and it carries a behaviour forward rather than choosing a default — the v1→v2 shape,
+/// not the v2→v3 one. Every build that wrote a v11 file rendered no tables at all, so there is no
+/// preference in such a file to preserve; what there *is* is the product's answer to a question
+/// that file was never asked, and the product's answer is the same `true` a fresh install gets.
+/// Writing `false` would be inventing a refusal on the reader's behalf; leaving the key out would
+/// leave the next reader to guess. See `SettingsV1::tables`.
+fn migrate_settings_v11_to_v12(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(12));
+        object.insert("tables".to_owned(), Value::from(true));
     }
     value
 }

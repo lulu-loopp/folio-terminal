@@ -273,8 +273,18 @@ pub struct ProjectedMathArtifact {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RgbaArtifactKind {
     Math,
-    InlineImage { animated: bool },
-    LocalImagePath { animated: bool },
+    /// A rendered GFM pipe table. It carries no pixels of its own: the block's picture is drawn
+    /// with the window's own text and fills, at terminal metrics, by whoever owns the paint —
+    /// which is why the `rgba` slot of such an artifact is empty and no texture is ever uploaded
+    /// for it. Everything else on the placement (the owned rows, the clip, the height cap, the
+    /// interior scroll, the source text) means exactly what it means for a formula.
+    Table,
+    InlineImage {
+        animated: bool,
+    },
+    LocalImagePath {
+        animated: bool,
+    },
 }
 
 /// A rendered artifact tied to transient grid coordinates. Unlike history artifacts, this never
