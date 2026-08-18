@@ -599,6 +599,22 @@ pub enum Text {
     /// The verb that ends every Advanced group: it puts that page's advanced
     /// rows back, and nothing else on the page.
     ResetAdvanced,
+
+    // ── customising a colour scheme (§7.1.6c-4c) ─────────────────────────
+    /// The verb that copies the scheme in force into the user's own folder and
+    /// opens the copy. The ellipsis is the interface convention it is: pressing
+    /// it does not finish the job, it hands you the file.
+    CustomiseScheme,
+    /// The title of the card raised when the scheme **in force** stops parsing.
+    ///
+    /// Separate from [`Self::SchemeFileSkipped`], which is the startup card
+    /// about a file in the folder: that one says "this scheme is not in your
+    /// list", and this one has to say "the file you are editing is broken and
+    /// the window kept the colours it had". Two different pieces of news about
+    /// one kind of file.
+    SchemeInUseBroken,
+    /// And the title of the card raised when it stops existing.
+    SchemeInUseGone,
 }
 
 impl Text {
@@ -1036,6 +1052,9 @@ impl Text {
             // ── the Advanced disclosure and its Reset ──────────────────────
             Self::AdvancedGroup => pick(lang, "Advanced", "高级"),
             Self::ResetAdvanced => pick(lang, "Reset to defaults", "恢复默认值"),
+            Self::CustomiseScheme => pick(lang, "Customise scheme…", "自定义配色…"),
+            Self::SchemeInUseBroken => pick(lang, "Colour scheme not reloaded", "配色未重新载入"),
+            Self::SchemeInUseGone => pick(lang, "Colour scheme not found", "找不到配色"),
         }
     }
 
@@ -1051,7 +1070,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 156] = [
+    pub const ALL: [Self; 159] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1208,6 +1227,9 @@ impl Text {
         Self::FilesViewGit,
         Self::AdvancedGroup,
         Self::ResetAdvanced,
+        Self::CustomiseScheme,
+        Self::SchemeInUseBroken,
+        Self::SchemeInUseGone,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -1282,6 +1304,48 @@ pub fn scheme_file_skipped(file: &str, reason: &str) -> String {
     match current() {
         Lang::English => format!("{file} — {reason}"),
         Lang::Chinese => format!("{file} —— {reason}"),
+    }
+}
+
+/// The card raised when a copy of the scheme in force has been written.
+///
+/// The file name is the parameter because it is the thing the reader has to be
+/// able to find again, and it is not one this product chose: it carries whatever
+/// [`crate::schemes::unique_custom`] had to fall back to when a copy of that
+/// name already existed. The second clause is a fact about what happens next and
+/// not an instruction — the file is already open in front of them.
+#[must_use]
+pub fn scheme_customised(file: &str) -> String {
+    match current() {
+        Lang::English => format!("{file} — saving it applies the colours"),
+        Lang::Chinese => format!("{file} —— 保存后颜色即生效"),
+    }
+}
+
+/// The card raised when the scheme in force stops parsing.
+///
+/// Same two halves as [`scheme_file_skipped`] plus the one thing the reader
+/// cannot see for themselves: nothing on screen changed, so without this
+/// sentence a broken save and a save with no visible effect read identically.
+#[must_use]
+pub fn scheme_in_use_broken(file: &str, reason: &str) -> String {
+    match current() {
+        Lang::English => format!("{file} — {reason}. The colours in force are unchanged."),
+        Lang::Chinese => format!("{file} —— {reason}。当前颜色未变。"),
+    }
+}
+
+/// The card raised when the scheme in force is no longer in the folder.
+///
+/// Both names are parameters because both are the user's: the one they chose and
+/// the one that is now in force in its place.
+#[must_use]
+pub fn scheme_in_use_gone(name: &str, fallback: &str) -> String {
+    match current() {
+        Lang::English => {
+            format!("{name} is no longer in the schemes folder. {fallback} is in force.")
+        }
+        Lang::Chinese => format!("配色 {name} 已不在 schemes 文件夹中，当前使用 {fallback}。"),
     }
 }
 

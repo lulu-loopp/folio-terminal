@@ -101,7 +101,26 @@ pub const PEEK_MAX_WIDTH_LOGICAL_PX: f32 = 460.0;
 /// What a cut line ends with.
 pub const PEEK_ELLIPSIS: &str = "…";
 
-/// Which of the two faces a tip is drawn in.
+// ── the colour swatch: the same machine wearing a third face (§7.1.6c-4c) ──
+//
+// A `#rrggbb` under the pointer in a text preview. Same clock, same anchors,
+// same surface as the two above — the reuse D-19 ruled for `#cmd-peek`, taken at
+// its word a second time rather than treated as a one-off.
+
+/// The side of the colour well drawn before the text, in logical pixels.
+///
+/// Twenty-eight, which is the height of a `.btn` in this dialog and about two
+/// lines of the card's own type: big enough that a dark colour and a slightly
+/// darker one are told apart side by side, small enough that the card is still a
+/// card and not a colour picker.
+pub const SWATCH_SIZE_LOGICAL_PX: f32 = 28.0;
+/// `border-radius: 6px` — the well is a rounded square, on the same ladder as the
+/// button (6) and the card (8) it sits inside.
+pub const SWATCH_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// The gap between the well and the token it is showing.
+pub const SWATCH_GAP_LOGICAL_PX: f32 = 8.0;
+
+/// Which of the faces a tip is drawn in.
 ///
 /// D-19 ruled that `#cmd-peek` reuses this module rather than becoming a second
 /// popup, and this is the shape of that reuse: one enum carrying the six things
@@ -120,6 +139,14 @@ pub enum TipFace {
         /// drawn in `--ink3` instead of `--ink2` (`cmdrail::PEEK_EMPTY_TEXT`).
         muted: bool,
     },
+    /// The colour under the pointer in a text preview ([`crate::hex_peek`]).
+    Swatch {
+        /// The colour the token spells, straight (non-premultiplied) RGBA. Part
+        /// of the face and not of the text, because it is what is *drawn* — the
+        /// text is the token, which the caller reads out of the document like
+        /// every other tip's words.
+        rgba: [u8; 4],
+    },
 }
 
 impl TipFace {
@@ -127,7 +154,7 @@ impl TipFace {
     pub fn font_logical_px(self) -> f32 {
         match self {
             Self::Chrome => TIP_FONT_LOGICAL_PX,
-            Self::Peek { .. } => PEEK_FONT_LOGICAL_PX,
+            Self::Peek { .. } | Self::Swatch { .. } => PEEK_FONT_LOGICAL_PX,
         }
     }
 
@@ -136,6 +163,13 @@ impl TipFace {
         match self {
             Self::Chrome => CHROME_LINE_HEIGHT,
             Self::Peek { .. } => PEEK_LINE_HEIGHT,
+            // **The swatch is the line box.** A well 28 logical pixels tall
+            // inside a card sized to a 12/1.5 line would overflow the card by
+            // ten pixels, so the leading is what gives way: one line, as tall as
+            // the well beside it, with the token set on its centre. Derived
+            // rather than written as 2.333 so that moving either number keeps
+            // the two the same height.
+            Self::Swatch { .. } => SWATCH_SIZE_LOGICAL_PX / PEEK_FONT_LOGICAL_PX,
         }
     }
 
@@ -144,7 +178,9 @@ impl TipFace {
     pub fn padding_logical_px(self) -> (f32, f32) {
         match self {
             Self::Chrome => (TIP_PADDING_X_LOGICAL_PX, TIP_PADDING_Y_LOGICAL_PX),
-            Self::Peek { .. } => (PEEK_PADDING_X_LOGICAL_PX, PEEK_PADDING_Y_LOGICAL_PX),
+            Self::Peek { .. } | Self::Swatch { .. } => {
+                (PEEK_PADDING_X_LOGICAL_PX, PEEK_PADDING_Y_LOGICAL_PX)
+            }
         }
     }
 
@@ -152,7 +188,7 @@ impl TipFace {
     pub fn radius_logical_px(self) -> f32 {
         match self {
             Self::Chrome => TIP_RADIUS_LOGICAL_PX,
-            Self::Peek { .. } => PEEK_RADIUS_LOGICAL_PX,
+            Self::Peek { .. } | Self::Swatch { .. } => PEEK_RADIUS_LOGICAL_PX,
         }
     }
 
@@ -160,7 +196,7 @@ impl TipFace {
     pub fn max_width_logical_px(self) -> f32 {
         match self {
             Self::Chrome => TIP_MAX_WIDTH_LOGICAL_PX,
-            Self::Peek { .. } => PEEK_MAX_WIDTH_LOGICAL_PX,
+            Self::Peek { .. } | Self::Swatch { .. } => PEEK_MAX_WIDTH_LOGICAL_PX,
         }
     }
 
@@ -172,8 +208,42 @@ impl TipFace {
     }
 
     /// Whether the text is set in the terminal's face.
+    ///
+    /// A `#rrggbb` is a token out of a document the pane draws in the terminal's
+    /// face, and quoting it in the window's sans face would be a paraphrase —
+    /// the same sentence [`PEEK_FONT_LOGICAL_PX`] makes about a command line.
     #[must_use]
     pub fn monospace(self) -> bool {
+        matches!(self, Self::Peek { .. } | Self::Swatch { .. })
+    }
+
+    /// How much room stands to the left of the text inside the box.
+    ///
+    /// Zero for a face that is only words. The swatch's own side plus its gap,
+    /// for the one that is not — and it is a property of the *face* rather than
+    /// something the caller adds to its measured widths, because otherwise the
+    /// box would grow while the text stayed at the padding and the well would be
+    /// drawn on top of it.
+    #[must_use]
+    pub fn leading_logical_px(self) -> f32 {
+        match self {
+            Self::Chrome | Self::Peek { .. } => 0.0,
+            Self::Swatch { .. } => SWATCH_SIZE_LOGICAL_PX + SWATCH_GAP_LOGICAL_PX,
+        }
+    }
+
+    /// Whether this face is placed by the *card's* rule — left of its host and
+    /// eight pixels above it — rather than the tip's.
+    ///
+    /// Split out of [`Self::monospace`], which used to answer both questions
+    /// because for two faces the answers coincided. They do not for the third: a
+    /// swatch quotes a token in the terminal's face as the card does, but its
+    /// host is a run of six characters in the middle of a document, and a card
+    /// hung to its left would cover the line it is about. It is placed like a
+    /// tip, which is what "beside the thing it explains" means when the thing is
+    /// small.
+    #[must_use]
+    pub fn placed_like_card(self) -> bool {
         matches!(self, Self::Peek { .. })
     }
 }
@@ -272,6 +342,15 @@ pub enum TooltipAnchorId {
     /// not, because a box you type into has its own placeholder to say what it
     /// is for.
     SearchControl(crate::search::SearchElement),
+    /// A `#rrggbb` under the pointer in a text preview (§7.1.6c-4c).
+    ///
+    /// It carries the token's **byte offset in the document** and not its screen
+    /// box, so that a card already up follows its token through a scroll or a
+    /// reflow instead of being retired and re-armed — the same reasoning
+    /// [`Self::CommandTick`] gives for carrying a mark rather than an index. An
+    /// edit that moves the token does change the offset, and that is correct:
+    /// the text under the pointer is then a different piece of text.
+    PreviewHex(crate::PreviewSurface, usize),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.
@@ -660,11 +739,11 @@ pub fn place(
     let line_height = (px(face.font_logical_px()) * face.line_height()).round();
 
     let text_width = line_widths.iter().copied().fold(0.0_f32, f32::max);
-    let width = (text_width + 2.0 * (pad_x + border)).round();
+    let width = (text_width + px(face.leading_logical_px()) + 2.0 * (pad_x + border)).round();
     let height = (line_widths.len() as f32 * line_height + 2.0 * (pad_y + border)).round();
 
     let (window_width, window_height) = window;
-    if face.monospace() {
+    if face.placed_like_card() {
         // `left = max(6, r.left − peekWidth − 12)`, `top = max(6, r.top − 8)`.
         // The mock-up clamps only the near edges, because its card can only ever
         // be pushed off the top-left; the far edges are clamped here as well, for
@@ -872,6 +951,12 @@ pub fn layout(
     let (pad_x, pad_y) = face.padding_logical_px();
     let pad_x = pad_x * scale;
     let pad_y = pad_y * scale;
+    // The leading is asymmetric on purpose: it is a *column* before the text and
+    // not padding around it, so it moves the left edge in and leaves the right
+    // where the box's own padding put it. Adding it to `pad_x` would take the
+    // same width off the right and give the text a box narrower than the one it
+    // was measured for.
+    let leading = face.leading_logical_px() * scale;
     let lines = text
         .split('\n')
         .enumerate()
@@ -879,7 +964,7 @@ pub fn layout(
             let top = frame[1] + border + pad_y + row as f32 * line_height;
             (
                 [
-                    frame[0] + border + pad_x,
+                    frame[0] + border + pad_x + leading,
                     top,
                     frame[2] - border - pad_x,
                     top + line_height,
@@ -921,6 +1006,42 @@ pub fn build(
         palette.menu_border,
         alpha(palette.menu_border_alpha),
     );
+
+    // **The colour well**, in the column [`TipFace::leading_logical_px`]
+    // reserved for it: a rounded square of the colour, with the card's own
+    // hairline round it.
+    //
+    // The hairline is not decoration. A swatch of `#1b1b1b` on a dark card and a
+    // swatch of the card's own surface would otherwise have no edge at all, and
+    // a card showing an invisible square is a card that looks broken rather than
+    // one that has just told you the colour is the same as the paper.
+    //
+    // A colour that carries alpha is composited **over the card's surface** and
+    // labelled by its own text, which spells the alpha out. The alternative —
+    // a chequerboard — is a second convention to learn, and it would be showing
+    // the colour over a pattern this window paints nowhere else.
+    if let TipFace::Swatch { rgba } = face {
+        let side = px(SWATCH_SIZE_LOGICAL_PX);
+        let (pad_x, pad_y) = face.padding_logical_px();
+        let border = px(TIP_BORDER_LOGICAL_PX);
+        let left = layout.frame[0] + border + px(pad_x);
+        let top = layout.frame[1] + border + px(pad_y);
+        let well = [left, top, left + side, top + side];
+        let radius = px(SWATCH_RADIUS_LOGICAL_PX);
+        quads.extend(bt_render::rounded_overlay_fill(
+            well,
+            radius,
+            [rgba[0], rgba[1], rgba[2]],
+            f32::from(rgba[3]) / 255.0,
+        ));
+        quads.extend(bt_render::rounded_overlay_halo(
+            well,
+            radius,
+            border,
+            palette.menu_border,
+            alpha(palette.menu_border_alpha),
+        ));
+    }
 
     // `color: var(--ink2)` over `--menu` — the same ink a menu row that is not
     // the selected one is drawn in, which is what `--ink2` on that surface
@@ -1624,6 +1745,155 @@ mod tests {
                 .iter()
                 .any(|quad| quad.color == palette.menu_surface),
             "faced"
+        );
+    }
+
+    // ── the swatch: the third face (§7.1.6c-4c) ───────────────────────────
+
+    /// PIN — **the swatch's card keeps a column for the colour and is exactly as
+    /// tall as the well in it.**
+    ///
+    /// Both halves are one claim about the same number: the leading widens the
+    /// box and moves the text, and the line box *is* the well, so a card that
+    /// got either wrong would either overlap its own swatch or overflow it.
+    ///
+    /// MUTATION: return `0.0` from `leading_logical_px` and the text starts under
+    /// the well; add the leading to `pad_x` instead of to the left edge alone and
+    /// the text box comes out narrower than the string it was measured for.
+    #[test]
+    fn a_swatch_card_keeps_a_column_for_the_colour_and_is_as_tall_as_the_well() {
+        let face = TipFace::Swatch {
+            rgba: [0x1b, 0x1b, 0x1b, 0xff],
+        };
+        assert!(face.monospace(), "it quotes a token out of a document");
+        assert!(!face.placed_like_card(), "and it is placed like a tip");
+        assert_eq!(face.leading_logical_px(), 36.0, "28 of well, 8 of gap");
+        assert_eq!(face.radius_logical_px(), PEEK_RADIUS_LOGICAL_PX);
+
+        let token = host(400.0, 300.0, 449.0, 318.0);
+        let text_width = 49.0_f32;
+        let (frame, line_height, border) =
+            super::place(token, &[text_width], WINDOW, SCALE, face).unwrap();
+        assert_eq!(line_height, SWATCH_SIZE_LOGICAL_PX);
+        assert_eq!(
+            frame[3] - frame[1],
+            (SWATCH_SIZE_LOGICAL_PX + 2.0 * (PEEK_PADDING_Y_LOGICAL_PX + border)).round(),
+            "the box is the well plus its own padding, and nothing else"
+        );
+        assert_eq!(
+            frame[2] - frame[0],
+            (text_width + 36.0 + 2.0 * (PEEK_PADDING_X_LOGICAL_PX + border)).round(),
+            "and wide enough for the well, the gap and the token"
+        );
+        assert_eq!(
+            frame[1],
+            token[3] + TIP_GAP_LOGICAL_PX,
+            "below the token, the tip's own rule"
+        );
+
+        let laid = super::layout("#1b1b1b", token, &[text_width], WINDOW, SCALE, face)
+            .expect("a swatch is placed");
+        let (text_box, text) = &laid.lines[0];
+        assert_eq!(text, "#1b1b1b");
+        assert_eq!(
+            text_box[0],
+            frame[0] + border + PEEK_PADDING_X_LOGICAL_PX + 36.0,
+            "the text starts after the well, not under it"
+        );
+        assert_eq!(
+            text_box[2],
+            frame[2] - border - PEEK_PADDING_X_LOGICAL_PX,
+            "and still ends at the box's own padding"
+        );
+        assert!(text_box[2] - text_box[0] >= text_width);
+    }
+
+    /// PIN — **the well is painted in the colour the token spells**, with the
+    /// card's own hairline round it so a swatch the colour of the card is still a
+    /// square.
+    ///
+    /// MUTATION: drop the halo and `#1b1b1b` on a dark card is an invisible
+    /// square — a card that looks broken rather than one saying "this colour is
+    /// the colour of the paper".
+    #[test]
+    fn the_well_is_painted_in_the_token_s_own_colour_inside_the_card_s_hairline() {
+        let palette = bt_render::chrome_palette();
+        let colour = [0x7a, 0x99, 0xff, 0xff];
+        let face = TipFace::Swatch { rgba: colour };
+        let token = host(400.0, 300.0, 449.0, 318.0);
+        let laid = super::layout("#7a99ff", token, &[49.0], WINDOW, SCALE, face).unwrap();
+        let layers = super::build(&laid, &palette, SCALE, 1.0, face);
+        let layer = &layers[0];
+
+        let well: Vec<&bt_render::OverlayQuad> = layer
+            .quads
+            .iter()
+            .filter(|quad| quad.color == [colour[0], colour[1], colour[2]])
+            .collect();
+        assert!(!well.is_empty(), "the colour itself is drawn");
+        let left = well
+            .iter()
+            .fold(f32::MAX, |low, quad| low.min(quad.rect[0]));
+        let right = well
+            .iter()
+            .fold(0.0_f32, |high, quad| high.max(quad.rect[2]));
+        let top = well
+            .iter()
+            .fold(f32::MAX, |low, quad| low.min(quad.rect[1]));
+        let bottom = well
+            .iter()
+            .fold(0.0_f32, |high, quad| high.max(quad.rect[3]));
+        assert_eq!(right - left, SWATCH_SIZE_LOGICAL_PX, "a square, not a bar");
+        assert_eq!(bottom - top, SWATCH_SIZE_LOGICAL_PX);
+        assert_eq!(
+            left,
+            laid.frame[0] + TIP_BORDER_LOGICAL_PX + PEEK_PADDING_X_LOGICAL_PX,
+            "in the column the leading reserved"
+        );
+        assert!(
+            right <= laid.lines[0].0[0],
+            "and clear of the text beside it"
+        );
+        assert!(
+            layer
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.menu_border && quad.rect[1] >= top - 2.0),
+            "with a hairline of its own"
+        );
+        // The token still rides the monospace channel: this face is a card with a
+        // square in it, not a second kind of popup.
+        let body = layer.body.as_ref().expect("the monospace channel");
+        assert_eq!(body.paragraphs[0].runs[0].text, "#7a99ff");
+        assert!(body.paragraphs[0].runs[0].mono);
+    }
+
+    /// A colour that carries alpha is composited over the card's own surface,
+    /// and the text is what says how much alpha there was.
+    #[test]
+    fn a_colour_with_alpha_is_laid_over_the_card_rather_than_over_a_chequerboard() {
+        let palette = bt_render::chrome_palette();
+        let face = TipFace::Swatch {
+            rgba: [0x7a, 0x99, 0xff, 0x80],
+        };
+        let token = host(400.0, 300.0, 465.0, 318.0);
+        let laid = super::layout("#7a99ff80", token, &[63.0], WINDOW, SCALE, face).unwrap();
+        let layer = &super::build(&laid, &palette, SCALE, 1.0, face)[0];
+        let inside: Vec<&bt_render::OverlayQuad> = layer
+            .quads
+            .iter()
+            .filter(|quad| quad.color == [0x7a, 0x99, 0xff])
+            .collect();
+        assert!(!inside.is_empty());
+        assert!(
+            inside
+                .iter()
+                .all(|quad| quad.alpha <= 128.0 / 255.0 + f32::EPSILON),
+            "no pixel of the well is more opaque than the colour says"
+        );
+        assert_eq!(
+            layer.body.as_ref().unwrap().paragraphs[0].runs[0].text,
+            "#7a99ff80"
         );
     }
 

@@ -54,7 +54,7 @@ pub use migrate::{
     FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, ReadReport, SESSION_MIGRATIONS,
     SETTINGS_MIGRATIONS,
 };
-pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme};
+pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme, write_scheme};
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
     DegradationReport, GraphFilterV1, PreviewPaneV1, PreviewPoolEntryV1, RecentEntryV1,

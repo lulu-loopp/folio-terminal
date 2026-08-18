@@ -1759,6 +1759,19 @@ pub(crate) fn scheme_for_theme(theme: Theme) -> ColourScheme {
     }
 }
 
+/// The pair in force, as `(light, dark)`.
+///
+/// The one reader is the schemes folder's watcher (§7.1.6c-4c). When the file
+/// behind the scheme a canvas is wearing stops parsing, the ruling is that the
+/// colours on screen do not move — and "do not move" can only be said by handing
+/// the same colours back to [`set_schemes`], because the other canvas may well
+/// have changed in the same rescan and the pair goes in together.
+#[must_use]
+pub fn schemes_in_force() -> (ColourScheme, ColourScheme) {
+    let schemes = active_schemes();
+    (schemes.light, schemes.dark)
+}
+
 /// Put a pair of schemes in force and bump [`theme_revision`].
 ///
 /// **One call for both**, because a window only ever wears one of them and the

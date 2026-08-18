@@ -2577,8 +2577,30 @@
      numbers would be two answers to how far a foot stands off its list. 140 and
      not 152 because the verb says less: the shortcut page's has a whole table in
      scope and says so, this one has the group it closes and nothing else. */
-  .sc-foot, .adv-foot { display: flex; justify-content: flex-end; margin-top: 14px; }
+  /* The foot became a *row* the day it grew a second verb (§7.1.6c-4c): `gap`
+     rather than a margin on one of them, so the day a third arrives it needs no
+     new number. 152 for `Customise scheme…` — the shortcut page's width, because
+     its word is the longest any `.btn` in this dialog carries — beside the
+     reset's own 140. */
+  .sc-foot, .adv-foot { display: flex; justify-content: flex-end; margin-top: 14px; gap: 8px; }
   .adv-foot .btn { width: 140px; }
+  .adv-foot .adv-customise { width: 152px; }
+  /* The colour under the pointer (§7.1.6c-4c). `#cmd-peek`'s card wearing a
+     third face: same 380ms, same surface, same radius — a 28px well before the
+     token, and the line box IS the well, so the card is exactly as tall as the
+     square in it. The hairline is not decoration: a swatch of `#1b1b1b` on a
+     dark card has no edge without it, and a card showing an invisible square
+     reads as broken rather than as "this colour is the colour of the paper". */
+  .hex-peek {
+    position: absolute; display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border-radius: 8px;
+    background: var(--menu); border: 1px solid var(--border);
+    font: 12px/28px Consolas, "Cascadia Mono", monospace; color: var(--ink2);
+    box-shadow: 0 8px 24px rgba(0,0,0,.28); z-index: 60;
+  }
+  .hex-peek .well {
+    width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
+  }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
 </style>
 </head>
@@ -2848,6 +2870,12 @@
   <div class="term-menu" id="pv-menu"></div>
   <div class="layout-peek" id="layout-peek"></div>
   <div id="cmd-peek"></div>
+  <!-- the colour under the pointer in a text preview (§7.1.6c-4c): the
+       same card, a well and the token. Shown here at rest so the face has
+       somewhere to be read; in the window it is raised by the tip host on
+       the pointer's own 380ms and placed like a tip — below the token,
+       flipping above when there is no room. -->
+  <div class="hex-peek" style="display:none"><span class="well" style="background:#7a99ff"></span>#7a99ff</div>
 
   <!-- picture-in-picture terminal (user + classmate need, 2026-07-18): a
        persistent preset session in a corner float — summon/hide on one key,
@@ -3322,7 +3350,28 @@
              through, every choice in it is written the instant it is made, and
              what this discards is exactly the rows the reader is looking at
              while they press it. -->
-        <div class="adv-foot"><button class="btn adv-reset">Reset to defaults</button></div>
+        <!-- CUSTOMISE SCHEME… (§7.1.6c-4c, user ruling 2026-08-17: route B).
+             There is no colour picker in this dialog and there is not going to
+             be one: §7.1.6c-4a made a scheme a Windows Terminal JSON object, so
+             an editor of our own would be a worse way to edit a format the
+             ecosystem already edits. What was missing was a *copy to edit*.
+             Pressing this takes the scheme the window is actually wearing,
+             writes it to `%APPDATA%\Folio\schemes\<Name> (custom).json`, ticks
+             it in the row for that canvas, shuts this dialog and opens the file
+             in a preview pane with the keyboard in it. The folder is watched
+             from then on, so Ctrl+S recolours the window — the editor is a
+             scheme editor because the colour under the pointer has a swatch and
+             the window itself is the preview.
+
+             It is in Advanced and the two scheme rows are not: choosing a scheme
+             is an everyday decision, and writing a file to edit by hand is the
+             one the disclosure exists for. `Reset to defaults` does not touch
+             it, and does not delete anything in that folder: the files are the
+             user's. -->
+        <div class="adv-foot">
+          <button class="btn adv-customise">Customise scheme…</button>
+          <button class="btn adv-reset">Reset to defaults</button>
+        </div>
         </div>
         </div>
         </section>

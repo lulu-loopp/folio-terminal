@@ -356,6 +356,19 @@ const RESTORE_ALL_WIDTH_LOGICAL_PX: f32 = 152.0;
 /// less: the shortcut page's verb has a whole table in scope and says so, this
 /// one has the group it closes and nothing else.
 const RESET_ADVANCED_WIDTH_LOGICAL_PX: f32 = 140.0;
+/// And `Customise scheme…`, the other verb an Advanced foot can carry
+/// (§7.1.6c-4c).
+///
+/// The shortcut page's 152 rather than the Reset's 140, because the word is
+/// longer: `Customise scheme…` is the widest label any `.btn` in this dialog
+/// carries, and a button sized to a shorter one would print it cut.
+const CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX: f32 = 152.0;
+/// The gap between two verbs standing on one foot line.
+///
+/// The `.btn` row's own `gap: 8px`. It exists because the foot became a *row*
+/// the day it grew a second verb, and two buttons that touch read as one control
+/// split in half.
+const FOOT_BUTTON_GAP_LOGICAL_PX: f32 = 8.0;
 const BUTTON_HEIGHT_LOGICAL_PX: f32 = 27.5;
 const BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
@@ -578,20 +591,101 @@ pub fn family_index(name: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// One `&'static str` per distinct scheme name this process has ever listed.
+///
+/// **The leak is per name, not per call and not per rescan.** That is the whole
+/// difference between this and the `Box::leak` [`monospace_families`]' comment
+/// rules out: the folder can be re-read any number of times and a name that was
+/// already there costs nothing, so the memory this can consume is bounded by how
+/// many *different* names the user's folder has held in one session — a handful
+/// for the case this exists for, which is a scheme being customised and then
+/// edited.
+///
+/// A name whose file has since been deleted keeps its string. Freeing it would
+/// mean proving no picker, no measurement and no hit test still holds it, which
+/// is exactly the proof `&'static str` exists to not have to write.
+fn intern_scheme_name(name: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut held = NAMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = held.get(name) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    held.insert(leaked);
+    leaked
+}
+
 /// The names one scheme picker draws, in its own order, as `&'static str`.
 ///
-/// Two `OnceLock`s and not one list filtered per call, for
-/// [`monospace_families`]'s reason taken one step further: `option_label`
-/// returns `&'static str`, and the *order* has to be stable across the measure
-/// pass, the hit test and the draw within one frame. The catalogue behind them
-/// is itself read once per process — see `crate::schemes::catalogue` — so these
-/// are two views of one enumeration rather than two enumerations.
+/// Two slices and not one list filtered per call, for [`monospace_families`]'s
+/// reason taken one step further: `option_label` returns `&'static str`, and the
+/// *order* has to be stable across the measure pass, the hit test and the draw
+/// within one frame.
+///
+/// **Keyed on the catalogue's revision** (§7.1.6c-4c). 4a made these two
+/// `OnceLock`s, which was the honest shape while the folder was only ever read
+/// at startup; once `Customise scheme…` began *writing* into that folder, a
+/// list that could not be rebuilt would have meant a scheme this window had just
+/// created being missing from the picker until a restart. Each rebuild leaks one
+/// slice of pointers into names that are themselves interned once, so the cost
+/// of a rescan that changed nothing is a single atomic load.
 #[must_use]
 pub fn scheme_labels(light: bool) -> &'static [&'static str] {
-    static LIGHT: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-    static DARK: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    static LIGHT: SchemeLabelSlot = SchemeLabelSlot::new();
+    static DARK: SchemeLabelSlot = SchemeLabelSlot::new();
     let slot = if light { &LIGHT } else { &DARK };
-    slot.get_or_init(|| crate::schemes::catalogue().names_for(light).collect())
+    slot.get(crate::schemes::revision(), || {
+        crate::schemes::catalogue()
+            .names_for(light)
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+/// One picker's cached list, and the catalogue revision it was built from.
+struct SchemeLabelSlot(std::sync::RwLock<(u64, &'static [&'static str])>);
+
+impl SchemeLabelSlot {
+    const fn new() -> Self {
+        Self(std::sync::RwLock::new((0, &[])))
+    }
+
+    /// The list for `revision`, building it from `names` if this is the first
+    /// time that revision has been asked for.
+    ///
+    /// `names` hands back owned strings and this interns them, so a rescan that
+    /// found the same schemes under the same names leaks nothing at all — only
+    /// the slice of pointers is new, and only when the revision actually moved.
+    fn get(&self, revision: u64, names: impl FnOnce() -> Vec<String>) -> &'static [&'static str] {
+        {
+            let held = self
+                .0
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if held.0 == revision {
+                return held.1;
+            }
+        }
+        let mut held = self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Re-checked under the write lock: two callers that missed together must
+        // still leak one slice between them.
+        if held.0 == revision {
+            return held.1;
+        }
+        let interned: Vec<&'static str> = names()
+            .into_iter()
+            .map(|name| intern_scheme_name(&name))
+            .collect();
+        let leaked: &'static [&'static str] = Box::leak(interned.into_boxed_slice());
+        *held = (revision, leaked);
+        leaked
+    }
 }
 
 /// Which row of a scheme picker a stored name is.
@@ -608,7 +702,8 @@ pub fn scheme_index(name: &str, light: bool) -> usize {
         .iter()
         .position(|label| *label == name)
         .or_else(|| {
-            let fallback = crate::schemes::catalogue().default_name(light);
+            let catalogue = crate::schemes::catalogue();
+            let fallback = catalogue.default_name(light);
             labels.iter().position(|label| *label == fallback)
         })
         .unwrap_or(0)
@@ -2523,7 +2618,8 @@ impl SettingsPanel {
             | SettingsTarget::RestoreRow(_)
             | SettingsTarget::RestoreAll
             | SettingsTarget::Advanced(_)
-            | SettingsTarget::ResetAdvanced(_) => self.focus = Some(target),
+            | SettingsTarget::ResetAdvanced(_)
+            | SettingsTarget::CustomiseScheme => self.focus = Some(target),
             // An item's own row is what the keyboard lands on: the menu is about
             // to close, and a focus naming an item of a shut picker names
             // nothing.
@@ -2897,7 +2993,11 @@ impl SettingsPanel {
                 // the same body a press on them runs, which is the rule this
                 // verdict exists for.
                 | SettingsTarget::Advanced(_)
-                | SettingsTarget::ResetAdvanced(_)),
+                | SettingsTarget::ResetAdvanced(_)
+                // And `Customise scheme…` for the same reason twice over: it
+                // writes a file, selects a scheme and shuts this dialog, none
+                // of which this type can reach.
+                | SettingsTarget::CustomiseScheme),
             ) => SettingsKeyVerdict::Chose(target),
             _ => SettingsKeyVerdict::Inert,
         }
@@ -3218,6 +3318,7 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
             // **The disclosure is a focus stop** (user ruling 2026-08-17): Enter
             // and Space turn it, which is the whole of "keyboard focusable".
             PageItem::Disclosure(_) => Some(SettingsTarget::Advanced(category)),
+            PageItem::Customise => Some(SettingsTarget::CustomiseScheme),
             PageItem::Reset => Some(SettingsTarget::ResetAdvanced(category)),
             PageItem::Heading(_) => None,
         })
@@ -3291,6 +3392,13 @@ pub enum SettingsTarget {
     /// That group's closing verb: `Reset to defaults`, for this page's advanced
     /// rows and no others.
     ResetAdvanced(SettingsCategory),
+    /// `Customise scheme…` (§7.1.6c-4c).
+    ///
+    /// Carries no category, unlike the two above: there is one scheme in force
+    /// in this window and the verb copies it, so there is nothing for a page to
+    /// qualify. [`SettingsLayout`] holds one box for it and a page that does not
+    /// draw it holds `None`, which is the same shape `restore_all` has.
+    CustomiseScheme,
 }
 
 /// One row's three boxes, and which row they belong to.
@@ -3414,6 +3522,9 @@ pub struct SettingsLayout {
     /// while the group is shut, because a verb inside a collapsed group is a
     /// verb nobody can see and the focus order must not hold it.
     reset_advanced: Option<[f32; 4]>,
+    /// `Customise scheme…`, on the same terms: only while the group holding it
+    /// is open, and only on a page that offers a scheme.
+    customise_scheme: Option<[f32; 4]>,
     /// The open menu's border box and its items, top to bottom in its row's own
     /// option order. Empty when the menu is shut.
     ///
@@ -3500,6 +3611,13 @@ impl SettingsLayout {
     #[must_use]
     pub fn reset_advanced(&self) -> Option<[f32; 4]> {
         self.reset_advanced
+    }
+
+    /// The open group's `Customise scheme…`, or `None` when this page has none.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn customise_scheme(&self) -> Option<[f32; 4]> {
+        self.customise_scheme
     }
 
     /// The open picker's scrollable body, or `None` while none is open.
@@ -3590,6 +3708,7 @@ impl SettingsLayout {
             SettingsTarget::RestoreAll => self.restore_all,
             SettingsTarget::Advanced(_) => self.advanced.map(|group| group.band),
             SettingsTarget::ResetAdvanced(_) => self.reset_advanced,
+            SettingsTarget::CustomiseScheme => self.customise_scheme,
             SettingsTarget::Nav(_)
             | SettingsTarget::Close
             | SettingsTarget::Scrim
@@ -4217,6 +4336,7 @@ pub fn layout_for_menu(
     let mut placed_rows: Vec<RowLayout> = Vec::new();
     let mut placed_advanced: Option<AdvancedLayout> = None;
     let mut reset_advanced: Option<[f32; 4]> = None;
+    let mut customise_scheme: Option<[f32; 4]> = None;
     for item in &items {
         match *item {
             PageItem::Heading(group) => {
@@ -4296,8 +4416,28 @@ pub fn layout_for_menu(
                     ],
                 });
             }
-            PageItem::Reset => {
+            // **The foot is one line, and the first verb on it opens the
+            // line.** Both of these are right-aligned and neither advances the
+            // cursor until the last one has been placed, which is what makes a
+            // group with one verb and a group with two the same height — and
+            // what stops a page that grows a third verb from having to restate
+            // the margin.
+            PageItem::Customise => {
                 cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
+                let button = px(CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX);
+                let right =
+                    row_right - px(RESET_ADVANCED_WIDTH_LOGICAL_PX + FOOT_BUTTON_GAP_LOGICAL_PX);
+                customise_scheme = Some([
+                    right - button,
+                    cursor,
+                    right,
+                    cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
+                ]);
+            }
+            PageItem::Reset => {
+                if customise_scheme.is_none() {
+                    cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
+                }
                 let button = px(RESET_ADVANCED_WIDTH_LOGICAL_PX);
                 reset_advanced = Some([
                     row_right - button,
@@ -4439,6 +4579,7 @@ pub fn layout_for_menu(
         restore_all,
         advanced: placed_advanced,
         reset_advanced,
+        customise_scheme,
         menu: popup.as_ref().map(|menu| menu.frame),
         items: popup
             .as_ref()
@@ -4465,6 +4606,10 @@ enum PageItem {
     Row(SettingsRow),
     /// The `Advanced` heading, and whether its triangle is turned open.
     Disclosure(bool),
+    /// `Customise scheme…`, on the pages that offer a scheme to customise
+    /// (§7.1.6c-4c). It stands on the same foot line as [`Self::Reset`], to its
+    /// left, and opens that line.
+    Customise,
     /// `Reset to defaults`, which only an open group has: a verb inside a
     /// collapsed group is a verb nobody can see.
     Reset,
@@ -4506,6 +4651,16 @@ fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<P
             items.push(PageItem::Row(row));
         }
         if open {
+            // **Derived from the rows, not from the page's name.** The verb
+            // copies the scheme in force, so it belongs to whatever page offers
+            // the two scheme rows; naming `Appearance` here would be a second
+            // place to teach the day those rows move.
+            if rows
+                .iter()
+                .any(|row| matches!(row, SettingsRow::LightScheme | SettingsRow::DarkScheme))
+            {
+                items.push(PageItem::Customise);
+            }
             items.push(PageItem::Reset);
         }
     }
@@ -4563,6 +4718,12 @@ impl StackMetrics {
             PageItem::Row(_) => self.row_height,
             PageItem::Disclosure(_) => self.disclosure_height,
             PageItem::Reset => self.foot_advance,
+            // Nothing: the foot is one line and `Reset` is what advances past
+            // it. This is the measuring half of the placing loop's `if
+            // customise_scheme.is_none()`, and the two say the same sentence
+            // from opposite ends — which is why the page height a group with
+            // two verbs reports is the same as the one it reported with one.
+            PageItem::Customise => 0.0,
         }
     }
 
@@ -4920,6 +5081,12 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
         && contains(reset, x, y)
     {
         return SettingsTarget::ResetAdvanced(layout.category);
+    }
+    if let Some(customise) = layout.customise_scheme
+        && layout.shows(customise)
+        && contains(customise, x, y)
+    {
+        return SettingsTarget::CustomiseScheme;
     }
     if contains(layout.frame, x, y) {
         return SettingsTarget::Panel;
@@ -5505,8 +5672,26 @@ fn push_advanced_group(
         tabular_numerals: false,
         clip: None,
     });
-    // `.btn` secondary, the shortcut page's own precedent: this is the second
-    // button in the dialog and it is the same button, so it is the same call.
+    // `.btn` secondary, the shortcut page's own precedent: the third button in
+    // the dialog is the same button, so it is the same call.
+    if let Some(customise) = layout.customise_scheme {
+        push_button(
+            &mut stack.quads,
+            &mut stack.labels,
+            customise,
+            Text::CustomiseScheme.text(),
+            hover == Some(SettingsTarget::CustomiseScheme),
+            scale,
+            border,
+            palette,
+            measure,
+        );
+        if focus == Some(SettingsTarget::CustomiseScheme) {
+            stack
+                .quads
+                .extend(focus_ring(customise, scale, palette.accent));
+        }
+    }
     if let Some(reset) = layout.reset_advanced {
         push_button(
             &mut stack.quads,
@@ -7005,6 +7190,111 @@ mod tests {
                 "option {index} is in view and does not answer a press"
             );
         }
+    }
+
+    /// PIN (§7.1.6c-4c) — **the Advanced foot is a row of two verbs on one
+    /// line**, `Customise scheme…` then `Reset to defaults`, and only on a page
+    /// that offers a scheme to customise.
+    ///
+    /// The one-line claim is the interesting one: the group's height is the same
+    /// as it was with one verb, which is what says the two arms of the placing
+    /// loop and the two arms of the measuring loop agree.
+    ///
+    /// Red gate: give `PageItem::Customise` a `foot_advance` of its own and the
+    /// height assertion goes red; place it before the disclosure and the order
+    /// one does.
+    #[test]
+    fn the_advanced_foot_carries_both_verbs_on_one_line() {
+        let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
+        let reset = open.reset_advanced().expect("an open group has its verb");
+        let customise = open
+            .customise_scheme()
+            .expect("the page with the scheme rows has the copy verb");
+
+        assert_eq!(customise[1], reset[1], "one line, not two");
+        assert_eq!(customise[3], reset[3]);
+        assert_eq!(width(customise), CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX);
+        assert!(
+            customise[2] < reset[0],
+            "the copy verb stands to the left of the reset, clear of it"
+        );
+        assert_eq!(
+            reset[0] - customise[2],
+            FOOT_BUTTON_GAP_LOGICAL_PX,
+            "with the button row's own gap between them"
+        );
+
+        let (x, y) = centre(customise);
+        assert_eq!(
+            hit(&open, values(), x, y),
+            SettingsTarget::CustomiseScheme,
+            "and it answers a press where it is drawn"
+        );
+        assert!(
+            labels_of(&open, None, values())
+                .iter()
+                .any(|label| label.text == Text::CustomiseScheme.text()),
+            "with its own word on it"
+        );
+
+        // Shut, it is nowhere — the same discipline the Reset lives by.
+        let shut = shaped(SettingsCategory::Appearance, AdvancedOpen::default(), None);
+        assert_eq!(shut.customise_scheme(), None);
+        assert!(
+            !focus_order(
+                content(&flat_rows(), &shortcut_lines()),
+                SettingsCategory::Appearance
+            )
+            .is_empty()
+        );
+
+        // A page whose Advanced group holds no scheme rows has one verb, and the
+        // group is no shorter for it: the foot is a line whatever stands on it.
+        let terminal = shaped(SettingsCategory::Terminal, every_group_open(), None);
+        assert_eq!(
+            terminal.customise_scheme(),
+            None,
+            "the copy verb belongs to the page the scheme rows are on"
+        );
+    }
+
+    /// PIN (§7.1.6c-4c) — **a picker re-lists when the catalogue's revision
+    /// moves, and not otherwise.**
+    ///
+    /// The mechanism 4a could not have: `option_label` hands back `&'static str`,
+    /// so a list that can change has to be rebuilt into a *new* leak rather than
+    /// mutated — and rebuilding on every call would leak per frame. The claim is
+    /// therefore two-sided, and the second half is the one that matters for a
+    /// dialog that redraws on hover.
+    ///
+    /// Red gate: drop the revision from the key and the "same pointer" assertion
+    /// goes red; cache the first answer forever and the "new names" one does.
+    #[test]
+    fn a_pickers_list_is_rebuilt_exactly_when_the_catalogue_moves() {
+        let slot = SchemeLabelSlot::new();
+        let first = slot.get(1, || vec!["Folio Dark".to_owned(), "Nord".to_owned()]);
+        assert_eq!(first, ["Folio Dark", "Nord"]);
+
+        let again = slot.get(1, || panic!("the same revision must not rebuild"));
+        assert_eq!(
+            again.as_ptr(),
+            first.as_ptr(),
+            "one leak per revision, not one per ask"
+        );
+
+        let moved = slot.get(2, || {
+            vec![
+                "Folio Dark".to_owned(),
+                "Nord".to_owned(),
+                "Nord (custom)".to_owned(),
+            ]
+        });
+        assert_eq!(moved, ["Folio Dark", "Nord", "Nord (custom)"]);
+        assert_eq!(
+            moved[0].as_ptr(),
+            first[0].as_ptr(),
+            "a name that was already there is the very same string: the interning              is what keeps a folder edited all afternoon from leaking a copy of              every unchanged name"
+        );
     }
 
     /// PIN (user ruling 2026-08-17) — **`Advanced` is a page's own group: its
@@ -10634,7 +10924,13 @@ mod tests {
                     .filter(|row| row.advanced())
                     .map(|row| row.control_target()),
             )
-            .chain([SettingsTarget::ResetAdvanced(PAGE)])
+            // The foot's two verbs, left to right as they are drawn — the walk
+            // down the page and the walk down the Tab order are still one walk
+            // now that the foot is a row rather than a button (§7.1.6c-4c).
+            .chain([
+                SettingsTarget::CustomiseScheme,
+                SettingsTarget::ResetAdvanced(PAGE),
+            ])
             .collect();
         assert_eq!(focus_order(content(&flat, &lines), PAGE), expected);
         // And a shut group is a group whose rows and whose verb are nowhere in
