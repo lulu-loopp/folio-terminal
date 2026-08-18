@@ -14411,11 +14411,13 @@ mod tests {
             height as f32,
             1.0,
             None,
+            None,
             crate::settings::SettingsContent {
                 rows: &rows,
                 shortcuts: &[],
                 profiles: &[],
                 advanced: crate::settings::AdvancedOpen::default(),
+                editor: None,
             },
             crate::settings::SettingsCategory::Appearance,
             0.0,

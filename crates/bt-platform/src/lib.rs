@@ -1660,11 +1660,23 @@ mod windows_impl {
         }
     }
 
-    type ImagePickerState = DeferredState<Vec<u16>, Result<Option<PathBuf>, String>>;
+    type ImagePickerState =
+        DeferredState<(ShellPickKind, Vec<u16>), Result<Option<PathBuf>, String>>;
 
-    /// The system's own file chooser, filtered to the pictures this product can
-    /// decode — [`FolderPicker`]'s twin, and every word of its doc comment
-    /// applies unchanged.
+    /// The system's own **file** chooser — [`FolderPicker`]'s twin, and every
+    /// word of its doc comment applies unchanged.
+    ///
+    /// It answers for two rows now (§7.1.6c-6b): the window's ground picture,
+    /// filtered to the formats this product can decode, and a profile's program,
+    /// which is filtered to nothing at all — a shell is whatever the reader says
+    /// it is, and a chooser that only offered `*.exe` would refuse a `.bat`, a
+    /// `.cmd` and every launcher shipped as one.
+    ///
+    /// **One bridge and not two**, unlike the folder chooser beside it, and the
+    /// difference is the reason that one is separate: the deferral's contract is
+    /// "one gesture in flight", and these two rows are in the same dialog and
+    /// cannot both be pressed at once. The kind travels *with* the request, so
+    /// the answer can never be handed to the row that did not ask.
     ///
     /// A second subclass on the same window rather than a mode on the first,
     /// because the deferral's whole contract is "one gesture in flight": a
@@ -1677,6 +1689,12 @@ mod windows_impl {
         hwnd: HWND,
         state: Arc<ImagePickerState>,
     }
+
+    /// Which of the two files a request is for.
+    ///
+    /// Public because the caller names it; [`ShellPickKind::Folder`] is not
+    /// reachable through this bridge, which is [`FolderPicker`]'s.
+    pub type FilePickKind = ShellPickKind;
 
     impl ImagePicker {
         pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
@@ -1707,7 +1725,7 @@ mod windows_impl {
         /// `start` is a **folder** and not the picture currently chosen: a shell
         /// item that is a file is not a place to open at, and the useful place
         /// to open at is the one the last picture came from.
-        pub fn request(&self, start: Option<&Path>) -> Result<bool, String> {
+        pub fn request(&self, kind: ShellPickKind, start: Option<&Path>) -> Result<bool, String> {
             let start = start
                 .map(|start| {
                     let mut units = start.as_os_str().encode_wide().collect::<Vec<_>>();
@@ -1715,7 +1733,7 @@ mod windows_impl {
                     units
                 })
                 .unwrap_or_default();
-            if !self.state.begin_request(start) {
+            if !self.state.begin_request((kind, start)) {
                 return Ok(false);
             }
             // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
@@ -1778,8 +1796,8 @@ mod windows_impl {
         unsafe { Arc::increment_strong_count(state_pointer) };
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
-        if let Some(start) = state.begin_showing() {
-            state.complete(show_shell_picker(hwnd, &start, ShellPickKind::Image));
+        if let Some((kind, start)) = state.begin_showing() {
+            state.complete(show_shell_picker(hwnd, &start, kind));
         }
         LRESULT(0)
     }
@@ -1954,16 +1972,21 @@ mod windows_impl {
         text.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Which of the two things `IFileOpenDialog` is being asked for.
+    /// Which of the three things `IFileOpenDialog` is being asked for.
     ///
-    /// One dialog function and two guises rather than two functions, because
+    /// One dialog function and three guises rather than three functions, because
     /// everything around the two lines that differ — the apartment, its balance,
     /// the cancel/error split, the shell allocation nobody else frees — is
-    /// identical and is the part that is easy to get subtly wrong twice.
+    /// identical and is the part that is easy to get subtly wrong three times.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum ShellPickKind {
+    pub enum ShellPickKind {
         Folder,
         Image,
+        /// A profile's own shell (§7.1.6c-6b) — **unfiltered on purpose**: a
+        /// chooser that offered only `*.exe` would refuse a `.bat`, a `.cmd` and
+        /// every launcher shipped as one, and what may be started is the
+        /// operating system's answer rather than this dialog's.
+        Program,
     }
 
     /// Show `IFileOpenDialog` and report what came back.
@@ -2018,7 +2041,13 @@ mod windows_impl {
                     // into the box for a file that is not there would arrive as
                     // a decode failure a second later, with the dialog already
                     // gone and nothing on screen to connect the two.
-                    ShellPickKind::Image => {
+                    // The same three for a program, and for the same reason one
+                    // step further on: a name typed into the box for a file that
+                    // is not there would be written into `profiles.json` as this
+                    // profile's shell and would grey the row the next time the
+                    // dialog was opened, with nothing on screen to connect the
+                    // two.
+                    ShellPickKind::Image | ShellPickKind::Program => {
                         options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST
                     }
                 };
@@ -2074,6 +2103,7 @@ mod windows_impl {
                 let noun = match kind {
                     ShellPickKind::Folder => "folder",
                     ShellPickKind::Image => "picture",
+                    ShellPickKind::Program => "program",
                 };
                 path.map(|path| Some(PathBuf::from(path)))
                     .map_err(|error| format!("the chosen {noun}'s name is not UTF-16: {error}"))
@@ -2630,8 +2660,8 @@ mod windows_impl {
     mod tests {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
-            compositor_failure, names_a_program, primary_language_id, retry_open_clipboard,
-            validate_local_image_path, validate_openable_path, wide_null,
+            ShellPickKind, compositor_failure, names_a_program, primary_language_id,
+            retry_open_clipboard, validate_local_image_path, validate_openable_path, wide_null,
         };
         use std::path::{Path, PathBuf};
 
@@ -2832,17 +2862,21 @@ mod windows_impl {
             let pictures = ImagePickerState::new();
             let start: Vec<u16> = "C:\\Users\\me\\Pictures\0".encode_utf16().collect();
 
-            assert!(pictures.begin_request(start.clone()));
+            assert!(pictures.begin_request((ShellPickKind::Image, start.clone())));
             assert!(
                 folders.begin_request(Vec::new()),
                 "a pending picture request must not swallow a folder request"
             );
             assert!(
-                !pictures.begin_request(Vec::new()),
-                "a second ask for the same gesture is coalesced, not stacked"
+                !pictures.begin_request((ShellPickKind::Program, Vec::new())),
+                "a second ask for the same gesture is coalesced, not stacked —                  including one for the other row this bridge answers, which is                  what keeps a program from arriving on the wallpaper's row"
             );
 
-            assert_eq!(pictures.begin_showing(), Some(start));
+            assert_eq!(
+                pictures.begin_showing(),
+                Some((ShellPickKind::Image, start)),
+                "the kind travels with the request, so the dialog that opens is                  the one that was asked for"
+            );
             assert_eq!(pictures.begin_showing(), None);
             pictures.complete(Ok(Some(PathBuf::from(r"C:\Users\me\Pictures\ridge.jpg"))));
             assert_eq!(
@@ -3462,12 +3496,12 @@ pub enum ThreadPriority {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    Compositor, CustomWindowFrame, DirWatch, FolderPicker, ImagePicker, ImeSystemCaret,
-    MathContextMenu, PROGRAM_REFUSED, adopt_parent_console, client_area_animation_enabled,
-    clipboard_text, current_thread_priority, documents_directory, get_dpi_for_window,
-    get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
-    message_box, monospace_font_families, open_local_file, open_local_path, os_ui_language,
-    recycle, request_window_close, reveal_in_explorer, set_clipboard_text,
+    Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
+    ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED, adopt_parent_console,
+    client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
+    get_dpi_for_window, get_window_rect, get_work_area, install_window_class_background,
+    is_window_minimized, message_box, monospace_font_families, open_local_file, open_local_path,
+    os_ui_language, recycle, request_window_close, reveal_in_explorer, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
     set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
     wheel_scroll_amount, write_to_console,

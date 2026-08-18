@@ -41,8 +41,8 @@ use std::{
 
 use bt_layout::Axis;
 use bt_persist::{
-    CandidateV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION, ProfileEntryV1, ProfilesV1,
-    ProgramV1, ResolutionV1, StartingDirV1,
+    CandidateV1, MarkV1, NamedStartAtV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION,
+    ProfileEntryV1, ProfilesV1, ProgramV1, ResolutionV1, StartAtV1, StartingDirV1,
 };
 use bt_pty::{ShellEnvironment, resolve_powershell_seven};
 use bt_render::{
@@ -51,7 +51,7 @@ use bt_render::{
 };
 
 use crate::{
-    marks::{ChromeMark, ChromeSprite, OverlayLayer},
+    marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer},
     seed::{RECENT_CAPACITY, RecentEntry, Seed, ago_label},
     settings::push_float_window,
 };
@@ -350,13 +350,30 @@ pub struct Profile {
     /// never starts a process. A real one has to say *whose* home, and the answer
     /// is not the same kind of thing for all four — see [`StartingDir`].
     ///
-    /// It is a fixed property of the profile rather than something the user can
-    /// edit, and that is this ticket's boundary, not an opinion about the feature:
-    /// editing it belongs to the profile editor (K86, → the Settings extension
-    /// block) along with the program, the arguments and the environment. What is
-    /// owed now is that the slot exists and is *read*, so that the editor is a
-    /// screen over a working mechanism rather than a screen and a mechanism.
+    /// **Not editable, and that is not this slice's boundary but the field's own
+    /// nature** (plan §1.6, met again one slice on). Which channel a launcher
+    /// listens on is a fact about the program — `wsl.exe` takes `--cd ~` and a
+    /// Windows shell takes a working directory — and a reader who picked the
+    /// wrong one would get a WSL tab standing in `/mnt/c/Users/…`, which is a
+    /// real directory and not the one that shell opens in. What the editor
+    /// offers instead is [`Self::start_at`], which is a different question.
     pub starting_dir: StartingDir,
+    /// Which of three answers a new leaf takes when it is asked where to open —
+    /// **the editor's question**, and the three items the mock-up's `Starting
+    /// directory` combo carries.
+    ///
+    /// A second field beside [`Self::starting_dir`] rather than three more
+    /// variants of it, because they are two questions and only one of them is
+    /// anybody's to answer. `starting_dir` says *where this profile's home is
+    /// and how its launcher is told about it*; this says whether a new tab takes
+    /// the folder of the pane it was opened beside, always goes home, or always
+    /// goes to one named place. Folding them together would have made "which
+    /// flag does the launcher take" a thing a picker could get wrong.
+    ///
+    /// [`StartAt::Inherit`] is what every shipped profile carries and what every
+    /// leaf in this window has always done, so a table nobody has edited spawns
+    /// byte for byte what it spawned before this field existed.
+    pub start_at: StartAt,
     /// Which spelling of a path this profile's shell speaks — see
     /// [`PathNamespace`]. What makes a directory inherited from another pane
     /// either translatable or honestly refused.
@@ -440,6 +457,45 @@ pub enum StartingDir {
         /// own `$HOME`, which has no Windows spelling to hand over instead.
         home: String,
     },
+}
+
+/// Where a new leaf of a profile opens — the three answers the editor offers,
+/// and the one question about a starting directory that is the reader's.
+///
+/// [`StartingDir`] above is the *form* an answer takes when a profile has to
+/// name its own home; this is what happens **before** that question is reached.
+/// The mock-up's combo writes the three `The current pane's folder`, `Home` and
+/// `Choose a folder…`, and the first is selected on a profile nobody has
+/// touched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartAt {
+    /// The folder the pane it was opened beside is standing in, when there is
+    /// one and this profile can spell it; this profile's own home when there is
+    /// not.
+    ///
+    /// **Today's behaviour and the shipped value**, which is what makes this
+    /// field free: a table nobody has edited answers exactly what it answered
+    /// before the field existed. [`cwd_for_spawn`] is the "can this profile
+    /// spell it" half and it is unchanged — a pair of namespaces that cannot
+    /// cross still falls through to the profile's own home rather than to a
+    /// guess.
+    Inherit,
+    /// This profile's own home, whatever the pane it was opened beside was
+    /// standing in.
+    ///
+    /// Not the same sentence as [`Self::Inherit`] with nothing to inherit: this
+    /// one *refuses* an inheritance that exists, which is what somebody who
+    /// keeps one profile pinned to a home directory is asking for.
+    Home,
+    /// This place, always — a folder chosen through the system's own picker.
+    ///
+    /// Held in the namespace the picker speaks, which is Windows', and
+    /// translated into the profile's at spawn through [`translate_cwd`] rather
+    /// than at the moment it was chosen. Storing the translation would freeze
+    /// it: a profile whose program later changes from `pwsh.exe` to `wsl.exe`
+    /// changes which namespace it speaks, and a path converted on the day it was
+    /// browsed to would then be written in the wrong one.
+    Fixed(PathBuf),
 }
 
 /// How a profile's executable is located on the machine.
@@ -662,6 +718,7 @@ pub fn shipped() -> Vec<Profile> {
             args: vec!["-NoLogo".to_owned()],
             env: Vec::new(),
             starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: Integration::PowerShellOptIn,
@@ -693,6 +750,7 @@ pub fn shipped() -> Vec<Profile> {
             args: vec!["-NoLogo".to_owned()],
             env: Vec::new(),
             starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             // The same script, and it already handles this shell: `folio.ps1`
@@ -734,6 +792,7 @@ pub fn shipped() -> Vec<Profile> {
                 flag: "--cd".to_owned(),
                 home: "~".to_owned(),
             },
+            start_at: StartAt::Inherit,
             paths: PathNamespace::Wsl,
             qualifier: Qualifier::WslDistribution,
             integration: Integration::BashInitFile,
@@ -792,6 +851,7 @@ pub fn shipped() -> Vec<Profile> {
             // MSYS spelling is a third namespace that only this shell understands,
             // and the script reports the Win32 one (`pwd -W`) precisely so that it
             // never has to become one.
+            start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: Integration::BashInitFile,
@@ -812,6 +872,7 @@ pub fn shipped() -> Vec<Profile> {
             args: Vec::new(),
             env: Vec::new(),
             starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
             integration: Integration::CmdPrompt,
@@ -983,12 +1044,182 @@ impl Registry {
             // against — see `announcement_set`.
             compared_title: None,
             display_title,
+            // **A copy carries no machine qualifier**, which is what `compose`
+            // already says about every profile of the reader's own: a copy of
+            // WSL has pinned whatever distribution it meant in its own
+            // arguments, and appending the machine's *default* distribution to
+            // it would be a title naming the wrong one. Said here as well as
+            // there because the two are one row read twice — before the file is
+            // written and after it is read back — and a row that renamed itself
+            // across a restart would be the table disagreeing with itself.
+            qualifier: Qualifier::None,
             origin: Origin::User,
             hidden: false,
             ..source
         };
         let at = index + 1;
         profiles.insert(at, copy);
+        self.publish(profiles);
+        Some(at)
+    }
+
+    /// Every editor field's body: read the table, change one row, put it back.
+    ///
+    /// **One door for all of them**, because every field in this dialog writes
+    /// the instant it is changed (§7.1.6c-4a: no dirty gate, nothing to save) and
+    /// a second spelling of "clone, mutate, publish" is a second place for the
+    /// revision to be forgotten. `change` answers whether it changed anything, so
+    /// that a field re-writing the value it already held does not tick a
+    /// revision and throw away every measured string in the window.
+    fn edit(&self, index: usize, change: impl FnOnce(&mut Profile) -> bool) -> bool {
+        let mut profiles = self.table().profiles.clone();
+        let Some(profile) = profiles.get_mut(index) else {
+            return false;
+        };
+        if !change(profile) {
+            return false;
+        }
+        self.publish(profiles)
+    }
+
+    /// [`rename`]'s body.
+    fn rename(&self, index: usize, title: &str) -> NameVerdict {
+        let title = title.trim();
+        if title.is_empty() {
+            return NameVerdict::Blank;
+        }
+        if self
+            .table()
+            .profiles()
+            .iter()
+            .enumerate()
+            .any(|(other, profile)| other != index && profile.display_title == title)
+        {
+            return NameVerdict::Taken;
+        }
+        self.edit(index, |profile| {
+            if profile.display_title == title {
+                return false;
+            }
+            profile.display_title = title.to_owned();
+            true
+        });
+        NameVerdict::Written
+    }
+
+    /// [`set_colour`]'s body.
+    fn set_colour(&self, index: usize, colour: MarkColour) -> bool {
+        self.edit(index, |profile| {
+            if profile.origin != Origin::User {
+                return false;
+            }
+            let mark = ChromeMark::ProfileGeneric { colour };
+            if profile.mark == mark {
+                return false;
+            }
+            profile.mark = mark;
+            true
+        })
+    }
+
+    /// [`set_hidden`]'s body — the two guards over this table's own floor rather
+    /// than over the process's, which is what lets a test hide a row without
+    /// moving the window's answer to "which profile is the floor".
+    fn set_hidden(&self, index: usize, hidden: bool, default: usize) -> bool {
+        let floor = self
+            .table()
+            .position_of_id(WINDOWS_POWERSHELL_ID)
+            .unwrap_or(0);
+        if hidden && (index == default || index == floor) {
+            return false;
+        }
+        self.edit(index, |profile| {
+            if profile.hidden == hidden {
+                return false;
+            }
+            profile.hidden = hidden;
+            true
+        })
+    }
+
+    /// [`delete`]'s body.
+    fn delete(&self, index: usize) -> Option<Profile> {
+        let mut profiles = self.table().profiles.clone();
+        // A built-in cannot be deleted — a row that is missing looks exactly
+        // like a row that was never designed — and the floor cannot be, whatever
+        // its origin, because a floor with a hole in it is not a floor.
+        if profiles.get(index)?.origin != Origin::User {
+            return None;
+        }
+        let removed = profiles.remove(index);
+        self.publish(profiles);
+        Some(removed)
+    }
+
+    /// [`reinsert`]'s body — the Undo toast's other half.
+    fn reinsert(&self, profile: Profile, at: usize) -> usize {
+        let mut profiles = self.table().profiles.clone();
+        let at = at.min(profiles.len());
+        profiles.insert(at, profile);
+        self.publish(profiles);
+        at
+    }
+
+    /// [`restore_defaults`]'s body.
+    fn restore_defaults(&self, index: usize) -> bool {
+        let mut profiles = self.table().profiles.clone();
+        let Some(profile) = profiles.get(index) else {
+            return false;
+        };
+        let Some(seed) = shipped()
+            .into_iter()
+            .find(|shipped| shipped.id == profile.id)
+        else {
+            return false;
+        };
+        // The row's *place* is not one of its defaults. Reordering is a decision
+        // about the list and restoring is a decision about one profile, and a
+        // verb that quietly did both would be one press undoing two things.
+        //
+        // Nor is `hidden`: a hidden row's foot verb is reached by opening the
+        // row that is dimmed in the list, and having it reappear in the picker
+        // would be this verb answering a question nobody asked it.
+        let hidden = profile.hidden;
+        profiles[index] = Profile { hidden, ..seed };
+        self.publish(profiles)
+    }
+
+    /// [`create`]'s body.
+    fn create(&self, template: usize) -> Option<usize> {
+        let mut profiles = self.table().profiles.clone();
+        let source = profiles.get(template)?.clone();
+        let display_title = copy_title(&source.display_title, &profiles);
+        let id = fresh_id(&display_title, &profiles);
+        let made = Profile {
+            id,
+            compared_title: None,
+            display_title,
+            // **A new profile wears the chassis, and a duplicate wears the
+            // brand.** The two verbs say different things: `Duplicate` says
+            // "another one of these", and its copy really is a PowerShell, so
+            // the mark is telling the truth (5a's own ruling). `New profile`
+            // takes the default only as a *template* for what to run, and the
+            // first thing anybody does with it is point it somewhere else — at
+            // which moment a Microsoft blue would be a brand on a program that
+            // is not theirs.
+            mark: ChromeMark::ProfileGeneric {
+                colour: unworn_colour(&profiles),
+            },
+            origin: Origin::User,
+            hidden: false,
+            ..source
+        };
+        // At the end, where `+ New profile` stands. A duplicate lands under its
+        // original because that is where the reader who pressed it is looking;
+        // nobody is looking at the default profile's row when they press the
+        // foot's verb.
+        let at = profiles.len();
+        profiles.push(made);
         self.publish(profiles);
         Some(at)
     }
@@ -1118,6 +1349,7 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
             args: Vec::new(),
             env: Vec::new(),
             starting_dir: StartingDir::WindowsHome,
+            start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             // A machine fact, and a profile the user wrote has already pinned
             // whatever distribution it meant in its own arguments. Saying it
@@ -1145,6 +1377,9 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
     }
     if let Some(starting_dir) = &entry.starting_dir {
         profile.starting_dir = starting_dir_from_file(starting_dir);
+    }
+    if let Some(start_at) = &entry.start_at {
+        profile.start_at = start_at_from_file(start_at);
     }
     // The five identity colours are not this product's to repaint (S98/S31), so
     // a `mark` key is read for a profile of the user's own and ignored on a
@@ -1259,28 +1494,71 @@ fn starting_dir_to_file(starting_dir: &StartingDir) -> StartingDirV1 {
     }
 }
 
+fn start_at_from_file(start_at: &StartAtV1) -> StartAt {
+    match start_at {
+        StartAtV1::Named(NamedStartAtV1::Inherit) => StartAt::Inherit,
+        StartAtV1::Named(NamedStartAtV1::Home) => StartAt::Home,
+        StartAtV1::Fixed { fixed } => StartAt::Fixed(PathBuf::from(fixed)),
+    }
+}
+
+fn start_at_to_file(start_at: &StartAt) -> StartAtV1 {
+    match start_at {
+        StartAt::Inherit => StartAtV1::Named(NamedStartAtV1::Inherit),
+        StartAt::Home => StartAtV1::Named(NamedStartAtV1::Home),
+        StartAt::Fixed(path) => StartAtV1::Fixed {
+            fixed: path.to_string_lossy().into_owned(),
+        },
+    }
+}
+
 /// The wire words for the shipped marks.
 ///
 /// A plain name and not the sprite's Rust spelling: `profiles.json` is read by
 /// people, and `ProfileUbuntu` is this build's private word for it. `shell` is
 /// the neutral chassis — the one `cmd` wears and the one a profile of the user's
 /// own gets — named for what it is rather than for the profile it came from.
-fn mark_from_file(name: &str) -> Option<ChromeMark> {
-    match name {
-        "powershell" => Some(ChromeMark::ProfilePowerShell),
-        "ubuntu" => Some(ChromeMark::ProfileUbuntu),
-        "git" => Some(ChromeMark::ProfileGit),
-        "shell" => Some(ChromeMark::ProfileCmd),
-        _ => None,
+/// The neutral chassis's wire word, in both directions — `#p-shell`, the
+/// drawing `#p-pwsh` and `#p-cmd` already are twice over.
+///
+/// One value and not an enum with one variant, because a second chassis would
+/// be a second *drawing* and there is not one: the mock-up struck one shape for
+/// "a shell of your own" and the eight colours are what tell two of them apart.
+/// The key is in the file anyway (plan §1.2's own worked example writes it) so
+/// that a second one, if it is ever drawn, arrives as a value rather than as a
+/// schema version.
+const GENERIC_CHASSIS: &str = "shell";
+
+fn mark_from_file(mark: &MarkV1) -> Option<ChromeMark> {
+    match mark {
+        MarkV1::Named(name) => match name.as_str() {
+            "powershell" => Some(ChromeMark::ProfilePowerShell),
+            "ubuntu" => Some(ChromeMark::ProfileUbuntu),
+            "git" => Some(ChromeMark::ProfileGit),
+            // The word a duplicate of `cmd` writes, and it keeps meaning what it
+            // meant in 5a: the Command Prompt's own charcoal panel, because a
+            // copy of a Command Prompt really is one. A profile drawn from
+            // nothing wears the object form below instead.
+            "shell" => Some(ChromeMark::ProfileCmd),
+            _ => None,
+        },
+        MarkV1::Generic { chassis, colour } if chassis == GENERIC_CHASSIS => {
+            MarkColour::from_wire(colour).map(|colour| ChromeMark::ProfileGeneric { colour })
+        }
+        MarkV1::Generic { .. } => None,
     }
 }
 
-fn mark_to_file(mark: ChromeMark) -> Option<&'static str> {
+fn mark_to_file(mark: ChromeMark) -> Option<MarkV1> {
     match mark {
-        ChromeMark::ProfilePowerShell => Some("powershell"),
-        ChromeMark::ProfileUbuntu => Some("ubuntu"),
-        ChromeMark::ProfileGit => Some("git"),
-        ChromeMark::ProfileCmd => Some("shell"),
+        ChromeMark::ProfilePowerShell => Some(MarkV1::Named("powershell".to_owned())),
+        ChromeMark::ProfileUbuntu => Some(MarkV1::Named("ubuntu".to_owned())),
+        ChromeMark::ProfileGit => Some(MarkV1::Named("git".to_owned())),
+        ChromeMark::ProfileCmd => Some(MarkV1::Named("shell".to_owned())),
+        ChromeMark::ProfileGeneric { colour } => Some(MarkV1::Generic {
+            chassis: GENERIC_CHASSIS.to_owned(),
+            colour: colour.wire().to_owned(),
+        }),
         _ => None,
     }
 }
@@ -1332,6 +1610,8 @@ fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
             env,
             starting_dir: (profile.starting_dir != seed.starting_dir)
                 .then(|| starting_dir_to_file(&profile.starting_dir)),
+            start_at: (profile.start_at != seed.start_at)
+                .then(|| start_at_to_file(&profile.start_at)),
             // A built-in's colour is not the file's to state, because it is not
             // the dialog's to change.
             mark: None,
@@ -1346,7 +1626,8 @@ fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
             args: (!profile.args.is_empty()).then(|| profile.args.clone()),
             env,
             starting_dir: Some(starting_dir_to_file(&profile.starting_dir)),
-            mark: mark_to_file(profile.mark).map(str::to_owned),
+            start_at: Some(start_at_to_file(&profile.start_at)),
+            mark: mark_to_file(profile.mark),
             integration: Some(integration_to_file(profile.integration).to_owned()),
         },
     }
@@ -1373,6 +1654,362 @@ pub fn move_profile(index: usize, down: bool) -> bool {
 /// announce a name this build did not choose.
 pub fn duplicate(index: usize) -> Option<usize> {
     registry().duplicate(index)
+}
+
+/// Make a profile of the reader's own from the default as a template, and
+/// answer where it landed — the foot's `+ New profile` (plan §2.1).
+///
+/// Not a blank one: a profile with no program is a row that cannot start, and
+/// this block's default state is meant to be foolproof. Not a menu of templates
+/// either — every row's `Duplicate` already is that, and one verb behind two
+/// doors is the thing this house keeps deleting.
+pub fn create(template: usize) -> Option<usize> {
+    registry().create(template)
+}
+
+/// The first of the eight no profile in this table is wearing, or the first of
+/// the eight.
+///
+/// Deterministic and not random, for `fresh_id`'s opposite reason: an id only
+/// has to be *unlikely* to collide, while two rows in the same list wearing the
+/// same colour is the exact failure a colour is there to prevent. Walking round
+/// after eight is honest — a ninth profile has to share with somebody, and
+/// sharing with the oldest is the least surprising choice.
+fn unworn_colour(profiles: &[Profile]) -> MarkColour {
+    let worn = |candidate: MarkColour| {
+        profiles
+            .iter()
+            .any(|profile| profile.mark == ChromeMark::ProfileGeneric { colour: candidate })
+    };
+    MarkColour::ALL
+        .into_iter()
+        .find(|colour| !worn(*colour))
+        .unwrap_or(MarkColour::ALL[0])
+}
+
+/// What happened to a name the editor's field was asked to write.
+///
+/// A verdict and not a `bool`, because the two refusals are different sentences
+/// and the field has to say which: this dialog writes on every keystroke's worth
+/// of change, so a refusal is a state the reader is standing in rather than an
+/// error they submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameVerdict {
+    /// The table has it.
+    Written,
+    /// Nothing, or nothing but spaces. A row has to be nameable — it is what a
+    /// tab, a picker and this list all draw — and an empty one would be a blank
+    /// line in three surfaces.
+    Blank,
+    /// Another row already draws exactly this. **Refused rather than allowed**,
+    /// and the argument is the identity model's own: a row is told apart by its
+    /// mark and its name, and two rows called `PowerShell 7` standing one line
+    /// apart in a picker is precisely the failure that made the two PowerShells
+    /// carry their versions (user ruling 2026-08-11). The refusal is exact and
+    /// not fuzzy — `powershell 7` and `PowerShell  7` are different names and
+    /// the reader may mean either — because a rule a person cannot predict is
+    /// worse than no rule.
+    Taken,
+}
+
+/// Rename one row — the editor's `Name` field, which writes
+/// [`Profile::display_title`] and never the string an announcement is compared
+/// against (§G S103, plan §1.4).
+///
+/// A built-in is renamed too (user ruling 2026-08-17, Q2 = b): "give PowerShell 7
+/// a `-NoProfile`" is the commonest thing anybody does to this table, and forcing
+/// a duplicate for it would make two rows called PowerShell — while the
+/// uniqueness of a row is half of this product's identity model. Its shipped
+/// [`Profile::compared_title`] is untouched and invisible, so `folio.ps1`'s
+/// announcement is still recognised as an echo after the rename.
+pub fn rename(index: usize, title: &str) -> NameVerdict {
+    registry().rename(index, title)
+}
+
+/// Point one row at a program on this machine — the editor's `Program` field and
+/// its `Browse…`.
+///
+/// A typed or browsed path is always a [`ProgramSource::Path`], including on a
+/// built-in: the shipped resolutions are *orders of search* (`BT_SHELL`, then a
+/// probe), and a path is the answer that search was for. The row's capability
+/// sentence re-derives from it because [`capability_text`] reads the
+/// integration and the namespace rather than the id.
+pub fn set_program_path(index: usize, path: &Path) -> bool {
+    registry().edit(index, |profile| {
+        let program = ProgramSource::Path(path.to_path_buf());
+        if profile.program == program {
+            return false;
+        }
+        profile.program = program;
+        // A program is what decides which spelling of a path this profile's
+        // shell speaks, and the namespace is derived and never stated (plan
+        // §1.6) — so it is re-derived here rather than left describing the
+        // program that used to be in this row.
+        profile.paths = derived_paths(profile);
+        true
+    })
+}
+
+/// Which of the three answers a new leaf of this row takes.
+pub fn set_start_at(index: usize, start_at: StartAt) -> bool {
+    registry().edit(index, |profile| {
+        if profile.start_at == start_at {
+            return false;
+        }
+        profile.start_at = start_at;
+        true
+    })
+}
+
+/// Repaint one row's mark — **a profile of the reader's own only**.
+///
+/// The five shipped colours are not this product's to repaint (S98/S31: the blue
+/// is Microsoft's and the orange is Ubuntu's), which is the same ruling that
+/// stopped a custom colour scheme repainting them, and it is enforced here
+/// rather than only in the dialog: a rule that lives in a control is a rule a
+/// hand-edited file walks around.
+pub fn set_colour(index: usize, colour: MarkColour) -> bool {
+    registry().set_colour(index, colour)
+}
+
+/// The words handed to the program ahead of anything the shell reads.
+pub fn set_args(index: usize, args: Vec<String>) -> bool {
+    registry().edit(index, |profile| {
+        if profile.args == args {
+            return false;
+        }
+        profile.args = args;
+        true
+    })
+}
+
+/// What this row sets in its sessions' environment, over what the terminal sets
+/// for itself.
+///
+/// **Stored now, read at spawn in 5c** (plan §5.2), which is the honest
+/// statement and the one the row's own sentence makes: the slot exists, the file
+/// round-trips it, and the layering rule that makes a profile's word the last
+/// one is the next slice's.
+pub fn set_env(index: usize, env: Vec<(String, String)>) -> bool {
+    registry().edit(index, |profile| {
+        if profile.env == env {
+            return false;
+        }
+        profile.env = env;
+        true
+    })
+}
+
+/// Keep one row out of the pickers, or put it back — the `⋯` menu's `Hide` and
+/// `Show`.
+///
+/// Two rows refuse to be hidden and the refusals are guards rather than
+/// politeness (plan §2.4, R5): the **default** cannot be hidden because hiding it
+/// leaves no new tab to open, and the **fallback floor** cannot, because every
+/// degradation in this product lands on it and a floor that can be taken away is
+/// a chain with a hole in the bottom. `default` is passed in rather than read,
+/// because which row is the default is `settings.json`'s answer resolved against
+/// this machine ([`default_profile`]) and not a fact this table holds.
+pub fn set_hidden(index: usize, hidden: bool, default: usize) -> bool {
+    registry().set_hidden(index, hidden, default)
+}
+
+/// Take one row out of the table and hand it back whole, so an Undo can put it
+/// back — the `⋯` menu's `Delete` and the editor's foot verb.
+///
+/// **Immediate, with an undo, and no confirmation** (plan §2.3, ruling 3): this
+/// dialog has no dirty gate to route a question through and every choice in it is
+/// written the instant it is made, so what deletion is owed is not a second
+/// question but a way back — which is the register `Ctrl+Shift+T` already struck
+/// in this product, where a confirmation would be the first modal over a modal.
+///
+/// The whole row comes back rather than a recipe for rebuilding it, because the
+/// one thing that must survive is the [`Profile::id`]: every seed on disk naming
+/// this profile is pointing at that string, and a rebuilt row with a fresh
+/// suffix would leave all of them degraded to the floor.
+pub fn delete(index: usize) -> Option<Profile> {
+    registry().delete(index)
+}
+
+/// Put a deleted row back where it was, and answer where that turned out to be.
+///
+/// Clamped to the end rather than refused, because the list may have moved under
+/// the toast — a reorder, or a second deletion — and a row that came back at the
+/// end is a row that came back.
+pub fn reinsert(profile: Profile, at: usize) -> usize {
+    registry().reinsert(profile, at)
+}
+
+/// Put one built-in back to the table this build ships — the editor's foot verb
+/// on a built-in (`Restore all defaults`).
+///
+/// Its position and its hidden flag are not defaults: both are decisions about
+/// the *list* rather than about this profile, and one press undoing two things
+/// is what this house keeps taking apart.
+pub fn restore_defaults(index: usize) -> bool {
+    registry().restore_defaults(index)
+}
+
+/// Why a built-in's `Colour` row is dark, interned so the dialog's `Copy`
+/// snapshot can carry it.
+///
+/// It names the profile it is standing on rather than saying "a built-in",
+/// because that is what the mock-up writes (`PowerShell's mark is its own`) and
+/// because the sentence is about a specific brand: Microsoft's blue and Ubuntu's
+/// orange are not this product's to repaint (S98/S31).
+#[must_use]
+pub fn mark_is_its_own(index: usize) -> &'static str {
+    intern(&crate::i18n::profile_mark_is_its_own(title(index)))
+}
+
+/// A path the dialog has to draw, interned — the fixed starting folder, which is
+/// this profile's value and therefore what its picker's button says.
+///
+/// Through the same table [`title`] uses, and for its reason: `SettingsValues`
+/// is compared for equality every frame and holds no owned strings, so a path
+/// that has to reach it has to be `&'static`. The table is keyed on the string
+/// itself, so a folder chosen twice is interned once.
+#[must_use]
+pub fn intern_path(path: &Path) -> &'static str {
+    intern(&path.to_string_lossy())
+}
+
+/// The honest capability sentence for one row of the table — [`capability_text`]
+/// by index, which is what a surface holding an index rather than a row can ask.
+#[must_use]
+pub fn capability_of(index: usize) -> crate::i18n::Text {
+    with_table(|table| {
+        table
+            .get(index)
+            .map_or(crate::i18n::Text::CapNone, capability_text)
+    })
+}
+
+/// Whether one row is a profile of the reader's own — which is what decides
+/// whether it can be deleted, whether its colour is theirs, and which of the two
+/// verbs its editor's foot carries.
+#[must_use]
+pub fn is_user(index: usize) -> bool {
+    with_table(|table| {
+        table
+            .get(index)
+            .is_some_and(|profile| profile.origin == Origin::User)
+    })
+}
+
+/// One row's `start_at`, `env`, colour and hidden flag, for a dialog that has to
+/// draw them.
+#[must_use]
+pub fn start_at(index: usize) -> StartAt {
+    with_table(|table| {
+        table
+            .get(index)
+            .map_or(StartAt::Inherit, |profile| profile.start_at.clone())
+    })
+}
+
+#[must_use]
+pub fn env(index: usize) -> Vec<(String, String)> {
+    with_table(|table| {
+        table
+            .get(index)
+            .map(|profile| profile.env.clone())
+            .unwrap_or_default()
+    })
+}
+
+#[must_use]
+pub fn hidden(index: usize) -> bool {
+    with_table(|table| table.get(index).is_some_and(|profile| profile.hidden))
+}
+
+/// The program this row names, spelled out in full — what the editor's `Program`
+/// field holds.
+///
+/// The *resolution* rather than a probe: a built-in nobody has edited says what
+/// it would look for, which is what the field must show before it is typed into,
+/// and the machine's own answer belongs to [`ProfilePrograms`]. `resolved` is
+/// that answer when there is one, because a reader looking at `PowerShell 7`
+/// wants the path this machine found rather than the words `BT_SHELL, then a
+/// probe`.
+#[must_use]
+pub fn program_text(index: usize, resolved: Option<&OsStr>) -> String {
+    with_table(
+        |table| match table.get(index).map(|profile| &profile.program) {
+            Some(ProgramSource::Path(path)) => path.to_string_lossy().into_owned(),
+            _ => resolved
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        },
+    )
+}
+
+/// Split an argument line the way Windows splits a command line — **spaces
+/// separate, double quotes group** (plan §3.3).
+///
+/// The rule is short on purpose and it is stated in the row's own sentence,
+/// because an argument box whose quoting rule cannot be said in one line is a box
+/// people get wrong. Concretely: runs of whitespace end a word; a `"` opens a
+/// group in which whitespace is ordinary and a second `"` closes it; a `""`
+/// inside a group is one literal quote, which is `CommandLineToArgvW`'s own rule
+/// for the case and the only one a person can discover by trying it. Backslash
+/// escaping — `\"` — is deliberately **not** honoured: a Windows path is full of
+/// backslashes, and a rule that made `C:\bin\` change the meaning of the next
+/// character would break the commonest argument there is.
+#[must_use]
+pub fn split_arguments(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' if quoted && characters.peek() == Some(&'"') => {
+                characters.next();
+                word.push('"');
+            }
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            character if character.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            character => {
+                word.push(character);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
+}
+
+/// The same words back as one line, quoted only where [`split_arguments`] would
+/// otherwise read two.
+///
+/// The pair has to round-trip, because the field is written from the table on
+/// every visit: a joiner that quoted differently from the splitter would rewrite
+/// somebody's arguments the second time they opened the page.
+#[must_use]
+pub fn join_arguments(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|word| {
+            if word.is_empty() || word.chars().any(char::is_whitespace) || word.contains('"') {
+                format!("\"{}\"", word.replace('"', "\"\""))
+            } else {
+                word.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `PowerShell 7 copy`, then `PowerShell 7 copy 2` — the naming the scheme
@@ -1569,6 +2206,17 @@ pub struct ProfileLine {
     /// control**: the default is changed on the General page and nowhere else,
     /// because one field with two writers is the thing §7.1.6c-4a just avoided.
     pub is_default: bool,
+    /// Whether this is the floor every degradation in the product lands on.
+    ///
+    /// A fact about the table and not about this profile, exactly as
+    /// [`Self::is_default`] is a fact about `settings.json` resolved against
+    /// this machine — and it is here for that field's reason: the row menu greys
+    /// `Hide` on both, and a menu that asked the table itself would be a second
+    /// reader of a rule [`set_hidden`] already enforces.
+    pub is_fallback: bool,
+    /// Whether the `⋯` offers `Delete` at all. A built-in is hidden, never
+    /// deleted, and its menu is simply shorter.
+    pub deletable: bool,
     pub hidden: bool,
     pub available: bool,
 }
@@ -1580,6 +2228,7 @@ pub struct ProfileLine {
 /// honoured hiding would be a page with no way back.
 #[must_use]
 pub fn page_lines(programs: &ProfilePrograms, default: usize) -> Vec<ProfileLine> {
+    let fallback = fallback_profile();
     with_table(|table| {
         table
             .profiles()
@@ -1598,6 +2247,8 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize) -> Vec<ProfileLine
                     },
                     capability: available.then(|| capability_text(profile).text()),
                     is_default: index == default,
+                    is_fallback: index == fallback,
+                    deletable: profile.origin == Origin::User,
                     hidden: profile.hidden,
                     available,
                 }
@@ -2166,21 +2817,67 @@ pub fn spawn_place(
     inherited: Option<PathBuf>,
     environment: &dyn ShellEnvironment,
 ) -> SpawnPlace {
-    match with_table(|table| {
-        table
-            .get(profile)
-            .map_or(StartingDir::WindowsHome, |entry| entry.starting_dir.clone())
-    }) {
+    let (start_at, starting_dir, namespace) = with_table(|table| {
+        table.get(profile).map_or_else(
+            || {
+                (
+                    StartAt::Inherit,
+                    StartingDir::WindowsHome,
+                    PathNamespace::Windows,
+                )
+            },
+            |entry| {
+                (
+                    entry.start_at.clone(),
+                    entry.starting_dir.clone(),
+                    entry.paths,
+                )
+            },
+        )
+    });
+    place_for(&start_at, &starting_dir, namespace, inherited, environment)
+}
+
+/// [`spawn_place`]'s pure half — the three answers resolved against one
+/// machine, with no table under it.
+///
+/// Split off for [`merge`]'s reason one function over: the rule is worth pinning
+/// without moving the process's own profile table to pin it, and `cargo test`
+/// runs this crate's cases in one process.
+fn place_for(
+    start_at: &StartAt,
+    starting_dir: &StartingDir,
+    namespace: PathNamespace,
+    inherited: Option<PathBuf>,
+    environment: &dyn ShellEnvironment,
+) -> SpawnPlace {
+    // **The reader's question first, the machine's second.** What the editor
+    // chose decides whether there is a place at all; the profile's own
+    // `starting_dir` decides which of the two channels it travels on, and a
+    // place that never arrived falls through to the profile's home exactly as an
+    // untranslatable inheritance already did.
+    let place = match start_at.clone() {
+        StartAt::Inherit => inherited,
+        // Not "inherit with nothing to inherit" — this one *refuses* a folder
+        // that was there, which is the whole of what the reader asked for.
+        StartAt::Home => None,
+        // Written in the picker's namespace and crossed into the profile's here,
+        // through the one door every crossing in this module goes through. A
+        // pair that cannot cross falls to the home below, which is
+        // `cwd_for_spawn`'s own rule and not a second one.
+        StartAt::Fixed(fixed) => translate_cwd(PathNamespace::Windows, namespace, &fixed),
+    };
+    match starting_dir {
         StartingDir::WindowsHome => SpawnPlace {
-            working_directory: inherited
+            working_directory: place
                 .or_else(|| environment.var_os("USERPROFILE").map(PathBuf::from)),
             arguments: Vec::new(),
         },
         StartingDir::LauncherFlag { flag, home } => SpawnPlace {
             working_directory: None,
             arguments: vec![
-                OsString::from(flag),
-                inherited.map_or_else(|| OsString::from(home), PathBuf::into_os_string),
+                OsString::from(flag.clone()),
+                place.map_or_else(|| OsString::from(home.clone()), PathBuf::into_os_string),
             ],
         },
     }
@@ -11582,6 +12279,414 @@ mod tests {
             table.position_of_id("cmd"),
             Some(0),
             "but a seat that names it still resolves to it"
+        );
+    }
+
+    // ── the editor (§7.1.6c-6b) ──────────────────────────────────────────────
+
+    /// PIN — **an edit reaches the file and the file reaches the table back**,
+    /// which is the whole contract of a dialog with no Save button.
+    ///
+    /// Red gate: write the field into the table and not into the entry, and the
+    /// rename survives exactly as long as the process does.
+    #[test]
+    fn an_edited_field_reaches_the_file_and_the_file_reaches_a_fresh_table() {
+        let registry = Registry::shipped();
+        assert_eq!(registry.rename(0, "Seven"), NameVerdict::Written);
+        registry.edit(0, |profile| {
+            profile.args = vec!["-NoLogo".to_owned(), "-NoProfile".to_owned()];
+            true
+        });
+
+        let written = registry.to_file();
+        let (read, faults) = merge(shipped(), &written);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(read[0].display_title, "Seven");
+        assert_eq!(read[0].args, ["-NoLogo", "-NoProfile"]);
+        assert_eq!(
+            read[0].compared_title.as_deref(),
+            Some("PowerShell 7"),
+            "the byte-compared word is a protocol constant and is not renamed \
+             with the row"
+        );
+        assert_eq!(read[0].id, "pwsh", "a rename is not a change of identity");
+    }
+
+    /// PIN — **a name another row already draws is refused, and nothing moves.**
+    ///
+    /// A row is told apart by its mark and its name, and two rows called
+    /// `PowerShell 7` one line apart in a picker is the failure that made the two
+    /// PowerShells carry their versions in the first place. The refusal is exact
+    /// rather than fuzzy, because a rule a person cannot predict is worse than
+    /// no rule: `powershell 7` is a different name and is allowed.
+    #[test]
+    fn a_name_another_row_already_draws_is_refused_and_the_table_does_not_move() {
+        let registry = Registry::shipped();
+        let before = registry.table().profiles().to_vec();
+
+        assert_eq!(registry.rename(0, "Command Prompt"), NameVerdict::Taken);
+        assert_eq!(registry.rename(0, "   "), NameVerdict::Blank);
+        assert_eq!(registry.table().profiles(), before.as_slice());
+        assert_eq!(registry.revision(), 0, "a refusal is not a change");
+
+        assert_eq!(registry.rename(0, "command prompt"), NameVerdict::Written);
+        assert_eq!(
+            registry.rename(0, "PowerShell 7"),
+            NameVerdict::Written,
+            "a row may always be given the name it already had back"
+        );
+    }
+
+    /// PIN — **the five identity colours are not this product's to repaint, and
+    /// a profile of the reader's own is theirs** (S98/S31, user ruling
+    /// 2026-08-17 Q5).
+    ///
+    /// Enforced in the table and not only in the dialog, because a rule that
+    /// lives in a control is a rule a hand-edited file walks around.
+    #[test]
+    fn a_builtins_colour_is_refused_and_a_profile_of_your_own_can_be_repainted() {
+        let registry = Registry::shipped();
+        assert!(
+            !registry.set_colour(0, MarkColour::Amber),
+            "PowerShell's blue is Microsoft's"
+        );
+        assert_eq!(
+            registry.table().get(0).unwrap().mark,
+            ChromeMark::ProfilePowerShell
+        );
+
+        let copy = registry.duplicate(0).expect("pwsh is a row");
+        assert_eq!(
+            registry.table().get(copy).unwrap().mark,
+            ChromeMark::ProfilePowerShell,
+            "a copy of a PowerShell is a PowerShell, and the mark says so"
+        );
+
+        // And a copy of WSL carries no machine qualifier, before the file is
+        // written or after it is read back — one row read twice, and a row that
+        // renamed itself across a restart would be the table disagreeing with
+        // itself.
+        let wsl = registry.table().position_of_id("wsl").unwrap();
+        let of_wsl = registry.duplicate(wsl).expect("wsl is a row");
+        assert_eq!(
+            registry.table().get(of_wsl).unwrap().qualifier,
+            Qualifier::None
+        );
+        let (read, _) = merge(shipped(), &registry.to_file());
+        assert_eq!(read[of_wsl].qualifier, Qualifier::None);
+
+        assert!(registry.set_colour(copy, MarkColour::Amber));
+        assert_eq!(
+            registry.table().get(copy).unwrap().mark,
+            ChromeMark::ProfileGeneric {
+                colour: MarkColour::Amber
+            }
+        );
+
+        // And it survives the file, which is where the object form of `mark`
+        // earns its place.
+        let (read, faults) = merge(shipped(), &registry.to_file());
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(
+            read[copy].mark,
+            ChromeMark::ProfileGeneric {
+                colour: MarkColour::Amber
+            }
+        );
+    }
+
+    /// PIN — **a deleted profile comes back with its own id, in its own place.**
+    ///
+    /// The id is the whole of what must survive: every seed on disk naming this
+    /// profile points at that string, and a row rebuilt with a fresh suffix would
+    /// leave all of them degraded to the floor. The position is what makes the
+    /// undo look like an undo rather than like a second creation.
+    #[test]
+    fn a_deleted_profile_comes_back_with_its_own_id_in_its_own_place() {
+        let registry = Registry::shipped();
+        let copy = registry.duplicate(1).expect("winps is a row");
+        let held = registry.table().get(copy).unwrap().clone();
+
+        assert!(
+            registry.delete(0).is_none(),
+            "a built-in is hidden, never deleted"
+        );
+        let removed = registry.delete(copy).expect("a profile of the user's own");
+        assert_eq!(removed.id, held.id);
+        assert!(!ids(registry.table().profiles()).contains(&held.id.as_str()));
+
+        let at = registry.reinsert(removed, copy);
+        assert_eq!(at, copy);
+        assert_eq!(registry.table().get(copy), Some(&held));
+    }
+
+    /// PIN — **the default and the floor cannot be hidden** (plan §2.4, R5).
+    ///
+    /// Both are guards rather than politeness: hiding the default leaves no new
+    /// tab to open, and hiding the floor puts a hole in the bottom of every
+    /// degradation chain in the product — which is exactly why the floor moved
+    /// off `pwsh` in the first place.
+    #[test]
+    fn hiding_the_default_and_hiding_the_floor_are_both_refused() {
+        let registry = Registry::shipped();
+        let floor = registry
+            .table()
+            .position_of_id(WINDOWS_POWERSHELL_ID)
+            .unwrap();
+        assert!(!registry.set_hidden(0, true, 0), "0 is the default here");
+        assert!(!registry.set_hidden(floor, true, 0));
+        assert!(registry.table().profiles().iter().all(|row| !row.hidden));
+
+        let cmd = registry.table().position_of_id("cmd").unwrap();
+        assert!(registry.set_hidden(cmd, true, 0));
+        assert!(
+            !registry.table().offered().contains(&cmd),
+            "hiding is being out of the pickers"
+        );
+        assert_eq!(
+            registry.table().position_of_id("cmd"),
+            Some(cmd),
+            "and it is still a profile: a seat already on disk restarts through \
+             its own id"
+        );
+        assert!(registry.set_hidden(cmd, false, 0));
+    }
+
+    /// PIN — **`Restore all defaults` puts every field back and leaves the two
+    /// that are not this profile's**: where it sits in the list, and whether it
+    /// is hidden.
+    ///
+    /// Both are decisions about the *list* rather than about the profile, and one
+    /// press undoing two things is what this house keeps taking apart.
+    #[test]
+    fn restoring_a_builtin_leaves_its_place_and_its_hiding_alone() {
+        let registry = Registry::shipped();
+        registry.rename(0, "Seven");
+        registry.edit(0, |profile| {
+            profile.args = vec!["-NoProfile".to_owned()];
+            profile.env = vec![("A".to_owned(), "1".to_owned())];
+            profile.start_at = StartAt::Home;
+            true
+        });
+        let cmd = registry.table().position_of_id("cmd").unwrap();
+        registry.set_hidden(cmd, true, 1);
+        registry.rename(cmd, "Console");
+        registry.move_profile(0, true);
+        let moved = registry.table().position_of_id("pwsh").unwrap();
+        assert_eq!(moved, 1);
+
+        assert!(registry.restore_defaults(moved));
+        let row = registry.table().get(moved).unwrap().clone();
+        assert_eq!(
+            row,
+            Profile {
+                ..shipped().remove(0)
+            }
+        );
+        assert_eq!(
+            registry.table().position_of_id("pwsh"),
+            Some(1),
+            "the row stays where the reader put it"
+        );
+
+        assert!(registry.restore_defaults(cmd));
+        assert_eq!(
+            registry.table().get(cmd).unwrap().display_title,
+            "Command Prompt"
+        );
+        assert!(
+            registry.table().get(cmd).unwrap().hidden,
+            "a hidden row's editor is reached by opening the row that is dimmed; \
+             putting it back in the picker is a question nobody asked"
+        );
+    }
+
+    /// PIN — **an argument line survives being split and joined**, because the
+    /// field is written from the table on every visit and a joiner that quoted
+    /// differently from the splitter would rewrite somebody's arguments the
+    /// second time they opened the page.
+    ///
+    /// The rule is the row's own sentence: spaces separate, double quotes group,
+    /// `""` inside a group is one literal quote — and a backslash is a
+    /// backslash, because a Windows path is full of them.
+    #[test]
+    fn an_argument_line_survives_being_split_and_joined() {
+        for words in [
+            vec![],
+            vec!["-NoLogo".to_owned()],
+            vec!["--cd".to_owned(), r"C:\Program Files\Git".to_owned()],
+            vec![r"C:\bin\".to_owned(), "a b".to_owned(), "\"q\"".to_owned()],
+            vec![String::new()],
+        ] {
+            let line = join_arguments(&words);
+            assert_eq!(split_arguments(&line), words, "{line:?}");
+        }
+        assert_eq!(
+            split_arguments("  -a   \"b c\"  d  "),
+            ["-a", "b c", "d"],
+            "runs of whitespace end a word and a quoted group keeps its own"
+        );
+        assert_eq!(
+            split_arguments(r"--path C:\bin\ --x"),
+            ["--path", r"C:\bin\", "--x"],
+            "a trailing backslash is a backslash and not an escape"
+        );
+    }
+
+    /// PIN — **`Inherit` is what this window did before the field existed**, and
+    /// the other two answers are the two things it could not say.
+    #[test]
+    fn the_three_starting_answers_are_inherit_home_and_one_fixed_place() {
+        let machine = FakeMachine::fully_equipped();
+        let inherited = Some(PathBuf::from(r"D:\Developer"));
+
+        let place = place_for(
+            &StartAt::Inherit,
+            &StartingDir::WindowsHome,
+            PathNamespace::Windows,
+            inherited.clone(),
+            &machine,
+        );
+        assert_eq!(place.working_directory, inherited);
+
+        let place = place_for(
+            &StartAt::Home,
+            &StartingDir::WindowsHome,
+            PathNamespace::Windows,
+            inherited.clone(),
+            &machine,
+        );
+        assert_eq!(
+            place.working_directory,
+            machine.var_os("USERPROFILE").map(PathBuf::from),
+            "Home refuses an inheritance that was there, which is the whole of \
+             what it says"
+        );
+
+        let place = place_for(
+            &StartAt::Fixed(PathBuf::from(r"E:\work")),
+            &StartingDir::WindowsHome,
+            PathNamespace::Windows,
+            inherited.clone(),
+            &machine,
+        );
+        assert_eq!(place.working_directory, Some(PathBuf::from(r"E:\work")));
+
+        // And a fixed folder crosses into the profile's own namespace through
+        // the one door every crossing in this module goes through.
+        let place = place_for(
+            &StartAt::Fixed(PathBuf::from(r"D:\Developer")),
+            &StartingDir::LauncherFlag {
+                flag: "--cd".to_owned(),
+                home: "~".to_owned(),
+            },
+            PathNamespace::Wsl,
+            None,
+            &machine,
+        );
+        assert_eq!(place.arguments, ["--cd", "/mnt/d/Developer"]);
+
+        // A pair that cannot cross falls to the profile's own home rather than
+        // to a guess — `cwd_for_spawn`'s rule, not a second one.
+        let place = place_for(
+            &StartAt::Fixed(PathBuf::from(r"\\server\share")),
+            &StartingDir::LauncherFlag {
+                flag: "--cd".to_owned(),
+                home: "~".to_owned(),
+            },
+            PathNamespace::Wsl,
+            None,
+            &machine,
+        );
+        assert_eq!(place.arguments, ["--cd", "~"]);
+    }
+
+    /// PIN — **a new profile wears the chassis and a duplicate wears the brand.**
+    ///
+    /// The two verbs say different things: `Duplicate` says "another one of
+    /// these" and its copy really is a PowerShell, while `New profile` takes the
+    /// default only as a template for what to run — and the first thing anybody
+    /// does with it is point it somewhere else, at which moment a Microsoft blue
+    /// would be a brand on a program that is not theirs.
+    #[test]
+    fn a_new_profile_wears_the_chassis_and_a_duplicate_wears_the_brand() {
+        let registry = Registry::shipped();
+        let made = registry.create(0).expect("pwsh is a row");
+        assert_eq!(made, registry.table().len() - 1, "it lands at the foot");
+        let row = registry.table().get(made).unwrap().clone();
+        assert_eq!(row.origin, Origin::User);
+        assert_eq!(row.compared_title, None);
+        assert_eq!(
+            row.mark,
+            ChromeMark::ProfileGeneric {
+                colour: MarkColour::Blue
+            }
+        );
+        assert_eq!(
+            row.program,
+            ProgramSource::PowerShellSeven,
+            "the template supplies the program; it is the identity that is new"
+        );
+
+        let again = registry.create(0).expect("pwsh is a row");
+        assert_eq!(
+            registry.table().get(again).unwrap().mark,
+            ChromeMark::ProfileGeneric {
+                colour: MarkColour::Teal
+            },
+            "two rows in one list must not wear one colour"
+        );
+    }
+
+    /// PIN — **the environment table round-trips through the file**, which is
+    /// the whole of what 5b owes it: the slot is written and read back, and
+    /// nothing puts it into a session yet (that is 5c).
+    #[test]
+    fn the_environment_table_round_trips_through_the_file() {
+        let registry = Registry::shipped();
+        let copy = registry.duplicate(0).expect("pwsh is a row");
+        registry.edit(copy, |profile| {
+            profile.env = vec![
+                ("FORCE_HYPERLINK".to_owned(), "0".to_owned()),
+                ("ANTHROPIC_LOG".to_owned(), "debug".to_owned()),
+            ];
+            true
+        });
+
+        let written = registry.to_file();
+        let (read, faults) = merge(shipped(), &written);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(
+            read[copy].env,
+            [
+                ("ANTHROPIC_LOG".to_owned(), "debug".to_owned()),
+                ("FORCE_HYPERLINK".to_owned(), "0".to_owned()),
+            ],
+            "an environment is a mapping, so the file sorts it and the bytes are \
+             a function of the content"
+        );
+    }
+
+    /// PIN — **pointing a row at a program re-derives what it can spell**, so a
+    /// profile whose shell became `wsl.exe` stops being told its directories in
+    /// Win32.
+    #[test]
+    fn a_program_a_reader_chose_re_derives_the_namespace_it_speaks() {
+        let registry = Registry::shipped();
+        let copy = registry.duplicate(2).expect("wsl is a row");
+        assert_eq!(
+            registry.table().get(copy).unwrap().paths,
+            PathNamespace::Wsl
+        );
+        registry.edit(copy, |profile| {
+            profile.program = ProgramSource::Path(PathBuf::from(r"C:\bin\fish.exe"));
+            profile.paths = derived_paths(profile);
+            true
+        });
+        assert_eq!(
+            registry.table().get(copy).unwrap().paths,
+            PathNamespace::Windows,
+            "only wsl.exe behind a bash init file crosses the namespace"
         );
     }
 

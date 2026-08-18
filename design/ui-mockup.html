@@ -1522,6 +1522,60 @@
     opacity: 0; transform: translateY(-6px); transition: opacity .22s ease, transform .22s ease; }
   .toast.show { opacity: 1; transform: none; }
   .toast .tdot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+
+  /* ── A CARD'S ONE VERB, born 2026-08-18 (Settings extension block, slice 5b) ──
+     A notice with something to press, and the only kind of notice that gets one:
+     the card that reports a thing this window cannot otherwise take back.
+
+     WHY AN UNDO AND NOT A CONFIRMATION. The Profiles dialog writes every choice
+     the instant it is made — it has no dirty gate, so there is nothing for a
+     question to be routed through, and `Restore all defaults` and `Reset to
+     defaults` were both ruled on exactly those grounds. What deletion adds to
+     those two is irreversibility, so what it is owed is an UNDO rather than a
+     question: undo is a precedent this product already struck as `Ctrl+Shift+T`,
+     while a confirmation would be the first modal standing on top of a modal
+     here. (Plan §2.3, user ruling 2026-08-17 Q3.)
+
+     IT IS A WORD AND NOT A `.btn`. A card is a notice, and a notice with a
+     filled button on it has stopped being a notice and become a dialog that
+     forgot to say so. So the verb wears the one face this house gives a
+     pressable word inside a small surface: no border, no fill at rest, the
+     surface's full ink against the body's muted one, and `--hover`'s pill only
+     under the pointer — `.gact`'s register, which the `×` two pixels away is
+     already wearing.
+
+     IT DOES NOT HIDE. The `×` is on the reveal ladder because a card dismisses
+     itself anyway, so a dismiss verb that is invisible until you reach for it
+     costs nothing. An undo cannot be on that ladder: the card's own expiry IS
+     the deadline for pressing it, and a verb you have to discover by hovering is
+     a verb that has expired by the time you have found it.
+
+     IT STANDS ON A ROW OF ITS OWN, right-aligned, under the sentence — not
+     tucked after the last word of it. Two reasons, and the second is the one
+     that decides it. A card's body wraps, so a verb after the last line would
+     land somewhere different on every card and nowhere at all on a card whose
+     last line is full. And a card's width is not the card's to choose: an
+     anchored one is as wide as the pane it hangs in, so "grow wider to fit both"
+     is not an answer available here. On its own row the two never compete, and
+     the row stops at the text column's trailing edge — one whole gap short of
+     the `×`'s reserved column — so the two pressable things on a card can never
+     share a pixel however long the word is.
+
+     ONE VERB. Not a run of them: a card is the report of ONE thing that
+     happened, and the moment it offers two answers it is a dialog. */
+  .toast { align-items: flex-start; }
+  .toast .tbody { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .toast-act {
+    align-self: flex-end; border: none; background: none; cursor: pointer;
+    font-family: inherit; font-size: 12px; font-weight: 500; color: var(--ink);
+    padding: 0 6px; border-radius: 5px; line-height: 1.4;
+  }
+  .toast-act:hover { background: var(--hover); }
+  .toast-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* The dot is centred on the FIRST line of text and not on the card, which is
+     now taller than one line whenever there is a verb — the same rule the title
+     already put it under. */
+  .toast .tdot { margin-top: 5px; }
   /* ── command palette (P1-9, 2026-07-18) ── a floating intent box: no scrim
      (the world stays visible — you are aiming, not modal-dialoguing), top
      third so the eye's resting line isn't covered, one flat list of sessions
@@ -2780,20 +2834,28 @@
      The first row's ↑ and the last row's ↓ are DISABLED, not absent: a row
      missing a button would shift every verb beside it out of column.
 
-     WHAT SLICE 5a SHIPPED, AND WHY IT IS THIS RULE AND NOT A DEPARTURE FROM IT
-     (§7.1.6c-6). 5a ships the data model, the file and this list read-only; the
-     only live verbs on it are ↑, ↓ and `Duplicate`. So the run is `↑ ↓ |
-     Duplicate` and there is no `⋯` at all — which is this comment's own
-     argument applied to a slice with one verb: the one verb is in the open, and
-     a `⋯` opening onto an empty menu is a dead control, which is the thing this
-     house keeps deleting. When 5b lands Edit / Hide / Delete / Set as default,
-     `Edit` takes the open slot, `Duplicate` joins the other three behind the
-     `⋯`, and the picture above is the picture again.
+     WHAT 5b LANDED (§7.1.6c-6b, 2026-08-18). The picture above is the picture
+     again: `Edit` took the open slot, `Duplicate` joined `Hide`, `Delete` and
+     `Set as default` behind the `⋯`, and the row itself became a focus stop that
+     `Enter` opens the editor from. (5a had shipped `↑ ↓ | Duplicate` with no `⋯`
+     at all — this comment's own argument applied to a slice with one verb, since
+     a `⋯` opening onto an empty menu is a dead control.)
 
-     The two arrows' tooltips went with it. This dialog has never drawn a
-     tooltip, and the channel arrives with the row menu — which is also where
-     the refusals that have reasons (`Hide` on the default, `Hide` on the
-     fallback floor) have to hang theirs.
+     `SET AS DEFAULT` IS IN THAT MENU, which this comment used to say the page
+     would never carry (user ruling 2026-08-17, Q4, amending E46/S102). The
+     ruling it was written from stands and is unchanged: the default is *chosen*
+     in one place, and that place is a picker on the General page. What the menu
+     item adds is the same choice made from the table it is a fact about, in the
+     same dialog, through that row's own applier — one field, one writer, two
+     doors onto it. The `default` badge here still reports and still cannot be
+     pressed.
+
+     THE TWO ARROWS STILL HAVE NO TOOLTIPS. This dialog has never drawn one and
+     still does not: the refusals that arrived with 5b are menu *items*, which
+     have a line of their own to carry a reason on (`Hide` on the default, `Hide`
+     on the fallback floor, `Set as default` on the row that already is one). A
+     dark arrow's "already first" waits for a tooltip channel rather than
+     shipping as a string nothing can draw.
 
      THE CAPABILITY SENTENCE WRAPS RATHER THAN CLIPS. It is written to two lines
      and measured at two (plan §4), and the half that would be cut off a single
@@ -3414,6 +3476,7 @@
               <div class="combo-menu" role="menu">
                 <div class="combo-item" role="menuitem">Duplicate</div>
                 <div class="combo-item dead" role="menuitem" title="The default profile stays in the picker">Hide</div>
+                <div class="combo-item dead" role="menuitem" title="Already the default">Set as default</div>
               </div>
             </div>
           </div>
@@ -3436,6 +3499,7 @@
               <div class="combo-menu" role="menu">
                 <div class="combo-item" role="menuitem">Duplicate</div>
                 <div class="combo-item dead" role="menuitem" title="Every fallback lands on this profile">Hide</div>
+                <div class="combo-item" role="menuitem">Set as default</div>
               </div>
             </div>
           </div>
@@ -3458,6 +3522,7 @@
               <div class="combo-menu" role="menu">
                 <div class="combo-item" role="menuitem">Duplicate</div>
                 <div class="combo-item" role="menuitem">Hide</div>
+                <div class="combo-item" role="menuitem">Set as default</div>
               </div>
             </div>
           </div>
@@ -3479,6 +3544,7 @@
               <div class="combo-menu" role="menu">
                 <div class="combo-item" role="menuitem">Duplicate</div>
                 <div class="combo-item" role="menuitem">Hide</div>
+                <div class="combo-item" role="menuitem">Set as default</div>
               </div>
             </div>
           </div>
@@ -3501,6 +3567,7 @@
               <div class="combo-menu" role="menu">
                 <div class="combo-item" role="menuitem">Duplicate</div>
                 <div class="combo-item" role="menuitem">Show</div>
+                <div class="combo-item" role="menuitem">Set as default</div>
               </div>
             </div>
           </div>
@@ -3528,6 +3595,7 @@
                 <div class="combo-item" role="menuitem">Duplicate</div>
                 <div class="combo-item" role="menuitem">Hide</div>
                 <div class="combo-item" role="menuitem" data-act="del">Delete</div>
+                <div class="combo-item" role="menuitem">Set as default</div>
               </div>
             </div>
           </div>
@@ -3556,6 +3624,32 @@
              S98/S31: those five colours are not this product's to repaint), and
              the foot verb is `Restore all defaults`, which returns every field on
              the page to the shipped table.
+
+             THREE PLACES THE SHIPPED PAGE READS DIFFERENTLY FROM THIS DRAWING,
+             each booked here because a prototype that quietly disagrees with the
+             product is worse than no prototype (§7.1.6c-6b, 2026-08-18):
+
+             1. `Starting directory` says the FOLDER when it is on one. This
+                drawing's third item is a verb (`Choose a folder…`), and a button
+                that answered with that verb while standing on `D:\Developer`
+                would be a control that cannot say its own value — the exact bug
+                the picker floor was widened to fix. The three items are
+                unchanged; only the button's caption is.
+
+             2. `Colour` says `Inherited` on a profile duplicated from a built-in.
+                A copy of PowerShell wears PowerShell's mark, which is telling the
+                truth about what it is a copy of and is none of these eight — so
+                nothing is ticked and the button says so. Choosing one of the
+                eight is a one-way door; the way back is to duplicate the built-in
+                again.
+
+             3. `Shell integration` is a READ-ONLY line and not a picker yet. Its
+                description is already the capability sentence in this drawing,
+                and that sentence is what 5b ships; the picker needs the `Auto`
+                derivation from the program's own file name, which plan §5.2
+                slices to 5c along with `Integration::None` and the honest matrix.
+                A picker that wrote a value nothing derived would be the
+                pretending this page exists to stop.
 
              `Name` writes `display_title` and NOT the string the OSC 0/2
              comparison uses (§G S103, plan §1.4). A built-in keeps its shipped
@@ -3758,7 +3852,11 @@
              many panes are running the profile, and that they keep running. It
              does not count seeds on disk — a number read out of a file at delete
              time can be wrong by the day it matters, and the honest place for
-             that is the degrade banner the restarting seat already prints. -->
+             that is the degrade banner the restarting seat already prints.
+
+             The card that carries that undo is the first toast in this product
+             with anything on it to press; its form — one word, right-aligned on
+             a row of its own, never hidden — is struck at `.toast-act` above. -->
         <div class="sc-foot"><button class="btn">Delete profile</button></div>
         </div>
         </section>
@@ -4684,10 +4782,20 @@
     jump: { label: "jump to that session" },
     run: { label: "run a command there", param: "command" },
   };
-  function notifyToast(text) {
+  // `act` is the card's one verb — `{ label, on }` — and every caller that
+  // passes nothing gets exactly the card this function has always made.
+  function notifyToast(text, act) {
     const t = document.createElement("div");
     t.className = "toast";
-    t.innerHTML = `<span class="tdot"></span>${esc(text)}`;
+    t.innerHTML = `<span class="tdot"></span><span class="tbody"><span>${esc(text)}</span>` +
+      (act ? `<button class="toast-act">${esc(act.label)}</button>` : "") + `</span>`;
+    if (act) {
+      t.querySelector(".toast-act").onclick = () => {
+        act.on();
+        t.classList.remove("show");
+        setTimeout(() => t.remove(), 260);
+      };
+    }
     $("toast-host").appendChild(t);
     requestAnimationFrame(() => t.classList.add("show"));
     setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 260); }, 3400);

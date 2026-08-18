@@ -700,6 +700,113 @@ pub enum Text {
     // was three merges.
     RowTables,
     DescTables,
+
+    // ── the profile editor (§7.1.6c-6b) ────────────────────
+    //
+    // The row's remaining verbs, the sub-page's fields and the two refusals a
+    // menu item can carry. Every sentence states a fact about the profile or the
+    // machine and none of them says "we" — `ui-copy-no-editorial`'s ruling, met
+    // on the page with the most sentences in the dialog.
+    /// The one verb in the open on a row, which is what a person came to this
+    /// list to do. The other four are behind the `⋯`.
+    ProfilesEdit,
+    ProfilesHide,
+    ProfilesShow,
+    ProfilesDelete,
+    /// The menu item ruled onto the row (user ruling 2026-08-17, Q4): the
+    /// picker itself stays on the General page, so the default still has one
+    /// place it is *chosen*, and this is the same choice made from the table it
+    /// is a fact about.
+    ProfilesSetDefault,
+    /// Why `Set as default` is dark on the row that already is one — named as a
+    /// state rather than as a rule, which is the register every refusal in this
+    /// menu wears.
+    ///
+    /// **The two arrows' own sentences are not here** ("already first", "already
+    /// last", "move up", "move down"). This dialog has never drawn a tooltip and
+    /// still has not got one: the refusals that arrived with this slice are menu
+    /// *items*, which have a line to carry theirs. A string with nothing to draw
+    /// it would be a translation nobody can ever read, so those four ship with
+    /// the channel and not before it.
+    ProfilesAlreadyDefault,
+    /// The foot of the list.
+    ProfilesNew,
+    /// The everyday half of the editor, in the order somebody decides a profile:
+    /// what it is called, what it runs, where it starts, what colour names it.
+    ProfilesRowName,
+    ProfilesRowNameDesc,
+    ProfilesRowProgram,
+    ProfilesRowProgramDesc,
+    ProfilesRowStartingDir,
+    ProfilesRowStartingDirDesc,
+    ProfilesRowColour,
+    ProfilesRowColourDesc,
+    /// The three answers the starting-directory picker carries.
+    ProfilesInherit,
+    ProfilesHome,
+    ProfilesChooseFolder,
+    /// The eight struck colours, named. A swatch alone cannot be spoken, read
+    /// aloud or searched, and these are not product names — unlike a profile's
+    /// own title, which is why those stay out of this table and these come in.
+    ProfilesColourBlue,
+    ProfilesColourTeal,
+    ProfilesColourGreen,
+    ProfilesColourAmber,
+    ProfilesColourRed,
+    ProfilesColourMagenta,
+    ProfilesColourViolet,
+    ProfilesColourSlate,
+    /// What the Colour picker's button says on a profile duplicated from a
+    /// built-in: it wears that built-in's mark, which is none of the eight and
+    /// is telling the truth about what it is a copy of. Nothing in the list is
+    /// ticked while this is the value.
+    ProfilesColourInherited,
+    /// And what it says on one of the five this build ships: the mark came with
+    /// the product and is not one of the eight — the row is greyed whole and its
+    /// sentence carries the reason.
+    ProfilesColourFixed,
+    /// The Advanced group's rows.
+    ProfilesRowArgs,
+    ProfilesRowArgsDesc,
+    ProfilesRowEnv,
+    /// **The present tense, and it is a fact** (J85): the slot is written to
+    /// `profiles.json` and read back, and nothing puts it into a session yet —
+    /// that is slice 5c, along with the layering rule that makes a profile's own
+    /// word the last one. The sentence the plan wrote for this row (`Set for
+    /// this profile's sessions, over what Folio sets`) is true the day the spawn
+    /// path reads it and ships then; a page that said it today would be the
+    /// pretending this page exists to stop.
+    ProfilesRowEnvDesc,
+    ProfilesRowHyperlink,
+    ProfilesRowHyperlinkDesc,
+    ProfilesRowIntegration,
+    ProfilesEnvAdd,
+    ProfilesEnvName,
+    ProfilesEnvValue,
+    /// `Auto`, `On`, `Off` — the hyperlink answer's three, where `Auto` is the
+    /// terminal's own declaration and the other two are this profile overruling
+    /// it.
+    ProfilesAuto,
+    ProfilesOn,
+    ProfilesOff,
+    /// The two verbs a foot can carry, and only ever one of them: a built-in
+    /// drops its overrides, a profile of the reader's own is deleted.
+    ProfilesRestoreAll,
+    ProfilesDeleteBtn,
+    ProfilesBrowse,
+    /// Why a `Hide` is dark. Both are guards and not politeness: hiding the
+    /// default leaves no new tab to open, and hiding the floor puts a hole in the
+    /// bottom of every degradation chain in the product.
+    ProfilesCannotHideDefault,
+    ProfilesCannotHideFallback,
+    /// Why the name field is refusing. Two sentences and not one, because they
+    /// are two different things to do about it.
+    ProfilesNameBlank,
+    ProfilesNameTaken,
+    /// The verb on the deletion card — the way back this product already struck
+    /// once as `Ctrl+Shift+T`, which is what a deletion with no confirmation is
+    /// owed.
+    ProfilesUndo,
 }
 
 impl Text {
@@ -1198,6 +1305,97 @@ impl Text {
                 "Draw markdown tables in output; off shows the pipe text",
                 "绘制输出里的 markdown 表格；关闭则显示管道符原文",
             ),
+
+            // ── the profile editor (§7.1.6c-6b) ────────────────
+            Self::ProfilesEdit => pick(lang, "Edit", "编辑"),
+            Self::ProfilesHide => pick(lang, "Hide", "隐藏"),
+            Self::ProfilesShow => pick(lang, "Show", "显示"),
+            Self::ProfilesDelete => pick(lang, "Delete", "删除"),
+            Self::ProfilesSetDefault => pick(lang, "Set as default", "设为默认"),
+            Self::ProfilesAlreadyDefault => pick(lang, "Already the default", "已经是默认"),
+            Self::ProfilesNew => pick(lang, "New profile", "新建档案"),
+            Self::ProfilesRowName => pick(lang, "Name", "名称"),
+            Self::ProfilesRowNameDesc => pick(
+                lang,
+                "What this profile is called on tabs, in the picker and in this list",
+                "标签、选择器与本列表上写的名字",
+            ),
+            Self::ProfilesRowProgram => pick(lang, "Program", "程序"),
+            Self::ProfilesRowProgramDesc => pick(
+                lang,
+                "The executable a new tab of this profile starts",
+                "该档案新建标签时启动的可执行文件",
+            ),
+            Self::ProfilesRowStartingDir => pick(lang, "Starting directory", "起始目录"),
+            Self::ProfilesRowStartingDirDesc => pick(
+                lang,
+                "Where a new tab of this profile opens",
+                "该档案的新标签在哪里打开",
+            ),
+            Self::ProfilesRowColour => pick(lang, "Colour", "颜色"),
+            Self::ProfilesRowColourDesc => pick(
+                lang,
+                "The mark that names this profile across the window",
+                "窗口各处标示该档案的那个标记",
+            ),
+            Self::ProfilesInherit => pick(lang, "The current pane's folder", "当前 pane 的文件夹"),
+            Self::ProfilesHome => pick(lang, "Home", "主目录"),
+            Self::ProfilesChooseFolder => pick(lang, "Choose a folder…", "选择文件夹…"),
+            Self::ProfilesColourBlue => pick(lang, "Blue", "蓝"),
+            Self::ProfilesColourTeal => pick(lang, "Teal", "青"),
+            Self::ProfilesColourGreen => pick(lang, "Green", "绿"),
+            Self::ProfilesColourAmber => pick(lang, "Amber", "琥珀"),
+            Self::ProfilesColourRed => pick(lang, "Red", "红"),
+            Self::ProfilesColourMagenta => pick(lang, "Magenta", "品红"),
+            Self::ProfilesColourViolet => pick(lang, "Violet", "紫"),
+            Self::ProfilesColourSlate => pick(lang, "Slate", "灰蓝"),
+            Self::ProfilesColourInherited => pick(lang, "Inherited", "沿用"),
+            Self::ProfilesColourFixed => pick(lang, "Its own", "自带"),
+            Self::ProfilesRowArgs => pick(lang, "Arguments", "参数"),
+            Self::ProfilesRowArgsDesc => pick(
+                lang,
+                "Passed to the program ahead of anything the shell reads · spaces separate, double quotes group",
+                "在 shell 读取任何东西之前传给程序 · 空格分词，双引号成组",
+            ),
+            Self::ProfilesRowEnv => pick(lang, "Environment", "环境变量"),
+            Self::ProfilesRowEnvDesc => pick(
+                lang,
+                "Stored for this profile. Nothing reads it into a session yet",
+                "为该档案保存。目前还没有会话读取它",
+            ),
+            Self::ProfilesRowHyperlink => pick(lang, "Force hyperlinks", "强制超链接"),
+            Self::ProfilesRowHyperlinkDesc => pick(
+                lang,
+                "FORCE_HYPERLINK, the answer programs read before emitting a link",
+                "FORCE_HYPERLINK，程序发出链接前读的那个回答",
+            ),
+            Self::ProfilesRowIntegration => pick(lang, "Shell integration", "Shell 集成"),
+            Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
+            Self::ProfilesEnvName => pick(lang, "Name", "名称"),
+            Self::ProfilesEnvValue => pick(lang, "Value", "值"),
+            Self::ProfilesAuto => pick(lang, "Auto", "自动"),
+            Self::ProfilesOn => pick(lang, "On", "开"),
+            Self::ProfilesOff => pick(lang, "Off", "关"),
+            Self::ProfilesRestoreAll => pick(lang, "Restore all defaults", "全部恢复默认"),
+            Self::ProfilesDeleteBtn => pick(lang, "Delete profile", "删除档案"),
+            Self::ProfilesBrowse => pick(lang, "Browse…", "浏览…"),
+            Self::ProfilesCannotHideDefault => pick(
+                lang,
+                "The default profile stays in the picker",
+                "默认档案留在选择器里",
+            ),
+            Self::ProfilesCannotHideFallback => pick(
+                lang,
+                "Every fallback lands on this profile",
+                "每一次降级都落在这个档案上",
+            ),
+            Self::ProfilesNameBlank => pick(lang, "A profile needs a name", "档案需要一个名字"),
+            Self::ProfilesNameTaken => pick(
+                lang,
+                "Another profile is already called this",
+                "已经有别的档案叫这个名字",
+            ),
+            Self::ProfilesUndo => pick(lang, "Undo", "撤销"),
         }
     }
 
@@ -1213,7 +1411,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 176] = [
+    pub const ALL: [Self; 225] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1390,6 +1588,55 @@ impl Text {
         Self::CapNone,
         Self::RowTables,
         Self::DescTables,
+        Self::ProfilesEdit,
+        Self::ProfilesHide,
+        Self::ProfilesShow,
+        Self::ProfilesDelete,
+        Self::ProfilesSetDefault,
+        Self::ProfilesAlreadyDefault,
+        Self::ProfilesNew,
+        Self::ProfilesRowName,
+        Self::ProfilesRowNameDesc,
+        Self::ProfilesRowProgram,
+        Self::ProfilesRowProgramDesc,
+        Self::ProfilesRowStartingDir,
+        Self::ProfilesRowStartingDirDesc,
+        Self::ProfilesRowColour,
+        Self::ProfilesRowColourDesc,
+        Self::ProfilesInherit,
+        Self::ProfilesHome,
+        Self::ProfilesChooseFolder,
+        Self::ProfilesColourBlue,
+        Self::ProfilesColourTeal,
+        Self::ProfilesColourGreen,
+        Self::ProfilesColourAmber,
+        Self::ProfilesColourRed,
+        Self::ProfilesColourMagenta,
+        Self::ProfilesColourViolet,
+        Self::ProfilesColourSlate,
+        Self::ProfilesColourInherited,
+        Self::ProfilesColourFixed,
+        Self::ProfilesRowArgs,
+        Self::ProfilesRowArgsDesc,
+        Self::ProfilesRowEnv,
+        Self::ProfilesRowEnvDesc,
+        Self::ProfilesRowHyperlink,
+        Self::ProfilesRowHyperlinkDesc,
+        Self::ProfilesRowIntegration,
+        Self::ProfilesEnvAdd,
+        Self::ProfilesEnvName,
+        Self::ProfilesEnvValue,
+        Self::ProfilesAuto,
+        Self::ProfilesOn,
+        Self::ProfilesOff,
+        Self::ProfilesRestoreAll,
+        Self::ProfilesDeleteBtn,
+        Self::ProfilesBrowse,
+        Self::ProfilesCannotHideDefault,
+        Self::ProfilesCannotHideFallback,
+        Self::ProfilesNameBlank,
+        Self::ProfilesNameTaken,
+        Self::ProfilesUndo,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -1651,6 +1898,69 @@ pub fn profile_not_installed(profile_title: &str) -> String {
     match current() {
         Lang::English => format!("{profile_title} is not installed"),
         Lang::Chinese => format!("未安装 {profile_title}"),
+    }
+}
+
+/// Why a built-in's `Colour` row is dark — **the row's sentence becomes the
+/// reason**, which is this dialog's own idiom for a control that is not the
+/// reader's to press.
+///
+/// The mock-up writes it of the profile it pictures (`PowerShell's mark is its
+/// own`), so the name is a value rather than a word in the string: the five
+/// identity colours are not this product's to repaint (S98/S31), and the row
+/// says which of the five it is standing on.
+#[must_use]
+pub fn profile_mark_is_its_own(profile_title: &str) -> String {
+    match current() {
+        Lang::English => format!("{profile_title}'s mark is its own"),
+        Lang::Chinese => format!("{profile_title} 的标记属于它自己"),
+    }
+}
+
+/// The deletion card, which names **one fact this window actually holds**: how
+/// many panes in it are running the profile, and that they keep running.
+///
+/// It does not count seeds on disk. A number read out of a session file at
+/// delete time can be wrong by the day it matters, and the honest place for that
+/// fact is the degrade banner the restarting seat already prints
+/// (`M2-restart-shell-contract` §3).
+///
+/// The zero case is a different sentence rather than `0 panes`: a reader who was
+/// running none is not being told about panes at all.
+#[must_use]
+pub fn profile_deleted(profile_title: &str, panes: usize) -> String {
+    match (current(), panes) {
+        (Lang::English, 0) => format!("{profile_title} is gone"),
+        (Lang::English, 1) => {
+            format!("{profile_title} is gone. One pane is running it, and it keeps running")
+        }
+        (Lang::English, panes) => {
+            format!("{profile_title} is gone. {panes} panes are running it, and they keep running")
+        }
+        (Lang::Chinese, 0) => format!("{profile_title} 已删除"),
+        (Lang::Chinese, panes) => {
+            format!("{profile_title} 已删除。有 {panes} 个 pane 仍在运行它，它们继续运行")
+        }
+    }
+}
+
+/// What each of the eight struck colours is called.
+///
+/// A function here rather than a method on the colour, because the colours are a
+/// fact about a drawing (`marks.rs` owns the hexes and holds no opinion about
+/// language) and their names are a fact about a picker. The mapping is total, so
+/// a ninth colour cannot ship without a word in both columns.
+#[must_use]
+pub fn colour_name(colour: crate::marks::MarkColour) -> Text {
+    match colour {
+        crate::marks::MarkColour::Blue => Text::ProfilesColourBlue,
+        crate::marks::MarkColour::Teal => Text::ProfilesColourTeal,
+        crate::marks::MarkColour::Green => Text::ProfilesColourGreen,
+        crate::marks::MarkColour::Amber => Text::ProfilesColourAmber,
+        crate::marks::MarkColour::Red => Text::ProfilesColourRed,
+        crate::marks::MarkColour::Magenta => Text::ProfilesColourMagenta,
+        crate::marks::MarkColour::Violet => Text::ProfilesColourViolet,
+        crate::marks::MarkColour::Slate => Text::ProfilesColourSlate,
     }
 }
 
