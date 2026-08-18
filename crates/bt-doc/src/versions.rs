@@ -99,6 +99,15 @@ pub struct LayoutKey {
     /// rastered while the window spoke one language can no longer be handed back
     /// after it has started speaking another.
     pub lang_rev: u64,
+    /// How many times the window's **profile table** has moved (§7.1.6c-6).
+    ///
+    /// [`Self::lang_rev`]'s twin, and it arrived for a reason spelled in the
+    /// same words one slice later: a profile's name is a *width*. The `˅` menu's
+    /// rows, the pane submenu's, the default-profile combo's column and every
+    /// tab that falls back to its profile's name are measured once and cached,
+    /// so a rename, a reorder or a duplicate that did not advance a number here
+    /// would be a window drawing yesterday's widths under today's words.
+    pub profile_rev: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -150,6 +159,7 @@ mod tests {
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,
+            profile_rev: 0,
         };
         let switched = LayoutKey {
             lang_rev: 1,
@@ -163,5 +173,44 @@ mod tests {
             hasher.finish()
         };
         assert_ne!(hash_of(base), hash_of(switched));
+    }
+
+    /// PIN (§7.1.6c-6) — **the profile table is part of the key too**, by
+    /// equality and by hash, and for the reason above rewritten one table over.
+    ///
+    /// A profile's name is a width. Rename `PowerShell 7` to `七号`, or duplicate
+    /// a row, and every cached measurement that named a profile is measuring a
+    /// string that no longer exists — the `˅` menu's minimum width, the pane
+    /// submenu's, the settings combo's column, and every tab whose caption fell
+    /// through to its profile's name.
+    ///
+    /// Red gate: drop `profile_rev` from the struct and a window that has just
+    /// been handed a renamed table draws yesterday's widths under today's words
+    /// until something unrelated invalidates the cache.
+    #[test]
+    fn a_profile_table_change_is_a_different_layout_key() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let base = LayoutKey {
+            width_cells: NonZeroU32::new(80).unwrap(),
+            dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_rev: 1,
+            theme_rev: 1,
+            lang_rev: 0,
+            profile_rev: 0,
+        };
+        let renamed = LayoutKey {
+            profile_rev: 1,
+            ..base
+        };
+        assert_ne!(base, renamed);
+
+        let hash_of = |key: LayoutKey| {
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(hash_of(base), hash_of(renamed));
     }
 }

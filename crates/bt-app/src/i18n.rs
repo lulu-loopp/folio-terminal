@@ -639,6 +639,54 @@ pub enum Text {
     /// halves answer different questions: a reader who chose a wallpaper and got
     /// no wallpaper is first asking whether the window heard them.
     BackgroundPictureRefused,
+
+    // ── the Profiles page (§7.1.6c-6) ──────────────────────
+    //
+    // **The profiles' own names are not here and never will be.** `PowerShell 7`,
+    // `WSL`, `Git Bash` and `Command Prompt` are product names, a Chinese window
+    // spells them the way an English one does (§G S103), and every one of them is
+    // byte-compared against what a shell announces about itself — which is what
+    // `no_profile_title_has_been_pulled_into_the_language_table` pins.
+    /// The rail's second word and the page's heading, which are two entries for
+    /// [`Self::NavGeneral`]'s reason: this file upper-cases at the source.
+    NavProfiles,
+    CategoryProfiles,
+    /// The one verb this slice ships live on a row.
+    ///
+    /// The arrows carry no words: they are glyphs, and the sentence a *dark*
+    /// arrow owes ("already first") needs a tooltip, which is a channel this
+    /// dialog has never had. It arrives with the row menu in the next slice,
+    /// where the refusals that have reasons have to live anyway.
+    ProfilesDuplicate,
+    /// The badges. They report and are not controls, which is why they wear the
+    /// group label's type and the ink an unavailable thing wears.
+    ProfilesBadgeDefault,
+    ProfilesBadgeHidden,
+
+    // ── the honest capability sentences (J85) ──────────────────
+    //
+    // The authority is `docs/shell-integration.md`'s "What each profile actually
+    // gets"; this page does not build a second matrix, it draws one row of that
+    // one. Each names the markers it HAS and the ones it has NOT — no row claims
+    // a capability by omission — and each is written to about fifty-eight
+    // characters, which is what the text column holds once the action run has
+    // taken its fixed reserve on the right.
+    /// A bash the terminal hands its own init file to: everything, unconditional.
+    CapFull,
+    /// PowerShell, both editions. **The condition is in the sentence** because
+    /// this page cannot probe for it: whether `folio.ps1` is dot-sourced into
+    /// the user's profile script is known only to a live session that has
+    /// already sent OSC 133, and a settings page has never had that. Said this
+    /// way the sentence is true in every state and needs no probe.
+    CapPowerShell,
+    /// WSL. The same everything, and the same honest condition — a `zsh` or
+    /// `fish` login never reads the init file the launcher was handed.
+    CapWslBash,
+    /// `cmd`, whose whole integration is the one marker that fits in `PROMPT`.
+    /// It is the only shipped row that has to say what it has not got.
+    CapCmd,
+    /// A profile served by no script at all.
+    CapNone,
 }
 
 impl Text {
@@ -1094,6 +1142,37 @@ impl Text {
             Self::BackgroundPictureRefused => {
                 pick(lang, "Background picture not shown", "背景图未显示")
             }
+
+            // ── the Profiles page (§7.1.6c-6) ──────────────────
+            Self::NavProfiles => pick(lang, "Profiles", "档案"),
+            Self::CategoryProfiles => pick(lang, "PROFILES", "档案"),
+            Self::ProfilesDuplicate => pick(lang, "Duplicate", "复制"),
+            // Lower case, because it is a badge and not a heading: the type
+            // raises it in the English and there is no case to raise in the
+            // Chinese, which is the same ruling `CategoryGeneral` carries.
+            Self::ProfilesBadgeDefault => pick(lang, "default", "默认"),
+            Self::ProfilesBadgeHidden => pick(lang, "hidden", "已隐藏"),
+            Self::CapFull => pick(
+                lang,
+                "Prompt marks, directory, exit codes and hyperlinks",
+                "提示符标记、目录、退出码与超链接",
+            ),
+            Self::CapPowerShell => pick(
+                lang,
+                "Prompt marks, directory, exit codes and hyperlinks — with folio.ps1 dot-sourced",
+                "提示符标记、目录、退出码与超链接 —— 前提是已点源 folio.ps1",
+            ),
+            Self::CapWslBash => pick(
+                lang,
+                "Prompt marks, directory, exit codes and hyperlinks — on a bash login only",
+                "提示符标记、目录、退出码与超链接 —— 仅限 bash 登录",
+            ),
+            Self::CapCmd => pick(
+                lang,
+                "Directory and hyperlinks; no prompt marks, no exit codes",
+                "目录与超链接；没有提示符标记，没有退出码",
+            ),
+            Self::CapNone => pick(lang, "No shell integration", "无 shell 集成"),
         }
     }
 
@@ -1109,7 +1188,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 164] = [
+    pub const ALL: [Self; 174] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1274,6 +1353,16 @@ impl Text {
         Self::DeleteSchemeUserFile,
         Self::SchemeDeleted,
         Self::BackgroundPictureRefused,
+        Self::NavProfiles,
+        Self::CategoryProfiles,
+        Self::ProfilesDuplicate,
+        Self::ProfilesBadgeDefault,
+        Self::ProfilesBadgeHidden,
+        Self::CapFull,
+        Self::CapPowerShell,
+        Self::CapWslBash,
+        Self::CapCmd,
+        Self::CapNone,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -1522,6 +1611,42 @@ pub fn unavailable_profile_tip(profile_title: &str) -> String {
     match current() {
         Lang::English => format!("{profile_title} — not found on this machine"),
         Lang::Chinese => format!("{profile_title} —— 本机上没有找到"),
+    }
+}
+
+/// Why a row of the Profiles page is greyed whole.
+///
+/// **The row's sentence becomes the reason** (mock-up, `.row.unavailable`): a
+/// shell that is not on this machine has no capabilities to report, and the one
+/// line the row has room for is the reason it cannot run.
+#[must_use]
+pub fn profile_not_installed(profile_title: &str) -> String {
+    match current() {
+        Lang::English => format!("{profile_title} is not installed"),
+        Lang::Chinese => format!("未安装 {profile_title}"),
+    }
+}
+
+/// What `profiles.json` could not be honoured for, named entry by entry.
+///
+/// `schemes`' register applied to a table: skip the entry, **name it**, say it
+/// once, never crash, never go quiet. The id is in the sentence because the id
+/// is what the reader has to search their own file for.
+#[must_use]
+pub fn profile_entry_fault(fault: &crate::profiles::ProfileFault) -> String {
+    match (current(), fault) {
+        (Lang::English, crate::profiles::ProfileFault::Unusable { id }) => {
+            format!("profiles.json: {id} names no program and was skipped")
+        }
+        (Lang::Chinese, crate::profiles::ProfileFault::Unusable { id }) => {
+            format!("profiles.json：{id} 没有写程序，已跳过")
+        }
+        (Lang::English, crate::profiles::ProfileFault::Duplicate { id }) => {
+            format!("profiles.json: {id} appears twice; the first was kept")
+        }
+        (Lang::Chinese, crate::profiles::ProfileFault::Duplicate { id }) => {
+            format!("profiles.json：{id} 出现了两次，保留了第一条")
+        }
     }
 }
 

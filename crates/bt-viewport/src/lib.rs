@@ -3903,6 +3903,7 @@ mod tests {
             font_rev: 1,
             theme_rev: 1,
             lang_rev: 0,
+            profile_rev: 0,
         }
     }
 
@@ -6071,6 +6072,7 @@ mod tests {
             LayoutKey {
                 theme_rev: 2,
                 lang_rev: 0,
+                profile_rev: 0,
                 ..key(8)
             },
         ] {

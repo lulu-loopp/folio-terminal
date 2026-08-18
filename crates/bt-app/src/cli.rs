@@ -155,9 +155,12 @@ impl CliFault {
 /// a property of how the process was started.
 #[must_use]
 pub fn refusal_text(fault: &CliFault) -> String {
-    let ids = profiles::PROFILES
-        .iter()
-        .map(|profile| profile.id)
+    // The table and not the shipped five: `--profile` resolves through
+    // `profiles::index_of_id`, so the ids `--help` prints have to be the ids
+    // that door will answer to. Before the table is installed it *is* the
+    // shipped five, which is the only state `--help` is ever printed in.
+    let ids = (0..profiles::count())
+        .map(profiles::id)
         .collect::<Vec<_>>()
         .join(", ");
     let usage = i18n::CliText::Usage { profile_ids: &ids }.text();
@@ -399,7 +402,7 @@ impl CliRefusal {
             Self::NoSuchProfile(id) => i18n::CliText::NoSuchProfile(id).text(),
             Self::NoSuchPath(path) => i18n::CliText::NoSuchPath(&path.to_string_lossy()).text(),
             Self::UnreachableFolder { folder, profile } => i18n::CliText::UnreachableFolder {
-                profile_title: profiles::PROFILES[*profile].title,
+                profile_title: profiles::title(*profile),
                 folder: &folder.to_string_lossy(),
             }
             .text(),
@@ -466,7 +469,7 @@ pub fn resolve(
     let cwd = folder.and_then(|folder| {
         let crossed = profiles::translate_cwd(
             profiles::PathNamespace::Windows,
-            profiles::PROFILES[profile].paths,
+            profiles::paths(profile),
             &folder,
         );
         if crossed.is_none() {
@@ -784,22 +787,23 @@ mod tests {
     /// PIN — **the profile slug is resolved against this build's own table**,
     /// and an id it has not got costs the shell choice and nothing else.
     ///
-    /// Every id is read out of `profiles::PROFILES` rather than written here, so
+    /// Every id is read out of the profile table rather than written here, so
     /// a profile added, removed or renamed is covered by this test on the day it
     /// moves instead of on the day somebody remembers.
     #[test]
     fn every_profile_id_this_build_has_resolves_and_an_unknown_one_falls_to_the_default() {
-        for (index, profile) in profiles::PROFILES.iter().enumerate() {
-            let plan = resolve(&parsed(&["--profile", profile.id]), PWSH, table(&[]));
-            assert_eq!(plan.profile, index, "{}", profile.id);
-            assert!(plan.refusals.is_empty(), "{}", profile.id);
+        for index in 0..profiles::count() {
+            let id = profiles::id(index);
+            let plan = resolve(&parsed(&["--profile", &id]), PWSH, table(&[]));
+            assert_eq!(plan.profile, index, "{id}");
+            assert!(plan.refusals.is_empty(), "{id}");
         }
         let plan = resolve(
             &parsed(&["--profile", "fish"]),
-            profiles::FALLBACK_PROFILE,
+            profiles::fallback_profile(),
             table(&[]),
         );
-        assert_eq!(plan.profile, profiles::FALLBACK_PROFILE);
+        assert_eq!(plan.profile, profiles::fallback_profile());
         assert!(plan.wants_pane);
         assert_eq!(
             plan.refusals,
@@ -901,13 +905,13 @@ mod tests {
     fn an_empty_request_resolves_to_a_plan_that_wants_nothing() {
         let plan = resolve(
             &CliRequest::default(),
-            profiles::FALLBACK_PROFILE,
+            profiles::fallback_profile(),
             table(&[]),
         );
         assert!(!plan.wants_pane);
         assert_eq!(plan.cwd, None);
         assert_eq!(plan.preview, None);
-        assert_eq!(plan.profile, profiles::FALLBACK_PROFILE);
+        assert_eq!(plan.profile, profiles::fallback_profile());
         assert!(plan.refusals.is_empty());
     }
 
@@ -920,12 +924,9 @@ mod tests {
     #[test]
     fn the_usage_block_lists_the_profile_ids_off_the_real_table() {
         let text = refusal_text(&CliFault::HelpAsked);
-        for profile in profiles::PROFILES {
-            assert!(
-                text.contains(profile.id),
-                "{} is not in the usage",
-                profile.id
-            );
+        for index in 0..profiles::count() {
+            let id = profiles::id(index);
+            assert!(text.contains(&id), "{} is not in the usage", id);
         }
         assert!(text.contains("--cwd"));
         assert!(text.contains("--profile"));

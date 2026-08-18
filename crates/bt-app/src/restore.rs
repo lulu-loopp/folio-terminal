@@ -42,7 +42,7 @@ use bt_render::{
 
 use crate::{
     marks::{ChromeMark, ChromeSprite, OverlayLayer},
-    profiles::{PROFILES, index_of_id},
+    profiles::{self, index_of_id},
     seed::Seed,
     settings::push_float_window,
 };
@@ -317,9 +317,9 @@ impl RestoreRow {
                 cwd,
                 manual_name,
             } => {
-                let profile = PROFILES[index_of_id(profile_id)];
+                let profile = index_of_id(profile_id);
                 (
-                    profile.mark,
+                    profiles::mark(profile),
                     // **This seed's own profile** is the name's last layer, and
                     // this row is where getting it wrong shows worst: a restore
                     // row has no program title at all (the program left with the
@@ -333,7 +333,7 @@ impl RestoreRow {
                         manual_name.as_deref(),
                         None,
                         Some(Path::new(cwd)),
-                        profile.title,
+                        &profiles::display_title(profile),
                     ),
                     cwd.clone(),
                 )
@@ -2102,10 +2102,10 @@ mod tests {
     /// their ordinary state rather than an edge case.
     #[test]
     fn a_restore_row_falls_back_to_its_own_profile_s_name_and_never_the_default_s() {
-        for profile in PROFILES {
+        for profile in profiles::shipped() {
             let row = RestoreRow::from_seed(
                 &Seed::Term {
-                    profile_id: profile.id.to_owned(),
+                    profile_id: profile.id.clone(),
                     // The case the bug lived in: no folder was ever reported, so
                     // there is nothing under the profile to catch the name.
                     cwd: String::new(),
@@ -2115,7 +2115,7 @@ mod tests {
             );
             assert_eq!(row.mark, profile.mark);
             assert_eq!(
-                row.label, profile.title,
+                row.label, profile.display_title,
                 "a {} row must not be captioned with another profile's name",
                 profile.id
             );
@@ -2125,11 +2125,11 @@ mod tests {
         // names the row when the shell reported one, and your own name beats
         // both. Otherwise "fall back to the profile" would quietly become
         // "always show the profile".
-        let git = PROFILES[index_of_id("gitbash")];
+        let git = profiles::id(index_of_id("gitbash"));
         assert_eq!(
             RestoreRow::from_seed(
                 &Seed::Term {
-                    profile_id: git.id.to_owned(),
+                    profile_id: git.clone(),
                     cwd: r"C:\work\repo".to_owned(),
                     manual_name: None,
                 },
@@ -2142,7 +2142,7 @@ mod tests {
         assert_eq!(
             RestoreRow::from_seed(
                 &Seed::Term {
-                    profile_id: git.id.to_owned(),
+                    profile_id: git.clone(),
                     cwd: r"C:\work\repo".to_owned(),
                     manual_name: Some("build".to_owned()),
                 },
@@ -2754,7 +2754,11 @@ in the folders you left them, as new shells."
         );
         assert_eq!(named.label, "build", "your name for it");
         assert_eq!(named.cwd, "C:\\Users\\you\\repo");
-        assert_eq!(named.mark, PROFILES[0].mark, "a profile's icon is its mark");
+        assert_eq!(
+            named.mark,
+            profiles::mark(0),
+            "a profile's icon is its mark"
+        );
         assert_eq!(named.badge_text().as_deref(), Some("2"));
 
         let unnamed = RestoreRow::from_seed(
@@ -2787,7 +2791,7 @@ in the folders you left them, as new shells."
             },
             1,
         );
-        assert_eq!(stranger.mark, PROFILES[0].mark);
+        assert_eq!(stranger.mark, profiles::mark(0));
     }
 
     /// PIN (i18n slice, 2026-08-17) — **Chinese wraps, and it wraps between

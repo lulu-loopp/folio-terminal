@@ -2780,6 +2780,7 @@ mod tests {
                 font_rev: 1,
                 theme_rev: 1,
                 lang_rev: 0,
+                profile_rev: 0,
             },
             view: ViewGeneration(1),
         }

@@ -381,6 +381,30 @@ const SHORTCUT_CONTROL_GAP_LOGICAL_PX: f32 = 8.0;
 /// beside a button that is already a word and a second one would read as a
 /// choice between two verbs rather than as an undo of one.
 const RESTORE_GLYPH: &str = "\u{21ba}";
+
+/// The two glyphs the reorder buttons wear — `↑` and `↓`, the mock-up's own.
+///
+/// Arrows and not chevrons: a chevron in this window means "there is more here"
+/// (a combo opens one, a menu turns one), and a button that moved a row while
+/// wearing the disclosure glyph would be borrowing a word that is already taken.
+const PROFILE_UP_GLYPH: &str = "\u{2191}";
+const PROFILE_DOWN_GLYPH: &str = "\u{2193}";
+
+/// The badge a row wears, or none.
+///
+/// **`hidden` outranks `default`**, and the ordering is a guard rather than a
+/// taste: the default profile is refused the `Hide` verb precisely so it cannot
+/// leave the picker, and if a hand-edited file ever produced a row that was both
+/// then the fact worth showing is the one that is wrong.
+fn badge_text(line: &crate::profiles::ProfileLine) -> Option<&'static str> {
+    if line.hidden {
+        Some(Text::ProfilesBadgeHidden.text())
+    } else if line.is_default {
+        Some(Text::ProfilesBadgeDefault.text())
+    } else {
+        None
+    }
+}
 /// Above a page's own closing verb — the shortcut page's `Restore all defaults`
 /// and, since §7.1.6c-5, every Advanced group's `Reset to defaults`. It stands
 /// off the last row the way a later heading stands off the group above it.
@@ -431,6 +455,45 @@ const FOOT_HINT_LINE_LOGICAL_PX: f32 = 12.0 * 1.5;
 /// split in half.
 const FOOT_BUTTON_GAP_LOGICAL_PX: f32 = 8.0;
 const BUTTON_HEIGHT_LOGICAL_PX: f32 = 27.5;
+
+// ── the Profiles page (§7.1.6c-6) ───────────────────────────────────────────
+//
+// Every number here is `design/ui-mockup.html`'s own `.pf-*` block. The mark
+// column is `.ticon`'s, shared with the picker's option marks and with the `˅`
+// menu's rows, because it is the same 15px mark in the same 14px column.
+/// `.pf-row { gap: 12px }` — mark to text, and text to the action run.
+const PROFILE_ROW_GAP_LOGICAL_PX: f32 = 12.0;
+/// `.ticon`'s column, one pixel narrower than the mark it centres.
+const PROFILE_MARK_COLUMN_LOGICAL_PX: f32 = 14.0;
+const PROFILE_MARK_LOGICAL_PX: f32 = 15.0;
+/// `.pf-act { height: 26px; min-width: 26px }`.
+const PROFILE_ACT_SIDE_LOGICAL_PX: f32 = 26.0;
+/// `.pf-acts { gap: 1px }`.
+const PROFILE_ACT_GAP_LOGICAL_PX: f32 = 1.0;
+/// `.pf-sep { width: 1px; height: 16px; margin: 0 3px }` — the hairline between
+/// "move this row" and "change this profile". Two verbs acting on different
+/// things must not read as one run of three.
+const PROFILE_SEPARATOR_MARGIN_LOGICAL_PX: f32 = 3.0;
+const PROFILE_SEPARATOR_HEIGHT_LOGICAL_PX: f32 = 16.0;
+/// `.pf-act { padding: 0 6px }`, either side of the one verb's word.
+const PROFILE_ACT_PADDING_X_LOGICAL_PX: f32 = 6.0;
+/// `.pf-act { font-size: 12.5px }` — a hair under the dialog buttons, because
+/// this run is trim on a row and not a verb of the page.
+const PROFILE_ACT_FONT_LOGICAL_PX: f32 = 12.5;
+/// `.pf-badge` — `margin-left: 8px; padding: 1px 6px; font-size: 10.5px`.
+const PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX: f32 = 8.0;
+const PROFILE_BADGE_PADDING_X_LOGICAL_PX: f32 = 6.0;
+const PROFILE_BADGE_FONT_LOGICAL_PX: f32 = 10.5;
+const PROFILE_BADGE_HEIGHT_LOGICAL_PX: f32 = 15.0;
+const PROFILE_BADGE_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// `.pf-badge { letter-spacing: .05em }`, the group label's own tracking —
+/// because a badge *is* a label.
+const PROFILE_BADGE_TRACKING_EM: f32 = 0.05;
+/// `.pf-row.pf-hidden .ticon { opacity: .35; filter: grayscale(1) }`, which is
+/// the register this file already struck for a mark naming something that is not
+/// running. Both halves: grayscale alone reads as a rendering fault, and a fade
+/// alone leaves Ubuntu's orange the loudest thing in a list of switched-off rows.
+const PROFILE_HIDDEN_MARK_OPACITY: f32 = 0.35;
 const BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 const BUTTON_FONT_LOGICAL_PX: f32 = 13.0;
 
@@ -963,6 +1026,18 @@ pub enum SettingsCategory {
     /// mock-up drew here first, and it still has no setting behind it.
     Terminal,
     RenderedBlocks,
+    /// The profile table, one row per profile (§7.1.6c-6).
+    ///
+    /// **Second, directly under General**, which is the mock-up's rail order and
+    /// an argument rather than a preference: General's `Default profile` row
+    /// points at the very table this word opens.
+    ///
+    /// Like [`Self::Shortcuts`] its page is not a list of `SettingsRow`s — a
+    /// profile is not a preference with a control beside it, it is a thing that
+    /// runs — so it rides in on [`SettingsContent::profiles`] and is laid out,
+    /// drawn and hit-tested by the same three special-cased blocks the shortcut
+    /// page taught this file to write.
+    Profiles,
     /// The one category whose page is not a list of rows.
     ///
     /// It is never empty — the shortcut table is a constant of this build — so
@@ -973,8 +1048,9 @@ pub enum SettingsCategory {
 
 impl SettingsCategory {
     /// Every category this build knows, in the rail's own order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::General,
+        Self::Profiles,
         Self::Appearance,
         Self::Terminal,
         Self::RenderedBlocks,
@@ -1013,6 +1089,7 @@ impl SettingsCategory {
     pub fn key(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Profiles => "profiles",
             Self::Appearance => "appearance",
             Self::Terminal => "terminal",
             Self::RenderedBlocks => "rendered-blocks",
@@ -1043,6 +1120,7 @@ impl SettingsCategory {
     pub fn label(self) -> &'static str {
         match self {
             Self::General => Text::CategoryGeneral.text(),
+            Self::Profiles => Text::CategoryProfiles.text(),
             Self::Appearance => Text::CategoryAppearance.text(),
             Self::Terminal => Text::CategoryTerminal.text(),
             Self::RenderedBlocks => Text::CategoryRenderedBlocks.text(),
@@ -1063,6 +1141,7 @@ impl SettingsCategory {
     pub fn nav_label(self) -> &'static str {
         match self {
             Self::General => Text::NavGeneral.text(),
+            Self::Profiles => Text::NavProfiles.text(),
             Self::Appearance => Text::NavAppearance.text(),
             Self::Terminal => Text::NavTerminal.text(),
             Self::RenderedBlocks => Text::NavRenderedBlocks.text(),
@@ -1601,7 +1680,7 @@ impl SettingsRow {
     /// still a choice among literals. A `String` here would allocate on every
     /// frame of a dialog that redraws on hover.
     #[must_use]
-    pub fn description(self, values: SettingsValues) -> &'static str {
+    pub fn description(self, values: &SettingsValues) -> &'static str {
         match self {
             // Mock-up 2496, word for word. It used to read "Light or dark" with
             // a note claiming the mock-up's line named a third option this build
@@ -1780,7 +1859,7 @@ impl SettingsRow {
     /// is not an action: what the greying forbids is a control that *appears to
     /// act*, and both the hit test and `activate` refuse this one.
     #[must_use]
-    pub fn available(self, values: SettingsValues) -> bool {
+    pub fn available(self, values: &SettingsValues) -> bool {
         match self {
             Self::Acrylic => values.acrylic_available,
             Self::BackgroundOpacity => values.translucency_available,
@@ -1800,7 +1879,7 @@ impl SettingsRow {
     /// What a slider row currently reads, as a whole percentage — `None` for
     /// every row that is not a slider.
     #[must_use]
-    pub fn slider_value(self, values: SettingsValues) -> Option<u8> {
+    pub fn slider_value(self, values: &SettingsValues) -> Option<u8> {
         let range = self.control().range()?;
         let value = match self {
             Self::ImageOpacity => values.background_image_opacity,
@@ -1834,7 +1913,7 @@ impl SettingsRow {
             // (mock-up 7645: "the default-profile picker is built from the same
             // list the ⌄ menu uses"). Not a copy of it — the same table — so a
             // fifth profile appears in both surfaces or in neither.
-            Self::DefaultProfile => profiles::PROFILES.len(),
+            Self::DefaultProfile => profiles::count(),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS.len(),
             Self::ImageFit => IMAGE_FIT_OPTIONS.len(),
             Self::Acrylic | Self::AlwaysOnTop => FORMULA_OPTIONS.len(),
@@ -1880,9 +1959,7 @@ impl SettingsRow {
                 .copied()
                 .map(split_direction_label),
             Self::Language => LANGUAGE_OPTIONS.get(index).copied().map(language_label),
-            Self::DefaultProfile => {
-                (index < profiles::PROFILES.len()).then(|| profiles::title(index))
-            }
+            Self::DefaultProfile => (index < profiles::count()).then(|| profiles::title(index)),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS
                 .get(index)
                 .copied()
@@ -1909,7 +1986,7 @@ impl SettingsRow {
     #[must_use]
     pub fn option_mark(self, index: usize) -> Option<ChromeMark> {
         match self {
-            Self::DefaultProfile => profiles::PROFILES.get(index).map(|profile| profile.mark),
+            Self::DefaultProfile => (index < profiles::count()).then(|| profiles::mark(index)),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .get(index)
                 .copied()
@@ -1926,7 +2003,7 @@ impl SettingsRow {
     /// click lights the row under the pointer and then does nothing; a rule
     /// spelled only at the draw leaves the item dark and still selectable.
     #[must_use]
-    pub fn option_enabled(self, index: usize, values: SettingsValues) -> bool {
+    pub fn option_enabled(self, index: usize, values: &SettingsValues) -> bool {
         match self {
             Self::DefaultProfile => values
                 .profile_available
@@ -1953,7 +2030,7 @@ impl SettingsRow {
     /// that can only show eight of thirty faces has to open showing the one that
     /// is ticked, and the runtime is what owns the offset it opens at.
     #[must_use]
-    pub fn selected_index(self, values: SettingsValues) -> Option<usize> {
+    pub fn selected_index(self, values: &SettingsValues) -> Option<usize> {
         match self {
             Self::Theme => THEME_OPTIONS.iter().position(|it| *it == values.theme),
             Self::Cursor => CURSOR_OPTIONS.iter().position(|it| *it == values.cursor),
@@ -2105,6 +2182,15 @@ pub struct SettingsContent<'a> {
     pub rows: &'a [SettingsRow],
     /// The shortcut page's own lines, folded and tagged by `shortcuts.rs`.
     pub shortcuts: &'a [crate::shortcuts::ShortcutRow],
+    /// The Profiles page's own rows, derived by `profiles.rs`.
+    ///
+    /// Borrowed here, beside the shortcut lines, for the reason they are: this
+    /// page's rows are facts about the machine — which profiles exist, which of
+    /// them this computer can start, what each one actually gives you — and
+    /// [`SettingsValues`] is a snapshot of *settings*. It also keeps
+    /// `ProfilePrograms` injectable, so a test about a machine without Git can
+    /// be written without a machine without Git.
+    pub profiles: &'a [crate::profiles::ProfileLine],
     /// **Which pages have their Advanced group open** (§7.1.6c-5).
     ///
     /// It rides here, with the rows, because it decides *which rows the dialog
@@ -2195,6 +2281,10 @@ impl SettingsContent<'_> {
     pub fn has_content(&self, category: SettingsCategory) -> bool {
         match category {
             SettingsCategory::Shortcuts => !self.shortcuts.is_empty(),
+            // Never empty in practice — the shipped five are a constant of this
+            // build — but derived from the rows all the same, because the rail's
+            // whole ruling is that a category with no content draws no word.
+            SettingsCategory::Profiles => !self.profiles.is_empty(),
             other => self.rows.iter().any(|row| row.category() == other),
         }
     }
@@ -2239,7 +2329,7 @@ impl SettingsContent<'_> {
 /// Passed in rather than fetched, so `build` is a function of its arguments and
 /// a row's drawn value cannot disagree with the value the caller is about to
 /// persist.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsValues {
     pub theme: ThemeModeV1,
     pub cursor: CursorStyle,
@@ -2301,10 +2391,13 @@ pub struct SettingsValues {
     pub psreadline_remove_available: bool,
     /// Which profiles this machine can start, in table order.
     ///
-    /// An array rather than a borrowed `ProfilePrograms`, so this type stays
-    /// `Copy` and `build`/`hit` can keep taking it by value. Four bools is the
-    /// whole of what those two need to know about the filesystem.
-    pub profile_available: [bool; profiles::PROFILES.len()],
+    /// A `Vec` rather than a borrowed `ProfilePrograms`, and a `Vec` rather than
+    /// the `[bool; 5]` it was: the profile table's length became a runtime fact
+    /// in §7.1.6c-6, so there is no array length to write. **That is what took
+    /// `Copy` off this struct** — the four readers now take it by reference,
+    /// which is what a snapshot of every row's answer should have been once it
+    /// stopped being four bools and a handful of scalars.
+    pub profile_available: Vec<bool>,
     /// Whether a picture is named — **not which one**. The name is a path and
     /// this struct is `Copy` + `Eq`; the button's caption comes through
     /// [`build`]'s own `background_image` argument, which is where a borrowed
@@ -2368,7 +2461,7 @@ impl SettingsValues {
             git_panel: true,
             split_direction: SplitDirectionV1::Auto,
             language: LanguageV1::System,
-            default_profile: profiles::FALLBACK_PROFILE,
+            default_profile: profiles::fallback_profile(),
             terminal_font: 0,
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
             light_scheme: scheme_index(bt_persist::DEFAULT_LIGHT_SCHEME, true),
@@ -2378,7 +2471,7 @@ impl SettingsValues {
             psreadline_remove_available: false,
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
-            profile_available: [true; profiles::PROFILES.len()],
+            profile_available: vec![true; profiles::count()],
             background_image: false,
             background_fit: image_fit_index(BackgroundFitV1::default()),
             background_image_opacity: bt_persist::DEFAULT_BACKGROUND_IMAGE_OPACITY,
@@ -2723,7 +2816,14 @@ impl SettingsPanel {
             | SettingsTarget::Advanced(_)
             | SettingsTarget::ResetAdvanced(_)
             | SettingsTarget::CustomiseScheme
+            | SettingsTarget::ProfileUp(_)
+            | SettingsTarget::ProfileDown(_)
+            | SettingsTarget::ProfileDuplicate(_)
             | SettingsTarget::DeleteScheme => self.focus = Some(target),
+            // A press on a row's own band moves nothing and focuses nothing:
+            // there is no verb on it yet, and a ring on a thing `Enter` cannot
+            // open is a ring that lies.
+            SettingsTarget::ProfileRow(_) => {}
             // An item's own row is what the keyboard lands on: the menu is about
             // to close, and a focus naming an item of a shut picker names
             // nothing.
@@ -2884,7 +2984,7 @@ impl SettingsPanel {
         &mut self,
         key: SettingsKey,
         content: SettingsContent<'_>,
-        values: SettingsValues,
+        values: &SettingsValues,
     ) -> SettingsKeyVerdict {
         if !self.open {
             return SettingsKeyVerdict::Inert;
@@ -2963,7 +3063,7 @@ impl SettingsPanel {
     /// the slider's, it simply had nowhere further to go, and letting it fall
     /// through would tip the focus out of a control the user is still driving
     /// the moment they reached its end.
-    fn slider_key(&self, values: SettingsValues, key: SliderKey) -> Option<SettingsKeyVerdict> {
+    fn slider_key(&self, values: &SettingsValues, key: SliderKey) -> Option<SettingsKeyVerdict> {
         if self.menu.is_some() {
             return None;
         }
@@ -3025,7 +3125,7 @@ impl SettingsPanel {
     fn activate(
         &mut self,
         content: SettingsContent<'_>,
-        values: SettingsValues,
+        values: &SettingsValues,
     ) -> SettingsKeyVerdict {
         match self.focus {
             Some(SettingsTarget::Close) => {
@@ -3123,7 +3223,12 @@ impl SettingsPanel {
     /// into the first control of whatever it was pointing at — and that is what
     /// makes `←`/`→` and Tab the ways across rather than one of five behaviours
     /// of the same key.
-    fn step(&mut self, content: SettingsContent<'_>, values: SettingsValues, delta: isize) -> bool {
+    fn step(
+        &mut self,
+        content: SettingsContent<'_>,
+        values: &SettingsValues,
+        delta: isize,
+    ) -> bool {
         match (self.menu, self.focus) {
             (Some(menu), Some(SettingsTarget::Choice(row, index))) if menu == row => {
                 self.step_option(row, values, index, delta)
@@ -3154,7 +3259,7 @@ impl SettingsPanel {
 
     /// Home/End: the first or last option of an open picker, else the two ends
     /// of whichever region the ring is in.
-    fn jump(&mut self, content: SettingsContent<'_>, values: SettingsValues, last: bool) -> bool {
+    fn jump(&mut self, content: SettingsContent<'_>, values: &SettingsValues, last: bool) -> bool {
         if let (Some(menu), Some(SettingsTarget::Choice(row, _))) = (self.menu, self.focus)
             && menu == row
         {
@@ -3187,7 +3292,7 @@ impl SettingsPanel {
     fn step_option(
         &mut self,
         row: SettingsRow,
-        values: SettingsValues,
+        values: &SettingsValues,
         index: usize,
         delta: isize,
     ) -> bool {
@@ -3200,7 +3305,7 @@ impl SettingsPanel {
     fn step_option_from(
         &mut self,
         row: SettingsRow,
-        values: SettingsValues,
+        values: &SettingsValues,
         start: isize,
         delta: isize,
     ) -> bool {
@@ -3418,6 +3523,26 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
         }
         return order;
     }
+    if category == SettingsCategory::Profiles {
+        // **A dark button is still a stop**, unlike the shortcut page's absent
+        // `↺`, and the two rules do not disagree: a `↺` that is not drawn is not
+        // there at all, while the first row's `↑` *is* drawn — greyed, with its
+        // reason on it — because a row missing a button shifts every button
+        // beside it out of column. Something a reader can see and be told about
+        // is something the ring must be able to reach.
+        return content
+            .profiles
+            .iter()
+            .enumerate()
+            .flat_map(|(index, _)| {
+                [
+                    SettingsTarget::ProfileUp(index),
+                    SettingsTarget::ProfileDown(index),
+                    SettingsTarget::ProfileDuplicate(index),
+                ]
+            })
+            .collect();
+    }
     // The same walk the boxes are placed from, so the ring visits the page in
     // the order the page is drawn and never lands on something that is not
     // there: a collapsed group's rows are already out of `page_items`, and its
@@ -3493,6 +3618,27 @@ pub enum SettingsTarget {
     RestoreRow(usize),
     /// The shortcut page's own `Restore all defaults`.
     RestoreAll,
+    /// The `↑` on one row of the Profiles page, by that row's index in
+    /// [`SettingsContent::profiles`].
+    ///
+    /// [`Self::Record`]'s ruling for its reason: this is a fact about the list
+    /// drawn *this frame*, resolved before the frame ends. The stable id is what
+    /// crosses into a file, and it is looked up through the row this names.
+    ProfileUp(usize),
+    /// The `↓` on one row of the Profiles page.
+    ProfileDown(usize),
+    /// `Duplicate` on one row of the Profiles page.
+    ProfileDuplicate(usize),
+    /// One row of the Profiles page, away from its verbs.
+    ///
+    /// **A hover target and not yet a focus stop.** The action run is revealed
+    /// by the pointer resting anywhere on the row — the tab strip's folder
+    /// button and the pane head's run are shown the same way — and a reveal that
+    /// only triggered on the buttons themselves would be a set of buttons you
+    /// have to already be on to see. Pressing here does nothing in this slice;
+    /// the row becomes a stop that `Enter` opens the editor from when there is
+    /// an editor to open.
+    ProfileRow(usize),
     /// One page's **Advanced** disclosure — the heading row with the triangle
     /// (§7.1.6c-5).
     ///
@@ -3531,7 +3677,7 @@ pub enum SettingsTarget {
 /// send to the Recycle Bin; the stored default (`""`) is a bundled scheme by
 /// definition. Both come back `false`, and the foot says why.
 #[must_use]
-pub fn delete_scheme_enabled(values: SettingsValues) -> bool {
+pub fn delete_scheme_enabled(values: &SettingsValues) -> bool {
     values.scheme_in_force_is_user_file
 }
 
@@ -3605,6 +3751,43 @@ pub struct ShortcutLineLayout {
     pub restore: Option<[f32; 4]>,
 }
 
+/// One row of the Profiles page, given boxes.
+///
+/// It is a `.row` wearing `.row`'s boxes with **three** text lines instead of
+/// two — the name, what it runs, and what it actually gives you — plus a mark
+/// column on the left and the action run on the right. The third line is this
+/// page's own and is a deliberate departure: every other row in this dialog
+/// describes a setting, and every row on this page describes *a thing that will
+/// run*, which is exactly the pretence J85 forbids a row to make by saying only
+/// its own name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileLineLayout {
+    /// Which row of [`SettingsContent::profiles`] this is.
+    pub index: usize,
+    pub band: [f32; 4],
+    /// The mark's own square, on its `.ticon` column.
+    pub mark: [f32; 4],
+    pub title: [f32; 4],
+    /// The `default` / `hidden` badge, when the row wears one.
+    pub badge: Option<[f32; 4]>,
+    pub desc: [f32; 4],
+    /// The capability sentence's two lines, absent on a row this machine cannot
+    /// start.
+    ///
+    /// **Two, always, whether the sentence needs both or not.** These sentences
+    /// were written to about fifty-eight characters a line and measured at two
+    /// (plan §4); a row that gave them one would cut the *condition* off the end
+    /// of the two PowerShell rows — `— with folio.ps1 dot-sourced` — which is
+    /// the half that makes the sentence honest. And the pair is reserved on
+    /// every row alike, because the dialog is one height and a page whose rows
+    /// grew with the wording would be a dialog whose size depended on the
+    /// language it was reading.
+    pub caps: Option<[[f32; 4]; 2]>,
+    pub up: [f32; 4],
+    pub down: [f32; 4],
+    pub duplicate: [f32; 4],
+}
+
 /// Every rectangle the overlay draws and hit-tests, in physical pixels of the
 /// whole surface.
 #[derive(Clone, Debug, PartialEq)]
@@ -3648,6 +3831,8 @@ pub struct SettingsLayout {
     rows: Vec<RowLayout>,
     /// The shortcut page's own lines. Empty on every other page.
     shortcuts: Vec<ShortcutLineLayout>,
+    /// The Profiles page's own rows. Empty on every other page.
+    profiles: Vec<ProfileLineLayout>,
     /// The shortcut page's `Restore all defaults`.
     restore_all: Option<[f32; 4]>,
     /// This page's Advanced disclosure, when it has advanced rows to disclose.
@@ -3857,6 +4042,14 @@ impl SettingsLayout {
                 .find(|line| line.index == index)
                 .map(|line| line.band),
             SettingsTarget::RestoreAll => self.restore_all,
+            SettingsTarget::ProfileUp(index)
+            | SettingsTarget::ProfileDown(index)
+            | SettingsTarget::ProfileDuplicate(index)
+            | SettingsTarget::ProfileRow(index) => self
+                .profiles
+                .iter()
+                .find(|line| line.index == index)
+                .map(|line| line.band),
             SettingsTarget::Advanced(_) => self.advanced.map(|group| group.band),
             SettingsTarget::ResetAdvanced(_) => self.reset_advanced,
             SettingsTarget::CustomiseScheme => self.customise_scheme,
@@ -3918,10 +4111,37 @@ pub fn theme_requested(target: SettingsTarget) -> Option<ThemeModeV1> {
 /// (`bt_persist::SettingsV1::default_profile`). The one place the index becomes a
 /// name is here, at the boundary between the pointer and the file.
 #[must_use]
-pub fn default_profile_requested(target: SettingsTarget) -> Option<&'static str> {
+/// What a press on the Profiles page asked for.
+///
+/// A verb and an index rather than three bare targets crossing into `main.rs`:
+/// the dialog's job ends at "this row, this verb", and what a move or a copy
+/// *is* belongs to `profiles.rs`, which owns the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileAction {
+    MoveUp(usize),
+    MoveDown(usize),
+    Duplicate(usize),
+}
+
+/// The verb a target names, or `None` for a target that is not on this page.
+///
+/// [`default_profile_requested`]'s shape, and one door for the pointer and the
+/// keyboard alike — which is `apply_settings_choice`'s founding rule: a verb
+/// reachable two ways whose body lives on one of them is a verb that half works.
+#[must_use]
+pub fn profile_action_requested(target: SettingsTarget) -> Option<ProfileAction> {
+    match target {
+        SettingsTarget::ProfileUp(index) => Some(ProfileAction::MoveUp(index)),
+        SettingsTarget::ProfileDown(index) => Some(ProfileAction::MoveDown(index)),
+        SettingsTarget::ProfileDuplicate(index) => Some(ProfileAction::Duplicate(index)),
+        _ => None,
+    }
+}
+
+pub fn default_profile_requested(target: SettingsTarget) -> Option<String> {
     match target {
         SettingsTarget::Choice(SettingsRow::DefaultProfile, index) => {
-            profiles::PROFILES.get(index).map(|profile| profile.id)
+            (index < profiles::count()).then(|| profiles::id(index))
         }
         _ => None,
     }
@@ -4349,6 +4569,11 @@ pub fn layout_for_menu(
         } else {
             &[]
         };
+    let profile_lines: &[crate::profiles::ProfileLine] = if category == SettingsCategory::Profiles {
+        content_of.profiles
+    } else {
+        &[]
+    };
     let width = px(DIALOG_MAX_WIDTH_LOGICAL_PX)
         .min(surface_width * DIALOG_WIDTH_RATIO)
         .round();
@@ -4718,6 +4943,123 @@ pub fn layout_for_menu(
             cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
         ]);
     }
+    let mut placed_profiles: Vec<ProfileLineLayout> = Vec::with_capacity(profile_lines.len());
+    if !profile_lines.is_empty() {
+        cursor += px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
+        let label = [
+            text_left,
+            cursor,
+            text_right,
+            cursor + px(GROUP_LABEL_LINE_LOGICAL_PX),
+        ];
+        cursor = label[3] + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
+        placed_groups.push(GroupLayout {
+            group: SettingsCategory::Profiles,
+            label,
+        });
+        for (index, line) in profile_lines.iter().enumerate() {
+            let band = [
+                row_left,
+                cursor,
+                row_right,
+                cursor + metrics.profile_row_height,
+            ];
+            let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
+            cursor += metrics.profile_row_height;
+            let middle = (band[1] + band[3]) / 2.0;
+            // **Right to left, which is how the run is really built**: the verbs
+            // sit against the trailing edge and the arrows sit against the verb.
+            // Laid out the other way a row would move its arrows whenever its
+            // neighbour's word changed length.
+            let act = px(PROFILE_ACT_SIDE_LOGICAL_PX);
+            let word = measure(
+                crate::i18n::Text::ProfilesDuplicate.text(),
+                px(PROFILE_ACT_FONT_LOGICAL_PX),
+            );
+            let duplicate_width = (word + 2.0 * px(PROFILE_ACT_PADDING_X_LOGICAL_PX)).max(act);
+            let duplicate = [
+                row_right - duplicate_width,
+                middle - act / 2.0,
+                row_right,
+                middle + act / 2.0,
+            ];
+            let separator_right =
+                duplicate[0] - px(PROFILE_ACT_GAP_LOGICAL_PX + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX);
+            let down_right = separator_right
+                - px(1.0 + PROFILE_SEPARATOR_MARGIN_LOGICAL_PX + PROFILE_ACT_GAP_LOGICAL_PX);
+            let down = [
+                down_right - act,
+                middle - act / 2.0,
+                down_right,
+                middle + act / 2.0,
+            ];
+            let up_right = down[0] - px(PROFILE_ACT_GAP_LOGICAL_PX);
+            let up = [
+                up_right - act,
+                middle - act / 2.0,
+                up_right,
+                middle + act / 2.0,
+            ];
+
+            let column = px(PROFILE_MARK_COLUMN_LOGICAL_PX);
+            let side = px(PROFILE_MARK_LOGICAL_PX).round();
+            let mark_left = ((row_left + row_left + column - side) / 2.0).round();
+            let mark_top = ((band[1] + band[3] - side) / 2.0).round();
+            let mark = [mark_left, mark_top, mark_left + side, mark_top + side];
+            let text_column_left = row_left + column + px(PROFILE_ROW_GAP_LOGICAL_PX);
+            let text_column_right = up[0] - px(PROFILE_ROW_GAP_LOGICAL_PX);
+
+            let title_width = measure(line.title, px(ROW_TITLE_FONT_LOGICAL_PX));
+            let title = [
+                text_column_left,
+                top,
+                (text_column_left + title_width).min(text_column_right),
+                top + px(ROW_TITLE_LINE_LOGICAL_PX),
+            ];
+            let badge = badge_text(line).map(|text| {
+                let width = measure(text, px(PROFILE_BADGE_FONT_LOGICAL_PX))
+                    + px(PROFILE_BADGE_TRACKING_EM * PROFILE_BADGE_FONT_LOGICAL_PX)
+                        * text.chars().count() as f32
+                    + 2.0 * px(PROFILE_BADGE_PADDING_X_LOGICAL_PX);
+                let left = title[2] + px(PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX);
+                let height = px(PROFILE_BADGE_HEIGHT_LOGICAL_PX);
+                let badge_top = ((title[1] + title[3] - height) / 2.0).round();
+                [left, badge_top, left + width, badge_top + height]
+            });
+            let desc = [
+                text_column_left,
+                title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
+                text_column_right,
+                title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
+            ];
+            let caps = line.capability.map(|_| {
+                let line_of = |ordinal: f32| {
+                    let top = desc[3]
+                        + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX)
+                        + ordinal * px(ROW_DESC_LINE_LOGICAL_PX);
+                    [
+                        text_column_left,
+                        top,
+                        text_column_right,
+                        top + px(ROW_DESC_LINE_LOGICAL_PX),
+                    ]
+                };
+                [line_of(0.0), line_of(1.0)]
+            });
+            placed_profiles.push(ProfileLineLayout {
+                index,
+                band,
+                mark,
+                title,
+                badge,
+                desc,
+                caps,
+                up,
+                down,
+                duplicate,
+            });
+        }
+    }
     // A picker hangs off a row's button, so a picker named for a row this page
     // is not holding has nothing to hang from and is not open. That is not a
     // guard against the impossible: switching Tab layout to Horizontal takes the
@@ -4763,6 +5105,7 @@ pub fn layout_for_menu(
         groups: placed_groups,
         rows: placed_rows,
         shortcuts: placed_lines,
+        profiles: placed_profiles,
         restore_all,
         advanced: placed_advanced,
         reset_advanced,
@@ -4874,6 +5217,8 @@ struct StackMetrics {
     row_content_height: f32,
     /// That, inside `.row`'s own two paddings.
     row_height: f32,
+    /// A Profiles row: three text lines rather than two, on the same paddings.
+    profile_row_height: f32,
     /// A `.group-label`'s margin, line box and margin.
     heading_advance: f32,
     /// The disclosure row: one line box inside `.row`'s paddings.
@@ -4900,6 +5245,10 @@ impl StackMetrics {
             scale,
             row_content_height,
             row_height: 2.0 * px(ROW_PADDING_Y_LOGICAL_PX) + row_content_height,
+            profile_row_height: 2.0 * px(ROW_PADDING_Y_LOGICAL_PX)
+                + row_content_height
+                + 2.0 * px(ROW_DESC_LINE_LOGICAL_PX)
+                + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
             heading_advance: px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
                 + px(GROUP_LABEL_LINE_LOGICAL_PX)
                 + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX),
@@ -4940,6 +5289,14 @@ impl StackMetrics {
             stack += self.heading_advance;
             stack += content.shortcuts.len() as f32 * self.row_height;
             stack += self.foot_advance;
+        }
+        if category == SettingsCategory::Profiles && !content.profiles.is_empty() {
+            stack += self.heading_advance;
+            // **Every row is the same height, capability line or not.** A page
+            // whose rows changed height with what is installed would be a
+            // dialog whose height depended on the machine — and the dialog is
+            // one height, taken over every page, decided when it opens.
+            stack += content.profiles.len() as f32 * self.profile_row_height;
         }
         px(CONTENT_PADDING_TOP_LOGICAL_PX) + stack + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX)
     }
@@ -5200,7 +5557,7 @@ fn menu_layout(
 /// sits inside a menu, a menu and a close button sit on the dialog, and the
 /// dialog sits on the scrim.
 #[must_use]
-pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> SettingsTarget {
+pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> SettingsTarget {
     let (x, y) = (x as f32, y as f32);
     if let (Some(menu), Some(row)) = (layout.menu, layout.menu_kind) {
         for (index, item) in layout.items.iter().enumerate() {
@@ -5236,6 +5593,36 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
     for item in &layout.nav_items {
         if contains(item.band, x, y) {
             return SettingsTarget::Nav(item.category);
+        }
+    }
+    for placed in &layout.profiles {
+        if !layout.shows(placed.band) {
+            continue;
+        }
+        // **A dark button answers `Panel`**, which is the same sentence an
+        // unavailable picker item answers with `Menu`: nothing happened, and the
+        // press belongs to the surface the control is standing on. The rule is
+        // asked here and by the draw from one predicate, so a button that looks
+        // pressable and does nothing cannot exist.
+        if contains(placed.up, x, y) {
+            return if placed.index == 0 {
+                SettingsTarget::Panel
+            } else {
+                SettingsTarget::ProfileUp(placed.index)
+            };
+        }
+        if contains(placed.down, x, y) {
+            return if placed.index + 1 >= layout.profiles.len() {
+                SettingsTarget::Panel
+            } else {
+                SettingsTarget::ProfileDown(placed.index)
+            };
+        }
+        if contains(placed.duplicate, x, y) {
+            return SettingsTarget::ProfileDuplicate(placed.index);
+        }
+        if contains(placed.band, x, y) {
+            return SettingsTarget::ProfileRow(placed.index);
         }
     }
     for placed in &layout.rows {
@@ -5333,8 +5720,11 @@ pub fn build(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
     focus: Option<SettingsTarget>,
-    values: SettingsValues,
+    values: &SettingsValues,
     shortcuts: &[crate::shortcuts::ShortcutRow],
+    // The Profiles page's rows, beside the shortcut page's and for its reason:
+    // they are facts about the machine, not settings, and they carry `String`s.
+    profiles: &[crate::profiles::ProfileLine],
     // The chosen picture's file name, or empty when there is none — the one
     // caption in this dialog that is a runtime string rather than a table
     // lookup. It arrives here beside `shortcuts` and not inside
@@ -5649,6 +6039,16 @@ pub fn build(
         palette,
         measure,
     );
+    push_profile_page(
+        &mut content_stack,
+        layout,
+        profiles,
+        hover,
+        focus,
+        scale,
+        palette,
+        measure,
+    );
     clip_content(clip, content_stack, &mut quads, &mut labels, &mut sprites);
 
     // The open picker, on a layer of its own above everything the dialog drew.
@@ -5840,7 +6240,7 @@ fn push_advanced_group(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
     focus: Option<SettingsTarget>,
-    values: SettingsValues,
+    values: &SettingsValues,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
@@ -5980,6 +6380,295 @@ fn push_advanced_group(
             stack.quads.extend(focus_ring(reset, scale, palette.accent));
         }
     }
+}
+
+/// The Profiles page's own rows, into the scrolling stack.
+///
+/// It draws nothing on any other page for [`push_shortcut_page`]'s reason:
+/// `layout.profiles` is empty unless the page is this one, which is the same
+/// shape "a category with no rows draws no heading" already has.
+#[allow(clippy::too_many_arguments)]
+fn push_profile_page(
+    stack: &mut OverlayLayer,
+    layout: &SettingsLayout,
+    profiles: &[crate::profiles::ProfileLine],
+    hover: Option<SettingsTarget>,
+    focus: Option<SettingsTarget>,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) {
+    let px = |value: f32| value * scale;
+    let last = layout.profiles.len().saturating_sub(1);
+    for placed in &layout.profiles {
+        let Some(line) = profiles.get(placed.index) else {
+            continue;
+        };
+        // **THE RUN IS REVEALED**, exactly as the tab strip's folder button and
+        // the pane head's run are: absent at rest, whole under the pointer. The
+        // focus is in the condition and is not decoration — a run of verbs
+        // reachable only by pointer does not exist for the keyboard, which is
+        // this dialog's founding ruling.
+        //
+        // Not drawn rather than drawn transparent: the mock-up's rest state is
+        // `opacity: 0`, and this window's text runs carry an ink and no alpha,
+        // so the honest reading of a zero-opacity control here is one that is
+        // not there.
+        let engaged = [
+            SettingsTarget::ProfileRow(placed.index),
+            SettingsTarget::ProfileUp(placed.index),
+            SettingsTarget::ProfileDown(placed.index),
+            SettingsTarget::ProfileDuplicate(placed.index),
+        ]
+        .into_iter()
+        .any(|target| hover == Some(target) || focus == Some(target));
+        // **Two different greys for two different sentences.** A hidden row is
+        // one you switched off — everything on it is muted, and its mark is
+        // faded *and* desaturated, which is the register this file already
+        // struck for a mark naming something that is not running. An unavailable
+        // row is one this machine cannot honour: it is greyed whole for the same
+        // reason a picker item is, and it has already dropped its capability
+        // line, because a shell that is not here has no capabilities to report.
+        let quiet = line.hidden || !line.available;
+        let title_ink = if quiet {
+            palette.menu_item_hint_text
+        } else {
+            palette.dialog_title_text
+        };
+        let mut sprite = ChromeSprite::new(line.mark, placed.mark, palette.accent);
+        if quiet {
+            sprite.opacity = PROFILE_HIDDEN_MARK_OPACITY;
+            sprite.grayscale = true;
+        }
+        stack.sprites.push(sprite);
+        stack.labels.push(ChromeLabel {
+            text: line.title.to_owned(),
+            rect: placed.title,
+            font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
+            color: title_ink,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+        if let (Some(box_), Some(text)) = (placed.badge, badge_text(line)) {
+            // The badge reports and cannot be pressed (plan §2.6): the default
+            // is changed on the General page and nowhere else, because one field
+            // with two writers is what §7.1.6c-4a just avoided. So it wears the
+            // group label's type and the ink an unavailable thing wears —
+            // everything about it says "this is a fact", not "press me".
+            stack.quads.extend(rounded_overlay_fill(
+                box_,
+                px(PROFILE_BADGE_RADIUS_LOGICAL_PX),
+                palette.dialog_hover,
+                1.0,
+            ));
+            stack.labels.push(ChromeLabel {
+                text: text.to_owned(),
+                rect: box_,
+                font_size_px: px(PROFILE_BADGE_FONT_LOGICAL_PX),
+                color: palette.menu_item_hint_text,
+                align_right: false,
+                align_center: true,
+                letter_spacing_em: PROFILE_BADGE_TRACKING_EM,
+                weight: ChromeLabelWeight::Medium,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
+        let desc_font = px(ROW_DESC_FONT_LOGICAL_PX);
+        stack.labels.push(ChromeLabel {
+            text: ellipsized(
+                &line.command,
+                placed.desc[2] - placed.desc[0],
+                desc_font,
+                measure,
+            ),
+            rect: placed.desc,
+            font_size_px: desc_font,
+            color: palette.dialog_muted_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+        if let (Some(boxes), Some(text)) = (placed.caps, line.capability) {
+            let width = boxes[0][2] - boxes[0][0];
+            for (box_, part) in boxes
+                .iter()
+                .zip(wrapped_pair(text, width, desc_font, measure))
+            {
+                if part.is_empty() {
+                    continue;
+                }
+                stack.labels.push(ChromeLabel {
+                    text: part,
+                    rect: *box_,
+                    font_size_px: desc_font,
+                    color: palette.menu_item_hint_text,
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                });
+            }
+        }
+        if !engaged {
+            continue;
+        }
+        // The first row's `↑` and the last row's `↓` are **dark, not absent**: a
+        // row missing a button shifts every button beside it out of column, and
+        // a run of verbs that moves from row to row is a run nobody can aim at.
+        for (box_, glyph, target, enabled) in [
+            (
+                placed.up,
+                PROFILE_UP_GLYPH,
+                SettingsTarget::ProfileUp(placed.index),
+                placed.index > 0,
+            ),
+            (
+                placed.down,
+                PROFILE_DOWN_GLYPH,
+                SettingsTarget::ProfileDown(placed.index),
+                placed.index < last,
+            ),
+        ] {
+            push_glyph_verb(
+                stack,
+                box_,
+                glyph,
+                enabled && hover == Some(target),
+                enabled,
+                scale,
+                palette,
+            );
+            if focus == Some(target) {
+                stack.quads.extend(focus_ring(box_, scale, palette.accent));
+            }
+        }
+        // The hairline between "move this row" and "change this profile". Two
+        // verbs acting on different things must not read as one run.
+        let separator_middle = (placed.down[2] + placed.duplicate[0]) / 2.0;
+        let thickness = scale.round().max(1.0);
+        let height = px(PROFILE_SEPARATOR_HEIGHT_LOGICAL_PX);
+        let middle_y = (placed.band[1] + placed.band[3]) / 2.0;
+        stack.quads.push(OverlayQuad {
+            rect: [
+                (separator_middle - thickness / 2.0).round(),
+                (middle_y - height / 2.0).round(),
+                (separator_middle + thickness / 2.0).round(),
+                (middle_y + height / 2.0).round(),
+            ],
+            color: palette.menu_border,
+            alpha: f32::from(palette.menu_border_alpha) / 255.0,
+        });
+        push_glyph_verb(
+            stack,
+            placed.duplicate,
+            Text::ProfilesDuplicate.text(),
+            hover == Some(SettingsTarget::ProfileDuplicate(placed.index)),
+            true,
+            scale,
+            palette,
+        );
+        if focus == Some(SettingsTarget::ProfileDuplicate(placed.index)) {
+            stack
+                .quads
+                .extend(focus_ring(placed.duplicate, scale, palette.accent));
+        }
+    }
+}
+
+/// One sentence over two lines of `width`, broken between words.
+///
+/// **Greedy, and the second line is still ellipsised.** A capability sentence
+/// that overflowed even two lines would be a sentence to shorten rather than a
+/// rule to change, and the ellipsis is what says so out loud rather than
+/// dropping the tail silently. The break is between words because a break inside
+/// one reads as a rendering fault — the same judgment `ellipsized` was given.
+fn wrapped_pair(
+    text: &str,
+    width: f32,
+    font_size_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> [String; 2] {
+    if measure(text, font_size_px) <= width {
+        return [text.to_owned(), String::new()];
+    }
+    let mut head = String::new();
+    let mut rest = text;
+    while let Some(cut) = rest.find(' ') {
+        let (word, tail) = rest.split_at(cut);
+        let candidate = if head.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{head} {word}")
+        };
+        if measure(&candidate, font_size_px) > width {
+            break;
+        }
+        head = candidate;
+        rest = tail.trim_start_matches(' ');
+    }
+    if head.is_empty() {
+        // One word wider than the column: there is nothing to break, so the
+        // first line takes what it can and the second is empty.
+        return [
+            ellipsized(text, width, font_size_px, measure),
+            String::new(),
+        ];
+    }
+    [head, ellipsized(rest, width, font_size_px, measure)]
+}
+
+/// One trim verb on a Profiles row — a glyph or a short word, with the hover
+/// fill the restore verb wears and nothing else.
+///
+/// Not [`push_button`]: these are `.pf-act`s, which have no border and no face
+/// at rest (`background: none`), because a run of three bordered buttons on
+/// every row would out-weigh the row.
+fn push_glyph_verb(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    text: &str,
+    hovered: bool,
+    enabled: bool,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+) {
+    let px = |value: f32| value * scale;
+    if hovered {
+        stack.quads.extend(rounded_overlay_fill(
+            rect,
+            px(BUTTON_RADIUS_LOGICAL_PX),
+            palette.dialog_hover,
+            1.0,
+        ));
+    }
+    stack.labels.push(ChromeLabel {
+        text: text.to_owned(),
+        rect,
+        font_size_px: px(PROFILE_ACT_FONT_LOGICAL_PX),
+        color: if !enabled {
+            palette.menu_item_hint_text
+        } else if hovered {
+            palette.dialog_title_text
+        } else {
+            palette.dialog_secondary_text
+        },
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
 }
 
 /// The shortcut page's own lines, into the scrolling stack.
@@ -6712,6 +7401,7 @@ mod tests {
         SettingsContent {
             rows,
             shortcuts,
+            profiles: &[],
             advanced,
         }
     }
@@ -7193,7 +7883,7 @@ mod tests {
             scroll_to_row(&placed, SettingsRow::SplitDirection),
         );
         let split = combo_of(&at_row, SettingsRow::SplitDirection);
-        let labels = labels_of(&at_row, None, values());
+        let labels = labels_of(&at_row, None, &values());
         let drawn = labels
             .iter()
             .find(|label| label.rect == combo_value_box(split))
@@ -7264,7 +7954,7 @@ mod tests {
                 None,
                 scroll_to_row(&at_rest, entry.row),
             );
-            let labels = labels_of(&placed, None, values());
+            let labels = labels_of(&placed, None, &values());
             let row = &row_of(&placed, entry.row);
             assert_eq!(
                 row.desc[2],
@@ -7284,7 +7974,7 @@ mod tests {
                 measure(&drawn.text, ROW_DESC_FONT_LOGICAL_PX),
                 width(row.desc)
             );
-            if drawn.text != row.row.description(values()) {
+            if drawn.text != row.row.description(&values()) {
                 assert!(
                     drawn.text.ends_with(ELLIPSIS),
                     "{:?}: a shortened sentence says so",
@@ -7377,7 +8067,7 @@ mod tests {
         );
         let (x, y) = centre(cut);
         assert_eq!(
-            hit(&straddling, values(), x, y),
+            hit(&straddling, &values(), x, y),
             SettingsTarget::Menu(long),
             "an item the body has cut takes no press"
         );
@@ -7548,7 +8238,7 @@ mod tests {
             assert!(shows(&at, index), "option {index} never comes into view");
             let (x, y) = centre(at.items[index]);
             assert_eq!(
-                hit(&at, values(), x, y),
+                hit(&at, &values(), x, y),
                 SettingsTarget::Choice(row, index),
                 "option {index} is in view and does not answer a press"
             );
@@ -7613,12 +8303,12 @@ mod tests {
             .expect("the verb is still there at the foot of the page");
         let (x, y) = centre(foot);
         assert_eq!(
-            hit(&at_foot, values(), x, y),
+            hit(&at_foot, &values(), x, y),
             SettingsTarget::CustomiseScheme,
             "and it answers a press where it is drawn"
         );
         assert!(
-            labels_of(&at_foot, None, values())
+            labels_of(&at_foot, None, &values())
                 .iter()
                 .any(|label| label.text == Text::CustomiseScheme.text()),
             "with its own word on it"
@@ -7663,14 +8353,14 @@ mod tests {
     fn delete_scheme_is_live_only_for_a_scheme_the_user_owns() {
         let bundled = values();
         assert!(
-            !delete_scheme_enabled(bundled),
+            !delete_scheme_enabled(&bundled),
             "a fresh install wears a bundled scheme and has nothing to delete"
         );
         let owned = SettingsValues {
             scheme_in_force_is_user_file: true,
             ..values()
         };
-        assert!(delete_scheme_enabled(owned));
+        assert!(delete_scheme_enabled(&owned));
 
         let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
         let at_foot = shaped_scrolled(
@@ -7683,12 +8373,12 @@ mod tests {
         let (x, y) = centre(delete);
 
         assert_eq!(
-            hit(&at_foot, bundled, x, y),
+            hit(&at_foot, &bundled, x, y),
             SettingsTarget::Panel,
             "a verb that cannot act takes no press: the pointer never lights it"
         );
         assert_eq!(
-            hit(&at_foot, owned, x, y),
+            hit(&at_foot, &owned, x, y),
             SettingsTarget::DeleteScheme,
             "and does the moment there is a file behind it"
         );
@@ -7703,12 +8393,12 @@ mod tests {
         panel.press(SettingsTarget::DeleteScheme);
         assert_eq!(panel.focus(), Some(SettingsTarget::DeleteScheme));
         assert_eq!(
-            panel.activate(content(&rows, &lines), bundled),
+            panel.activate(content(&rows, &lines), &bundled),
             SettingsKeyVerdict::Inert,
             "Enter on a verb with nothing to act on does nothing"
         );
         assert_eq!(
-            panel.activate(content(&rows, &lines), owned),
+            panel.activate(content(&rows, &lines), &owned),
             SettingsKeyVerdict::Chose(SettingsTarget::DeleteScheme)
         );
 
@@ -7718,7 +8408,7 @@ mod tests {
         let hint = at_foot.delete_reason.expect("the foot has its hint line");
         assert_eq!(hint[3], delete[1], "the line sits directly above the verbs");
         assert_eq!(hint[0], at_foot.rows[0].band[0], "and spans the whole row");
-        let greyed = labels_of(&at_foot, None, bundled);
+        let greyed = labels_of(&at_foot, None, &bundled);
         let said = greyed
             .iter()
             .find(|label| label.text == Text::DeleteSchemeBundled.text())
@@ -7733,7 +8423,7 @@ mod tests {
             chrome_palette().menu_item_hint_text,
             "the word goes to the hint ink, which is what greyed means here"
         );
-        let live = labels_of(&at_foot, None, owned);
+        let live = labels_of(&at_foot, None, &owned);
         assert!(
             live.iter()
                 .any(|label| label.text == Text::DeleteSchemeUserFile.text()),
@@ -7906,7 +8596,7 @@ mod tests {
         while y < SURFACE.1 {
             let mut x = 0.0_f32;
             while x < SURFACE.0 {
-                let target = hit(&shut, values(), f64::from(x), f64::from(y));
+                let target = hit(&shut, &values(), f64::from(x), f64::from(y));
                 assert!(
                     !matches!(
                         target,
@@ -7924,7 +8614,7 @@ mod tests {
             }
             y += 7.0;
         }
-        let labels = labels_of(&shut, None, values());
+        let labels = labels_of(&shut, None, &values());
         for absent in flat_rows().into_iter().filter(|row| row.advanced()) {
             assert!(
                 !labels.iter().any(|label| label.text == absent.title()),
@@ -7968,17 +8658,17 @@ mod tests {
                 .expect("the verb is still there at the foot of the page"),
         );
         assert_eq!(
-            hit(&at_foot, values(), x, y),
+            hit(&at_foot, &values(), x, y),
             SettingsTarget::ResetAdvanced(SettingsCategory::Appearance),
             "which answers for the page it closes"
         );
         let (x, y) = centre(group.band);
         assert_eq!(
-            hit(&open, values(), x, y),
+            hit(&open, &values(), x, y),
             SettingsTarget::Advanced(SettingsCategory::Appearance),
             "and the heading's whole band turns it, not the 10px triangle alone"
         );
-        let sprites = sprites_of(&open, None, values());
+        let sprites = sprites_of(&open, None, &values());
         let turned = sprites
             .iter()
             .filter_map(|sprite| match sprite.mark {
@@ -7992,7 +8682,7 @@ mod tests {
             "the files tree's own glyph, turned open — one of them, and no \
              second kind of disclosure"
         );
-        let shut_sprites = sprites_of(&shut, None, values());
+        let shut_sprites = sprites_of(&shut, None, &values());
         assert!(
             shut_sprites.iter().any(|sprite| matches!(
                 sprite.mark,
@@ -8032,14 +8722,14 @@ mod tests {
         );
         panel.press(SettingsTarget::Advanced(SettingsCategory::Appearance));
         assert_eq!(
-            panel.key(SettingsKey::Activate, shut, values()),
+            panel.key(SettingsKey::Activate, shut, &values()),
             SettingsKeyVerdict::Chose(SettingsTarget::Advanced(SettingsCategory::Appearance)),
             "Enter asks for the same thing a press on it asks for"
         );
         panel.press(SettingsTarget::ResetAdvanced(SettingsCategory::Appearance));
         let open = content_with(&rows, &lines, every_group_open());
         assert_eq!(
-            panel.key(SettingsKey::Activate, open, values()),
+            panel.key(SettingsKey::Activate, open, &values()),
             SettingsKeyVerdict::Chose(SettingsTarget::ResetAdvanced(SettingsCategory::Appearance)),
             "and so does its Reset"
         );
@@ -8289,7 +8979,7 @@ mod tests {
             "the point under test really is the gear"
         );
         assert_eq!(
-            hit(&placed, values(), gear, y),
+            hit(&placed, &values(), gear, y),
             SettingsTarget::Scrim,
             "a modal means MODAL: the gear is behind the scrim like everything else"
         );
@@ -8307,7 +8997,7 @@ mod tests {
         while y < SURFACE.1 {
             let mut x = 0.0_f32;
             while x < SURFACE.0 {
-                let target = hit(&placed, values(), f64::from(x), f64::from(y));
+                let target = hit(&placed, &values(), f64::from(x), f64::from(y));
                 let inside_dialog = contains(placed.frame, x, y);
                 let inside_menu = contains(menu, x, y);
                 match target {
@@ -8339,7 +9029,7 @@ mod tests {
     fn every_control_answers_where_it_is_drawn() {
         let placed = open(1.0, true);
         let (x, y) = centre(placed.close);
-        assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Close);
+        assert_eq!(hit(&placed, &values(), x, y), SettingsTarget::Close);
         // Every row's button, on a dialog with nothing open over them — with a
         // picker up the row it hangs over belongs to the picker, which is
         // `a_press_inside_an_open_picker_never_reaches_the_row_beneath_it`.
@@ -8354,7 +9044,7 @@ mod tests {
             let combo = row_of(&shut, placed_row.row).combo;
             let (x, y) = centre(combo);
             assert_eq!(
-                hit(&shut, values(), x, y),
+                hit(&shut, &values(), x, y),
                 placed_row.row.control_target(),
                 "{:?}'s control must answer for its own row",
                 placed_row.row
@@ -8363,7 +9053,7 @@ mod tests {
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
             assert_eq!(
-                hit(&placed, values(), x, y),
+                hit(&placed, &values(), x, y),
                 SettingsTarget::Choice(SettingsRow::Theme, index),
                 "item {index} must answer for its own option"
             );
@@ -8373,7 +9063,7 @@ mod tests {
         assert_eq!(
             hit(
                 &placed,
-                values(),
+                &values(),
                 f64::from(menu[0] + 1.0),
                 f64::from(menu[1] + 1.0)
             ),
@@ -8383,7 +9073,7 @@ mod tests {
         assert_eq!(
             hit(
                 &placed,
-                values(),
+                &values(),
                 f64::from(placed.frame[0] + 4.0),
                 f64::from(placed.frame[1] + 4.0),
             ),
@@ -8402,7 +9092,7 @@ mod tests {
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
             assert_eq!(
-                theme_requested(hit(&placed, values(), x, y)),
+                theme_requested(hit(&placed, &values(), x, y)),
                 Some(THEME_OPTIONS[index])
             );
         }
@@ -8431,7 +9121,7 @@ mod tests {
         assert_eq!(placed.items.len(), CURSOR_OPTIONS.len());
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
-            let target = hit(&placed, values(), x, y);
+            let target = hit(&placed, &values(), x, y);
             assert_eq!(target, SettingsTarget::Choice(SettingsRow::Cursor, index));
             assert_eq!(cursor_style_requested(target), Some(CURSOR_OPTIONS[index]));
         }
@@ -8469,11 +9159,11 @@ mod tests {
         );
         let (x, y) = centre(cursor);
         assert_eq!(
-            hit(&placed, values(), x, y),
+            hit(&placed, &values(), x, y),
             SettingsTarget::Combo(SettingsRow::Cursor)
         );
         assert_eq!(placed.items.len(), 3);
-        let labels = labels_of(&placed, None, values());
+        let labels = labels_of(&placed, None, &values());
         for label in ["Bar", "Block", "Underline"] {
             assert!(labels.iter().any(|candidate| candidate.text == label));
         }
@@ -8656,7 +9346,7 @@ mod tests {
             );
             let (x, y) = centre(combo);
             assert_eq!(
-                hit(&placed, values(), x, y),
+                hit(&placed, &values(), x, y),
                 entry.row.control_target(),
                 "row {index} ({:?}) is visible but does not answer a press",
                 entry.row
@@ -8681,7 +9371,7 @@ mod tests {
         );
         let (x, y) = centre(last.combo);
         assert_eq!(
-            hit(&placed, values(), x, y),
+            hit(&placed, &values(), x, y),
             SettingsTarget::Scrim,
             "a combo below the dialog's own bottom edge is scrim, not a control"
         );
@@ -8768,7 +9458,7 @@ mod tests {
             return None;
         }
         Some(
-            row.selected_index(values())
+            row.selected_index(&values())
                 .and_then(|index| row.option_label(index))
                 .expect("every picker row this dialog holds reads something"),
         )
@@ -8831,14 +9521,14 @@ mod tests {
             // (§7.1.6c-5) — the padding box would predict a crop ten pixels
             // taller at the top and eighteen at the bottom than the one drawn.
             let content = placed.clip;
-            let labels = labels_of(&placed, None, values());
-            let quads = quads_of(&placed, None, values());
+            let labels = labels_of(&placed, None, &values());
+            let quads = quads_of(&placed, None, &values());
             for row in &placed.rows {
                 // Text: the row's own boxes are the layout boxes, whatever the
                 // crop, and a box with nothing showing draws nothing at all.
                 for (box_of, text) in [
                     (row.title, row.row.title()),
-                    (row.desc, row.row.description(values())),
+                    (row.desc, row.row.description(&values())),
                 ] {
                     match clipped(box_of, content) {
                         None => assert!(
@@ -9004,7 +9694,7 @@ mod tests {
             }
         }
         for (placed, row) in &placed_rows {
-            let labels = labels_of(placed, None, values());
+            let labels = labels_of(placed, None, &values());
             // Sliders have no value box and nothing that can outgrow one.
             let Some(whole) = shown_value(row.row) else {
                 continue;
@@ -9258,7 +9948,7 @@ mod tests {
     fn built(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        values: SettingsValues,
+        values: &SettingsValues,
     ) -> Vec<OverlayLayer> {
         built_with(placed, hover, None, values, None)
     }
@@ -9268,7 +9958,7 @@ mod tests {
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
         focus: Option<SettingsTarget>,
-        values: SettingsValues,
+        values: &SettingsValues,
         recording: Option<(usize, &[String], Option<&str>)>,
     ) -> Vec<OverlayLayer> {
         let lines = shortcut_lines();
@@ -9278,6 +9968,7 @@ mod tests {
             focus,
             values,
             &lines,
+            &[],
             "",
             recording,
             &mut measure,
@@ -9289,7 +9980,7 @@ mod tests {
     fn quads_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        values: SettingsValues,
+        values: &SettingsValues,
     ) -> Vec<OverlayQuad> {
         built(placed, hover, values)
             .into_iter()
@@ -9300,7 +9991,7 @@ mod tests {
     fn labels_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        values: SettingsValues,
+        values: &SettingsValues,
     ) -> Vec<ChromeLabel> {
         built(placed, hover, values)
             .into_iter()
@@ -9311,7 +10002,7 @@ mod tests {
     fn sprites_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        values: SettingsValues,
+        values: &SettingsValues,
     ) -> Vec<ChromeSprite> {
         built(placed, hover, values)
             .into_iter()
@@ -9369,7 +10060,7 @@ mod tests {
         ] {
             let placed = open_rows(1.0, Some(kind), TabLayoutMode::Vertical);
             let menu = placed.menu.expect("the picker is open");
-            let layers = built(&placed, None, values());
+            let layers = built(&placed, None, &values());
             let popup = popup_layer(&layers);
             assert_eq!(
                 popup,
@@ -9450,7 +10141,7 @@ mod tests {
         while y < covered[3] {
             let mut x = covered[0] + 0.5;
             while x < covered[2] {
-                let target = hit(&placed, values(), f64::from(x), f64::from(y));
+                let target = hit(&placed, &values(), f64::from(x), f64::from(y));
                 assert!(
                     matches!(
                         target,
@@ -9474,7 +10165,7 @@ mod tests {
     fn the_scrim_is_the_mock_ups_own_alpha_over_the_whole_window() {
         let placed = open(1.0, false);
         let palette = chrome_palette();
-        let scrim = quads_of(&placed, None, values())[0];
+        let scrim = quads_of(&placed, None, &values())[0];
         assert_eq!(scrim.rect, [0.0, 0.0, SURFACE.0, SURFACE.1]);
         assert_eq!(scrim.color, [0x0f, 0x0f, 0x0f]);
         assert_eq!(scrim.color, palette.modal_scrim);
@@ -9496,7 +10187,7 @@ mod tests {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let placed = open(scale, false);
             let palette = chrome_palette();
-            let quads = quads_of(&placed, None, values());
+            let quads = quads_of(&placed, None, &values());
             let border_alpha = f32::from(palette.menu_border_alpha) / 255.0;
             let hairline = quads
                 .iter()
@@ -9546,7 +10237,7 @@ mod tests {
             let labels = labels_of(
                 &placed,
                 None,
-                SettingsValues {
+                &SettingsValues {
                     theme: selected,
                     ..values()
                 },
@@ -9586,7 +10277,7 @@ mod tests {
         // a different sentence from the one this pins.
         let nav = placed.nav;
         let count = |hover, color| {
-            quads_of(&placed, hover, values())
+            quads_of(&placed, hover, &values())
                 .iter()
                 .filter(|quad| quad.color == color)
                 .filter(|quad| quad.rect[0] >= nav[2] || quad.rect[2] <= nav[0])
@@ -9630,7 +10321,7 @@ mod tests {
     #[test]
     fn the_group_heading_is_uppercase_and_tracked() {
         let placed = open(1.0, false);
-        let labels = labels_of(&placed, None, values());
+        let labels = labels_of(&placed, None, &values());
         let heading = labels
             .iter()
             .find(|label| label.text == "APPEARANCE")
@@ -9647,7 +10338,7 @@ mod tests {
         // heading out letter by letter. A ratio does not carry the DPI scale.
         for scale in [1.0_f32, 2.0] {
             let placed = open(scale, false);
-            let labels = labels_of(&placed, None, values());
+            let labels = labels_of(&placed, None, &values());
             let heading = labels
                 .iter()
                 .find(|label| label.text == "APPEARANCE")
@@ -9674,7 +10365,7 @@ mod tests {
                 continue;
             }
             let placed = open_page(1.0, None, TabLayoutMode::Vertical, category, 0.0);
-            let labels = labels_of(&placed, None, values());
+            let labels = labels_of(&placed, None, &values());
             let headings: Vec<&ChromeLabel> = labels
                 .iter()
                 .filter(|label| label.text == category.label())
@@ -9755,7 +10446,7 @@ mod tests {
                 SettingsCategory::Appearance,
                 0.0,
             );
-            let labels = labels_of(&placed, None, values());
+            let labels = labels_of(&placed, None, &values());
             let heading = labels
                 .iter()
                 .find(|label| label.text == SettingsCategory::Appearance.label())
@@ -9815,7 +10506,7 @@ mod tests {
                         f64::from((combo[1] + combo[3]) / 2.0),
                     );
                     assert_eq!(
-                        hit(&placed, values(), centre.0, centre.1),
+                        hit(&placed, &values(), centre.0, centre.1),
                         row.control_target(),
                         "{tab_layout:?} at {scale}: {row:?}'s control must answer \
                          where it is drawn"
@@ -10031,6 +10722,7 @@ mod tests {
                     .collect();
                 let thinner = SettingsContent {
                     rows: &kept,
+                    profiles: &[],
                     shortcuts: if absent == SettingsCategory::Shortcuts {
                         &[]
                     } else {
@@ -10097,6 +10789,7 @@ mod tests {
         let thinner = SettingsContent {
             rows: &without,
             shortcuts: &lines,
+            profiles: &[],
             advanced: AdvancedOpen::default(),
         };
         for category in SettingsCategory::ALL {
@@ -10121,7 +10814,7 @@ mod tests {
             "mock-up 2467"
         );
         assert_eq!(
-            SettingsRow::DefaultProfile.description(values()),
+            SettingsRow::DefaultProfile.description(&values()),
             "What opens on a new tab, and when Folio starts",
             "mock-up 2468, word for word but for the product's name"
         );
@@ -10129,24 +10822,23 @@ mod tests {
             SettingsRow::DefaultProfile
                 .option_labels()
                 .collect::<Vec<_>>(),
-            profiles::PROFILES
-                .iter()
-                .map(|profile| profile.title)
+            (0..profiles::count())
+                .map(profiles::title)
                 .collect::<Vec<_>>(),
         );
-        for (index, profile) in profiles::PROFILES.iter().enumerate() {
+        for index in 0..profiles::count() {
             assert_eq!(
                 SettingsRow::DefaultProfile.option_mark(index),
-                Some(profile.mark),
+                Some(profiles::mark(index)),
                 "{} wears its own mark, not a generic shell glyph",
-                profile.id
+                profiles::id(index)
             );
             assert_eq!(
                 default_profile_requested(SettingsTarget::Choice(
                     SettingsRow::DefaultProfile,
                     index
                 )),
-                Some(profile.id),
+                Some(profiles::id(index)),
                 "the press asks for a profile by id — an index would not survive \
                  the table being reordered"
             );
@@ -10206,13 +10898,13 @@ mod tests {
     /// come from `chosen` fails here for every other profile in the table.
     #[test]
     fn the_default_profile_combo_shows_the_profile_that_would_actually_start() {
-        for chosen in 0..profiles::PROFILES.len() {
+        for chosen in 0..profiles::count() {
             let values = SettingsValues {
                 default_profile: chosen,
                 ..values()
             };
             assert_eq!(
-                SettingsRow::DefaultProfile.selected_index(values),
+                SettingsRow::DefaultProfile.selected_index(&values),
                 Some(chosen)
             );
             let placed = open_showing(SettingsRow::DefaultProfile);
@@ -10220,7 +10912,7 @@ mod tests {
                 .row(SettingsRow::DefaultProfile)
                 .expect("the Startup row is in the dialog")
                 .combo;
-            let caption = labels_of(&placed, None, values)
+            let caption = labels_of(&placed, None, &values)
                 .into_iter()
                 .find(|label| label.rect[1] >= combo[1] && label.rect[3] <= combo[3])
                 .expect("the closed combo shows its current value");
@@ -10228,7 +10920,7 @@ mod tests {
             assert_eq!(
                 caption.text,
                 ellipsized(
-                    profiles::PROFILES[chosen].title,
+                    profiles::title(chosen),
                     width(box_of),
                     COMBO_FONT_LOGICAL_PX,
                     &mut measure
@@ -10249,7 +10941,7 @@ mod tests {
     #[test]
     fn a_shell_this_machine_lacks_is_greyed_in_the_startup_picker_and_cannot_be_chosen() {
         let missing = profiles::index_of_id("gitbash");
-        let mut available = [true; profiles::PROFILES.len()];
+        let mut available = vec![true; profiles::count()];
         available[missing] = false;
         let lacking = SettingsValues {
             profile_available: available,
@@ -10267,27 +10959,27 @@ mod tests {
         );
 
         assert_eq!(
-            hit(&placed, lacking, centre.0, centre.1),
+            hit(&placed, &lacking, centre.0, centre.1),
             SettingsTarget::Menu(SettingsRow::DefaultProfile),
             "the press lands on the menu's body — nothing was chosen, and the \
              menu stays up"
         );
         assert_eq!(
-            hit(&placed, values(), centre.0, centre.1),
+            hit(&placed, &values(), centre.0, centre.1),
             SettingsTarget::Choice(SettingsRow::DefaultProfile, missing),
             "and on a machine that has Git Bash the very same point chooses it"
         );
 
         let palette = bt_render::chrome_palette();
-        let mark = sprites_of(&placed, None, lacking)
+        let mark = sprites_of(&placed, None, &lacking)
             .into_iter()
-            .find(|sprite| sprite.mark == profiles::PROFILES[missing].mark)
+            .find(|sprite| sprite.mark == profiles::mark(missing))
             .expect("the greyed item still draws its mark");
         assert_eq!(mark.opacity, UNAVAILABLE_MARK_OPACITY);
         assert!(mark.grayscale, "and it loses its colours saying so");
-        let label = labels_of(&placed, None, lacking)
+        let label = labels_of(&placed, None, &lacking)
             .into_iter()
-            .find(|label| label.text == profiles::PROFILES[missing].title)
+            .find(|label| label.text == profiles::title(missing))
             .expect("the greyed item is still named");
         assert_eq!(
             label.color, palette.menu_item_hint_text,
@@ -10300,9 +10992,9 @@ mod tests {
         // by the draw as well as by the hit test.
         let hovered = SettingsTarget::Choice(SettingsRow::DefaultProfile, missing);
         assert_eq!(
-            labels_of(&placed, Some(hovered), lacking)
+            labels_of(&placed, Some(hovered), &lacking)
                 .into_iter()
-                .find(|label| label.text == profiles::PROFILES[missing].title)
+                .find(|label| label.text == profiles::title(missing))
                 .map(|label| label.color),
             Some(palette.menu_item_hint_text),
         );
@@ -10355,7 +11047,7 @@ mod tests {
     #[test]
     fn the_close_affordance_wears_the_mock_ups_own_close_symbol() {
         let placed = open(1.0, true);
-        let sprites = sprites_of(&placed, None, values());
+        let sprites = sprites_of(&placed, None, &values());
         let closes: Vec<_> = sprites
             .iter()
             .filter(|sprite| sprite.mark == ChromeMark::WindowClose)
@@ -10424,7 +11116,7 @@ mod tests {
             item[2] - item[0],
             width(menu) - 2.0 * 1.0 - 2.0 * MENU_PADDING_LOGICAL_PX
         );
-        let labels = labels_of(&placed, None, values());
+        let labels = labels_of(&placed, None, &values());
         // The closed button draws this word too, so the popup's own copy is the
         // one inside the popup — picking the first match finds the button's.
         let drawn = labels
@@ -10504,7 +11196,7 @@ mod tests {
             TabLayoutMode::Horizontal,
             0.0,
         );
-        let labels = labels_of(&placed, None, values());
+        let labels = labels_of(&placed, None, &values());
         for text in [
             "Display formulas",
             "Typeset $$…$$ blocks; off shows the LaTeX source",
@@ -10569,11 +11261,11 @@ mod tests {
                 ..values()
             };
             assert_eq!(
-                SettingsRow::Formulas.selected_index(values),
+                SettingsRow::Formulas.selected_index(&values),
                 Some(expected),
                 "display_formulas={display_formulas} must tick item {expected}"
             );
-            let labels = labels_of(&placed, None, values);
+            let labels = labels_of(&placed, None, &values);
             let ticks = labels.iter().filter(|label| label.text == TICK).count();
             assert_eq!(ticks, 1, "exactly one item wears the tick");
         }
@@ -10872,7 +11564,7 @@ mod tests {
         for row in [SettingsRow::ImageOpacity, SettingsRow::BackgroundOpacity] {
             let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
-            assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Slider(row));
+            assert_eq!(hit(&placed, &values(), x, y), SettingsTarget::Slider(row));
             assert!(row.control().range().is_some());
             assert_eq!(row.option_count(), 0, "a slider has no items to open");
         }
@@ -10884,7 +11576,7 @@ mod tests {
         ] {
             let placed = open_scrolled(1.0, false, scroll_to_row(&at_rest, row));
             let (x, y) = centre(combo_of(&placed, row));
-            assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Combo(row));
+            assert_eq!(hit(&placed, &values(), x, y), SettingsTarget::Combo(row));
             assert!(row.control().range().is_none());
         }
     }
@@ -11023,17 +11715,17 @@ mod tests {
         for row in [SettingsRow::Acrylic, SettingsRow::BackgroundOpacity] {
             let placed = showing(row);
             assert!(
-                row.available(values()),
+                row.available(&values()),
                 "{row:?} is live on a capable machine"
             );
-            assert!(!row.available(lacking));
+            assert!(!row.available(&lacking));
             assert_ne!(
-                row.description(lacking),
-                row.description(values()),
+                row.description(&lacking),
+                row.description(&values()),
                 "{row:?}'s muted line becomes the reason it cannot act"
             );
             assert!(
-                !row.description(lacking).trim().is_empty(),
+                !row.description(&lacking).trim().is_empty(),
                 "{row:?} greyed without a reason is a dead control"
             );
 
@@ -11041,19 +11733,19 @@ mod tests {
             // the picker must not open and the track must not move.
             let (x, y) = centre(combo_of(&placed, row));
             assert_eq!(
-                hit(&placed, lacking, x, y),
+                hit(&placed, &lacking, x, y),
                 SettingsTarget::Panel,
                 "{row:?} must not answer a press while it cannot act"
             );
-            assert_eq!(hit(&placed, values(), x, y), row.control_target());
+            assert_eq!(hit(&placed, &values(), x, y), row.control_target());
         }
 
         // Every one of the row's three parts steps back to the hint ink, and
         // nothing on a live row does.
         for row in [SettingsRow::Acrylic, SettingsRow::BackgroundOpacity] {
             let placed = showing(row);
-            let greyed = labels_of(&placed, None, lacking);
-            let live = labels_of(&placed, None, values());
+            let greyed = labels_of(&placed, None, &lacking);
+            let live = labels_of(&placed, None, &values());
             let title = row_of(&placed, row).title;
             let drawn = greyed
                 .iter()
@@ -11079,7 +11771,7 @@ mod tests {
         panel.select_category(PAGE);
         panel.press(SettingsTarget::Combo(SettingsRow::Acrylic));
         assert_eq!(
-            panel.key(SettingsKey::Activate, content(&rows, &lines), lacking),
+            panel.key(SettingsKey::Activate, content(&rows, &lines), &lacking),
             SettingsKeyVerdict::Inert,
             "Enter on a row that cannot act does nothing and says nothing"
         );
@@ -11095,7 +11787,7 @@ mod tests {
         let placed = open(1.0, false);
         let box_of = combo_value_box(combo_of(&placed, SettingsRow::BackgroundImage));
 
-        let empty = labels_of(&placed, None, values());
+        let empty = labels_of(&placed, None, &values());
         let drawn = empty
             .iter()
             .find(|label| label.rect == box_of)
@@ -11110,8 +11802,9 @@ mod tests {
             &placed,
             None,
             None,
-            chosen,
+            &chosen,
             &lines,
+            &[],
             "ridge.jpg",
             None,
             &mut measure,
@@ -11127,9 +11820,9 @@ mod tests {
 
         // Neither item is ticked once a picture is named: the answer is the file,
         // and `None` is a verb that would clear it.
-        assert_eq!(SettingsRow::BackgroundImage.selected_index(chosen), None);
+        assert_eq!(SettingsRow::BackgroundImage.selected_index(&chosen), None);
         assert_eq!(
-            SettingsRow::BackgroundImage.selected_index(values()),
+            SettingsRow::BackgroundImage.selected_index(&values()),
             Some(0)
         );
         assert_eq!(
@@ -11172,9 +11865,9 @@ mod tests {
         let mut on = values();
         on.acrylic = true;
         on.always_on_top = true;
-        assert_eq!(SettingsRow::Acrylic.selected_index(on), Some(0));
-        assert_eq!(SettingsRow::AlwaysOnTop.selected_index(on), Some(0));
-        assert_eq!(SettingsRow::Acrylic.selected_index(values()), Some(1));
+        assert_eq!(SettingsRow::Acrylic.selected_index(&on), Some(0));
+        assert_eq!(SettingsRow::AlwaysOnTop.selected_index(&on), Some(0));
+        assert_eq!(SettingsRow::Acrylic.selected_index(&values()), Some(1));
     }
 
     /// PIN — `sample()` is the settings a fresh install reads, so a geometry
@@ -11203,14 +11896,14 @@ mod tests {
         assert!(!sample.always_on_top);
         assert!(sample.acrylic_available && sample.translucency_available);
         assert_eq!(
-            SettingsRow::ImageOpacity.slider_value(sample),
+            SettingsRow::ImageOpacity.slider_value(&sample),
             Some(bt_persist::DEFAULT_BACKGROUND_IMAGE_OPACITY)
         );
         assert_eq!(
-            SettingsRow::BackgroundOpacity.slider_value(sample),
+            SettingsRow::BackgroundOpacity.slider_value(&sample),
             Some(bt_persist::DEFAULT_BACKGROUND_OPACITY)
         );
-        assert_eq!(SettingsRow::Theme.slider_value(sample), None);
+        assert_eq!(SettingsRow::Theme.slider_value(&sample), None);
 
         // A stored value under the floor is lifted where it is read, because
         // `bt_persist` deliberately stores what it was given and a thumb outside
@@ -11218,7 +11911,7 @@ mod tests {
         let mut hand_edited = sample;
         hand_edited.background_opacity = 7;
         assert_eq!(
-            SettingsRow::BackgroundOpacity.slider_value(hand_edited),
+            SettingsRow::BackgroundOpacity.slider_value(&hand_edited),
             Some(bt_persist::MINIMUM_BACKGROUND_OPACITY)
         );
     }
@@ -11369,7 +12062,7 @@ mod tests {
         while y < SURFACE.1 {
             let mut x = 0.0_f32;
             while x < SURFACE.0 {
-                let target = hit(&flat, values(), f64::from(x), f64::from(y));
+                let target = hit(&flat, &values(), f64::from(x), f64::from(y));
                 assert!(
                     !matches!(
                         target,
@@ -11384,10 +12077,10 @@ mod tests {
             y += 3.0;
         }
 
-        let labels = labels_of(&flat, None, values());
+        let labels = labels_of(&flat, None, &values());
         for absent in [
             SettingsRow::Sidebar.title(),
-            SettingsRow::Sidebar.description(values()),
+            SettingsRow::Sidebar.description(&values()),
         ] {
             assert!(
                 !labels.iter().any(|label| label.text == absent),
@@ -11456,7 +12149,7 @@ mod tests {
         assert_eq!(placed.items.len(), TAB_LAYOUT_OPTIONS.len());
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
-            let target = hit(&placed, values(), x, y);
+            let target = hit(&placed, &values(), x, y);
             assert_eq!(
                 target,
                 SettingsTarget::Choice(SettingsRow::TabLayout, index)
@@ -11486,7 +12179,7 @@ mod tests {
         assert_eq!(placed.items.len(), SIDEBAR_OPTIONS.len());
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
-            let target = hit(&placed, values(), x, y);
+            let target = hit(&placed, &values(), x, y);
             assert_eq!(target, SettingsTarget::Choice(SettingsRow::Sidebar, index));
             assert_eq!(sidebar_mode_requested(target), Some(SIDEBAR_OPTIONS[index]));
             assert_eq!(tab_layout_requested(target), None);
@@ -11514,8 +12207,8 @@ mod tests {
         // picker open under it.
         let at_rest = open_rows(1.0, None, TabLayoutMode::Vertical);
         let at_sidebar = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
-        let mut labels = labels_of(&at_rest, None, values());
-        labels.extend(labels_of(&at_sidebar, None, values()));
+        let mut labels = labels_of(&at_rest, None, &values());
+        labels.extend(labels_of(&at_sidebar, None, &values()));
         for text in [
             "Tab layout",
             "Choose where tabs appear in the window",
@@ -11587,7 +12280,7 @@ mod tests {
     fn keyed(panel: &mut SettingsPanel, key: SettingsKey) -> SettingsKeyVerdict {
         let rows = flat_rows();
         let lines = shortcut_lines();
-        panel.key(key, content(&rows, &lines), values())
+        panel.key(key, content(&rows, &lines), &values())
     }
 
     /// Where the focus is after this run of keys, from a dialog already inside
@@ -11939,7 +12632,7 @@ mod tests {
         );
         assert_eq!(panel.menu(), Some(SettingsRow::Theme));
         let selected = SettingsRow::Theme
-            .selected_index(values())
+            .selected_index(&values())
             .expect("the theme row always has a value");
         assert_eq!(
             panel.focus(),
@@ -12038,37 +12731,38 @@ mod tests {
         let lines = shortcut_lines();
         let mut lacking = values();
         // Only the fallback shell is installed.
-        lacking.profile_available =
-            std::array::from_fn(|index| index == profiles::FALLBACK_PROFILE);
-        lacking.default_profile = profiles::FALLBACK_PROFILE;
+        lacking.profile_available = (0..profiles::count())
+            .map(|index| index == profiles::fallback_profile())
+            .collect();
+        lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        panel.key(SettingsKey::End, content(&flat, &lines), lacking);
+        panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
         assert_eq!(
             panel.focus(),
             Some(SettingsTarget::Combo(SettingsRow::DefaultProfile))
         );
-        panel.key(SettingsKey::Activate, content(&flat, &lines), lacking);
+        panel.key(SettingsKey::Activate, content(&flat, &lines), &lacking);
         assert_eq!(panel.menu(), Some(SettingsRow::DefaultProfile));
 
         // Every arrow press from here lands on the one profile that can start.
-        for _ in 0..profiles::PROFILES.len() + 1 {
-            panel.key(SettingsKey::Down, content(&flat, &lines), lacking);
+        for _ in 0..profiles::count() + 1 {
+            panel.key(SettingsKey::Down, content(&flat, &lines), &lacking);
             assert_eq!(
                 panel.focus(),
                 Some(SettingsTarget::Choice(
                     SettingsRow::DefaultProfile,
-                    profiles::FALLBACK_PROFILE
+                    profiles::fallback_profile()
                 )),
                 "the arrows have nowhere else this machine can go"
             );
         }
-        panel.key(SettingsKey::Home, content(&flat, &lines), lacking);
+        panel.key(SettingsKey::Home, content(&flat, &lines), &lacking);
         assert_eq!(
             panel.focus(),
             Some(SettingsTarget::Choice(
                 SettingsRow::DefaultProfile,
-                profiles::FALLBACK_PROFILE
+                profiles::fallback_profile()
             )),
             "Home lands on the first *choosable* item, not on a greyed one"
         );
@@ -12126,7 +12820,7 @@ mod tests {
                     && quad.rect[3] <= control[3] + 0.5
             })
         };
-        let unfocused: Vec<OverlayQuad> = quads_of(&placed, None, values())
+        let unfocused: Vec<OverlayQuad> = quads_of(&placed, None, &values())
             .into_iter()
             .filter(|quad| quad.color == accent)
             .filter(|quad| quad.rect[0] >= nav[2])
@@ -12137,7 +12831,7 @@ mod tests {
             "a dialog nobody is driving by keyboard draws no ring"
         );
 
-        let ring: Vec<OverlayQuad> = built_with(&placed, None, focus, values(), None)
+        let ring: Vec<OverlayQuad> = built_with(&placed, None, focus, &values(), None)
             .into_iter()
             .flat_map(|layer| layer.quads)
             .filter(|quad| quad.color == accent)
@@ -12336,7 +13030,7 @@ mod tests {
         let (desc, items) = mockup_combo("theme");
         assert_eq!(items, ["Light", "Dark", "System"], "the fixture parsed");
         assert_eq!(
-            SettingsRow::Theme.description(values()),
+            SettingsRow::Theme.description(&values()),
             desc,
             "the row's description is the mock-up's sentence"
         );
@@ -12432,7 +13126,7 @@ mod tests {
                 ..values()
             };
             assert_eq!(
-                SettingsRow::Language.selected_index(values),
+                SettingsRow::Language.selected_index(&values),
                 Some(index),
                 "{mode:?} ticks its own item"
             );
@@ -12465,7 +13159,7 @@ mod tests {
     #[test]
     fn the_language_row_names_its_two_languages_and_promises_no_restart() {
         assert_eq!(
-            SettingsRow::Language.description(values()),
+            SettingsRow::Language.description(&values()),
             crate::i18n::Text::DescLanguage.text()
         );
         assert_eq!(
@@ -12509,11 +13203,11 @@ mod tests {
             ..values()
         };
         for row in visible_rows(TabLayoutMode::Vertical) {
-            let line: &'static str = row.description(light);
+            let line: &'static str = row.description(&light);
             assert!(!line.is_empty(), "{row:?} says something");
             assert_eq!(
                 line,
-                row.description(dark),
+                row.description(&dark),
                 "{row:?} has no line that follows a value yet, and does not pretend to"
             );
         }
@@ -12617,7 +13311,7 @@ mod tests {
             for item in &placed.nav_items {
                 let (x, y) = centre(item.band);
                 assert_eq!(
-                    hit(&placed, values(), x, y),
+                    hit(&placed, &values(), x, y),
                     SettingsTarget::Nav(item.category),
                     "scale {scale}: {:?} must answer where it is drawn",
                     item.category
@@ -12644,7 +13338,7 @@ mod tests {
         let placed = open(1.0, false);
         let palette = chrome_palette();
         let grounds_of = |hover| {
-            quads_of(&placed, hover, values())
+            quads_of(&placed, hover, &values())
                 .into_iter()
                 .filter(|quad| quad.color == palette.dialog_hover)
                 .filter(|quad| quad.rect[2] <= placed.nav[2])
@@ -12678,7 +13372,7 @@ mod tests {
         );
         // No accent stroke anywhere in the rail — the ruling's whole point.
         assert!(
-            !quads_of(&placed, None, values())
+            !quads_of(&placed, None, &values())
                 .into_iter()
                 .filter(|quad| quad.rect[2] <= placed.nav[2])
                 .any(|quad| quad.color == palette.accent),
@@ -12831,14 +13525,14 @@ mod tests {
             if let Some(record) = drawn.record {
                 let (x, y) = centre(record);
                 assert_eq!(
-                    hit(&placed, values(), x, y),
+                    hit(&placed, &values(), x, y),
                     SettingsTarget::Record(drawn.index)
                 );
             }
             if let Some(restore) = drawn.restore {
                 let (x, y) = centre(restore);
                 assert_eq!(
-                    hit(&placed, values(), x, y),
+                    hit(&placed, &values(), x, y),
                     SettingsTarget::RestoreRow(drawn.index)
                 );
             }
@@ -12856,7 +13550,7 @@ mod tests {
         // The page's own verb closes the table, so it is reached at the foot.
         let at_foot = page(at_rest.max_scroll());
         let (x, y) = centre(at_foot.restore_all.expect("the page's own verb"));
-        assert_eq!(hit(&at_foot, values(), x, y), SettingsTarget::RestoreAll);
+        assert_eq!(hit(&at_foot, &values(), x, y), SettingsTarget::RestoreAll);
 
         // Exactly one line has a `↺`, which is the one row that departs.
         assert_eq!(
@@ -12898,10 +13592,20 @@ mod tests {
             .expect("this window hosts the dialog")
         };
         let words = |placed: &SettingsLayout| -> Vec<ChromeLabel> {
-            build(placed, None, None, values(), &lines, "", None, &mut measure)
-                .iter()
-                .flat_map(|layer| layer.labels.clone())
-                .collect()
+            build(
+                placed,
+                None,
+                None,
+                &values(),
+                &lines,
+                &[],
+                "",
+                None,
+                &mut measure,
+            )
+            .iter()
+            .flat_map(|layer| layer.labels.clone())
+            .collect()
         };
         let at_rest = page(UNSCROLLED);
 
@@ -13031,7 +13735,7 @@ mod tests {
         let mut panel = keyboarded_on(SettingsCategory::Shortcuts);
         panel.begin_recording(2);
         assert_eq!(
-            panel.key(SettingsKey::Escape, content(&rows, &lines), values()),
+            panel.key(SettingsKey::Escape, content(&rows, &lines), &values()),
             SettingsKeyVerdict::Moved
         );
         assert_eq!(panel.recording_row(), None, "the capture went first");
@@ -13113,8 +13817,9 @@ mod tests {
             &placed,
             None,
             focus,
-            values(),
+            &values(),
             &lines,
+            &[],
             "",
             Some((0, &waiting, None)),
             &mut measure,
@@ -13152,8 +13857,9 @@ mod tests {
             &placed,
             None,
             focus,
-            values(),
+            &values(),
             &lines,
+            &[],
             "",
             Some((0, &waiting, Some(crate::shortcuts::HINT_ALTGR_ZONE))),
             &mut measure,
@@ -13173,8 +13879,9 @@ mod tests {
             &placed,
             None,
             None,
-            values(),
+            &values(),
             &lines,
+            &[],
             "",
             Some((0, &waiting, None)),
             &mut measure,
@@ -13269,13 +13976,13 @@ mod tests {
             words,
             [
                 SettingsCategory::General.nav_label(),
-                // Designed ahead of the build (house rule: a new surface is
-                // styled and reviewed before it is coded): the Profiles page
-                // was mocked up and ratified on 2026-08-18, and slice 5a is
-                // what makes it a `SettingsCategory`. When it lands, replace
-                // this literal with its `nav_label()` — the pin then goes back
-                // to reading every word from the enum.
-                "Profiles",
+                // **The placeholder is gone** (§7.1.6c-6). This was the literal
+                // `"Profiles"` with a note saying to replace it with a
+                // `nav_label()` the day the page became a category; slice 5a is
+                // that day, so the pin is back to reading every word from the
+                // enum and the mock-up's rail and this build's rail can no
+                // longer drift apart on any of the six.
+                SettingsCategory::Profiles.nav_label(),
                 SettingsCategory::Appearance.nav_label(),
                 SettingsCategory::Terminal.nav_label(),
                 SettingsCategory::RenderedBlocks.nav_label(),
@@ -13327,5 +14034,437 @@ mod tests {
         assert!(!panel.is_open());
         assert!(panel.menu().is_none());
         assert_eq!(panel.hover(), None);
+    }
+
+    // ── the Profiles page (§7.1.6c-6) ──────────────────────────────────────
+
+    /// Four rows standing for the four states this page has to be able to draw:
+    /// the default, an ordinary row, one this machine cannot start, and one the
+    /// user has hidden.
+    ///
+    /// Written out here rather than taken from `profiles::page_lines`, for the
+    /// reason `SettingsValues::sample` is written out: these cases are about the
+    /// *page*, and a fixture read off the machine running the suite would make
+    /// them quietly also about which shells are installed on it.
+    fn profile_lines() -> Vec<crate::profiles::ProfileLine> {
+        vec![
+            crate::profiles::ProfileLine {
+                index: 0,
+                mark: ChromeMark::ProfilePowerShell,
+                title: "PowerShell 7",
+                command: "pwsh.exe -NoLogo".to_owned(),
+                capability: Some(Text::CapPowerShell.text()),
+                is_default: true,
+                hidden: false,
+                available: true,
+            },
+            crate::profiles::ProfileLine {
+                index: 1,
+                mark: ChromeMark::ProfileUbuntu,
+                title: "WSL",
+                command: "wsl.exe --cd ~".to_owned(),
+                capability: Some(Text::CapWslBash.text()),
+                is_default: false,
+                hidden: false,
+                available: true,
+            },
+            crate::profiles::ProfileLine {
+                index: 2,
+                mark: ChromeMark::ProfileGit,
+                title: "Git Bash",
+                command: "Git Bash is not installed".to_owned(),
+                capability: None,
+                is_default: false,
+                hidden: false,
+                available: false,
+            },
+            crate::profiles::ProfileLine {
+                index: 3,
+                mark: ChromeMark::ProfileCmd,
+                title: "Command Prompt",
+                command: "cmd.exe".to_owned(),
+                capability: Some(Text::CapCmd.text()),
+                is_default: false,
+                hidden: true,
+                available: true,
+            },
+        ]
+    }
+
+    fn profiles_content<'a>(
+        rows: &'a [SettingsRow],
+        shortcuts: &'a [crate::shortcuts::ShortcutRow],
+        profiles: &'a [crate::profiles::ProfileLine],
+    ) -> SettingsContent<'a> {
+        SettingsContent {
+            rows,
+            shortcuts,
+            profiles,
+            advanced: every_group_open(),
+        }
+    }
+
+    /// The Profiles page, laid out at 1x with the four fixture rows on it.
+    fn profiles_page(profiles: &[crate::profiles::ProfileLine]) -> SettingsLayout {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            profiles_content(&rows, &shortcuts, profiles),
+            SettingsCategory::Profiles,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            // The real fixture face, not `flat`: this page is the one whose
+            // boxes depend on how long a name is — the badge sits against the
+            // end of the title, and a face that measured every string as zero
+            // would collapse the very box the badge hangs off.
+            &mut measure,
+        )
+        .expect("the settings dialog fits")
+    }
+
+    fn profiles_drawn(
+        placed: &SettingsLayout,
+        profiles: &[crate::profiles::ProfileLine],
+        hover: Option<SettingsTarget>,
+        focus: Option<SettingsTarget>,
+    ) -> Vec<OverlayLayer> {
+        let lines = shortcut_lines();
+        build(
+            placed,
+            hover,
+            focus,
+            &values(),
+            &lines,
+            profiles,
+            "",
+            None,
+            &mut measure,
+        )
+    }
+
+    /// PIN — **the rail gains `Profiles` the day the page has rows, and not
+    /// before**, and it stands second.
+    ///
+    /// The rail is derived from content and always has been; this is the first
+    /// category whose content is not a list of `SettingsRow`s, so the derivation
+    /// had to learn a second question rather than gain an exception. Second and
+    /// directly under General because General's `Default profile` row points at
+    /// the very table this word opens.
+    ///
+    /// Red gate: name the category in the rail unconditionally and a build that
+    /// somehow had no profiles would draw a door onto an empty room.
+    #[test]
+    fn the_rail_gains_profiles_the_day_the_page_has_rows() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        assert!(
+            !content(&rows, &shortcuts)
+                .nav_items()
+                .contains(&SettingsCategory::Profiles),
+            "no rows, no word"
+        );
+        let lines = profile_lines();
+        assert_eq!(
+            profiles_content(&rows, &shortcuts, &lines).nav_items(),
+            [
+                SettingsCategory::General,
+                SettingsCategory::Profiles,
+                SettingsCategory::Appearance,
+                SettingsCategory::Terminal,
+                SettingsCategory::RenderedBlocks,
+                SettingsCategory::Shortcuts,
+            ]
+        );
+    }
+
+    /// PIN — **a row says three things: what it is called, what it runs, and
+    /// what it actually gives you** (J85).
+    ///
+    /// The third line is this page's own and it is the reason the page exists in
+    /// the shape it does: every other row in this dialog describes a setting, and
+    /// a row that describes *a thing that will run* and says only its own name is
+    /// exactly the pretence the honest-capability ruling forbids.
+    #[test]
+    fn a_profile_row_names_itself_says_what_it_runs_and_says_what_it_gives() {
+        let lines = profile_lines();
+        let placed = profiles_page(&lines);
+        assert_eq!(placed.profiles.len(), lines.len());
+        let drawn: Vec<String> = profiles_drawn(&placed, &lines, None, None)
+            .into_iter()
+            .flat_map(|layer| layer.labels)
+            .map(|label| label.text)
+            .collect();
+        // **Read across the wrap.** A capability sentence is written to two
+        // lines and broken between words, so the page says it as two labels; the
+        // page's words joined back together are what the reader sees, and that
+        // is what this pins rather than any one label's exact contents.
+        let page = drawn.join(" ");
+        let says = |expected: &str| page.contains(expected);
+        for expected in [
+            "PowerShell 7",
+            "pwsh.exe -NoLogo",
+            Text::CapPowerShell.text(),
+            "WSL",
+            "wsl.exe --cd ~",
+            Text::CapWslBash.text(),
+        ] {
+            assert!(says(expected), "{expected:?} is nowhere in {page:?}");
+        }
+        let marks: Vec<ChromeMark> = profiles_drawn(&placed, &lines, None, None)
+            .into_iter()
+            .flat_map(|layer| layer.sprites)
+            .map(|sprite| sprite.mark)
+            .collect();
+        for line in &lines {
+            assert!(
+                marks.contains(&line.mark),
+                "{} wears its own mark",
+                line.title
+            );
+        }
+    }
+
+    /// PIN — **the row this machine cannot start is greyed whole, its sentence
+    /// becomes the reason, and it has no capability line at all.**
+    ///
+    /// `.row.unavailable`'s existing rule met by a row that happened to have two
+    /// sentences. A shell that is not here has no capabilities to report.
+    #[test]
+    fn an_unavailable_row_is_greyed_whole_and_says_only_why() {
+        let lines = profile_lines();
+        let placed = profiles_page(&lines);
+        let missing = &placed.profiles[2];
+        assert_eq!(missing.caps, None, "no third line to draw");
+        let labels = profiles_drawn(&placed, &lines, None, None)
+            .into_iter()
+            .flat_map(|layer| layer.labels)
+            .collect::<Vec<_>>();
+        let title = labels
+            .iter()
+            .find(|label| label.text == "Git Bash")
+            .expect("the row is still named");
+        assert_eq!(
+            title.color,
+            chrome_palette().menu_item_hint_text,
+            "the quietest ink this surface has, which is what it already uses \
+             for text that reports rather than offers"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == "Git Bash is not installed"),
+            "and the reason took the sentence's place"
+        );
+        let faded = profiles_drawn(&placed, &lines, None, None)
+            .into_iter()
+            .flat_map(|layer| layer.sprites)
+            .find(|sprite| sprite.mark == ChromeMark::ProfileGit)
+            .expect("the mark is still drawn");
+        assert!(faded.grayscale && faded.opacity < 1.0);
+    }
+
+    /// PIN — **the badges report and cannot be pressed.**
+    ///
+    /// The default is changed on the General page and nowhere else: one field
+    /// with two writers is what the scheme slice avoided by ruling that a
+    /// picker's answer has one door. So `default` is a label wearing the label's
+    /// type, and there is no target under it.
+    #[test]
+    fn the_badges_report_and_are_not_controls() {
+        let lines = profile_lines();
+        let placed = profiles_page(&lines);
+        let badge = placed.profiles[0].badge.expect("the default row is badged");
+        assert!(
+            placed.profiles[1].badge.is_none(),
+            "an ordinary row has none"
+        );
+        assert!(
+            placed.profiles[3].badge.is_some(),
+            "and a hidden row says so"
+        );
+        let labels = profiles_drawn(&placed, &lines, None, None)
+            .into_iter()
+            .flat_map(|layer| layer.labels)
+            .collect::<Vec<_>>();
+        for text in [
+            Text::ProfilesBadgeDefault.text(),
+            Text::ProfilesBadgeHidden.text(),
+        ] {
+            assert!(labels.iter().any(|label| label.text == text), "{text:?}");
+        }
+        let centre = (
+            f64::from((badge[0] + badge[2]) / 2.0),
+            f64::from((badge[1] + badge[3]) / 2.0),
+        );
+        // **The row and not a control.** A press here names the row the pointer
+        // is over — which is what reveals its action run — and asks for no verb
+        // at all, because the default is changed on the General page and nowhere
+        // else.
+        let target = hit(&placed, &values(), centre.0, centre.1);
+        assert_eq!(target, SettingsTarget::ProfileRow(0));
+        assert_eq!(profile_action_requested(target), None);
+    }
+
+    /// PIN — **the action run is revealed, and is absent until it is.**
+    ///
+    /// The tab strip's folder button and the pane head's run are shown exactly
+    /// this way. `:focus-within` is in the condition and is not decoration: a run
+    /// of verbs reachable only by pointer does not exist for the keyboard.
+    #[test]
+    fn a_rows_verbs_appear_under_the_pointer_and_under_the_ring() {
+        let lines = profile_lines();
+        let placed = profiles_page(&lines);
+        let words = |hover, focus| {
+            profiles_drawn(&placed, &lines, hover, focus)
+                .into_iter()
+                .flat_map(|layer| layer.labels)
+                .filter(|label| label.text == Text::ProfilesDuplicate.text())
+                .count()
+        };
+        assert_eq!(words(None, None), 0, "at rest the row is only its words");
+        assert_eq!(
+            words(Some(SettingsTarget::ProfileRow(1)), None),
+            1,
+            "the pointer anywhere on a row shows that row's run, and no other's"
+        );
+        assert_eq!(
+            words(None, Some(SettingsTarget::ProfileUp(2))),
+            1,
+            "and so does the ring, on the row holding it"
+        );
+    }
+
+    /// PIN — **the first row's `↑` and the last row's `↓` are dark, not absent,
+    /// and a press on one lands nowhere.**
+    ///
+    /// A row missing a button shifts every button beside it out of column, and a
+    /// run of verbs that moves from row to row is a run nobody can aim at. The
+    /// refusal is answered once and read by the hit test and the draw alike, so
+    /// a button that looks pressable and does nothing cannot exist.
+    #[test]
+    fn the_ends_of_the_list_have_dark_arrows_that_are_still_drawn() {
+        let lines = profile_lines();
+        let placed = profiles_page(&lines);
+        let last = lines.len() - 1;
+        // The hit test does not answer to the reveal — the boxes are laid out
+        // whether they are drawn or not, and the pointer that is over one is by
+        // definition on the row that shows it.
+        let press = |box_: [f32; 4]| {
+            hit(
+                &placed,
+                &values(),
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+        assert_eq!(press(placed.profiles[0].up), SettingsTarget::Panel);
+        assert_eq!(press(placed.profiles[last].down), SettingsTarget::Panel);
+        assert_eq!(
+            press(placed.profiles[0].down),
+            SettingsTarget::ProfileDown(0)
+        );
+        assert_eq!(
+            press(placed.profiles[last].up),
+            SettingsTarget::ProfileUp(last)
+        );
+        assert_eq!(
+            press(placed.profiles[1].duplicate),
+            SettingsTarget::ProfileDuplicate(1)
+        );
+
+        // Drawn, both of them, and in the same column as every other row's.
+        let columns: Vec<f32> = placed.profiles.iter().map(|row| row.up[0]).collect();
+        assert!(
+            columns.windows(2).all(|pair| pair[0] == pair[1]),
+            "the run is a fixed reserve on the right: {columns:?}"
+        );
+    }
+
+    /// PIN — **every verb on this page is a Tab stop, dark ones included.**
+    ///
+    /// A run of verbs reachable only by pointer does not exist for the keyboard,
+    /// which is this dialog's founding ruling. The dark arrows differ from the
+    /// shortcut page's absent `↺`: that one is *not drawn*, and this one is —
+    /// something a reader can see and be told the reason for is something the
+    /// ring has to be able to reach.
+    #[test]
+    fn the_keyboard_reaches_every_verb_on_the_profiles_page() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        let lines = profile_lines();
+        let order = focus_order(
+            profiles_content(&rows, &shortcuts, &lines),
+            SettingsCategory::Profiles,
+        );
+        assert_eq!(order[0], SettingsTarget::Close);
+        assert_eq!(order[1], SettingsTarget::Nav(SettingsCategory::Profiles));
+        assert_eq!(
+            &order[2..],
+            &(0..lines.len())
+                .flat_map(|index| [
+                    SettingsTarget::ProfileUp(index),
+                    SettingsTarget::ProfileDown(index),
+                    SettingsTarget::ProfileDuplicate(index),
+                ])
+                .collect::<Vec<_>>()[..],
+            "up, down, duplicate — the run's own visual order, row by row"
+        );
+    }
+
+    /// PIN — **each of the three targets asks for exactly one verb.**
+    ///
+    /// One door for the pointer and the keyboard alike, which is
+    /// `apply_settings_choice`'s founding rule: a verb reachable two ways whose
+    /// body lives on one of them is a verb that half works.
+    #[test]
+    fn a_press_on_the_run_asks_for_one_named_verb() {
+        use crate::settings::ProfileAction;
+        assert_eq!(
+            profile_action_requested(SettingsTarget::ProfileUp(2)),
+            Some(ProfileAction::MoveUp(2))
+        );
+        assert_eq!(
+            profile_action_requested(SettingsTarget::ProfileDown(2)),
+            Some(ProfileAction::MoveDown(2))
+        );
+        assert_eq!(
+            profile_action_requested(SettingsTarget::ProfileDuplicate(2)),
+            Some(ProfileAction::Duplicate(2))
+        );
+        assert_eq!(profile_action_requested(SettingsTarget::Close), None);
+        assert_eq!(
+            profile_action_requested(SettingsTarget::Nav(SettingsCategory::Profiles)),
+            None
+        );
+    }
+
+    /// PIN — **every row of this page is the same height, whatever is installed
+    /// on the machine.**
+    ///
+    /// The dialog is one height, taken over every page and decided when it opens.
+    /// A page whose rows grew and shrank with the capability line would be a
+    /// dialog whose height depended on which shells the reader happens to have.
+    #[test]
+    fn a_row_without_a_capability_line_is_no_shorter_than_one_with() {
+        let lines = profile_lines();
+        let placed = profiles_page(&lines);
+        let heights: Vec<f32> = placed
+            .profiles
+            .iter()
+            .map(|row| row.band[3] - row.band[1])
+            .collect();
+        assert!(
+            heights.windows(2).all(|pair| pair[0] == pair[1]),
+            "{heights:?}"
+        );
+        let bands: Vec<f32> = placed.profiles.iter().map(|row| row.band[1]).collect();
+        assert!(
+            bands.windows(2).all(|pair| pair[1] > pair[0]),
+            "and they stack downward"
+        );
     }
 }

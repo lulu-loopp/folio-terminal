@@ -32,11 +32,18 @@
 use std::{
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf, Prefix},
-    sync::OnceLock,
+    sync::{
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
 use bt_layout::Axis;
+use bt_persist::{
+    CandidateV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION, ProfileEntryV1, ProfilesV1,
+    ProgramV1, ResolutionV1, StartingDirV1,
+};
 use bt_pty::{ShellEnvironment, resolve_powershell_seven};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
@@ -243,7 +250,17 @@ const RECENT_ITEM_MAX_WIDTH_LOGICAL_PX: f32 = 260.0;
 /// than dropped. That is the honest form of "you do not have this", and it is
 /// the one a hidden row cannot say — a row that is missing looks exactly like a
 /// row that was never designed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// **Owned data since §7.1.6c-6, and that is the whole of slice 5a's
+/// foundation.** It was five `Copy` structs of `&'static` fields in a `const`
+/// array, which is exactly the right shape for a table nobody can change and
+/// exactly the wrong one for a table that has a settings page. What replaces it
+/// is [`ProfileTable`]: the shipped five ([`shipped`]) merged with
+/// `profiles.json`'s departures and whatever profiles the user has made.
+///
+/// The old constant survives as the *seed*, not as the table: it is what a
+/// machine with no file gets, what "restore this profile" compares against, and
+/// where [`Self::compared_title`] comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
     /// The name a seed keeps this profile by — `docs/DESIGN.md` §7.1.4 requires a
     /// "**稳定 profile_id**（不是标题、不是展示对象）".
@@ -266,10 +283,44 @@ pub struct Profile {
     /// and a future "pwsh with different arguments" profile would do). The paths
     /// already on disk are therefore *historical values to be migrated*, which is
     /// `migrate_session_v5_to_v6`'s whole job.
-    pub id: &'static str,
-    pub title: &'static str,
+    pub id: String,
+    /// The **shipped** title, kept for byte-comparison and never drawn.
+    ///
+    /// This is the string the integration scripts announce — `folio.ps1` sends
+    /// `$PSVersionTable.PSEdition`, which is `PowerShell` or `Windows
+    /// PowerShell` whatever the row is called in this window — and it is what a
+    /// pane head compares an OSC 0/2 announcement against before deciding the
+    /// shell is merely echoing its launcher.
+    ///
+    /// **It is not a setting, it is a protocol constant** (plan §1.4). It does
+    /// not appear on any surface and cannot be edited. A profile of the user's
+    /// own has none: no script this build ships will ever announce a name this
+    /// build did not choose, so there is no second string to compare.
+    ///
+    /// The comparison set is `{compared_title} ∪ {display_title}` — see
+    /// [`announces_this_profile`]. Both, because after a rename neither the
+    /// script's word nor the user's own may leak onto a head as a program title.
+    pub compared_title: Option<String>,
+    /// The name every surface draws.
+    ///
+    /// [`title`] is this plus whatever qualifier the machine supplied, and that
+    /// composed string is what a tab, a rail, a pane head, a picker and a
+    /// window title all show.
+    ///
+    /// Not translated: `PowerShell 7`, `WSL`, `Git Bash` and `Command Prompt`
+    /// are product names, and a Chinese window spells them the same way an
+    /// English one does (§G S103) — which is why the shipped defaults live in
+    /// this table and not in `i18n.rs`, pinned there by
+    /// `no_profile_title_has_been_pulled_into_the_language_table`.
+    pub display_title: String,
     /// A profile's icon is its mark, not a letter that happens to be in its
     /// prompt — the mock-up says so in as many words at `const mark`.
+    ///
+    /// The five shipped marks are not this product's to repaint (S98/S31: the
+    /// blue is Microsoft's and the orange is Ubuntu's), and a profile duplicated
+    /// from a built-in inherits the mark it really is — a copy of PowerShell is
+    /// a PowerShell, and the mark is telling the truth. The eight struck colours
+    /// a profile drawn from nothing wears are the editor's, one slice on.
     pub mark: ChromeMark,
     /// How this profile's program is found on the machine it is running on.
     pub program: ProgramSource,
@@ -281,7 +332,17 @@ pub struct Profile {
     /// coded", which was true only while every shell this terminal could start
     /// was a PowerShell. It is a PowerShell flag: `cmd.exe` would take it as the
     /// name of a batch file to run, and `bash` as a filename to open.
-    pub args: &'static [&'static str],
+    pub args: Vec<String>,
+    /// What this profile sets in its sessions' environment, over what the
+    /// terminal sets for itself.
+    ///
+    /// **The slot exists and is persisted; nothing reads it into a spawn yet**
+    /// — that is slice 5c, along with the layering rule (inherited environment,
+    /// then the terminal's own declarations, then this, which wins because it is
+    /// the most specific sentence anybody said). The field is here now because
+    /// the file format that carries it is here now, and a format that could not
+    /// round-trip an environment would have to change version to gain one.
+    pub env: Vec<(String, String)>,
     /// Where a leaf of this profile opens when nothing else says.
     ///
     /// The mock-up has no such field: it has one `HOME` constant (line 2632) that
@@ -304,6 +365,36 @@ pub struct Profile {
     pub qualifier: Qualifier,
     /// Which shell-integration script this profile is served by, if any.
     pub integration: Integration,
+    /// Kept out of the pickers.
+    ///
+    /// A built-in cannot be deleted — a row that is missing looks exactly like a
+    /// row that was never designed, which is the sentence this module already
+    /// writes about a shell the machine does not have — so hiding is the whole
+    /// of what "I do not want to see this" can mean here. A hidden profile is
+    /// still a profile: a seat already on disk restarts through its own
+    /// `profile_id` and is untouched by this.
+    pub hidden: bool,
+    /// Whether this build shipped it, or the user made it.
+    ///
+    /// **Availability is deliberately not here.** Whether this machine can start
+    /// a profile is [`ProfilePrograms`]'s answer and stays there: it is a fact
+    /// about a filesystem probed once, not a field of the table, and a copy of
+    /// it on the row would be a second place for the same question to be
+    /// answered — with the copy going stale exactly when a program is installed
+    /// while the window is open.
+    pub origin: Origin,
+}
+
+/// Where a profile came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// One of the shipped five. Every field may be overridden but the colour,
+    /// each override is undone one profile at a time, and it can be hidden but
+    /// never deleted.
+    Builtin,
+    /// The user's own. It has no shipped answer to fall back to, so its entry in
+    /// `profiles.json` carries everything about it.
+    User,
 }
 
 /// Where a profile's shell stands when it is not told.
@@ -320,7 +411,7 @@ pub struct Profile {
 /// So the enum carries the *form* the answer takes rather than a path. That is
 /// what keeps this from being a special case bolted onto the spawn path: a
 /// profile states how it is told where to start, and the spawn reads it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartingDir {
     /// `%USERPROFILE%` — the Windows home, handed over as a working directory.
     ///
@@ -344,10 +435,10 @@ pub enum StartingDir {
     /// handed. That is the same fact stated twice: the launcher is the only
     /// thing in the chain that speaks both.
     LauncherFlag {
-        flag: &'static str,
+        flag: String,
         /// What the flag is given when nothing has been inherited — the shell's
         /// own `$HOME`, which has no Windows spelling to hand over instead.
-        home: &'static str,
+        home: String,
     },
 }
 
@@ -358,7 +449,7 @@ pub enum StartingDir {
 /// and already tested (`bt_pty::resolve_powershell_seven`: `BT_SHELL`, then a
 /// `pwsh` probe); [`Self::FirstOf`] is a list of places to look, in order, for a
 /// program that either is on this machine or is not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgramSource {
     /// `bt_pty::resolve_powershell_seven`'s answer — `BT_SHELL` first (ruling
     /// 2026-08-10, Q4: the override is **kept**, as a development back door, and
@@ -376,20 +467,26 @@ pub enum ProgramSource {
     /// visible.
     PowerShellSeven,
     /// The first of these that is a real file, in order.
-    FirstOf(&'static [ProgramCandidate]),
+    FirstOf(Vec<ProgramCandidate>),
+    /// This program, at this path, and no search at all.
+    ///
+    /// What a profile of the user's own says when somebody has typed or browsed
+    /// to an executable. A duplicate of a built-in does **not** collapse into
+    /// this: it clones the built-in's own resolution, because `pwsh` follows
+    /// `BT_SHELL` and then a probe, and a copy frozen to whatever that answered
+    /// on the day it was made would quietly stop being a copy the first time the
+    /// original moved.
+    Path(PathBuf),
 }
 
 /// One place to look for a profile's executable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgramCandidate {
     /// `%VARIABLE%\tail` — an environment variable and a path under it.
     ///
     /// Never a bare relative path: "wherever this process happens to be
     /// standing" is not a place a shell lives.
-    Under {
-        variable: &'static str,
-        tail: &'static str,
-    },
+    Under { variable: String, tail: String },
     /// Find `anchor` on `PATH`, climb out of the directory it was found in, and
     /// take `tail` from there.
     ///
@@ -405,21 +502,22 @@ pub enum ProgramCandidate {
     /// parent is the root both hang off. Climbing one directory rather than
     /// joining onto the anchor's own is what makes this work for a layout where
     /// the two are siblings rather than nested.
-    BesideOnPath {
-        anchor: &'static str,
-        tail: &'static str,
-    },
+    BesideOnPath { anchor: String, tail: String },
 }
 
 /// Which shell-integration script a profile is served by, and **how it gets
 /// there** — the two answers are not the same, and the difference is what the
 /// honest-capability matrix is made of.
 ///
-/// There is no `None`, and that is the P6 result rather than a tidy-up: every
-/// profile this build ships now has a way in. What differs is how far it
-/// reaches, and the variants say so — which is exactly the distinction a `None`
-/// would have flattened, by spelling "we found no door" and "the door is only
-/// wide enough for one marker" the same way.
+/// **[`Self::None`] arrived with §7.1.6c-6 and does not undo that reasoning.**
+/// The variant was refused while every profile in the table was one this build
+/// shipped, and each of those five has a way in; what differs is how far it
+/// reaches, and the variants say so — a distinction a blanket `None` would have
+/// flattened, by spelling "we found no door" and "the door is only wide enough
+/// for one marker" the same way. A profile of the user's own running an
+/// arbitrary executable is the case that reopens it, and it reopens it honestly
+/// rather than by widening one of the other three: handing `--init-file` to a
+/// program that is not a bash makes it a filename to open.
 ///
 /// The profile with no script is not degraded by a special case: a shell that
 /// never emits OSC 133 keeps the cursor/WRAPLINE heuristics, and one that never
@@ -490,6 +588,16 @@ pub enum Integration {
     /// bracket to leave dangling. Pinned at
     /// `bt_term::…::a_prompt_that_can_never_send_c_must_not_send_a_or_b_either`.
     CmdPrompt,
+    /// No door at all — nothing is dot-sourced, no argument is added and no
+    /// `PROMPT` is written.
+    ///
+    /// **The degradation needs no invention**: a screen that never sees OSC 133
+    /// keeps the cursor/WRAPLINE heuristics byte for byte, and a session that
+    /// never sees OSC 7 leaves the relative path undetected rather than guessing
+    /// a directory. Both are existing, implemented, documented conventions
+    /// (`docs/shell-integration.md`, "Authority and fallback"), which is why
+    /// this variant costs three arms and no new mechanism.
+    None,
 }
 
 /// The profile whose PSReadLine is the one this product can repair.
@@ -501,181 +609,1113 @@ pub enum Integration {
 /// feature's audience.
 pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 
-pub const PROFILES: [Profile; 5] = [
-    Profile {
-        id: "pwsh",
-        // **Two PowerShells, two rows** (user ruling 2026-08-11), which is
-        // Windows Terminal's own arrangement and the one a machine with both
-        // installed makes necessary: 7 and 5.1 are different products with
-        // different language versions, and a single row could only ever start
-        // one of them while claiming to be both.
-        //
-        // **Both rows carry their version** (user ruling 2026-08-11, reversing
-        // the bare name this row shipped with). The two were named "PowerShell"
-        // and "Windows PowerShell", which is what each product is *called* — and
-        // in a tab strip, a tooltip and a picker standing one line apart, it left
-        // the user unable to tell which row was 7 and which was 5.1. A name whose
-        // job is to distinguish two things has to distinguish them.
-        //
-        // `7` and not `7.5`: the version is the product line's, which is what the
-        // family has been called since it stopped being 6. `5.1` is the whole
-        // number because 5.1 is where Windows PowerShell stopped — a fixed value,
-        // not a reading. A `pwsh` 8 would be a new line and a new word here.
-        //
-        // **`scripts/shell-integration/folio.ps1` carries both of these
-        // strings and must be changed with them, character for character.** The
-        // script titles its session with the edition it is running, and
-        // `pane_head_title` drops a program title that merely repeats its own
-        // profile's — a shell agreeing with its launcher has announced nothing.
-        // That test is string equality, so a rename on one side alone puts the
-        // family name back in front of every pane head in the tab. Pinned by
-        // `the_integration_script_names_the_profiles_own_titles`.
-        title: "PowerShell 7",
-        mark: ChromeMark::ProfilePowerShell,
-        program: ProgramSource::PowerShellSeven,
-        // The flag this terminal has always passed, now said by the profile that
-        // means it rather than by the spawn path every profile goes through.
-        args: &["-NoLogo"],
-        starting_dir: StartingDir::WindowsHome,
-        paths: PathNamespace::Windows,
-        qualifier: Qualifier::None,
-        integration: Integration::PowerShellOptIn,
-    },
-    Profile {
-        id: WINDOWS_POWERSHELL_ID,
-        // The qualifier was always this row's real name rather than one the list
-        // invented; the version is the ruling above, and 5.1 is where this product
-        // ends rather than where it happens to be.
-        title: "Windows PowerShell 5.1",
-        // The same mark. The mock-up has one PowerShell symbol and drew no
-        // second one, and there is nothing to invent: both rows start a
-        // PowerShell, the blue tile is what "a PowerShell is here" looks like,
-        // and the titles already say which. A second glyph would be this list
-        // asserting a visual distinction the family does not have.
-        mark: ChromeMark::ProfilePowerShell,
-        // Not `PowerShellSeven`, and not a bare name either: this is the one
-        // shell that is *part of Windows*, so it is named where Windows keeps
-        // it. That is what lets [`FALLBACK_PROFILE`] be this row — the probe
-        // finds it on every Windows there is, so the floor under every other
-        // profile is never itself greyed.
-        program: ProgramSource::FirstOf(&[ProgramCandidate::Under {
-            variable: "SystemRoot",
-            tail: r"System32\WindowsPowerShell\v1.0\powershell.exe",
-        }]),
-        args: &["-NoLogo"],
-        starting_dir: StartingDir::WindowsHome,
-        paths: PathNamespace::Windows,
-        qualifier: Qualifier::None,
-        // The same script, and it already handles this shell: `folio.ps1`
-        // is written for 5.1 and 7 alike, and the PSReadLine 2.0.0 anchor repair
-        // 5.1 needs is an existing no-op sentinel rather than a second code path.
-        integration: Integration::PowerShellOptIn,
-    },
-    Profile {
-        id: "wsl",
-        // The mock-up writes `WSL · Ubuntu`; this is the half of it that is a
-        // constant, and [`Qualifier::WslDistribution`] is the half that is a
-        // claim about this machine.
-        //
-        // The name after the `·` is a **discovery claim**: `wsl.exe` with no
-        // arguments starts whatever the user's *default* distribution is, which
-        // on one machine is Ubuntu and on the next is Debian or Alpine, so
-        // printing "Ubuntu" over a command that will start Debian would be
-        // chrome saying something it did not check. It is now checked —
-        // `crate::wsl` asks `wsl.exe --list --verbose` which one carries the
-        // `*` — and appended only when there is more than one installed and the
-        // bare title would therefore be an unanswered question.
-        //
-        // The constant stays the short form, which is also the mock-up's own
-        // rule at line 4013 that a session's name drops everything from the `·`
-        // on: a tab falling back to its profile's name is called `WSL`.
-        title: "WSL",
-        mark: ChromeMark::ProfileUbuntu,
-        program: ProgramSource::FirstOf(&[ProgramCandidate::Under {
-            variable: "SystemRoot",
-            tail: r"System32\wsl.exe",
-        }]),
-        args: &[],
-        // The one profile whose home is not a Windows directory.
-        starting_dir: StartingDir::LauncherFlag {
-            flag: "--cd",
-            home: "~",
+/// The five profiles this build ships, freshly built.
+///
+/// **The seed, not the table.** It is what a machine with no `profiles.json`
+/// gets, in this order; it is what a built-in's `Restore all defaults` compares
+/// against; and it is where every built-in's [`Profile::compared_title`] comes
+/// from. What the window actually reads is [`table`], which is this merged with
+/// the file.
+///
+/// A function and no longer a `const`, because the rows own their strings now
+/// (§7.1.6c-6). The cost is five allocations at each call and the call sites are
+/// startup, a restore and a test — the alternative, a second `&'static` struct
+/// standing beside the owned one, would have made every row of this table exist
+/// twice and put the next person who edits one in front of two places to edit.
+#[must_use]
+pub fn shipped() -> Vec<Profile> {
+    vec![
+        Profile {
+            id: "pwsh".to_owned(),
+            // **Two PowerShells, two rows** (user ruling 2026-08-11), which is
+            // Windows Terminal's own arrangement and the one a machine with both
+            // installed makes necessary: 7 and 5.1 are different products with
+            // different language versions, and a single row could only ever start
+            // one of them while claiming to be both.
+            //
+            // **Both rows carry their version** (user ruling 2026-08-11, reversing
+            // the bare name this row shipped with). The two were named "PowerShell"
+            // and "Windows PowerShell", which is what each product is *called* — and
+            // in a tab strip, a tooltip and a picker standing one line apart, it left
+            // the user unable to tell which row was 7 and which was 5.1. A name whose
+            // job is to distinguish two things has to distinguish them.
+            //
+            // `7` and not `7.5`: the version is the product line's, which is what the
+            // family has been called since it stopped being 6. `5.1` is the whole
+            // number because 5.1 is where Windows PowerShell stopped — a fixed value,
+            // not a reading. A `pwsh` 8 would be a new line and a new word here.
+            //
+            // **`scripts/shell-integration/folio.ps1` carries both of these
+            // strings and must be changed with them, character for character.** The
+            // script titles its session with the edition it is running, and
+            // `pane_head_title` drops a program title that merely repeats its own
+            // profile's — a shell agreeing with its launcher has announced nothing.
+            // That test is string equality, so a rename on one side alone puts the
+            // family name back in front of every pane head in the tab. Pinned by
+            // `the_integration_script_names_the_profiles_own_titles`.
+            compared_title: Some("PowerShell 7".to_owned()),
+            display_title: "PowerShell 7".to_owned(),
+            mark: ChromeMark::ProfilePowerShell,
+            program: ProgramSource::PowerShellSeven,
+            // The flag this terminal has always passed, now said by the profile that
+            // means it rather than by the spawn path every profile goes through.
+            args: vec!["-NoLogo".to_owned()],
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: Integration::PowerShellOptIn,
+            hidden: false,
+            origin: Origin::Builtin,
         },
-        paths: PathNamespace::Wsl,
-        qualifier: Qualifier::WslDistribution,
-        integration: Integration::BashInitFile,
-    },
-    Profile {
-        id: "gitbash",
-        title: "Git Bash",
-        mark: ChromeMark::ProfileGit,
-        // Git for Windows lands in more places than a list can enumerate — the
-        // same shape of problem `find_pwsh` already solves for PowerShell 7,
-        // and the same answer: probe rather than assume.
-        //
-        // `git.exe` on `PATH` is tried **first**, and it is the only candidate
-        // that generalises. The three paths under it are the system-wide, the
-        // 32-bit and the per-user installers' *defaults*, which between them
-        // still miss everyone who chose their own install directory — a case
-        // this project met on the very first machine it was tested on, where
-        // Git sits on another drive entirely. Somebody who moved the install has
-        // certainly put `git` on their path, so the tool is the landmark its own
-        // shell is found by.
-        program: ProgramSource::FirstOf(&[
-            ProgramCandidate::BesideOnPath {
-                anchor: "git.exe",
-                tail: r"bin\bash.exe",
+        Profile {
+            id: WINDOWS_POWERSHELL_ID.to_owned(),
+            // The qualifier was always this row's real name rather than one the list
+            // invented; the version is the ruling above, and 5.1 is where this product
+            // ends rather than where it happens to be.
+            compared_title: Some("Windows PowerShell 5.1".to_owned()),
+            display_title: "Windows PowerShell 5.1".to_owned(),
+            // The same mark. The mock-up has one PowerShell symbol and drew no
+            // second one, and there is nothing to invent: both rows start a
+            // PowerShell, the blue tile is what "a PowerShell is here" looks like,
+            // and the titles already say which. A second glyph would be this list
+            // asserting a visual distinction the family does not have.
+            mark: ChromeMark::ProfilePowerShell,
+            // Not `PowerShellSeven`, and not a bare name either: this is the one
+            // shell that is *part of Windows*, so it is named where Windows keeps
+            // it. That is what lets [`fallback_profile()`] be this row — the probe
+            // finds it on every Windows there is, so the floor under every other
+            // profile is never itself greyed.
+            program: ProgramSource::FirstOf(vec![ProgramCandidate::Under {
+                variable: "SystemRoot".to_owned(),
+                tail: r"System32\WindowsPowerShell\v1.0\powershell.exe".to_owned(),
+            }]),
+            args: vec!["-NoLogo".to_owned()],
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            // The same script, and it already handles this shell: `folio.ps1`
+            // is written for 5.1 and 7 alike, and the PSReadLine 2.0.0 anchor repair
+            // 5.1 needs is an existing no-op sentinel rather than a second code path.
+            integration: Integration::PowerShellOptIn,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "wsl".to_owned(),
+            // The mock-up writes `WSL · Ubuntu`; this is the half of it that is a
+            // constant, and [`Qualifier::WslDistribution`] is the half that is a
+            // claim about this machine.
+            //
+            // The name after the `·` is a **discovery claim**: `wsl.exe` with no
+            // arguments starts whatever the user's *default* distribution is, which
+            // on one machine is Ubuntu and on the next is Debian or Alpine, so
+            // printing "Ubuntu" over a command that will start Debian would be
+            // chrome saying something it did not check. It is now checked —
+            // `crate::wsl` asks `wsl.exe --list --verbose` which one carries the
+            // `*` — and appended only when there is more than one installed and the
+            // bare title would therefore be an unanswered question.
+            //
+            // The constant stays the short form, which is also the mock-up's own
+            // rule at line 4013 that a session's name drops everything from the `·`
+            // on: a tab falling back to its profile's name is called `WSL`.
+            compared_title: Some("WSL".to_owned()),
+            display_title: "WSL".to_owned(),
+            mark: ChromeMark::ProfileUbuntu,
+            program: ProgramSource::FirstOf(vec![ProgramCandidate::Under {
+                variable: "SystemRoot".to_owned(),
+                tail: r"System32\wsl.exe".to_owned(),
+            }]),
+            args: Vec::new(),
+            env: Vec::new(),
+            // The one profile whose home is not a Windows directory.
+            starting_dir: StartingDir::LauncherFlag {
+                flag: "--cd".to_owned(),
+                home: "~".to_owned(),
             },
-            ProgramCandidate::Under {
-                variable: "ProgramFiles",
-                tail: r"Git\bin\bash.exe",
+            paths: PathNamespace::Wsl,
+            qualifier: Qualifier::WslDistribution,
+            integration: Integration::BashInitFile,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "gitbash".to_owned(),
+            compared_title: Some("Git Bash".to_owned()),
+            display_title: "Git Bash".to_owned(),
+            mark: ChromeMark::ProfileGit,
+            // Git for Windows lands in more places than a list can enumerate — the
+            // same shape of problem `find_pwsh` already solves for PowerShell 7,
+            // and the same answer: probe rather than assume.
+            //
+            // `git.exe` on `PATH` is tried **first**, and it is the only candidate
+            // that generalises. The three paths under it are the system-wide, the
+            // 32-bit and the per-user installers' *defaults*, which between them
+            // still miss everyone who chose their own install directory — a case
+            // this project met on the very first machine it was tested on, where
+            // Git sits on another drive entirely. Somebody who moved the install has
+            // certainly put `git` on their path, so the tool is the landmark its own
+            // shell is found by.
+            program: ProgramSource::FirstOf(vec![
+                ProgramCandidate::BesideOnPath {
+                    anchor: "git.exe".to_owned(),
+                    tail: r"bin\bash.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "ProgramFiles".to_owned(),
+                    tail: r"Git\bin\bash.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "ProgramFiles(x86)".to_owned(),
+                    tail: r"Git\bin\bash.exe".to_owned(),
+                },
+                ProgramCandidate::Under {
+                    variable: "LocalAppData".to_owned(),
+                    tail: r"Programs\Git\bin\bash.exe".to_owned(),
+                },
+            ]),
+            // `bin\bash.exe` is the MSYS wrapper the Git Bash shortcut itself runs,
+            // and `--login -i` is that shortcut's own argument list: `--login` is
+            // what sources `/etc/profile` and puts `git` on the path, and without it
+            // this would be a bash that cannot find the tool it is named after.
+            args: vec!["--login".to_owned(), "-i".to_owned()],
+            env: Vec::new(),
+            // Git for Windows' MSYS layer maps `$HOME` onto `%USERPROFILE%` by
+            // default, so the Windows home *is* this shell's home — one directory
+            // under two spellings, unlike WSL's two directories.
+            starting_dir: StartingDir::WindowsHome,
+            // **Windows, not MSYS.** Git Bash prints `/d/Developer` and its process
+            // is standing in `D:\Developer` — one directory, two spellings, and the
+            // Win32 one is the true one: it is what `CreateProcess` was handed, what
+            // Explorer opens, and what every other pane in this window speaks. The
+            // MSYS spelling is a third namespace that only this shell understands,
+            // and the script reports the Win32 one (`pwd -W`) precisely so that it
+            // never has to become one.
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: Integration::BashInitFile,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+        Profile {
+            id: "cmd".to_owned(),
+            compared_title: Some("Command Prompt".to_owned()),
+            display_title: "Command Prompt".to_owned(),
+            mark: ChromeMark::ProfileCmd,
+            program: ProgramSource::FirstOf(vec![ProgramCandidate::Under {
+                variable: "SystemRoot".to_owned(),
+                tail: r"System32\cmd.exe".to_owned(),
+            }]),
+            // None. `cmd.exe` has no logo to suppress, and every switch it does take
+            // (`/c`, `/k`) would end the session rather than start one.
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            paths: PathNamespace::Windows,
+            qualifier: Qualifier::None,
+            integration: Integration::CmdPrompt,
+            hidden: false,
+            origin: Origin::Builtin,
+        },
+    ]
+}
+
+/// The profile table this window actually reads: [`shipped`] merged with
+/// `profiles.json`, in the file's order, plus whatever the user has made.
+///
+/// **One table, and it lives here rather than on `Runtime`.** Every consumer of
+/// a profile is already a free function in this module taking a `usize`
+/// ([`title`], [`spawn_place`], [`revived_cwd`], [`index_of_id`]…) and two of
+/// them are in other modules entirely (`restore.rs`, `shell_integration.rs`).
+/// Threading a borrowed table through all of that would have made the table an
+/// argument of forty signatures to serve one owner; [`crate::i18n::install`] set
+/// the precedent for the shape used instead — read the file, install once,
+/// before anything that measures a string exists.
+///
+/// Unlike the language, it can move afterwards: a reorder and a duplicate both
+/// rewrite it, so the answer is behind a lock and every change advances
+/// [`profile_revision`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileTable {
+    profiles: Vec<Profile>,
+}
+
+impl ProfileTable {
+    /// Every row, in the order every surface draws them.
+    #[must_use]
+    pub fn profiles(&self) -> &[Profile] {
+        &self.profiles
+    }
+
+    /// How many rows there are — a runtime fact now, and the reason the two
+    /// `[T; count()]` arrays this module used to hold became `Vec`s.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+
+    /// One row, or `None` past the end.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&Profile> {
+        self.profiles.get(index)
+    }
+
+    /// Where a stable id sits **today**, or `None` if nothing holds it.
+    #[must_use]
+    pub fn position_of_id(&self, id: &str) -> Option<usize> {
+        self.profiles.iter().position(|profile| profile.id == id)
+    }
+
+    /// The rows a picker offers, as table indices.
+    ///
+    /// Hidden rows are absent — that is the whole of what hiding means — and the
+    /// indices are the **table's**, not the picker's own row numbers. A menu row
+    /// that carried its own ordinal would name a different profile the moment
+    /// something above it was hidden, and the answer it got wrong would be
+    /// silent: the wrong shell would simply start.
+    #[must_use]
+    pub fn offered(&self) -> Vec<usize> {
+        (0..self.profiles.len())
+            .filter(|index| !self.profiles[*index].hidden)
+            .collect()
+    }
+}
+
+/// The table in force, and the number that says how many times it has moved.
+///
+/// **A type and not two loose statics**, and that is what makes the moving parts
+/// testable: `cargo test` runs this crate's cases in parallel in one process, so
+/// a case that reordered the *process's* table for a microsecond would race
+/// every other case that asks how many profiles there are. The tests below build
+/// their own [`Registry`] and move that. It is `crate::i18n`'s ruling verbatim —
+/// "these build their own `Current` rather than moving the process's, and that
+/// is a decision and not a shortcut" — met again one table over.
+struct Registry {
+    /// `Arc` rather than a guard handed to callers: a draw pass reads a title, a
+    /// mark and a command line from three places inside one frame, and a lock
+    /// guard alive across all of that is a lock guard alive across a re-entrant
+    /// call into this module. A refcount bump per read is much the cheaper half.
+    table: RwLock<Arc<ProfileTable>>,
+    /// [`crate::i18n::lang_revision`]'s twin, feeding `LayoutKey` for the
+    /// identical reason. A profile's name is a **width**: the `˅` menu's rows,
+    /// the pane submenu's, the settings combo's column and every tab that falls
+    /// back to its profile's name are measured and cached, so a reorder or a
+    /// duplicate that did not advance this would be a window drawing yesterday's
+    /// widths under today's words.
+    revision: AtomicU64,
+}
+
+impl Registry {
+    fn shipped() -> Self {
+        Self {
+            table: RwLock::new(Arc::new(ProfileTable {
+                profiles: shipped(),
+            })),
+            revision: AtomicU64::new(0),
+        }
+    }
+
+    fn table(&self) -> Arc<ProfileTable> {
+        self.table
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    /// Put a new table in force, and answer whether anything moved.
+    ///
+    /// **A table equal to the one in force advances nothing.** A probe that
+    /// found the same programs, or a press that moved the first row up, has not
+    /// changed a width, and a revision that ticked anyway would throw away every
+    /// measured string in the window for nothing.
+    fn publish(&self, profiles: Vec<Profile>) -> bool {
+        let mut held = self
+            .table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.profiles == profiles {
+            return false;
+        }
+        *held = Arc::new(ProfileTable { profiles });
+        drop(held);
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// [`install`]'s body, over one registry.
+    fn install(&self, file: &ProfilesV1) -> Vec<ProfileFault> {
+        let (profiles, faults) = merge(shipped(), file);
+        self.publish(profiles);
+        faults
+    }
+
+    /// [`move_profile`]'s body.
+    fn move_profile(&self, index: usize, down: bool) -> bool {
+        let mut profiles = self.table().profiles.clone();
+        if index >= profiles.len() {
+            return false;
+        }
+        let other = if down {
+            Some(index + 1).filter(|next| *next < profiles.len())
+        } else {
+            index.checked_sub(1)
+        };
+        let Some(other) = other else { return false };
+        profiles.swap(index, other);
+        self.publish(profiles)
+    }
+
+    /// [`duplicate`]'s body.
+    fn duplicate(&self, index: usize) -> Option<usize> {
+        let mut profiles = self.table().profiles.clone();
+        let source = profiles.get(index)?.clone();
+        let display_title = copy_title(&source.display_title, &profiles);
+        let id = fresh_id(&display_title, &profiles);
+        let copy = Profile {
+            id,
+            // No script this build ships will ever announce a name this build
+            // did not choose, so a copy has no second word to be compared
+            // against — see `announcement_set`.
+            compared_title: None,
+            display_title,
+            origin: Origin::User,
+            hidden: false,
+            ..source
+        };
+        let at = index + 1;
+        profiles.insert(at, copy);
+        self.publish(profiles);
+        Some(at)
+    }
+
+    /// [`to_file`]'s body.
+    fn to_file(&self) -> ProfilesV1 {
+        let shipped = shipped();
+        ProfilesV1 {
+            schema_version: PROFILES_SCHEMA_VERSION,
+            profiles: self
+                .table()
+                .profiles
+                .iter()
+                .map(|profile| {
+                    entry_for(profile, shipped.iter().find(|seed| seed.id == profile.id))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The process's own registry — the table this window reads.
+static REGISTRY: OnceLock<Registry> = OnceLock::new();
+
+fn registry() -> &'static Registry {
+    REGISTRY.get_or_init(Registry::shipped)
+}
+
+/// The table as it stands. Cheap — a refcount bump.
+#[must_use]
+pub fn table() -> Arc<ProfileTable> {
+    registry().table()
+}
+
+/// Read one thing out of the table without cloning a row.
+fn with_table<R>(read: impl FnOnce(&ProfileTable) -> R) -> R {
+    read(&table())
+}
+
+/// How many times the table has moved. Into `LayoutKey`, beside `lang_rev`.
+#[must_use]
+pub fn profile_revision() -> u64 {
+    registry().revision()
+}
+
+/// What the reader had to refuse, so somebody can be told once.
+///
+/// `schemes`' register applied to a table: skip the entry, name it, say it once,
+/// never crash, never go quiet. A file with two bad rows is two things to fix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileFault {
+    /// Neither a built-in id nor a startable profile: an entry the file invented
+    /// and gave no program to. A row that cannot start is not a row.
+    Unusable { id: String },
+    /// A second entry claiming an id an earlier entry already took. The first
+    /// wins, because a stable id has to name one thing and the seeds on disk
+    /// pointing at it were written when only the first existed.
+    Duplicate { id: String },
+}
+
+/// Read `profiles.json` onto the shipped table and put the result in force.
+///
+/// The rules, each with a red gate of its own:
+///
+/// * **The array is the order.** There is no `order` key — two places saying the
+///   same thing drift.
+/// * **A built-in entry writes only its differences.** `{ "id": "pwsh" }` is the
+///   shipped profile, unchanged, in that position.
+/// * **A shipped id the file never names is appended, visible.** That is the
+///   only honest answer to a build that grew a sixth built-in: it appears, at
+///   the end, not hidden.
+/// * **An entry that is neither a built-in nor has a program is dropped and
+///   named.** The rest of the file still lands.
+/// * **No file at all is the shipped five in shipped order**, byte for byte what
+///   this window did before this slice existed. Nothing is written until
+///   something is changed — a feature does not announce itself by putting an
+///   empty document in everybody's `%APPDATA%`.
+pub fn install(file: &ProfilesV1) -> Vec<ProfileFault> {
+    registry().install(file)
+}
+
+/// [`install`]'s pure half, so the rules can be tested without a process-wide
+/// table under them.
+fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<ProfileFault>) {
+    let mut faults = Vec::new();
+    let mut built: Vec<Profile> = Vec::new();
+    for entry in &file.profiles {
+        if built.iter().any(|profile| profile.id == entry.id) {
+            faults.push(ProfileFault::Duplicate {
+                id: entry.id.clone(),
+            });
+            continue;
+        }
+        let seed = shipped.iter().find(|profile| profile.id == entry.id);
+        let Some(profile) = compose(seed, entry) else {
+            faults.push(ProfileFault::Unusable {
+                id: entry.id.clone(),
+            });
+            continue;
+        };
+        built.push(profile);
+    }
+    for profile in shipped {
+        if !built.iter().any(|held| held.id == profile.id) {
+            built.push(profile);
+        }
+    }
+    (built, faults)
+}
+
+/// One file entry onto one shipped profile, or onto nothing.
+fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
+    let mut profile = match seed {
+        Some(shipped) => shipped.clone(),
+        None => Profile {
+            id: entry.id.clone(),
+            // A profile of the user's own has no shipped name, so there is no
+            // second string for an announcement to be compared against.
+            compared_title: None,
+            display_title: entry.id.clone(),
+            // The neutral chassis in its neutral grey — the mock-up's own
+            // `#p-shell` is `#p-cmd`'s shape in another fill — because a row
+            // that has not said what it is must not borrow somebody's brand to
+            // say it. The eight struck colours are the editor's.
+            mark: ChromeMark::ProfileCmd,
+            program: entry.program.as_ref().map(program_from_file)?,
+            args: Vec::new(),
+            env: Vec::new(),
+            starting_dir: StartingDir::WindowsHome,
+            paths: PathNamespace::Windows,
+            // A machine fact, and a profile the user wrote has already pinned
+            // whatever distribution it meant in its own arguments. Saying it
+            // twice is saying it once and once wrong.
+            qualifier: Qualifier::None,
+            integration: Integration::None,
+            hidden: false,
+            origin: Origin::User,
+        },
+    };
+    if let Some(title) = &entry.display_title {
+        profile.display_title.clone_from(title);
+    }
+    if let Some(program) = &entry.program {
+        profile.program = program_from_file(program);
+    }
+    if let Some(args) = &entry.args {
+        profile.args.clone_from(args);
+    }
+    if let Some(env) = &entry.env {
+        profile.env = env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+    }
+    if let Some(starting_dir) = &entry.starting_dir {
+        profile.starting_dir = starting_dir_from_file(starting_dir);
+    }
+    // The five identity colours are not this product's to repaint (S98/S31), so
+    // a `mark` key is read for a profile of the user's own and ignored on a
+    // built-in — the file cannot say what the dialog will not offer.
+    if profile.origin == Origin::User
+        && let Some(mark) = &entry.mark
+        && let Some(named) = mark_from_file(mark)
+    {
+        profile.mark = named;
+    }
+    if let Some(integration) = &entry.integration
+        && let Some(named) = integration_from_file(integration)
+    {
+        profile.integration = named;
+    }
+    if profile.origin == Origin::User {
+        profile.paths = derived_paths(&profile);
+    }
+    profile.hidden = entry.hidden;
+    Some(profile)
+}
+
+/// Which spelling of a path a profile's shell speaks — **derived, never stated**
+/// (plan §1.6).
+///
+/// It is a property of the program and not a taste: choose it wrong and a
+/// directory inherited from another pane is silently translated into
+/// `/mnt/c/...` or into somewhere that does not exist. Only `wsl.exe` behind a
+/// bash init file crosses the namespace, which is why this asks both questions
+/// and not either one.
+fn derived_paths(profile: &Profile) -> PathNamespace {
+    let names_the_launcher = |tail: &str| tail.to_ascii_lowercase().ends_with("wsl.exe");
+    let launcher = match &profile.program {
+        ProgramSource::Path(path) => path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe")),
+        ProgramSource::FirstOf(candidates) => candidates.iter().any(|candidate| match candidate {
+            ProgramCandidate::Under { tail, .. } | ProgramCandidate::BesideOnPath { tail, .. } => {
+                names_the_launcher(tail)
+            }
+        }),
+        ProgramSource::PowerShellSeven => false,
+    };
+    if launcher && profile.integration == Integration::BashInitFile {
+        PathNamespace::Wsl
+    } else {
+        PathNamespace::Windows
+    }
+}
+
+fn program_from_file(program: &ProgramV1) -> ProgramSource {
+    match program {
+        ProgramV1::Path(path) => ProgramSource::Path(PathBuf::from(path)),
+        ProgramV1::Resolution(ResolutionV1::PowerShellSeven) => ProgramSource::PowerShellSeven,
+        ProgramV1::Resolution(ResolutionV1::FirstOf { candidates }) => ProgramSource::FirstOf(
+            candidates
+                .iter()
+                .map(|candidate| match candidate {
+                    CandidateV1::Under { variable, tail } => ProgramCandidate::Under {
+                        variable: variable.clone(),
+                        tail: tail.clone(),
+                    },
+                    CandidateV1::BesideOnPath { anchor, tail } => ProgramCandidate::BesideOnPath {
+                        anchor: anchor.clone(),
+                        tail: tail.clone(),
+                    },
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn program_to_file(program: &ProgramSource) -> ProgramV1 {
+    match program {
+        ProgramSource::Path(path) => ProgramV1::Path(path.to_string_lossy().into_owned()),
+        ProgramSource::PowerShellSeven => ProgramV1::Resolution(ResolutionV1::PowerShellSeven),
+        ProgramSource::FirstOf(candidates) => ProgramV1::Resolution(ResolutionV1::FirstOf {
+            candidates: candidates
+                .iter()
+                .map(|candidate| match candidate {
+                    ProgramCandidate::Under { variable, tail } => CandidateV1::Under {
+                        variable: variable.clone(),
+                        tail: tail.clone(),
+                    },
+                    ProgramCandidate::BesideOnPath { anchor, tail } => CandidateV1::BesideOnPath {
+                        anchor: anchor.clone(),
+                        tail: tail.clone(),
+                    },
+                })
+                .collect(),
+        }),
+    }
+}
+
+fn starting_dir_from_file(starting_dir: &StartingDirV1) -> StartingDir {
+    match starting_dir {
+        StartingDirV1::Named(NamedStartingDirV1::WindowsHome) => StartingDir::WindowsHome,
+        StartingDirV1::LauncherFlag { flag, home } => StartingDir::LauncherFlag {
+            flag: flag.clone(),
+            home: home.clone(),
+        },
+    }
+}
+
+fn starting_dir_to_file(starting_dir: &StartingDir) -> StartingDirV1 {
+    match starting_dir {
+        StartingDir::WindowsHome => StartingDirV1::Named(NamedStartingDirV1::WindowsHome),
+        StartingDir::LauncherFlag { flag, home } => StartingDirV1::LauncherFlag {
+            flag: flag.clone(),
+            home: home.clone(),
+        },
+    }
+}
+
+/// The wire words for the shipped marks.
+///
+/// A plain name and not the sprite's Rust spelling: `profiles.json` is read by
+/// people, and `ProfileUbuntu` is this build's private word for it. `shell` is
+/// the neutral chassis — the one `cmd` wears and the one a profile of the user's
+/// own gets — named for what it is rather than for the profile it came from.
+fn mark_from_file(name: &str) -> Option<ChromeMark> {
+    match name {
+        "powershell" => Some(ChromeMark::ProfilePowerShell),
+        "ubuntu" => Some(ChromeMark::ProfileUbuntu),
+        "git" => Some(ChromeMark::ProfileGit),
+        "shell" => Some(ChromeMark::ProfileCmd),
+        _ => None,
+    }
+}
+
+fn mark_to_file(mark: ChromeMark) -> Option<&'static str> {
+    match mark {
+        ChromeMark::ProfilePowerShell => Some("powershell"),
+        ChromeMark::ProfileUbuntu => Some("ubuntu"),
+        ChromeMark::ProfileGit => Some("git"),
+        ChromeMark::ProfileCmd => Some("shell"),
+        _ => None,
+    }
+}
+
+fn integration_from_file(name: &str) -> Option<Integration> {
+    match name {
+        "powershell" => Some(Integration::PowerShellOptIn),
+        "bash" => Some(Integration::BashInitFile),
+        "cmd" => Some(Integration::CmdPrompt),
+        "none" => Some(Integration::None),
+        _ => None,
+    }
+}
+
+fn integration_to_file(integration: Integration) -> &'static str {
+    match integration {
+        Integration::PowerShellOptIn => "powershell",
+        Integration::BashInitFile => "bash",
+        Integration::CmdPrompt => "cmd",
+        Integration::None => "none",
+    }
+}
+
+/// The table as `profiles.json` would write it — **differences only**.
+///
+/// A built-in equal to the shipped one in every respect is one key, its id, and
+/// that is what lets a later build retune it for everybody who never touched it.
+#[must_use]
+pub fn to_file() -> ProfilesV1 {
+    registry().to_file()
+}
+
+fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
+    let env = (!profile.env.is_empty()).then(|| {
+        profile
+            .env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    });
+    match seed {
+        Some(seed) => ProfileEntryV1 {
+            id: profile.id.clone(),
+            display_title: (profile.display_title != seed.display_title)
+                .then(|| profile.display_title.clone()),
+            hidden: profile.hidden,
+            program: (profile.program != seed.program).then(|| program_to_file(&profile.program)),
+            args: (profile.args != seed.args).then(|| profile.args.clone()),
+            env,
+            starting_dir: (profile.starting_dir != seed.starting_dir)
+                .then(|| starting_dir_to_file(&profile.starting_dir)),
+            // A built-in's colour is not the file's to state, because it is not
+            // the dialog's to change.
+            mark: None,
+            integration: (profile.integration != seed.integration)
+                .then(|| integration_to_file(profile.integration).to_owned()),
+        },
+        None => ProfileEntryV1 {
+            id: profile.id.clone(),
+            display_title: Some(profile.display_title.clone()),
+            hidden: profile.hidden,
+            program: Some(program_to_file(&profile.program)),
+            args: (!profile.args.is_empty()).then(|| profile.args.clone()),
+            env,
+            starting_dir: Some(starting_dir_to_file(&profile.starting_dir)),
+            mark: mark_to_file(profile.mark).map(str::to_owned),
+            integration: Some(integration_to_file(profile.integration).to_owned()),
+        },
+    }
+}
+
+/// Move one row one place, and say whether anything moved.
+///
+/// Buttons and not a drag (plan §2.5): this dialog's keyboard model is a Tab
+/// order over targets and a drag has no keyboard equivalent; the list is five to
+/// ten rows, where a drag's only advantage — moving item thirty to position two
+/// — does not arise; and this window's chrome is already dense with drag targets,
+/// so a third grammar of dragging inside a modal floating over them is a gesture
+/// collision.
+pub fn move_profile(index: usize, down: bool) -> bool {
+    registry().move_profile(index, down)
+}
+
+/// Copy one row, and answer where the copy landed.
+///
+/// The copy sits **directly under its original**, which is where somebody who
+/// just pressed `Duplicate` on a row is looking, and it takes the original's
+/// mark because a copy of a PowerShell really is a PowerShell. Its
+/// [`Profile::compared_title`] is `None`: no script this build ships will ever
+/// announce a name this build did not choose.
+pub fn duplicate(index: usize) -> Option<usize> {
+    registry().duplicate(index)
+}
+
+/// `PowerShell 7 copy`, then `PowerShell 7 copy 2` — the naming the scheme
+/// customiser struck a slice earlier, verbatim: **a copy of a copy numbers
+/// itself from the original's name**, so duplicating `X copy` gives `X copy 2`
+/// and never `X copy copy`.
+fn copy_title(source: &str, profiles: &[Profile]) -> String {
+    let stem = source
+        .rsplit_once(" copy")
+        .map_or(source, |(head, tail)| {
+            if tail.is_empty() || tail.trim_start().parse::<u32>().is_ok() {
+                head
+            } else {
+                source
+            }
+        })
+        .to_owned();
+    let taken = |candidate: &str| {
+        profiles
+            .iter()
+            .any(|profile| profile.display_title == candidate)
+    };
+    let first = format!("{stem} copy");
+    if !taken(&first) {
+        return first;
+    }
+    (2u32..)
+        .map(|number| format!("{stem} copy {number}"))
+        .find(|candidate| !taken(candidate))
+        .unwrap_or(first)
+}
+
+/// A stable id for a profile of the user's own: **the name it was made with,
+/// slugged, plus four hex digits** — `claude-7f3a`, `powershell-7-copy-91b2`.
+///
+/// Not the slug alone, because renaming is the commonest edit there is and an
+/// identity that moved with the name would strand every seed on disk naming it.
+/// Not a bare uuid either: the whole point of a file of its own is that a person
+/// can read it, and `a3f1c8e0-…` is a line nobody can read. Computed once at
+/// creation and never recomputed.
+///
+/// The five shipped slugs are reserved words; a collision — with them, or with
+/// an id already in the table — retries with another suffix.
+fn fresh_id(display_title: &str, profiles: &[Profile]) -> String {
+    let mut stem = String::new();
+    for character in display_title.chars() {
+        if character.is_ascii_alphanumeric() {
+            stem.push(character.to_ascii_lowercase());
+        } else if !stem.ends_with('-') {
+            stem.push('-');
+        }
+    }
+    let stem = stem.trim_matches('-');
+    let stem = if stem.is_empty() { "profile" } else { stem };
+    let shipped = shipped();
+    let taken = |candidate: &str| {
+        profiles.iter().any(|profile| profile.id == candidate)
+            || shipped.iter().any(|profile| profile.id == candidate)
+    };
+    let mut seed = suffix_seed();
+    loop {
+        let candidate = format!("{stem}-{:04x}", seed & 0xffff);
+        if !taken(&candidate) {
+            return candidate;
+        }
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    }
+}
+
+/// Four hex digits nobody has to be able to predict, and nobody has to be able
+/// to reproduce either.
+///
+/// The clock and a counter rather than a random-number dependency: the suffix
+/// only has to be *unlikely* to collide, and the loop above turns a collision
+/// into another try rather than into a bug. Adding a crate to this workspace to
+/// draw four hex digits would be paying a supply chain for a tie-break.
+fn suffix_seed() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos: u64 = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos().into());
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    nanos
+        .wrapping_mul(2_862_933_555_777_941_757)
+        .wrapping_add(count.wrapping_mul(3_037_000_493))
+}
+
+/// How many rows the table holds.
+#[must_use]
+pub fn count() -> usize {
+    with_table(ProfileTable::len)
+}
+
+/// The stable id of one row.
+#[must_use]
+pub fn id(index: usize) -> String {
+    with_table(|table| {
+        table
+            .get(index)
+            .map(|profile| profile.id.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// The name this row is called, before the machine's qualifier is joined on.
+///
+/// [`title`] is what a surface draws; this is what the editor edits, and the
+/// second string in the comparison set.
+#[must_use]
+pub fn display_title(index: usize) -> String {
+    with_table(|table| {
+        table
+            .get(index)
+            .map(|profile| profile.display_title.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// The mark one row wears.
+#[must_use]
+pub fn mark(index: usize) -> ChromeMark {
+    with_table(|table| {
+        table
+            .get(index)
+            .map_or(ChromeMark::ProfileCmd, |profile| profile.mark)
+    })
+}
+
+/// Which spelling of a path one row's shell speaks.
+#[must_use]
+pub fn paths(index: usize) -> PathNamespace {
+    with_table(|table| {
+        table
+            .get(index)
+            .map_or(PathNamespace::Windows, |profile| profile.paths)
+    })
+}
+
+/// Which integration script serves one row.
+#[must_use]
+pub fn integration(index: usize) -> Integration {
+    with_table(|table| {
+        table
+            .get(index)
+            .map_or(Integration::None, |profile| profile.integration)
+    })
+}
+
+/// The arguments one row always passes, ahead of anything the shell reads.
+#[must_use]
+pub fn args(index: usize) -> Vec<String> {
+    with_table(|table| {
+        table
+            .get(index)
+            .map(|profile| profile.args.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// One row of the Settings dialog's **Profiles** page, ready to be laid out.
+///
+/// Built here and not in `settings.rs` for the reason every other derived answer
+/// in this house is built once: the `˅` menu, the pane submenu, the default
+/// picker and this page are four surfaces asking the same three questions about
+/// a profile — what is it called, can this machine start it, and what does it
+/// actually give you — and four spellings of that is four chances for two of
+/// them to disagree in front of the same reader.
+///
+/// It rides into the dialog through `SettingsContent`, exactly as the shortcut
+/// page's lines do, which is what keeps [`ProfilePrograms`] — a fact about a
+/// filesystem — out of a struct that is otherwise a snapshot of settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileLine {
+    /// Which row of the table this is. **The table's index and not the page's**:
+    /// they are the same today because the page shows hidden rows too, and they
+    /// would come apart the day it did not.
+    pub index: usize,
+    pub mark: ChromeMark,
+    /// What the row is called, qualifier and all — [`title`].
+    pub title: &'static str,
+    /// The line under the name: what this profile runs, or — on a machine that
+    /// does not have it — why it cannot.
+    pub command: String,
+    /// The honest capability sentence (J85), or `None` for a row that cannot
+    /// run at all.
+    ///
+    /// **An unavailable row drops this line rather than greying it.** A shell
+    /// that is not on this machine has no capabilities to report, and the one
+    /// sentence the row has room for is the reason it cannot start — which is
+    /// `.row.unavailable`'s existing rule applied to a row that happened to have
+    /// two lines.
+    pub capability: Option<&'static str>,
+    /// Whether the `default` badge is on this row. **It reports and is not a
+    /// control**: the default is changed on the General page and nowhere else,
+    /// because one field with two writers is the thing §7.1.6c-4a just avoided.
+    pub is_default: bool,
+    pub hidden: bool,
+    pub available: bool,
+}
+
+/// Every row of the Profiles page, top to bottom.
+///
+/// Hidden rows are **here** and absent from [`ProfileTable::offered`], and the
+/// asymmetry is the point: this page is where hiding is undone, so a page that
+/// honoured hiding would be a page with no way back.
+#[must_use]
+pub fn page_lines(programs: &ProfilePrograms, default: usize) -> Vec<ProfileLine> {
+    with_table(|table| {
+        table
+            .profiles()
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| {
+                let available = programs.is_available(index);
+                ProfileLine {
+                    index,
+                    mark: profile.mark,
+                    title: title(index),
+                    command: if available {
+                        command_line(profile, programs.program(index))
+                    } else {
+                        crate::i18n::profile_not_installed(title(index))
+                    },
+                    capability: available.then(|| capability_text(profile).text()),
+                    is_default: index == default,
+                    hidden: profile.hidden,
+                    available,
+                }
+            })
+            .collect()
+    })
+}
+
+/// `pwsh.exe -NoLogo`, `wsl.exe --cd ~`, `cmd.exe` — what this row starts, in
+/// the words the mock-up wrote under each of its names.
+///
+/// **The leaf and not the path.** The full path is `C:\Program
+/// Files\PowerShell\7\pwsh.exe` and the row has about fifty-eight characters;
+/// the executable's own name is the half that identifies it, and the half a
+/// reader would recognise. The place arguments are appended because for the one
+/// profile that has them they are the whole of where it opens — `wsl.exe` alone
+/// says nothing about `~`.
+fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
+    let program = resolved
+        .map(Path::new)
+        .and_then(Path::file_name)
+        .map_or_else(
+            || profile.display_title.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+    let mut words = vec![program];
+    words.extend(profile.args.iter().cloned());
+    if let StartingDir::LauncherFlag { flag, home } = &profile.starting_dir {
+        words.push(flag.clone());
+        words.push(home.clone());
+    }
+    words.join(" ")
+}
+
+/// **The honest capability sentence** (J85), derived from what actually reaches
+/// the shell.
+///
+/// The authority is `docs/shell-integration.md`'s "What each profile actually
+/// gets", and this page does not build a second matrix — it draws one row of
+/// that one. Which is why the derivation is over [`Integration`] and
+/// [`PathNamespace`] rather than over the profile's id: a duplicate of WSL is
+/// not `wsl`, and it gets WSL's sentence because it gets WSL's door.
+///
+/// Two of the answers carry their condition **in the sentence**, because this
+/// page cannot probe for it: whether `folio.ps1` has been dot-sourced, and
+/// whether a WSL login lands in bash, are known only to a live session that has
+/// already spoken. Said this way each sentence is true in every state and never
+/// needs a probe to stay true.
+#[must_use]
+pub fn capability_text(profile: &Profile) -> crate::i18n::Text {
+    match (profile.integration, profile.paths) {
+        (Integration::PowerShellOptIn, _) => crate::i18n::Text::CapPowerShell,
+        // The launcher is the difference: a Git Bash is handed its init file and
+        // reads it, full stop, while `wsl.exe` hands it to whatever shell the
+        // distribution logs the user into.
+        (Integration::BashInitFile, PathNamespace::Wsl) => crate::i18n::Text::CapWslBash,
+        (Integration::BashInitFile, PathNamespace::Windows) => crate::i18n::Text::CapFull,
+        (Integration::CmdPrompt, _) => crate::i18n::Text::CapCmd,
+        (Integration::None, _) => crate::i18n::Text::CapNone,
+    }
+}
+
+/// Every spelling of one profile's name that a shell announcing it would use —
+/// **the set a pane head compares an OSC 0/2 title against**.
+///
+/// A shell that merely says its launcher's name has announced nothing, and the
+/// head must not promote it to a program title. Which name, though, is now two
+/// questions and not one (plan §1.4, and the first thing slice 5a had to land):
+///
+/// * the **shipped** title, because that is what the integration scripts send —
+///   `folio.ps1` writes `PowerShell 7` or `Windows PowerShell 5.1` however the
+///   row has since been renamed. Drop this and the family name reappears in
+///   front of every pane head the day somebody renames a row;
+/// * the **display** title, because a user who renames a row to `七号` is owed
+///   the same silence when their own shell echoes it back;
+/// * the **qualified** form, because that is the third spelling this window
+///   itself shows, and `WSL · Ubuntu` is what a tab reads.
+///
+/// A profile of the user's own contributes no shipped string: no script this
+/// build ships will ever announce a name this build did not choose, so there is
+/// no second word to compare.
+///
+/// `&'static str` throughout, so the set can be handed to a pure function and
+/// held for the length of a frame — the two composed spellings are interned by
+/// [`title`]'s own table.
+#[must_use]
+pub fn announcement_set(index: usize) -> Vec<&'static str> {
+    let qualified = title(index);
+    with_table(|table| {
+        table.get(index).map_or_else(
+            || vec![qualified],
+            |profile| {
+                announcement_names(profile, qualified)
+                    .iter()
+                    .map(|name| intern(name))
+                    .collect()
             },
-            ProgramCandidate::Under {
-                variable: "ProgramFiles(x86)",
-                tail: r"Git\bin\bash.exe",
-            },
-            ProgramCandidate::Under {
-                variable: "LocalAppData",
-                tail: r"Programs\Git\bin\bash.exe",
-            },
-        ]),
-        // `bin\bash.exe` is the MSYS wrapper the Git Bash shortcut itself runs,
-        // and `--login -i` is that shortcut's own argument list: `--login` is
-        // what sources `/etc/profile` and puts `git` on the path, and without it
-        // this would be a bash that cannot find the tool it is named after.
-        args: &["--login", "-i"],
-        // Git for Windows' MSYS layer maps `$HOME` onto `%USERPROFILE%` by
-        // default, so the Windows home *is* this shell's home — one directory
-        // under two spellings, unlike WSL's two directories.
-        starting_dir: StartingDir::WindowsHome,
-        // **Windows, not MSYS.** Git Bash prints `/d/Developer` and its process
-        // is standing in `D:\Developer` — one directory, two spellings, and the
-        // Win32 one is the true one: it is what `CreateProcess` was handed, what
-        // Explorer opens, and what every other pane in this window speaks. The
-        // MSYS spelling is a third namespace that only this shell understands,
-        // and the script reports the Win32 one (`pwd -W`) precisely so that it
-        // never has to become one.
-        paths: PathNamespace::Windows,
-        qualifier: Qualifier::None,
-        integration: Integration::BashInitFile,
-    },
-    Profile {
-        id: "cmd",
-        title: "Command Prompt",
-        mark: ChromeMark::ProfileCmd,
-        program: ProgramSource::FirstOf(&[ProgramCandidate::Under {
-            variable: "SystemRoot",
-            tail: r"System32\cmd.exe",
-        }]),
-        // None. `cmd.exe` has no logo to suppress, and every switch it does take
-        // (`/c`, `/k`) would end the session rather than start one.
-        args: &[],
-        starting_dir: StartingDir::WindowsHome,
-        paths: PathNamespace::Windows,
-        qualifier: Qualifier::None,
-        integration: Integration::CmdPrompt,
-    },
-];
+        )
+    })
+}
+
+/// [`announcement_set`]'s rule, without the interning and without the table —
+/// so the rule can be read, and tested, on one profile.
+fn announcement_names(profile: &Profile, qualified: &str) -> Vec<String> {
+    let mut names = vec![qualified.to_owned()];
+    for name in [
+        profile.compared_title.as_deref(),
+        Some(profile.display_title.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !names.iter().any(|held| held == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
 
 /// The profile everything falls back **to**, and the one thing in this module
 /// that is not a choice.
@@ -706,7 +1746,17 @@ pub const PROFILES: [Profile; 5] = [
 /// which spawns `powershell.exe` when a profile's program will not start: a pane
 /// that ends up running 5.1 now says *Windows PowerShell* on its tab instead of
 /// wearing the name of the shell it failed to be.
-pub const FALLBACK_PROFILE: usize = 1;
+///
+/// **A lookup and no longer the literal `1`** (§7.1.6c-6). It was an ordinal
+/// into a `const` array, which was exact for as long as nothing could reorder
+/// that array; a table the user can reorder turns the same literal into "whoever
+/// happens to be second", and a floor that can be walked out from under is a
+/// fallback chain with a hole in the bottom. The id is the thing that does not
+/// move, so the id is what this asks for.
+#[must_use]
+pub fn fallback_profile() -> usize {
+    with_table(|table| table.position_of_id(WINDOWS_POWERSHELL_ID).unwrap_or(0))
+}
 
 /// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from —
 /// `state.defaultProfile` (mock-up 3217), resolved for this machine.
@@ -718,10 +1768,10 @@ pub const FALLBACK_PROFILE: usize = 1;
 /// slightly different:
 ///
 /// * an id naming no profile in this build — including the empty id a user who
-///   has never opened the setting has — is [`FALLBACK_PROFILE`], which is
+///   has never opened the setting has — is [`fallback_profile()`], which is
 ///   [`index_of_id`]'s rule and not a second one;
 /// * an id naming a profile this machine cannot start is **also**
-///   [`FALLBACK_PROFILE`], and this is the part `index_of_id` cannot do because
+///   [`fallback_profile()`], and this is the part `index_of_id` cannot do because
 ///   it is a fact about the machine rather than about the file. Someone who chose
 ///   Git Bash and then uninstalled Git must still get a window;
 /// * anything else is what they chose.
@@ -732,14 +1782,12 @@ pub const FALLBACK_PROFILE: usize = 1;
 /// exactly as long as its cause.
 #[must_use]
 pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
-    PROFILES
-        .iter()
-        .position(|profile| profile.id == stored)
+    with_table(|table| table.position_of_id(stored))
         .filter(|index| programs.is_available(*index))
-        .unwrap_or(FALLBACK_PROFILE)
+        .unwrap_or_else(fallback_profile)
 }
 
-/// Which profile a seed's `profile_id` names, or [`FALLBACK_PROFILE`] when the
+/// Which profile a seed's `profile_id` names, or [`fallback_profile()`] when the
 /// file names one this build does not have.
 ///
 /// Falling back rather than refusing is the schema's own rule — `§5.4` 逐叶降级,
@@ -758,10 +1806,7 @@ pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
 /// recovered by a build that understood it again.
 #[must_use]
 pub fn index_of_id(id: &str) -> usize {
-    PROFILES
-        .iter()
-        .position(|profile| profile.id == id)
-        .unwrap_or(FALLBACK_PROFILE)
+    with_table(|table| table.position_of_id(id)).unwrap_or_else(fallback_profile)
 }
 
 /// Whether this build has a profile by that name at all.
@@ -771,11 +1816,11 @@ pub fn index_of_id(id: &str) -> usize {
 /// caller that needs a profile and wrong for the one caller that needs to know a
 /// substitution happened. `M2-restart-shell-contract.md` §3 requires that
 /// substitution to be visible — "绝不静默替换" — and a function that answers
-/// `FALLBACK_PROFILE` for a saved `"pwsh"` and a saved `"fish"` alike cannot tell
+/// `fallback_profile()` for a saved `"pwsh"` and a saved `"fish"` alike cannot tell
 /// anyone which of the two it was looking at.
 #[must_use]
 pub fn has_id(id: &str) -> bool {
-    PROFILES.iter().any(|profile| profile.id == id)
+    with_table(|table| table.position_of_id(id).is_some())
 }
 
 /// What a greyed row says when the pointer rests on it — the *why* behind the
@@ -840,11 +1885,57 @@ pub enum Qualifier {
 /// was read on and the click aimed at it is a worse answer than a settled one.
 #[must_use]
 pub fn title(profile: usize) -> &'static str {
-    static TITLES: OnceLock<[String; PROFILES.len()]> = OnceLock::new();
-    &TITLES.get_or_init(|| {
-        let qualifier = crate::wsl::facts().title_qualifier();
-        std::array::from_fn(|index| compose_title(index, qualifier))
-    })[profile]
+    static TITLES: RwLock<Option<(u64, Vec<&'static str>)>> = RwLock::new(None);
+    let revision = profile_revision();
+    {
+        let held = TITLES
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, titles)) = held.as_ref()
+            && *at == revision
+            && let Some(found) = titles.get(profile)
+        {
+            return found;
+        }
+    }
+    let qualifier = crate::wsl::facts().title_qualifier();
+    let composed: Vec<&'static str> = with_table(|table| {
+        table
+            .profiles
+            .iter()
+            .map(|entry| intern(&compose_title(entry, qualifier)))
+            .collect()
+    });
+    let mut held = TITLES
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *held = Some((revision, composed));
+    held.as_ref()
+        .and_then(|(_, titles)| titles.get(profile).copied())
+        .unwrap_or("")
+}
+
+/// One `&'static str` per distinct composed title this process has ever shown.
+///
+/// `crate::settings::intern_scheme_name`'s recipe, one module over and for the
+/// same reason: the leak is **per name, not per call and not per rebuild**, so
+/// the memory this can consume is bounded by how many different names the user's
+/// table has held in one session — a handful, for the case it exists for, which
+/// is a row being renamed or duplicated. Freeing one would mean proving that no
+/// picker, no measurement and no hit test still holds it, which is exactly the
+/// proof `&'static str` exists to not have to write.
+fn intern(text: &str) -> &'static str {
+    static HELD: Mutex<Option<std::collections::BTreeSet<&'static str>>> = Mutex::new(None);
+    let mut held = HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let names = held.get_or_insert_with(std::collections::BTreeSet::new);
+    if let Some(found) = names.get(text) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(text.to_owned().into_boxed_str());
+    names.insert(leaked);
+    leaked
 }
 
 /// [`title`]'s rule, without the cache — `Profile.title`, then the qualifier
@@ -856,12 +1947,12 @@ pub fn title(profile: usize) -> &'static str {
 /// profile's name is called `WSL` and not `WSL · Ubuntu-24.04`. That rule needs
 /// no code here — the short form **is** the constant, and the only place the
 /// qualifier is added is the place a long name fits.
-fn compose_title(profile: usize, qualifier: Option<&str>) -> String {
-    match (PROFILES[profile].qualifier, qualifier) {
+fn compose_title(profile: &Profile, qualifier: Option<&str>) -> String {
+    match (profile.qualifier, qualifier) {
         (Qualifier::WslDistribution, Some(distribution)) => {
-            format!("{} · {distribution}", PROFILES[profile].title)
+            format!("{} · {distribution}", profile.display_title)
         }
-        _ => PROFILES[profile].title.to_owned(),
+        _ => profile.display_title.clone(),
     }
 }
 
@@ -997,7 +2088,7 @@ pub fn translate_cwd(from: PathNamespace, to: PathNamespace, cwd: &Path) -> Opti
 /// than to a guess (`docs/shell-integration.md` §34-35).
 #[must_use]
 pub fn cwd_for_spawn(source: usize, target: usize, cwd: Option<&Path>) -> Option<PathBuf> {
-    translate_cwd(PROFILES[source].paths, PROFILES[target].paths, cwd?)
+    translate_cwd(paths(source), paths(target), cwd?)
 }
 
 /// Where a leaf is to be started, in the two forms a spawn can actually say it.
@@ -1030,7 +2121,7 @@ pub struct SpawnPlace {
 /// which is an honest answer this side could not have produced anyway.
 #[must_use]
 pub fn revived_cwd(profile: usize, cwd: &Path) -> Option<PathBuf> {
-    match PROFILES[profile].paths {
+    match paths(profile) {
         PathNamespace::Windows => cwd.is_dir().then(|| cwd.to_path_buf()),
         PathNamespace::Wsl => Some(cwd.to_path_buf()),
     }
@@ -1075,7 +2166,11 @@ pub fn spawn_place(
     inherited: Option<PathBuf>,
     environment: &dyn ShellEnvironment,
 ) -> SpawnPlace {
-    match PROFILES[profile].starting_dir {
+    match with_table(|table| {
+        table
+            .get(profile)
+            .map_or(StartingDir::WindowsHome, |entry| entry.starting_dir.clone())
+    }) {
         StartingDir::WindowsHome => SpawnPlace {
             working_directory: inherited
                 .or_else(|| environment.var_os("USERPROFILE").map(PathBuf::from)),
@@ -1109,20 +2204,22 @@ fn search_path(environment: &dyn ShellEnvironment, file_name: &str) -> Option<Pa
 /// The same three the Git Bash profile falls back to — the system-wide, the
 /// 32-bit and the per-user installers' defaults — pointed at `cmd\git.exe`
 /// instead of `bin\bash.exe`, because they are two files of one install.
-const GIT_FALLBACKS: &[ProgramCandidate] = &[
-    ProgramCandidate::Under {
-        variable: "ProgramFiles",
-        tail: r"Git\cmd\git.exe",
-    },
-    ProgramCandidate::Under {
-        variable: "ProgramFiles(x86)",
-        tail: r"Git\cmd\git.exe",
-    },
-    ProgramCandidate::Under {
-        variable: "LocalAppData",
-        tail: r"Programs\Git\cmd\git.exe",
-    },
-];
+fn git_fallbacks() -> [ProgramCandidate; 3] {
+    [
+        ProgramCandidate::Under {
+            variable: "ProgramFiles".to_owned(),
+            tail: r"Git\cmd\git.exe".to_owned(),
+        },
+        ProgramCandidate::Under {
+            variable: "ProgramFiles(x86)".to_owned(),
+            tail: r"Git\cmd\git.exe".to_owned(),
+        },
+        ProgramCandidate::Under {
+            variable: "LocalAppData".to_owned(),
+            tail: r"Programs\Git\cmd\git.exe".to_owned(),
+        },
+    ]
+}
 
 /// Where `git.exe` is on this machine, or `None` when it is nowhere.
 ///
@@ -1144,7 +2241,7 @@ const GIT_FALLBACKS: &[ProgramCandidate] = &[
 #[must_use]
 pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
     search_path(environment, "git.exe").or_else(|| {
-        GIT_FALLBACKS.iter().copied().find_map(|candidate| {
+        git_fallbacks().iter().find_map(|candidate| {
             ProfilePrograms::candidate_path(candidate, environment)
                 .filter(|path| environment.is_file(path))
         })
@@ -1168,7 +2265,7 @@ pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
 /// the build server and fail on the developer's laptop for the same code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfilePrograms {
-    resolved: [Option<OsString>; PROFILES.len()],
+    resolved: Vec<Option<OsString>>,
 }
 
 impl ProfilePrograms {
@@ -1176,15 +2273,28 @@ impl ProfilePrograms {
     #[must_use]
     pub fn probe(environment: &dyn ShellEnvironment) -> Self {
         Self {
-            resolved: std::array::from_fn(|index| match PROFILES[index].program {
-                // A real `None` on a machine with no PowerShell 7, which is
-                // what greys the row rather than starting 5.1 under 7's name.
-                ProgramSource::PowerShellSeven => resolve_powershell_seven(environment),
-                ProgramSource::FirstOf(candidates) => candidates
+            resolved: with_table(|table| {
+                table
+                    .profiles
                     .iter()
-                    .filter_map(|candidate| Self::candidate_path(*candidate, environment))
-                    .find(|candidate| environment.is_file(candidate))
-                    .map(PathBuf::into_os_string),
+                    .map(|profile| match &profile.program {
+                        // A real `None` on a machine with no PowerShell 7, which
+                        // is what greys the row rather than starting 5.1 under
+                        // 7's name.
+                        ProgramSource::PowerShellSeven => resolve_powershell_seven(environment),
+                        ProgramSource::FirstOf(candidates) => candidates
+                            .iter()
+                            .filter_map(|candidate| Self::candidate_path(candidate, environment))
+                            .find(|candidate| environment.is_file(candidate))
+                            .map(PathBuf::into_os_string),
+                        // A path the user named is a path or it is not: there is
+                        // no list to walk, and a program that is not there greys
+                        // the row exactly as a missing built-in does.
+                        ProgramSource::Path(path) => environment
+                            .is_file(path)
+                            .then(|| path.clone().into_os_string()),
+                    })
+                    .collect()
             }),
         }
     }
@@ -1202,7 +2312,7 @@ impl ProfilePrograms {
     ///
     /// Naming a place is not finding a file there; the caller still probes.
     pub(crate) fn candidate_path(
-        candidate: ProgramCandidate,
+        candidate: &ProgramCandidate,
         environment: &dyn ShellEnvironment,
     ) -> Option<PathBuf> {
         match candidate {
@@ -1320,8 +2430,16 @@ pub struct ProfileMenuLayout {
     scale: f32,
     /// The menu's border box.
     frame: [f32; 4],
-    /// One row per entry of [`PROFILES`], top to bottom.
+    /// One row per **offered** profile, top to bottom.
     items: Vec<[f32; 4]>,
+    /// Which table row each of [`Self::items`] draws.
+    ///
+    /// The two are not the same number once anything is hidden, and the answer a
+    /// bare ordinal would get wrong here is silent — the wrong shell would
+    /// simply start. So the mapping is laid down once, at layout, and the draw
+    /// and the hit test both read it rather than each recomputing which rows are
+    /// on offer.
+    profiles: Vec<usize>,
     /// The `.menu-sep` above the `Files pane` row.
     ///
     /// Unconditional where the Recent separator is optional, and the asymmetry
@@ -1518,17 +2636,19 @@ pub fn layout(
     // its annotation are both this module's own constants, so their length is a
     // fact the product is responsible for making room for.
     let files_row = row_content(files_pane_text(), px(ITEM_FONT_LOGICAL_PX), files_hint);
-    let content = (0..PROFILES.len())
-        // `title(index)` and not `Profile::title`: the qualifier is part of the
-        // string the row draws, and on a machine with two distributions it is
-        // the longest row in the list.
-        .map(|index| row_content(title(index), px(ITEM_FONT_LOGICAL_PX), annotation))
+    let offered = table().offered();
+    let content = offered
+        .iter()
+        // `title(index)` and not `Profile::display_title`: the qualifier is part
+        // of the string the row draws, and on a machine with two distributions
+        // it is the longest row in the list.
+        .map(|index| row_content(title(*index), px(ITEM_FONT_LOGICAL_PX), annotation))
         .fold(files_row, f32::max);
     let width = (chrome + content)
         .max(px(MENU_MIN_WIDTH_LOGICAL_PX))
         .round();
     let height = (2.0 * (border + padding)
-        + item_height * PROFILES.len() as f32
+        + item_height * offered.len() as f32
         + files_block
         + recent_block)
         .round();
@@ -1563,8 +2683,8 @@ pub fn layout(
     let content_left = frame[0] + border + padding;
     let content_right = frame[2] - border - padding;
     let mut cursor = frame[1] + border + padding;
-    let mut items = Vec::with_capacity(PROFILES.len());
-    for _ in 0..PROFILES.len() {
+    let mut items = Vec::with_capacity(offered.len());
+    for _ in 0..offered.len() {
         items.push([content_left, cursor, content_right, cursor + item_height]);
         cursor += item_height;
     }
@@ -1608,6 +2728,7 @@ pub fn layout(
         scale,
         frame,
         items,
+        profiles: offered,
         files_separator,
         files_pane,
         separator,
@@ -1644,8 +2765,9 @@ pub fn hit(
     y: f64,
 ) -> Option<Option<MenuRow>> {
     let (x, y) = (x as f32, y as f32);
-    for (index, item) in layout.items.iter().enumerate() {
+    for (row, item) in layout.items.iter().enumerate() {
         if contains(*item, x, y) {
+            let index = layout.profiles[row];
             return Some(
                 programs
                     .is_available(index)
@@ -1741,13 +2863,13 @@ pub fn build(
         alpha(palette.menu_border_alpha),
     );
 
-    for (index, item) in layout.items.iter().enumerate() {
-        let profile = PROFILES[index];
+    for (row, item) in layout.items.iter().enumerate() {
+        let index = layout.profiles[row];
         let available = programs.is_available(index);
         push_row(
             &Row {
                 rect: *item,
-                mark: Some(profile.mark),
+                mark: Some(mark(index)),
                 name: title(index),
                 // `margin-left: auto` puts the hint hard against the row's
                 // trailing padding, and it names a fact about the profile rather
@@ -2042,7 +3164,7 @@ fn separator_alpha(ink: [u8; 3]) -> f32 {
 /// so it wears the folder the pane is (`#i-folder` in `--accent`, mock-up 7427).
 fn recent_mark(seed: &Seed) -> ChromeMark {
     match seed {
-        Seed::Term { profile_id, .. } => PROFILES[index_of_id(profile_id)].mark,
+        Seed::Term { profile_id, .. } => mark(index_of_id(profile_id)),
         Seed::Files { .. } => ChromeMark::Folder,
     }
 }
@@ -4658,8 +5780,11 @@ pub struct PaneMenuLayout {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneSubmenuLayout {
     frame: [f32; 4],
-    /// One row per entry of [`PROFILES`], top to bottom.
+    /// One row per **offered** profile, top to bottom.
     items: Vec<[f32; 4]>,
+    /// Which table row each of [`Self::items`] draws — `ProfileMenuLayout`'s
+    /// mapping, for its reason.
+    profiles: Vec<usize>,
 }
 
 impl PaneMenuLayout {
@@ -4919,11 +6044,13 @@ fn pane_submenu_layout(
     let px = |value: f32| value * scale;
     let hint = measure(current_profile_hint_text(), px(HINT_FONT_LOGICAL_PX));
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
-    let content = (0..PROFILES.len())
+    let offered = table().offered();
+    let content = offered
+        .iter()
         .map(|index| {
             px(ITEM_ICON_COLUMN_LOGICAL_PX)
                 + px(ITEM_GAP_LOGICAL_PX)
-                + measure(title(index), px(ITEM_FONT_LOGICAL_PX))
+                + measure(title(*index), px(ITEM_FONT_LOGICAL_PX))
                 + px(ITEM_GAP_LOGICAL_PX)
                 + hint
         })
@@ -4931,7 +6058,7 @@ fn pane_submenu_layout(
     let width = (chrome + content)
         .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
         .round();
-    let height = (2.0 * (border + padding) + PROFILES.len() as f32 * item_height).round();
+    let height = (2.0 * (border + padding) + offered.len() as f32 * item_height).round();
 
     let (surface_width, surface_height) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
@@ -4957,12 +6084,16 @@ fn pane_submenu_layout(
     let content_left = frame[0] + border + padding;
     let content_right = frame[2] - border - padding;
     let mut cursor = frame[1] + border + padding;
-    let mut items = Vec::with_capacity(PROFILES.len());
-    for _ in 0..PROFILES.len() {
+    let mut items = Vec::with_capacity(offered.len());
+    for _ in 0..offered.len() {
         items.push([content_left, cursor, content_right, cursor + item_height]);
         cursor += item_height;
     }
-    PaneSubmenuLayout { frame, items }
+    PaneSubmenuLayout {
+        frame,
+        items,
+        profiles: offered,
+    }
 }
 
 /// What a point is over.
@@ -4977,9 +6108,9 @@ pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<PaneMenu
     if let Some(submenu) = layout.submenu.as_ref()
         && contains(submenu.frame, x, y)
     {
-        for (index, rect) in submenu.items.iter().enumerate() {
+        for (row, rect) in submenu.items.iter().enumerate() {
             if contains(*rect, x, y) {
-                return Some(PaneMenuHit::Submenu(index));
+                return Some(PaneMenuHit::Submenu(submenu.profiles[row]));
             }
         }
         return Some(PaneMenuHit::Surface);
@@ -5243,7 +6374,7 @@ fn push_submenu(
         push_row(
             &Row {
                 rect: *rect,
-                mark: Some(PROFILES[index].mark),
+                mark: Some(mark(index)),
                 name: title(index),
                 hint,
                 hint_ink: None,
@@ -5815,6 +6946,17 @@ const FILE_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 172.0;
 
 #[cfg(test)]
 mod tests {
+    /// The shipped five, as the `const` array this module's cases were written
+    /// against.
+    ///
+    /// A call per case rather than a static: the rows own their strings now
+    /// (§7.1.6c-6), so there is no array to borrow. What the cases mean by it is
+    /// unchanged — **the table this build ships**, which is exactly what they
+    /// were pinning before the user could reorder anything.
+    fn shipped_five() -> Vec<Profile> {
+        shipped()
+    }
+
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
@@ -6241,10 +7383,10 @@ mod tests {
     /// The rows below are about *drawing* — this row's name is inked here, greyed
     /// there, tipped with what its caption left out — and none of them is about
     /// what the name happens to be. Spelling it out made every one of them a
-    /// second, accidental copy of `PROFILES[…].title`, so the 7 / 5.1 rename came
+    /// second, accidental copy of `display_title(…)`, so the 7 / 5.1 rename came
     /// back as six failures in tests that had no opinion about it.
-    fn powershell_seven() -> &'static str {
-        PROFILES[index_of_id("pwsh")].title
+    fn powershell_seven() -> String {
+        display_title(index_of_id("pwsh"))
     }
 
     /// An in-memory machine: what is on the `PATH`, and which files exist.
@@ -6286,7 +7428,7 @@ mod tests {
         /// PowerShell, because that one ships *inside* the OS.
         ///
         /// A fixture without it would be a machine that does not exist, and it
-        /// would quietly make [`FALLBACK_PROFILE`] unavailable, which is the one
+        /// would quietly make [`fallback_profile()`] unavailable, which is the one
         /// thing this module guarantees can never happen.
         fn bare_windows() -> Self {
             Self::default()
@@ -6331,7 +7473,7 @@ mod tests {
     fn term(cwd: &str, manual_name: Option<&str>, secs_ago: u64) -> RecentEntry {
         RecentEntry {
             seed: Seed::Term {
-                profile_id: PROFILES[FALLBACK_PROFILE].id.to_owned(),
+                profile_id: shipped_five()[fallback_profile()].id.to_owned(),
                 cwd: cwd.to_owned(),
                 manual_name: manual_name.map(str::to_owned),
             },
@@ -6413,7 +7555,7 @@ mod tests {
                 width >= (180.0 * scale).round(),
                 "scale {scale}: `min-width: 180px`, got {width}"
             );
-            let longest = (0..PROFILES.len())
+            let longest = (0..count())
                 .map(|index| fake_measure(title(index), ITEM_FONT_LOGICAL_PX * scale))
                 .fold(0.0_f32, f32::max);
             let annotation = fake_measure(hint_text(), HINT_FONT_LOGICAL_PX * scale).max(
@@ -6434,7 +7576,7 @@ mod tests {
                     .round(),
                 "scale {scale}: and the longest row decides the rest"
             );
-            assert_eq!(layout.items.len(), PROFILES.len());
+            assert_eq!(layout.items.len(), count());
         }
     }
 
@@ -6535,10 +7677,10 @@ mod tests {
     ///
     /// The order is load-bearing rather than tidy: `state.defaultProfile` is an
     /// *index* into this list (mock-up 3217), and until P3 makes it a setting,
-    /// [`FALLBACK_PROFILE`] is a constant index too. Reordering this array
+    /// [`fallback_profile()`] is a constant index too. Reordering this array
     /// silently re-points it.
     ///
-    /// This test replaces one that asserted `PROFILES.len() == 1` and was right
+    /// This test replaces one that asserted `count() == 1` and was right
     /// to: a list of rows that all started PowerShell would have been rows that
     /// cannot do what they say. What makes the list honest now is the rest of
     /// this file — a program per profile, and a greyed row where the machine
@@ -6549,10 +7691,11 @@ mod tests {
     /// means by "PowerShell", 5.1 beside it because the pair is the choice.
     #[test]
     fn the_picker_offers_exactly_the_profiles_this_build_has() {
-        assert_eq!(PROFILES.len(), 5);
-        let listed: Vec<_> = PROFILES.iter().map(|profile| profile.id).collect();
+        assert_eq!(count(), 5);
+        let shipped = shipped_five();
+        let listed: Vec<_> = shipped.iter().map(|profile| profile.id.as_str()).collect();
         assert_eq!(listed, ["pwsh", "winps", "wsl", "gitbash", "cmd"]);
-        assert_eq!(PROFILES[FALLBACK_PROFILE].title, "Windows PowerShell 5.1");
+        assert_eq!(display_title(fallback_profile()), "Windows PowerShell 5.1");
 
         // **Mark × title, and not the mark alone.** This used to require every
         // mark to be distinct, and the two PowerShells retire that: they are one
@@ -6562,11 +7705,11 @@ mod tests {
         // identity *is* — "图标 × 目录", the icon and the text together — and in
         // this list the text is the title. Two rows with the same mark are fine;
         // two rows a reader cannot tell apart are not.
-        for (index, left) in PROFILES.iter().enumerate() {
-            for right in &PROFILES[index + 1..] {
+        for (index, left) in shipped_five().iter().enumerate() {
+            for right in &shipped_five()[index + 1..] {
                 assert_ne!(
-                    (left.mark, left.title),
-                    (right.mark, right.title),
+                    (left.mark, &left.display_title),
+                    (right.mark, &right.display_title),
                     "{} and {} would be one row twice",
                     left.id,
                     right.id
@@ -6574,19 +7717,22 @@ mod tests {
             }
         }
         assert_eq!(
-            PROFILES[index_of_id("pwsh")].mark,
-            PROFILES[index_of_id("winps")].mark,
+            mark(index_of_id("pwsh")),
+            mark(index_of_id("winps")),
             "and the two PowerShells share theirs on purpose"
         );
 
         // And five ids, because an id is what a seed is keyed on: two profiles
         // sharing one would be two tabs that cannot be told apart on disk.
         let ids: std::collections::HashSet<_> = listed.iter().collect();
-        assert_eq!(ids.len(), PROFILES.len());
-        for profile in PROFILES {
+        assert_eq!(ids.len(), count());
+        for profile in shipped_five() {
             assert_eq!(
-                index_of_id(profile.id),
-                PROFILES.iter().position(|p| p.id == profile.id).unwrap(),
+                index_of_id(&profile.id),
+                shipped_five()
+                    .iter()
+                    .position(|p| p.id == profile.id)
+                    .unwrap(),
                 "{} must resolve to its own row",
                 profile.id
             );
@@ -6603,8 +7749,8 @@ mod tests {
     /// exact failure that cannot be seen from a screenshot of the menu.
     #[test]
     fn only_the_powershell_profile_asks_for_nologo() {
-        for profile in PROFILES {
-            let has_nologo = profile.args.contains(&"-NoLogo");
+        for profile in shipped_five() {
+            let has_nologo = profile.args.iter().any(|argument| argument == "-NoLogo");
             // Both PowerShells: the flag belongs to the family, not to one row.
             let is_powershell = profile.id == "pwsh" || profile.id == "winps";
             assert_eq!(
@@ -6615,9 +7761,9 @@ mod tests {
                 if is_powershell { "" } else { "not" }
             );
         }
-        assert_eq!(PROFILES[index_of_id("cmd")].args, &[] as &[&str]);
+        assert_eq!(args(index_of_id("cmd")), &[] as &[&str]);
         assert_eq!(
-            PROFILES[index_of_id("gitbash")].args,
+            args(index_of_id("gitbash")),
             &["--login", "-i"],
             "without --login this is a bash that cannot find git"
         );
@@ -6638,7 +7784,7 @@ mod tests {
     /// * leave `pwsh` resolving through the old chain and a machine without
     ///   PowerShell 7 gets a row labelled `PowerShell` that starts 5.1 — the
     ///   original lie, now with a second row beside it making the lie visible;
-    /// * point `FALLBACK_PROFILE` at `pwsh` and the floor under every other
+    /// * point `fallback_profile()` at `pwsh` and the floor under every other
     ///   profile becomes a row that is allowed to be greyed.
     #[test]
     fn the_two_powershells_are_two_rows_and_only_one_of_them_can_be_missing() {
@@ -6647,17 +7793,17 @@ mod tests {
         // Each row says which one it is. The bare "PowerShell" / "Windows
         // PowerShell" pair these shipped with is what the user could not read
         // apart at a glance, and the version is the whole answer.
-        assert_eq!(PROFILES[seven].title, "PowerShell 7");
-        assert_eq!(PROFILES[five].title, "Windows PowerShell 5.1");
+        assert_eq!(display_title(seven), "PowerShell 7");
+        assert_eq!(display_title(five), "Windows PowerShell 5.1");
         for profile in [seven, five] {
             assert!(
-                PROFILES[profile]
-                    .title
+                shipped_five()[profile]
+                    .display_title
                     .split_whitespace()
                     .any(|word| word.starts_with(|first: char| first.is_ascii_digit())),
                 "{:?} names its version, which is the only thing telling it from \
                  the row beside it",
-                PROFILES[profile].id
+                shipped_five()[profile].id
             );
         }
 
@@ -6679,7 +7825,7 @@ mod tests {
         let plain = bare();
         assert!(!plain.is_available(seven), "no install, no row that works");
         assert!(plain.is_available(five), "and this one is part of the OS");
-        assert_eq!(five, FALLBACK_PROFILE);
+        assert_eq!(five, fallback_profile());
 
         // `BT_SHELL` still belongs to the 7 row (Q4) and still bypasses the
         // probe: it names a shell, and naming one that is not there leaves the
@@ -6728,7 +7874,7 @@ mod tests {
         // conditional that decides what a PowerShell calls itself. `Core` is 7 and
         // everything else is the 5.1 that ships with Windows.
         for (id, edition) in [("pwsh", "Core"), ("winps", "Desktop")] {
-            let title = PROFILES[index_of_id(id)].title;
+            let title = display_title(index_of_id(id));
             let quoted = format!("'{title}'");
             assert!(
                 script.contains(&quoted),
@@ -6738,8 +7884,8 @@ mod tests {
         }
         // And the arms are told apart the way the script tells them apart, so the
         // pair above cannot both be satisfied by one arm carrying both strings.
-        let seven = PROFILES[index_of_id("pwsh")].title;
-        let five = PROFILES[index_of_id("winps")].title;
+        let seven = display_title(index_of_id("pwsh"));
+        let five = display_title(index_of_id("winps"));
         assert!(
             script.contains(&format!(
                 "$PSVersionTable.PSEdition -eq 'Core') {{ '{seven}' }} else {{ '{five}' }}"
@@ -6761,19 +7907,20 @@ mod tests {
     #[test]
     fn the_fallback_profile_can_always_be_started() {
         assert_eq!(
-            PROFILES[FALLBACK_PROFILE].id, "winps",
+            shipped_five()[fallback_profile()].id,
+            "winps",
             "the floor is the shell that is part of Windows"
         );
         assert!(
             !matches!(
-                PROFILES[FALLBACK_PROFILE].program,
+                shipped_five()[fallback_profile()].program,
                 ProgramSource::PowerShellSeven
             ),
             "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
         );
         // Even on a machine with nothing else on it.
-        assert!(bare().is_available(FALLBACK_PROFILE));
-        assert!(equipped().is_available(FALLBACK_PROFILE));
+        assert!(bare().is_available(fallback_profile()));
+        assert!(equipped().is_available(fallback_profile()));
     }
 
     /// PIN — `default` is a caption on the *chosen* row, not on the first one.
@@ -6793,7 +7940,7 @@ mod tests {
             NO_RECENT,
             &mut fake_measure,
         );
-        for (chosen, profile) in PROFILES.iter().enumerate() {
+        for (chosen, profile) in shipped_five().iter().enumerate() {
             let layers = build(
                 &layout,
                 &equipped(),
@@ -6854,7 +8001,7 @@ mod tests {
         );
         // Every profile as the default in turn, so the longest name carrying the
         // hint is covered rather than only the first row's short one.
-        for chosen in 0..PROFILES.len() {
+        for chosen in 0..count() {
             for programs in [equipped(), bare()] {
                 let layer = one_layer(build(
                     &layout,
@@ -6987,7 +8134,7 @@ mod tests {
     /// Red gate for the whole of P3's data half. Four inputs and four different
     /// answers, and the two failure modes this exists to stop are opposites: a
     /// resolver that trusted the file hands a window a shell that is not
-    /// installed, and one that only ever answered `FALLBACK_PROFILE` makes the
+    /// installed, and one that only ever answered `fallback_profile()` makes the
     /// setting a control that does nothing.
     #[test]
     fn the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it() {
@@ -7000,17 +8147,17 @@ mod tests {
         );
         assert_eq!(
             default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &all),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             "nobody has ever opened the setting: the floor, not an error"
         );
         assert_eq!(
             default_profile("a-profile-from-a-newer-build", &all),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             "an id this build does not have degrades exactly as a leaf's does"
         );
         assert_eq!(
             default_profile("gitbash", &bare()),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             "chosen, installed once, uninstalled since — the window still opens"
         );
         // And the resolved answer is always startable, which is the property
@@ -7056,7 +8203,7 @@ mod tests {
         // profile is followed rather than guessed at.
         assert_eq!(
             spawn_place(
-                FALLBACK_PROFILE,
+                fallback_profile(),
                 None,
                 &FakeMachine::default().with_var("USERPROFILE", r"\\server\redirected\dev")
             )
@@ -7064,7 +8211,7 @@ mod tests {
             Some(PathBuf::from(r"\\server\redirected\dev")),
         );
         assert_eq!(
-            spawn_place(FALLBACK_PROFILE, None, &FakeMachine::default()),
+            spawn_place(fallback_profile(), None, &FakeMachine::default()),
             SpawnPlace::default(),
             "a machine that cannot name its own home is told nothing, not a guess"
         );
@@ -7217,8 +8364,8 @@ mod tests {
         let windows = Path::new(r"D:\Developer\BetterTerminal");
         let mounted = Path::new("/mnt/d/Developer/BetterTerminal");
         let inside = Path::new("/home/weiyi/src");
-        for (source, profile) in PROFILES.iter().enumerate() {
-            for (target, other) in PROFILES.iter().enumerate() {
+        for (source, profile) in shipped_five().iter().enumerate() {
+            for (target, other) in shipped_five().iter().enumerate() {
                 let (standing, expected) = match (profile.paths, other.paths) {
                     (PathNamespace::Windows, PathNamespace::Windows) => (windows, Some(windows)),
                     (PathNamespace::Windows, PathNamespace::Wsl) => (windows, Some(mounted)),
@@ -7295,23 +8442,26 @@ mod tests {
     /// unable to say which of them `WSL` opens.
     #[test]
     fn only_the_profile_that_names_a_launcher_wears_the_machine_s_answer() {
-        for (index, profile) in PROFILES.iter().enumerate() {
+        for profile in &shipped_five() {
             assert_eq!(
-                compose_title(index, None),
-                profile.title,
+                compose_title(profile, None),
+                profile.display_title,
                 "{} is its own title on a machine that answered nothing",
                 profile.id
             );
-            let qualified = compose_title(index, Some("Ubuntu-24.04"));
+            let qualified = compose_title(profile, Some("Ubuntu-24.04"));
             match profile.qualifier {
                 Qualifier::WslDistribution => {
                     assert_eq!(qualified, "WSL · Ubuntu-24.04");
                     // The mock-up's own rule (line 4013): a session's name is
                     // everything before `" ·"`, and it is the constant.
-                    assert_eq!(qualified.split(" ·").next(), Some(profile.title));
+                    assert_eq!(
+                        qualified.split(" ·").next(),
+                        Some(profile.display_title.as_str())
+                    );
                 }
                 Qualifier::None => assert_eq!(
-                    qualified, profile.title,
+                    qualified, profile.display_title,
                     "{} names a program, not a launcher",
                     profile.id
                 ),
@@ -7331,15 +8481,15 @@ mod tests {
     fn a_profile_is_offered_when_this_machine_has_its_program_and_greyed_when_it_does_not() {
         let none = bare();
         assert_eq!(
-            (0..PROFILES.len())
+            (0..count())
                 .filter(|index| none.is_available(*index))
                 .collect::<Vec<_>>(),
-            vec![FALLBACK_PROFILE],
+            vec![fallback_profile()],
             "a bare Windows box offers PowerShell and says the truth about the rest"
         );
 
         let all = equipped();
-        for (index, profile) in PROFILES.iter().enumerate() {
+        for (index, profile) in shipped_five().iter().enumerate() {
             assert!(
                 all.is_available(index),
                 "{} is installed here and must be offered",
@@ -7479,7 +8629,7 @@ mod tests {
         );
         assert_eq!(
             layout.items.len(),
-            PROFILES.len(),
+            count(),
             "greying is not hiding: every profile still has a row"
         );
 
@@ -7505,7 +8655,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &programs,
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             NO_RECENT,
             now(),
@@ -7546,7 +8696,7 @@ mod tests {
         // two PowerShells share a mark on purpose — a search would find whichever
         // came first and could not tell the greyed 7 row from the startable 5.1
         // one, which is exactly the pair this test has to distinguish.
-        let winps = layer.sprites[FALLBACK_PROFILE];
+        let winps = layer.sprites[fallback_profile()];
         assert_eq!(winps.mark, ChromeMark::ProfilePowerShell);
         assert_eq!(winps.opacity, 1.0);
         assert!(!winps.grayscale);
@@ -7626,7 +8776,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &programs,
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             &vault,
             now(),
@@ -7789,7 +8939,7 @@ mod tests {
         let rest = one_layer(build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             NO_RECENT,
             now(),
@@ -7798,7 +8948,7 @@ mod tests {
         let hover = one_layer(build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             Some(MenuRow::Profile(0)),
             NO_RECENT,
             now(),
@@ -7949,7 +9099,7 @@ mod tests {
         let layers = build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             NO_RECENT,
             now(),
@@ -8019,7 +9169,7 @@ mod tests {
             assert_eq!(
                 layout.frame[3] - layout.frame[1],
                 (2.0 * (border + MENU_PADDING_LOGICAL_PX * scale)
-                    + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * PROFILES.len() as f32
+                    + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * count() as f32
                     // The `Files pane` section is unconditional, so it is here
                     // even with an empty vault — that asymmetry is the point of
                     // this pin, not an exception to it.
@@ -8035,7 +9185,7 @@ mod tests {
             let layer = one_layer(build(
                 &layout,
                 &equipped(),
-                FALLBACK_PROFILE,
+                fallback_profile(),
                 None,
                 NO_RECENT,
                 now(),
@@ -8050,7 +9200,7 @@ mod tests {
             );
             assert_eq!(
                 layer.sprites.len(),
-                PROFILES.len() + 1,
+                count() + 1,
                 "scale {scale}: one mark per profile row, plus the files row's folder"
             );
         }
@@ -8141,7 +9291,7 @@ mod tests {
     /// index, and never a profile.
     ///
     /// Red gate: the menu's rows used to be one untagged `usize` indexed
-    /// straight into [`PROFILES`]. With a Recent section under them that number
+    /// straight into [`shipped_five()`]. With a Recent section under them that number
     /// names two different things, and the bug it produces is silent — clicking
     /// the third recent seed launches a bare PowerShell in the wrong folder and
     /// looks, from the outside, exactly like the menu working.
@@ -8217,7 +9367,7 @@ mod tests {
             layout.frame[3] - layout.frame[1],
             (2.0 * ((FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
                 + MENU_PADDING_LOGICAL_PX * scale)
-                + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * PROFILES.len() as f32
+                + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * count() as f32
                 + files_block(scale)
                 + recent_block(scale, RECENT_CAPACITY))
             .round(),
@@ -8227,7 +9377,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             &vault,
             now(),
@@ -8243,7 +9393,7 @@ mod tests {
         );
         assert_eq!(
             layer.sprites.len(),
-            PROFILES.len() + 1 + RECENT_CAPACITY,
+            count() + 1 + RECENT_CAPACITY,
             "one mark per drawn row, the files row included"
         );
     }
@@ -8268,7 +9418,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             &vault,
             now(),
@@ -8357,7 +9507,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             &vault,
             now(),
@@ -8392,7 +9542,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             None,
             &vault,
             now(),
@@ -8414,7 +9564,7 @@ mod tests {
             .iter()
             .find(|sprite| in_row(layout.recent[1], sprite))
             .expect("the terminal row wears a mark");
-        assert_eq!(shell.mark, PROFILES[FALLBACK_PROFILE].mark);
+        assert_eq!(shell.mark, mark(fallback_profile()));
         assert_eq!(shell.color, palette.accent);
         // An id this build does not have costs the row its shell choice, never
         // its mark — `index_of_id` falls back rather than refusing.
@@ -8424,7 +9574,7 @@ mod tests {
                 cwd: "C:\\repo".to_owned(),
                 manual_name: None,
             }),
-            PROFILES[FALLBACK_PROFILE].mark
+            mark(fallback_profile())
         );
 
         let hint = layer
@@ -8467,7 +9617,7 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
-            FALLBACK_PROFILE,
+            fallback_profile(),
             Some(MenuRow::Recent(0)),
             &vault,
             now(),
@@ -8853,7 +10003,7 @@ mod tests {
     #[test]
     fn the_pane_menus_keyboard_walk_aims_the_picker_and_then_leaves_it() {
         use PaneMenuHover as H;
-        let rows = PROFILES.len();
+        let rows = count();
         // The list is entered at whichever end the key names.
         assert_eq!(
             H::step(None, MenuStep::Down, rows),
@@ -9105,7 +10255,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            (0..PROFILES.len()).map(title).collect::<Vec<_>>(),
+            (0..count()).map(title).collect::<Vec<_>>(),
             "every profile the strip offers, in the strip's own order"
         );
         assert_eq!(
@@ -9123,7 +10273,7 @@ mod tests {
                 .iter()
                 .map(|sprite| sprite.mark)
                 .collect::<Vec<_>>(),
-            PROFILES
+            shipped_five()
                 .iter()
                 .map(|profile| profile.mark)
                 .collect::<Vec<_>>(),
@@ -9132,7 +10282,7 @@ mod tests {
 
         // A press on a submenu row is answered as that profile, and the child
         // wins the pixels where the two frames overlap.
-        for index in 0..PROFILES.len() {
+        for index in 0..count() {
             let rect = layout.submenu.as_ref().unwrap().items[index];
             assert_eq!(
                 pane_menu_hit(
@@ -9158,7 +10308,7 @@ mod tests {
                 .iter()
                 .filter(|l| l.text != current_profile_hint_text())
                 .count(),
-            PROFILES.len(),
+            count(),
             "no row is dropped — a missing row looks like a row nobody designed"
         );
         assert!(
@@ -10224,5 +11374,513 @@ mod tests {
             TERM_MENU_ROWS.len(),
             "every row is painted, including the ones that cannot answer"
         );
+    }
+
+    // ── the table, the file and the page (§7.1.6c-6) ───────────────────────
+    //
+    // Every case below moves **its own** `Registry` rather than the process's,
+    // which is `crate::i18n`'s ruling verbatim: `cargo test` runs this crate in
+    // one process with many threads, and a case that reordered the window's own
+    // table for a microsecond would race every other case that asks how many
+    // profiles there are.
+
+    /// One file entry, spelled the way `profiles.json` spells an untouched
+    /// built-in.
+    fn named(id: &str) -> ProfileEntryV1 {
+        ProfileEntryV1 {
+            id: id.to_owned(),
+            ..ProfileEntryV1::default()
+        }
+    }
+
+    fn file(entries: Vec<ProfileEntryV1>) -> ProfilesV1 {
+        ProfilesV1 {
+            schema_version: PROFILES_SCHEMA_VERSION,
+            profiles: entries,
+        }
+    }
+
+    fn ids(profiles: &[Profile]) -> Vec<&str> {
+        profiles.iter().map(|profile| profile.id.as_str()).collect()
+    }
+
+    /// PIN — **a machine with no `profiles.json` is this window before this
+    /// slice existed, row for row and byte for byte.**
+    ///
+    /// The first red gate of the whole slice, and the one everything else is
+    /// allowed to build on: the table is data now, the file is optional, and the
+    /// ordinary machine — which has no such file and never will — must not be
+    /// able to tell. Nothing is written until something is changed, either: a
+    /// feature does not announce itself by putting an empty document in
+    /// everybody's `%APPDATA%` (`schemes.rs`'s own judgment).
+    ///
+    /// Red gate: seed the table from anything but `shipped()`, or let a missing
+    /// file mean "empty table", and every surface in the window changes at once.
+    #[test]
+    fn a_machine_with_no_profiles_file_gets_the_shipped_five_unchanged() {
+        let (built, faults) = merge(shipped(), &ProfilesV1::default());
+        assert_eq!(built, shipped());
+        assert!(faults.is_empty());
+        assert_eq!(ids(&built), ["pwsh", "winps", "wsl", "gitbash", "cmd"]);
+        assert!(
+            built.iter().all(|profile| !profile.hidden),
+            "and none of them arrives hidden"
+        );
+    }
+
+    /// PIN — **the array is the order, and a built-in writes only what differs.**
+    ///
+    /// There is deliberately no `order` key: two places saying the same thing
+    /// drift, and a JSON list already reads as an order to anybody editing it by
+    /// hand. An entry that is nothing but an id is the shipped profile in that
+    /// position, which is what lets a later build retune one for everybody who
+    /// never touched it.
+    ///
+    /// Red gate: read the file as a set and the reorder does nothing; apply a
+    /// bare entry as a blank profile and every untouched row loses its program.
+    #[test]
+    fn the_array_is_the_order_and_a_builtin_writes_only_its_differences() {
+        let (built, faults) = merge(
+            shipped(),
+            &file(vec![
+                named("cmd"),
+                ProfileEntryV1 {
+                    display_title: Some("Ubuntu".to_owned()),
+                    ..named("wsl")
+                },
+                named("gitbash"),
+                named("winps"),
+                named("pwsh"),
+            ]),
+        );
+        assert!(faults.is_empty());
+        assert_eq!(ids(&built), ["cmd", "wsl", "gitbash", "winps", "pwsh"]);
+        assert_eq!(built[1].display_title, "Ubuntu");
+        assert_eq!(
+            built[1].id, "wsl",
+            "renaming a row does not rename what the disk calls it"
+        );
+        let shipped = shipped();
+        for profile in &built {
+            let seed = shipped
+                .iter()
+                .find(|seed| seed.id == profile.id)
+                .expect("every row here is a built-in");
+            assert_eq!(profile.program, seed.program, "{}", profile.id);
+            assert_eq!(profile.args, seed.args, "{}", profile.id);
+            assert_eq!(profile.integration, seed.integration, "{}", profile.id);
+            assert_eq!(
+                profile.compared_title, seed.compared_title,
+                "{} keeps the word its script announces, renamed or not",
+                profile.id
+            );
+        }
+    }
+
+    /// PIN — **a built-in this build ships and the file never mentions arrives
+    /// at the end, visible.**
+    ///
+    /// The only honest answer to "the upgrade brought a sixth profile": it
+    /// appears, last, not hidden. Dropping it would make a new shell invisible to
+    /// everybody who has ever touched this dialog; inserting it at the top would
+    /// move somebody's list around for a row they did not ask for.
+    #[test]
+    fn a_shipped_id_the_file_never_names_is_appended_and_visible() {
+        let (built, faults) = merge(shipped(), &file(vec![named("cmd"), named("wsl")]));
+        assert!(faults.is_empty());
+        assert_eq!(ids(&built), ["cmd", "wsl", "pwsh", "winps", "gitbash"]);
+        assert!(built[2..].iter().all(|profile| !profile.hidden));
+    }
+
+    /// PIN — **an entry that is neither a built-in nor a startable profile is
+    /// dropped, named once, and takes nothing else with it.**
+    ///
+    /// `schemes`' register applied to a table: skip it, say which one, never
+    /// crash, never go quiet. A row with no program is a row that cannot start,
+    /// and a list with an unstartable row in it is a list that lies.
+    #[test]
+    fn an_entry_that_is_neither_a_builtin_nor_a_program_is_dropped_and_named() {
+        let (built, faults) = merge(
+            shipped(),
+            &file(vec![named("pwsh"), named("fish"), named("cmd")]),
+        );
+        assert_eq!(
+            faults,
+            vec![ProfileFault::Unusable {
+                id: "fish".to_owned()
+            }]
+        );
+        assert_eq!(ids(&built), ["pwsh", "cmd", "winps", "wsl", "gitbash"]);
+        assert!(
+            crate::i18n::profile_entry_fault(&faults[0]).contains("fish"),
+            "the sentence names the entry, because the id is what the reader has \
+             to search their own file for"
+        );
+    }
+
+    /// PIN — **the first entry to claim an id keeps it.**
+    ///
+    /// A stable id has to name one thing: the seeds already on disk pointing at
+    /// it were written when only the first existed, so the first is the one they
+    /// meant. The second is refused and named rather than silently merged, which
+    /// would leave a file whose two halves disagree and no way to find out.
+    #[test]
+    fn a_second_entry_claiming_a_taken_id_is_refused_and_named() {
+        let (built, faults) = merge(
+            shipped(),
+            &file(vec![
+                ProfileEntryV1 {
+                    display_title: Some("first".to_owned()),
+                    ..named("pwsh")
+                },
+                ProfileEntryV1 {
+                    display_title: Some("second".to_owned()),
+                    ..named("pwsh")
+                },
+            ]),
+        );
+        assert_eq!(
+            faults,
+            vec![ProfileFault::Duplicate {
+                id: "pwsh".to_owned()
+            }]
+        );
+        assert_eq!(built[0].display_title, "first");
+        assert_eq!(
+            built.iter().filter(|profile| profile.id == "pwsh").count(),
+            1
+        );
+    }
+
+    /// PIN — **a hidden built-in leaves the pickers and stays a profile.**
+    ///
+    /// Hiding is the whole of what "I do not want to see this" can mean for a
+    /// row that cannot be deleted, and it must not reach the seat that is
+    /// already running it: a restart resolves through the seat's own
+    /// `profile_id`, which is untouched by any of this.
+    #[test]
+    fn a_hidden_builtin_leaves_the_pickers_but_stays_a_profile() {
+        let (built, _) = merge(
+            shipped(),
+            &file(vec![ProfileEntryV1 {
+                hidden: true,
+                ..named("cmd")
+            }]),
+        );
+        let table = ProfileTable { profiles: built };
+        assert_eq!(
+            table
+                .offered()
+                .into_iter()
+                .map(|index| table.profiles()[index].id.as_str())
+                .collect::<Vec<_>>(),
+            ["pwsh", "winps", "wsl", "gitbash"],
+            "the `˅` menu, the `+` and the picker are all one list, and `cmd` is \
+             not on it"
+        );
+        assert_eq!(
+            table.position_of_id("cmd"),
+            Some(0),
+            "but a seat that names it still resolves to it"
+        );
+    }
+
+    /// PIN — **what the table writes, the table reads back.**
+    ///
+    /// The round trip is where "only differences are written" is proved to be a
+    /// *representation* rather than a lossy summary: reorder, hide, rename and
+    /// copy, write, read, and land on exactly the same table.
+    #[test]
+    fn the_table_survives_the_round_trip_through_its_own_file() {
+        let registry = Registry::shipped();
+        registry.install(&file(vec![
+            named("cmd"),
+            ProfileEntryV1 {
+                display_title: Some("Ubuntu".to_owned()),
+                ..named("wsl")
+            },
+            ProfileEntryV1 {
+                hidden: true,
+                ..named("gitbash")
+            },
+            named("pwsh"),
+            named("winps"),
+        ]));
+        registry.duplicate(0).expect("cmd is a row");
+        let before = registry.table().profiles().to_vec();
+
+        let written = registry.to_file();
+        let (read, faults) = merge(shipped(), &written);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(read, before);
+
+        let wire = serde_json::to_value(&written).unwrap();
+        assert_eq!(
+            wire["profiles"][4].as_object().map(serde_json::Map::len),
+            Some(1),
+            "an untouched built-in is its id and nothing else, so the next build \
+             is still free to retune it: {:?}",
+            wire["profiles"][4]
+        );
+    }
+
+    /// PIN — **a press that moves nothing advances nothing.**
+    ///
+    /// `profile_rev` throws away every measured string in the window, so a
+    /// revision that ticked when the first row's `↑` was pressed would be a
+    /// window re-measuring itself for a press that did nothing. The dark button
+    /// is still drawn, and still a focus stop — it just has no effect to have.
+    #[test]
+    fn moving_a_row_advances_the_revision_and_moving_the_first_row_up_does_not() {
+        let registry = Registry::shipped();
+        assert_eq!(registry.revision(), 0);
+
+        assert!(
+            !registry.move_profile(0, false),
+            "nothing is above the first"
+        );
+        assert_eq!(registry.revision(), 0);
+        let last = registry.table().len() - 1;
+        assert!(!registry.move_profile(last, true));
+        assert_eq!(registry.revision(), 0);
+
+        assert!(registry.move_profile(1, false));
+        assert_eq!(registry.revision(), 1);
+        assert_eq!(
+            ids(registry.table().profiles()),
+            ["winps", "pwsh", "wsl", "gitbash", "cmd"]
+        );
+        assert!(
+            registry.move_profile(0, true),
+            "and it goes back the way it came"
+        );
+        assert_eq!(registry.revision(), 2);
+        assert_eq!(ids(registry.table().profiles()), ids(&shipped()));
+    }
+
+    /// PIN — **a copy lands under its original, carries its mark, and takes an
+    /// id no built-in holds.**
+    ///
+    /// The five shipped slugs are reserved words: a user profile that took one
+    /// would answer to every seed on disk that named the built-in. The copy also
+    /// loses its `compared_title`, because no script this build ships will ever
+    /// announce a name this build did not choose.
+    #[test]
+    fn a_duplicate_lands_under_its_original_with_an_id_no_builtin_holds() {
+        let registry = Registry::shipped();
+        let at = registry.duplicate(0).expect("pwsh is a row");
+        assert_eq!(at, 1);
+        let table = registry.table();
+        let copy = &table.profiles()[1];
+        assert_eq!(copy.display_title, "PowerShell 7 copy");
+        assert_eq!(
+            copy.mark,
+            table.profiles()[0].mark,
+            "a copy of a PowerShell is a PowerShell"
+        );
+        assert_eq!(copy.program, table.profiles()[0].program);
+        assert_eq!(copy.origin, Origin::User);
+        assert_eq!(copy.compared_title, None);
+        assert!(
+            shipped().iter().all(|seed| seed.id != copy.id),
+            "{} took a reserved slug",
+            copy.id
+        );
+        assert!(
+            copy.id.starts_with("powershell-7-copy-"),
+            "the id is readable, because the whole point of a file of its own is \
+             that a person can read it: {}",
+            copy.id
+        );
+        assert_eq!(registry.revision(), 1);
+    }
+
+    /// PIN — **a copy of a copy numbers itself from the original's name.**
+    ///
+    /// The scheme customiser struck this a slice earlier and it is the same
+    /// sentence here: `X copy`, `X copy 2`, and never `X copy copy`.
+    #[test]
+    fn a_copy_of_a_copy_numbers_itself_from_the_original_s_name() {
+        let registry = Registry::shipped();
+        registry.duplicate(0);
+        registry.duplicate(1);
+        registry.duplicate(2);
+        assert_eq!(
+            registry
+                .table()
+                .profiles()
+                .iter()
+                .map(|profile| profile.display_title.as_str())
+                .take(4)
+                .collect::<Vec<_>>(),
+            [
+                "PowerShell 7",
+                "PowerShell 7 copy",
+                "PowerShell 7 copy 2",
+                "PowerShell 7 copy 3"
+            ]
+        );
+    }
+
+    /// PIN — **a renamed built-in still drops the word its script announces.**
+    ///
+    /// R7, the thing this slice had to land before any rename was possible.
+    /// `folio.ps1` sends `$PSVersionTable.PSEdition`, which is the shipped title
+    /// whatever the row has since been called; a pane head compares an
+    /// announcement against the set and drops it either way, so neither the
+    /// script's word nor the user's own can leak onto a head as a program title.
+    #[test]
+    fn a_renamed_builtin_still_drops_the_word_its_script_announces() {
+        let (built, _) = merge(
+            shipped(),
+            &file(vec![ProfileEntryV1 {
+                display_title: Some("七号".to_owned()),
+                ..named("pwsh")
+            }]),
+        );
+        let renamed = &built[0];
+        let names = announcement_names(renamed, "七号");
+        assert!(
+            names.iter().any(|name| name == "PowerShell 7"),
+            "the shipped word survives the rename invisibly: {names:?}"
+        );
+        assert!(names.iter().any(|name| name == "七号"));
+
+        let copy = Profile {
+            compared_title: None,
+            display_title: "Claude".to_owned(),
+            ..renamed.clone()
+        };
+        assert_eq!(
+            announcement_names(&copy, "Claude"),
+            ["Claude"],
+            "a profile of the user's own has no shipped word, so there is no \
+             second string to compare"
+        );
+    }
+
+    /// PIN — **every capability sentence agrees with
+    /// `docs/shell-integration.md`'s own matrix, row by row.**
+    ///
+    /// J85: this page draws a row of that table rather than building a second
+    /// one. The two would otherwise drift the first time a shell gained or lost
+    /// a marker, and the page would go on making a promise the terminal had
+    /// stopped keeping.
+    ///
+    /// Red gate: change a `yes` to a `no` in the doc, or reword a sentence to
+    /// claim a marker it does not have, and this names the row.
+    #[test]
+    fn every_capability_sentence_agrees_with_the_shell_integration_matrix() {
+        const DOC: &str = include_str!("../../../docs/shell-integration.md");
+        let row_for = |label: &str| -> Vec<String> {
+            DOC.lines()
+                .find(|line| line.starts_with(&format!("| {label} |")))
+                .unwrap_or_else(|| panic!("the matrix has a row for {label}"))
+                .split('|')
+                .map(|cell| cell.trim().to_owned())
+                .collect()
+        };
+        // The columns, as the matrix heads them.
+        const PROMPT_MARK: usize = 2; // `133;A`
+        const EXIT_CODE: usize = 5; // `133;D` + exit code
+        const DIRECTORY: usize = 6; // `OSC 7`
+
+        for (id, label) in [
+            ("pwsh", "**PowerShell** (7, script installed)"),
+            ("winps", "**Windows PowerShell** (5.1, script installed)"),
+            ("wsl", "**WSL** (bash login shell)"),
+            ("gitbash", "**Git Bash**"),
+            ("cmd", "**Command Prompt**"),
+        ] {
+            let profile = shipped()
+                .into_iter()
+                .find(|profile| profile.id == id)
+                .expect("a shipped id");
+            // Lower-cased before the comparison: the sentence opens with a
+            // capital because it is a sentence, and the markers it names are
+            // the same markers in either case.
+            let sentence = capability_text(&profile)
+                .in_lang(crate::i18n::Lang::English)
+                .to_lowercase();
+            let cells = row_for(label);
+            let claims = |marker: &str| {
+                sentence.contains(marker) && !sentence.contains(&format!("no {marker}"))
+            };
+            let says_yes = |column: usize| cells[column].trim_matches('*') == "yes";
+            assert_eq!(
+                claims("prompt marks"),
+                says_yes(PROMPT_MARK),
+                "{id}: the sentence and the matrix disagree about prompt marks"
+            );
+            assert_eq!(
+                claims("exit codes"),
+                says_yes(EXIT_CODE),
+                "{id}: the sentence and the matrix disagree about exit codes"
+            );
+            assert_eq!(
+                claims("directory"),
+                says_yes(DIRECTORY),
+                "{id}: the sentence and the matrix disagree about the directory"
+            );
+        }
+    }
+
+    /// PIN — **a shell this machine does not have says why, and says nothing
+    /// else.**
+    ///
+    /// `.row.unavailable`'s existing rule met by a row that happened to have two
+    /// sentences: a shell that is not here has no capabilities to report, and the
+    /// one line the row has room for is the reason it cannot start.
+    #[test]
+    fn an_unavailable_row_gives_its_reason_and_drops_its_capability_line() {
+        let lines = page_lines(&bare(), fallback_profile());
+        assert_eq!(lines.len(), count());
+        let git = lines
+            .iter()
+            .find(|line| line.index == index_of_id("gitbash"))
+            .expect("Git Bash is a row even where Git is not installed");
+        assert!(!git.available);
+        assert_eq!(git.capability, None);
+        assert!(
+            git.command.contains("Git Bash"),
+            "the sentence became the reason: {}",
+            git.command
+        );
+
+        let floor = lines
+            .iter()
+            .find(|line| line.index == fallback_profile())
+            .expect("the floor is always a row");
+        assert!(floor.available && floor.is_default);
+        assert_eq!(
+            floor.capability,
+            Some(crate::i18n::Text::CapPowerShell.text())
+        );
+        assert_eq!(
+            floor.command, "powershell.exe -NoLogo",
+            "the row says what it starts, in the executable's own name"
+        );
+    }
+
+    /// PIN — the line under a name is the program's own leaf and the words
+    /// handed to it, including the launcher's place flag.
+    ///
+    /// The full path is sixty characters and the row has about fifty-eight; the
+    /// executable's name is the half that identifies it. `wsl.exe` alone would
+    /// say nothing about where the tab opens, which is what `--cd ~` is.
+    #[test]
+    fn the_line_under_a_name_is_the_executable_and_its_words() {
+        let lines = page_lines(&equipped(), fallback_profile());
+        let of = |id: &str| {
+            lines
+                .iter()
+                .find(|line| line.index == index_of_id(id))
+                .map(|line| line.command.clone())
+                .expect("a shipped id")
+        };
+        assert_eq!(of("pwsh"), "pwsh.exe -NoLogo");
+        assert_eq!(of("wsl"), "wsl.exe --cd ~");
+        assert_eq!(of("gitbash"), "bash.exe --login -i");
+        assert_eq!(of("cmd"), "cmd.exe");
     }
 }

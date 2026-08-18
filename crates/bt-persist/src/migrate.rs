@@ -277,6 +277,14 @@ fn migrate_settings_v10_to_v11(mut value: Value) -> Value {
 /// version bump.
 pub const KEYBINDINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 
+/// Migration table for `profiles.json`. Empty for the same reason
+/// [`KEYBINDINGS_MIGRATIONS`] is, and for one more of its own: this document is
+/// **a list of departures**, so a build that ships a sixth profile, retires a
+/// fifth or retunes a fourth's arguments changes nothing here — an entry naming
+/// an id this build has never heard of is a row that degrades, and a built-in
+/// this file never mentions is a row the reader appends. Neither is a version.
+pub const PROFILES_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
 pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
