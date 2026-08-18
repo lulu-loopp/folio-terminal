@@ -3256,6 +3256,60 @@ mod windows_impl {
     /// console as characters. A console's code page is very often 936 or 437 on
     /// the machines this product runs on, and a byte-oriented write would put
     /// mojibake on the screen for the half of this text that is Chinese.
+    /// Give a windows-subsystem process its parent's console for its standard
+    /// handles, when it has none of its own.
+    ///
+    /// `#![windows_subsystem = "windows"]` (user report 2026-08-18: launching
+    /// `folio.exe` raised a Windows Terminal window first) means the loader no
+    /// longer conjures a console — which also means a developer running
+    /// `folio.exe` from a shell with `BT_STARTUP_TRACE` set would watch nothing
+    /// arrive: the process starts with null standard handles and Rust's `print`
+    /// family quietly discards into them. This adopts the parent's console and
+    /// points the null handles at its screen, so a trace asked for from a shell
+    /// still lands in that shell.
+    ///
+    /// **A redirection is never touched.** Only a handle that is null is
+    /// replaced; `folio.exe 2>trace.txt` keeps its file, because the caller who
+    /// redirected owns where that stream goes. And a double-click stays silent:
+    /// with no parent console `AttachConsole` fails and this is a no-op.
+    pub fn adopt_parent_console() {
+        use windows::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+        };
+        let null = |slot| {
+            unsafe { GetStdHandle(slot) }
+                .map(|handle| handle.is_invalid())
+                .unwrap_or(true)
+        };
+        if !null(STD_OUTPUT_HANDLE) && !null(STD_ERROR_HANDLE) {
+            return;
+        }
+        if unsafe { GetConsoleWindow() }.is_invalid()
+            && unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_err()
+        {
+            return;
+        }
+        let name: Vec<u16> = "CONOUT$ ".encode_utf16().collect();
+        let Ok(conout) = (unsafe {
+            CreateFileW(
+                PCWSTR(name.as_ptr()),
+                GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+        }) else {
+            return;
+        };
+        for slot in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            if null(slot) {
+                let _ = unsafe { SetStdHandle(slot, HANDLE(conout.0)) };
+            }
+        }
+    }
+
     pub fn write_to_console(text: &str) -> bool {
         let attached = unsafe { !GetConsoleWindow().is_invalid() }
             || unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok();
@@ -3367,13 +3421,14 @@ pub enum ThreadPriority {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FolderPicker, ImagePicker, ImeSystemCaret,
-    MathContextMenu, PROGRAM_REFUSED, client_area_animation_enabled, clipboard_text,
-    current_thread_priority, documents_directory, get_dpi_for_window, get_window_rect,
-    get_work_area, install_window_class_background, is_window_minimized, message_box,
-    monospace_font_families, open_local_file, open_local_path, os_ui_language, recycle,
-    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_outer_rect, set_window_topmost, shell_execute,
-    spawn_at_priority, system_backdrop_available, wheel_scroll_amount, write_to_console,
+    MathContextMenu, PROGRAM_REFUSED, adopt_parent_console, client_area_animation_enabled,
+    clipboard_text, current_thread_priority, documents_directory, get_dpi_for_window,
+    get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
+    message_box, monospace_font_families, open_local_file, open_local_path, os_ui_language,
+    recycle, request_window_close, reveal_in_explorer, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_outer_rect, set_window_topmost,
+    shell_execute, spawn_at_priority, system_backdrop_available, wheel_scroll_amount,
+    write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.

@@ -1,3 +1,14 @@
+// **A window, not a console** (user report 2026-08-18: double-clicking
+// `folio.exe` first raised a Windows Terminal window, because a
+// console-subsystem binary is handed a console host before its own `main`
+// runs, and Windows 11's default host is WT). A terminal *emulator* draws its
+// own windows; the console the loader would have conjured is somebody else's.
+// A parent console is still spoken to when one exists — `--help` goes through
+// `bt_platform::write_to_console`, which attaches to the parent on demand —
+// and diagnostics launched with redirected handles keep them: the subsystem
+// decides only what happens when nobody asked for output anywhere.
+#![windows_subsystem = "windows"]
+
 use std::{
     backtrace::Backtrace,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -45804,6 +45815,9 @@ fn append_panic_report(path: &std::path::Path, report: &str) -> std::io::Result<
 }
 
 fn main() -> Result<()> {
+    // First, so that even the panic hook's own words have somewhere to land
+    // when a shell launched this window-subsystem process to read its traces.
+    bt_platform::adopt_parent_console();
     install_panic_log_hook();
     // **The command line, before there is anything for it to be wrong about.**
     // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
