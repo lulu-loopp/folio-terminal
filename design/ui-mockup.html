@@ -2601,6 +2601,248 @@
   .hex-peek .well {
     width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
   }
+  /* ── THE PROFILES PAGE, born 2026-08-17 (Settings extension block, slice 5) ──
+     The last of the four surfaces the extension block was opened for, and the
+     one the profile system has been holding a socket for since it was built:
+     `profiles-block-inventory.md` K86 handed "增/删/改/排序档案(可执行、参数、
+     env、起始目录、图标、颜色)" here in as many words, and §G S99-S103 kept
+     `Default profile` behind in General while this page waited for a rail.
+
+     A PAGE OF TWO VIEWS, NOT A LIST THAT SWELLS. The edit view REPLACES the
+     list; it does not open inside it. The argument is §7.1.6c-2's own, said
+     again about a different editor: "编辑器是一页,不是一串行" — an accordion
+     would put the profile being edited between the profiles that are not, in one
+     scroll, with an environment table in the middle of it.
+
+     THE ROW GROWS A THIRD LINE, and it is the only page in this dialog allowed
+     one. Every other row here describes a SETTING; every row on this page
+     describes a THING THAT RUNS, and a row that says only its own name is
+     precisely the pretending `profiles-block-inventory.md` J85 forbids ("每个档案
+     标注它实际拿到了哪些能力……不在 UI 上假装有"). The sentences come from
+     `docs/shell-integration.md`'s own matrix — one authority, quoted, never a
+     second table that would drift from it. The Terminal page's PSReadLine row is
+     the precedent: the one row in this dialog that reports a fact about the
+     machine rather than about the setting. Here they all do.
+
+     WHAT THE PAGE DOES NOT CARRY. There is no "set as default" (ruling E46 /
+     S102: the default is changed in ONE place and that place is General's row —
+     the `default` badge here reports and cannot be pressed), and there is no
+     colour picker for the five built-in marks (S98/S31: PowerShell's blue and
+     Ubuntu's orange are not this product's to repaint, which is the same ruling
+     that stopped a custom scheme repainting them). */
+  .pf-view { display: none; }
+  .pf-view.shown { display: block; }
+
+  /* THE ACTIONS ARE REVEALED, exactly as the tab strip's folder button and the
+     pane head's run are: `opacity: 0` at rest, `.12s` to full under the pointer.
+     `:focus-within` is in the selector and is not decoration — a run of verbs
+     reachable only by pointer does not exist for the keyboard, and this dialog's
+     whole slice-1 ruling was that everything in it is a focus stop.
+
+     ONE VERB IN THE OPEN AND THREE BEHIND A `⋯`. The first draft put Edit,
+     Duplicate, Hide and Delete side by side, and measured: the run came out at
+     232px against a text column of 220 — the trim wider than the row. It is also
+     the wrong reading even where it fits, because those four are not four equal
+     verbs: `Edit` is what a person came to this list to do, and duplicating,
+     hiding and deleting are the rarer three. So the row applies this block's own
+     progressive-disclosure rule to itself. The menu is not a new machine either
+     — this window already opens one over the thing under the pointer at the pane
+     head, the tab, the tree and the terminal — and a menu may legitimately be
+     shorter on one row than another, which is exactly what lets `Delete` be
+     ABSENT on a built-in rather than present and dead. A refusal that has a
+     reason (`Hide` on the default, `Hide` on the fallback floor) stays in the
+     menu greyed with its reason, which is the register `Restart shell…` already
+     uses while one is under way.
+
+     ↑/↓ AND NOT A DRAG (plan §2.5). Three reasons, in order: this dialog's
+     keyboard model is a Tab order over targets and a drag has no keyboard
+     equivalent; the list is five to ten rows, where drag's only advantage —
+     moving item 30 to position 2 — does not arise; and this window's chrome is
+     already dense with drag targets (tabs, panes, dividers), so a third grammar
+     of dragging inside a modal floating over them is a gesture collision.
+
+     The first row's ↑ and the last row's ↓ are DISABLED, not absent: a row
+     missing a button would shift every verb beside it out of column. */
+  .pf-row { gap: 12px; }
+  .pf-acts {
+    flex: none; display: flex; align-items: center; gap: 1px;
+    opacity: 0; transition: opacity .12s ease;
+  }
+  .pf-row:hover .pf-acts, .pf-row:focus-within .pf-acts { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .pf-acts { transition: none; } }
+  .pf-act {
+    flex: none; height: 26px; min-width: 26px; padding: 0 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; background: none; border-radius: 6px;
+    color: var(--ink2); font-family: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  .pf-act.glyph { padding: 0; font-size: 13px; }
+  .pf-act:hover { background: var(--hover); color: var(--ink); }
+  .pf-act[disabled] { color: var(--ink3); cursor: default; }
+  .pf-act[disabled]:hover { background: none; color: var(--ink3); }
+  /* A hairline between "move this row" and "change this profile": two verbs that
+     act on different things should not read as one run of six. */
+  .pf-sep { width: 1px; height: 16px; margin: 0 3px; background: var(--border); flex: none; }
+
+  /* The badge reports and is not a control (see the block comment). It wears the
+     group label's type — 11px, uppercase, tracked — because it IS a label, and
+     the ink an unavailable thing wears, because there is nothing to press. */
+  .pf-badge {
+    margin-left: 8px; padding: 1px 6px; border-radius: 4px;
+    background: var(--hover); color: var(--ink3);
+    font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+  }
+  /* THE SENTENCE IS BUDGETED, and the budget is why the verbs moved into a
+     menu: the run is a fixed reserve on the right, and at four words wide it
+     left the text column too narrow to say the four markers without wrapping to
+     four lines. At one word plus a `⋯` the column holds about fifty-eight
+     characters a line, which is what these sentences are written to. Each names
+     the markers it HAS and the ones it has NOT — no row claims a capability by
+     omission, and none of them is a summary word that would have to be looked
+     up somewhere else. */
+  .pf-caps { font-size: 12px; color: var(--ink3); margin-top: 2px; }
+
+  /* A HIDDEN BUILT-IN IS DIMMED, NOT DELETED (plan §2.4). Built-ins cannot be
+     deleted at all — a row that is missing looks exactly like a row that was
+     never designed, which is the same sentence `profiles.rs` writes about a
+     shell this machine does not have. The mark takes `.ticon-wrap.dead`'s
+     register verbatim (`opacity:.35; filter:grayscale(1)`), which this file
+     already struck for a mark naming something that is not running: both halves,
+     because grayscale alone reads as a rendering fault and a fade alone leaves
+     Ubuntu's orange the loudest thing in a list of rows you have switched off. */
+  .pf-row.pf-hidden .title,
+  .pf-row.pf-hidden .desc,
+  .pf-row.pf-hidden .pf-caps { color: var(--ink3); }
+  .pf-row.pf-hidden .ticon { opacity: .35; filter: grayscale(1); }
+
+  /* THE EDIT VIEW'S HEAD. A breadcrumb and not a second rail: the rail keeps
+     `Profiles` selected, because that is where the reader is. `‹ Profiles` is
+     the only way back that is a control; Esc is the other, and it takes one
+     press to reach the list and a second to leave the dialog (plan §3.5 — this
+     is a new rung on §7.1.5's Esc ladder and is booked as one). */
+  .pf-crumb { display: flex; align-items: center; gap: 6px; margin: 10px 0 2px; }
+  .pf-back {
+    border: none; background: none; padding: 0 4px 0 0; cursor: pointer;
+    font-family: inherit;
+    font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--ink3);
+  }
+  .pf-back:hover { color: var(--ink); }
+  .pf-crumb .sep { font-size: 11px; color: var(--ink3); }
+  .pf-crumb .name {
+    font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--ink2);
+  }
+
+  /* ── THE TEXT FIELD, born here ──────────────────────────────────────────────
+     This dialog has never taken a typed answer: every row until now asked a
+     question with a small named set of answers, and every one of them is a
+     picker. A profile's name, its program and its arguments are none of those,
+     and a combo of "every path on this machine" is not a control.
+
+     IT BORROWS `.combo > button`'s RECIPE EXACTLY — hairline, radius 6, 13px,
+     the same padding — because in this house a control is a face and a hairline,
+     and a field that invented its own would read as arriving from somewhere
+     else. It takes the same column, too: `min-width: 118px; max-width: 50%`, so
+     the right edge of every control on the page is still one line (the
+     one-column-per-page ruling of 2026-08-17). */
+  .field {
+    flex: none; min-width: 118px; max-width: 50%;
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--ink); font-family: inherit; font-size: 13px;
+    padding: 5px 10px;
+  }
+  .field:hover { background: var(--hover); }
+  .field:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .field.mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
+  /* A field with a verb beside it is one control in two parts, so the pair
+     occupies the column and the field gives way inside it. */
+  .field-pair { flex: none; display: flex; align-items: center; gap: 8px; max-width: 50%; }
+  .field-pair .field { max-width: none; min-width: 0; flex: 1; }
+  .field-pair .btn { flex: none; padding: 5px 10px; font-size: 12.5px; }
+
+  /* ── THE ENVIRONMENT TABLE ──────────────────────────────────────────────────
+     The one row on this page whose HEIGHT depends on its content, and the reason
+     the dialog's "one height" ruling is stated the way it is: the frame is
+     locked to the tallest PAGE, measured when the dialog opens and when a
+     disclosure turns — adding a variable makes this page scroll a little
+     further, it does not make the dialog grow under the rail.
+
+     FOLIO'S OWN DECLARATIONS ARE PRE-FILLED AND GREYED (plan §1.7, Q7). They are
+     what this terminal already says to every session: `TERM_PROGRAM`, the colour
+     claim, and `FORCE_HYPERLINK` — the last of which is the whole of R-d, now
+     visible instead of buried in line 16 of a script. Showing them is both the
+     foolproof default (you can see what is being said on your behalf) and the
+     honest one (there is no invisible second layer). A profile's own row wins
+     over them, because a profile's environment is the most specific statement
+     about the session and the person who wrote it has already answered. */
+  .envtab { flex: none; display: flex; flex-direction: column; gap: 6px; }
+  .envrow { display: flex; align-items: center; gap: 6px; }
+  .envrow .field { flex: 1; min-width: 0; }
+  .envrow .field.k { flex: 0 0 170px; }
+  .envrow.ghost .field { color: var(--ink3); border-style: dashed; }
+  .env-del {
+    flex: none; width: 22px; height: 22px; padding: 0;
+    border: none; background: none; border-radius: 5px;
+    color: var(--ink3); font-size: 12px; cursor: pointer;
+  }
+  .env-del:hover { background: var(--hover); color: var(--ink); }
+  .envrow.ghost .env-del { visibility: hidden; }
+  .env-add { align-self: flex-start; padding: 4px 10px; font-size: 12.5px; }
+
+  /* A colour is chosen by its colour, so the picker shows one — a 12px well in
+     the button and in each item, beside the name. The names are there because a
+     swatch alone cannot be spoken, searched or read by anybody who does not
+     separate these eight by hue. */
+  .pf-swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+  .combo .value .pf-swatch { margin-right: 8px; }
+  .combo .value { display: flex; align-items: center; }
+
+  /* ONE CONTROL COLUMN PER PAGE (user ruling 2026-08-17), stated here by hand
+     for the same reason the Appearance page states its own: this prototype
+     cannot express "as wide as the widest sibling on the page" without a grid
+     track shared across rows. 200 holds this page's longest picker value,
+     `The current pane's folder`, without truncating it.
+
+     AND THREE ROWS LEAVE THE COLUMN, WHICH IS THE POINT OF SAYING SO. The
+     right-aligned column is a ruling about a run of PICKERS: controls that
+     answer a question with one small named value, whose left edges line up so
+     the page can be scanned down. A path, an argument list and a table of
+     environment variables are none of those. Squeezed into a 200px column,
+     `C:\Users\me\.local\bin\claude.exe` and `FORCE_HYPERLINK` both ellipsise —
+     a control that cannot say its own value, which is the exact bug the picker
+     floor was widened to fix earlier this same day. So those three stack: the
+     title and its sentence on top, the control across the full width beneath.
+     The column above and below them is undisturbed, because they were never in
+     it. */
+  .pf-view[data-view="edit"] .row:not(.stacked) .combo,
+  .pf-view[data-view="edit"] .row:not(.stacked) .combo > button,
+  .pf-view[data-view="edit"] .row:not(.stacked) .field { width: 200px; max-width: 200px; }
+  .row.stacked { display: block; }
+  .row.stacked .text { margin-bottom: 8px; }
+  .row.stacked .field,
+  .row.stacked .field-pair,
+  .row.stacked .envtab { width: 100%; max-width: none; min-width: 0; }
+
+  /* The row's own menu borrows `.combo`'s popup whole — same face, same 8px
+     round, same 4px padding, same right-edge anchoring and the same click-away
+     and Escape the dialog's pickers already have. What it does not borrow is the
+     tick column: nothing in it is a current value. */
+  .pf-more { position: relative; flex: none; max-width: none; }
+  /* `.combo > button` is the pickers' recipe — a 118px floor, a hairline, a face
+     and space-between — and every line of it is wrong for a trigger that is one
+     glyph wide. Undone here rather than by making the trigger something other
+     than a `.combo`, because the popup's own machinery (open/close, flip-up,
+     click-away, Escape) is keyed off exactly that structure. */
+  .pf-more > button {
+    min-width: 26px; width: 26px; padding: 0;
+    border: none; background: none; justify-content: center;
+  }
+  .pf-more > button:hover { background: var(--hover); color: var(--ink); }
+  .pf-more .combo-menu { min-width: 150px; }
+  .pf-more .combo-item { padding: 6px 10px; }
+  .pf-more .combo-item.dead { color: var(--ink3); cursor: default; }
+  .pf-more .combo-item.dead:hover { background: none; color: var(--ink3); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
 </style>
 </head>
@@ -2729,6 +2971,26 @@
       <path d="M8 1.8v12.4M1.8 8h12.4"/>
       <path d="M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8" stroke-width="1.35"/>
     </g>
+  </symbol>
+  <!-- THE CHASSIS A PROFILE OF YOUR OWN WEARS (slice 5, plan §1.5).
+
+       `p-pwsh` and `p-cmd` are already the same drawing twice — one rounded
+       panel, one chevron, one underline — differing only in what they are filled
+       with. So a user's profile is that drawing a third time, filled from a set
+       of eight fixed colours, and it reads as "a shell of your own" rather than
+       as a brand nobody owns. NO LETTER IN IT: the house rule is that a profile
+       icon is a MARK and not a character ("认出 PowerShell 靠的是那块蓝,不是读
+       字形"), and an initial in a box is exactly the thing that rule refuses.
+
+       `currentColor` on the panel and a white glyph, with the colour handed in
+       as a LITERAL hex at the use site rather than a var: a mark carries its own
+       colours and does not turn over with the theme (mock-up line 2148), so the
+       eight are struck values and each of them holds its silhouette on both
+       grounds — the constraint `p-cmd` was drawn charcoal-not-black to satisfy. -->
+  <symbol id="p-shell" viewBox="0 0 16 16">
+    <rect x="1" y="2.5" width="14" height="11" rx="1.8" fill="currentColor"/>
+    <path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#fff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M8.5 10.9h3.2" stroke="#fff" stroke-width="1.35" stroke-linecap="round"/>
   </symbol>
   <symbol id="i-panel" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M6.2 2.5v11" stroke="currentColor" stroke-width="1.1"/></symbol>
   <!-- 2026-08-15 (user ruling) — the split family, struck for this product.
@@ -2937,6 +3199,12 @@
       <div class="settings-body">
         <nav class="settings-nav" id="settings-nav" aria-label="Settings categories">
           <button class="nav-item selected" data-page="general">General</button>
+          <!-- SECOND, and directly under General, because General's `Default
+               profile` row names the very table this word opens. The rail is
+               still derived from which categories have rows — `Profiles` is not
+               a door onto an empty room, it arrives on the day its rows do, and
+               this is that day (slice 5). -->
+          <button class="nav-item" data-page="profiles">Profiles</button>
           <button class="nav-item" data-page="appearance">Appearance</button>
           <button class="nav-item" data-page="terminal">Terminal</button>
           <button class="nav-item" data-page="blocks">Rendered blocks</button>
@@ -2954,6 +3222,405 @@
             <button aria-haspopup="listbox"><span class="value">PowerShell</span><span class="chev">▼</span></button>
             <div class="combo-menu" role="listbox" id="profile-options"></div>
           </div>
+        </div>
+        </section>
+
+        <!-- ══ PROFILES (Settings extension block, slice 5; K86 / §G S99-S103) ══
+             The page's own reasoning lives in the CSS block at `.pf-view`. What
+             the markup adds is the six states a row can be in, one of each,
+             because the list is where this page tells the truth:
+
+               1  PowerShell 7            the default; ↑ and Hide both dead
+               2  Windows PowerShell 5.1  the fallback floor; Hide dead
+               3  WSL · Ubuntu            a qualifier the machine supplied
+               4  Git Bash                not installed on this machine
+               5  Command Prompt          hidden by the user
+               6  Claude                  a profile of the user's own
+
+             `DELETE` IS ABSENT FROM A BUILT-IN'S MENU rather than present and
+             dead. A built-in cannot be deleted at all — it can be hidden, and a
+             row that is missing looks exactly like a row that was never
+             designed, which is the sentence `profiles.rs` already writes about a
+             shell this machine does not have. Absence is safe HERE and would not
+             have been in the run: a right-aligned row of verbs with one missing
+             slides the rest sideways from row to row, and a menu has no column
+             to keep. A refusal that has a reason stays and greys — `Hide` on the
+             default and on the fallback floor — with the reason in its tooltip,
+             which is where a menu item keeps one.
+
+             AN UNAVAILABLE ROW DROPS ITS CAPABILITY LINE. A shell that is not on
+             this machine has no capabilities to report, and the one sentence the
+             row has room for is the reason it cannot run — which is `.row
+             .unavailable`'s existing rule ("a row the machine cannot honour is
+             greyed WHOLE and its sentence becomes the reason") applied to a row
+             that happens to have had two. -->
+        <section class="settings-page" data-page="profiles">
+        <div class="pf-view shown" data-view="list">
+        <div class="group-label">Profiles</div>
+
+        <div class="row pf-row">
+          <span class="ticon"><svg class="pmark"><use href="#p-pwsh"/></svg></span>
+          <div class="text">
+            <div class="title">PowerShell 7<span class="pf-badge">default</span></div>
+            <div class="desc">pwsh.exe -NoLogo</div>
+            <div class="pf-caps">Prompt marks, directory, exit codes and hyperlinks — with folio.ps1 in $PROFILE</div>
+          </div>
+          <div class="pf-acts">
+            <button class="pf-act glyph" disabled title="Already first">↑</button>
+            <button class="pf-act glyph" title="Move down">↓</button>
+            <span class="pf-sep"></span>
+            <button class="pf-act pf-edit-act">Edit</button>
+            <div class="combo pf-more" data-combo="pfmore">
+              <button class="pf-act glyph" aria-haspopup="menu" title="More" aria-label="More actions">⋯</button>
+              <div class="combo-menu" role="menu">
+                <div class="combo-item" role="menuitem">Duplicate</div>
+                <div class="combo-item dead" role="menuitem" title="The default profile stays in the picker">Hide</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row pf-row">
+          <span class="ticon"><svg class="pmark"><use href="#p-pwsh"/></svg></span>
+          <div class="text">
+            <div class="title">Windows PowerShell 5.1</div>
+            <div class="desc">powershell.exe -NoLogo</div>
+            <div class="pf-caps">Prompt marks, directory, exit codes and hyperlinks — with folio.ps1 in $PROFILE</div>
+          </div>
+          <div class="pf-acts">
+            <button class="pf-act glyph" title="Move up">↑</button>
+            <button class="pf-act glyph" title="Move down">↓</button>
+            <span class="pf-sep"></span>
+            <button class="pf-act pf-edit-act">Edit</button>
+            <div class="combo pf-more" data-combo="pfmore">
+              <button class="pf-act glyph" aria-haspopup="menu" title="More" aria-label="More actions">⋯</button>
+              <div class="combo-menu" role="menu">
+                <div class="combo-item" role="menuitem">Duplicate</div>
+                <div class="combo-item dead" role="menuitem" title="Every fallback lands on this profile">Hide</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row pf-row">
+          <span class="ticon"><svg class="pmark"><use href="#p-ubuntu"/></svg></span>
+          <div class="text">
+            <div class="title">WSL · Ubuntu</div>
+            <div class="desc">wsl.exe --cd ~</div>
+            <div class="pf-caps">Prompt marks, directory, exit codes and hyperlinks — on a bash login only</div>
+          </div>
+          <div class="pf-acts">
+            <button class="pf-act glyph" title="Move up">↑</button>
+            <button class="pf-act glyph" title="Move down">↓</button>
+            <span class="pf-sep"></span>
+            <button class="pf-act pf-edit-act">Edit</button>
+            <div class="combo pf-more" data-combo="pfmore">
+              <button class="pf-act glyph" aria-haspopup="menu" title="More" aria-label="More actions">⋯</button>
+              <div class="combo-menu" role="menu">
+                <div class="combo-item" role="menuitem">Duplicate</div>
+                <div class="combo-item" role="menuitem">Hide</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row pf-row unavailable">
+          <span class="ticon"><svg class="pmark"><use href="#p-git"/></svg></span>
+          <div class="text">
+            <div class="title">Git Bash</div>
+            <div class="desc">Git for Windows is not installed</div>
+          </div>
+          <div class="pf-acts">
+            <button class="pf-act glyph" title="Move up">↑</button>
+            <button class="pf-act glyph" title="Move down">↓</button>
+            <span class="pf-sep"></span>
+            <button class="pf-act pf-edit-act">Edit</button>
+            <div class="combo pf-more" data-combo="pfmore">
+              <button class="pf-act glyph" aria-haspopup="menu" title="More" aria-label="More actions">⋯</button>
+              <div class="combo-menu" role="menu">
+                <div class="combo-item" role="menuitem">Duplicate</div>
+                <div class="combo-item" role="menuitem">Hide</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row pf-row pf-hidden">
+          <span class="ticon"><svg class="pmark"><use href="#p-cmd"/></svg></span>
+          <div class="text">
+            <div class="title">Command Prompt<span class="pf-badge">hidden</span></div>
+            <div class="desc">cmd.exe</div>
+            <div class="pf-caps">Directory and hyperlinks; no prompt marks, no exit codes</div>
+          </div>
+          <div class="pf-acts">
+            <button class="pf-act glyph" title="Move up">↑</button>
+            <button class="pf-act glyph" title="Move down">↓</button>
+            <span class="pf-sep"></span>
+            <button class="pf-act pf-edit-act">Edit</button>
+            <div class="combo pf-more" data-combo="pfmore">
+              <button class="pf-act glyph" aria-haspopup="menu" title="More" aria-label="More actions">⋯</button>
+              <div class="combo-menu" role="menu">
+                <div class="combo-item" role="menuitem">Duplicate</div>
+                <div class="combo-item" role="menuitem">Show</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- A PROFILE OF THE USER'S OWN. Its mark is the shared chassis in one of
+             eight struck colours (`#p-shell`), its id is a slug with a short
+             random tail — `claude-7f3a` — so that renaming it does not change who
+             it is on disk, and it is the only kind of row whose ✕ is live. -->
+        <div class="row pf-row">
+          <span class="ticon"><svg class="pmark" style="color:#B07A16"><use href="#p-shell"/></svg></span>
+          <div class="text">
+            <div class="title">Claude</div>
+            <div class="desc">claude.exe</div>
+            <div class="pf-caps">No shell integration</div>
+          </div>
+          <div class="pf-acts">
+            <button class="pf-act glyph" title="Move up">↑</button>
+            <button class="pf-act glyph" disabled title="Already last">↓</button>
+            <span class="pf-sep"></span>
+            <button class="pf-act pf-edit-act">Edit</button>
+            <div class="combo pf-more" data-combo="pfmore">
+              <button class="pf-act glyph" aria-haspopup="menu" title="More" aria-label="More actions">⋯</button>
+              <div class="combo-menu" role="menu">
+                <div class="combo-item" role="menuitem">Duplicate</div>
+                <div class="combo-item" role="menuitem">Hide</div>
+                <div class="combo-item" role="menuitem" data-act="del">Delete</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- NEW PROFILE COPIES THE DEFAULT rather than opening a blank one: a
+             profile with no program is a row that cannot start, and this block's
+             default state is meant to be foolproof. It is not a menu of
+             templates either — every row's `Duplicate` already is that, and one
+             verb with two doors is the thing this house keeps deleting. -->
+        <div class="sc-foot"><button class="btn pf-new">New profile</button></div>
+        </div>
+
+        <!-- ══ the editor ══════════════════════════════════════════════════════
+             The everyday half on top, in the order somebody decides a profile:
+             what it is called, what it runs, where it starts, what colour names
+             it. Everything else is behind the page's own Advanced — arguments,
+             the environment, the hyperlink answer and which integration script
+             it is served by — because those four are what the disclosure exists
+             for, by the same measure that put `Customise scheme…` behind one.
+
+             PICTURED HERE: a profile of the user's own, which is why `Colour` is
+             live and the page's foot verb is `Delete profile`. On a BUILT-IN the
+             two differ and only those two: `Colour` is greyed whole with its
+             sentence become the reason (`PowerShell's mark is its own` —
+             S98/S31: those five colours are not this product's to repaint), and
+             the foot verb is `Restore all defaults`, which returns every field on
+             the page to the shipped table.
+
+             `Name` writes `display_title` and NOT the string the OSC 0/2
+             comparison uses (§G S103, plan §1.4). A built-in keeps its shipped
+             `title` invisibly, because that is the word its integration script
+             announces — `folio.ps1` sends `$PSVersionTable.PSEdition` — and a
+             pane head drops an announcement that merely repeats the launcher.
+             After a rename BOTH strings are compared, so neither the script's
+             word nor the user's own leaks onto the head as a program title. -->
+        <div class="pf-view" data-view="edit">
+        <div class="pf-crumb">
+          <button class="pf-back">‹ Profiles</button>
+          <span class="sep">›</span>
+          <span class="name">Claude</span>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Name</div>
+            <div class="desc">What this profile is called on tabs, in the picker and in this list</div>
+          </div>
+          <input class="field" value="Claude" aria-label="Name">
+        </div>
+
+        <div class="row stacked">
+          <div class="text">
+            <div class="title">Program</div>
+            <div class="desc">The executable a new tab of this profile starts</div>
+          </div>
+          <div class="field-pair">
+            <input class="field mono" value="C:\Users\Weiyi\.local\bin\claude.exe" aria-label="Program">
+            <button class="btn">Browse…</button>
+          </div>
+        </div>
+
+        <!-- THREE ANSWERS AND NOT A PATH BOX. `Inherit` is what every tab does
+             today and stays the default; `Home` is the profile's own answer when
+             nothing has been inherited, and it is not one string for all
+             profiles — a Windows shell takes a working directory, `wsl.exe` takes
+             `--cd ~`, and the shipped table already says which. `Choose a
+             folder…` adds a fixed place and puts its path under the row. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Starting directory</div>
+            <div class="desc">Where a tab of this profile opens when nothing is inherited</div>
+          </div>
+          <div class="combo" data-combo="pfstart">
+            <button aria-haspopup="listbox"><span class="value">The current pane's folder</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="inherit" role="option"><span class="tick">✓</span>The current pane's folder</div>
+              <div class="combo-item" data-v="home" role="option"><span class="tick">✓</span>Home</div>
+              <div class="combo-item" data-v="fixed" role="option"><span class="tick">✓</span>Choose a folder…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- EIGHT STRUCK COLOURS AND NOT A COLOUR PICKER (§7.1.6c-4a already
+             ruled there is no picker in this dialog and there is not going to be
+             one). A 15px identity mark's whole job is to be recognised across a
+             strip at a glance, and a continuous colour space is exactly how two
+             indistinguishable blues get chosen. The eight are fixed hexes rather
+             than scheme colours, because a mark does not turn over with the
+             theme, and each holds its silhouette on both grounds.
+
+             It stays editable AFTER creation. Pick-once would make people delete
+             and recreate a profile to change its colour, and recreating changes
+             the `id` — at which point every seed on disk pointing at it degrades
+             to the fallback. That trades one irreversible convenience for a pile
+             of reversible losses. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Colour</div>
+            <div class="desc">The mark that names this profile across the window</div>
+          </div>
+          <div class="combo" data-combo="pfcolour">
+            <button aria-haspopup="listbox"><span class="value"><span class="pf-swatch" style="background:#B07A16"></span>Amber</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="blue" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#2F6FB5"></span>Blue</div>
+              <div class="combo-item" data-v="teal" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#1F7A6B"></span>Teal</div>
+              <div class="combo-item" data-v="green" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#3F7D3A"></span>Green</div>
+              <div class="combo-item selected" data-v="amber" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#B07A16"></span>Amber</div>
+              <div class="combo-item" data-v="red" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#A83A3A"></span>Red</div>
+              <div class="combo-item" data-v="magenta" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#A03A78"></span>Magenta</div>
+              <div class="combo-item" data-v="violet" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#6B4E9E"></span>Violet</div>
+              <div class="combo-item" data-v="slate" role="option"><span class="tick">✓</span><span class="pf-swatch" style="background:#4A5568"></span>Slate</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="adv" id="adv-profile">
+        <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-profile-rows">
+          <svg class="tri"><use href="#i-tri"/></svg>
+          <div class="text"><div class="title">Advanced</div></div>
+        </div>
+        <div class="adv-rows" id="adv-profile-rows">
+
+        <div class="row stacked">
+          <div class="text">
+            <div class="title">Arguments</div>
+            <div class="desc">Passed to the program ahead of anything the shell reads</div>
+          </div>
+          <input class="field mono" value="" placeholder="None" aria-label="Arguments">
+        </div>
+
+        <!-- THE THREE GREYED ROWS ARE FOLIO'S OWN, and `FORCE_HYPERLINK` among
+             them is the whole of R-d made visible (`M2-persistence-schema-v1.md`
+             §296-299 deferred it to "per-profile 环境变量覆盖机制", and the
+             mechanism landed with the profile system). Until then the only thing
+             that said this terminal renders links was line 16 of one profile's
+             opt-in script, so links worked in a PowerShell whose owner had
+             installed the script and in no other pane in the window.
+
+             A profile's own row WINS over them. The environment of a profile is
+             the most specific statement anybody makes about its sessions, and
+             `hyperlink_declaration`'s own rule is already that whoever set the
+             variable has answered the question. -->
+        <div class="row stacked">
+          <div class="text">
+            <div class="title">Environment</div>
+            <div class="desc">Set for this profile's sessions, over what Folio sets</div>
+          </div>
+          <div class="envtab">
+            <div class="envrow ghost">
+              <input class="field k mono" value="TERM_PROGRAM" readonly aria-label="Name"><input class="field mono" value="Folio" readonly aria-label="Value"><button class="env-del" aria-label="Remove">✕</button>
+            </div>
+            <div class="envrow ghost">
+              <input class="field k mono" value="COLORTERM" readonly aria-label="Name"><input class="field mono" value="truecolor" readonly aria-label="Value"><button class="env-del" aria-label="Remove">✕</button>
+            </div>
+            <div class="envrow ghost">
+              <input class="field k mono" value="FORCE_HYPERLINK" readonly aria-label="Name"><input class="field mono" value="1" readonly aria-label="Value"><button class="env-del" aria-label="Remove">✕</button>
+            </div>
+            <div class="envrow">
+              <input class="field k mono" value="ANTHROPIC_LOG" aria-label="Name"><input class="field mono" value="debug" aria-label="Value"><button class="env-del" aria-label="Remove">✕</button>
+            </div>
+            <button class="btn env-add">Add</button>
+          </div>
+        </div>
+
+        <!-- A ROW OF ITS OWN as well as a line in the table, because it is the
+             one variable in there that is a question about this terminal rather
+             than about the program: `Auto` is Folio declaring what it is
+             (it renders OSC 8, and the `supports-hyperlinks` convention's default
+             answer is a guess from a list this terminal is not on), and On/Off
+             are the user overruling that declaration for this profile. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Force hyperlinks</div>
+            <div class="desc">FORCE_HYPERLINK, the answer programs read before emitting a link</div>
+          </div>
+          <div class="combo" data-combo="pfhyper">
+            <button aria-haspopup="listbox"><span class="value">Auto</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="auto" role="option"><span class="tick">✓</span>Auto</div>
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ITS DESCRIPTION IS THE CAPABILITY SENTENCE, and it is the same
+             sentence the list row carries — one authority quoted twice, never a
+             second table. `Auto` reads the program's own file name: pwsh and
+             powershell take the PowerShell script, bash/sh/zsh/wsl take the init
+             file, cmd takes the PROMPT variable, and anything else takes NONE.
+             `None` is a variant the enum does not have today and this page is why
+             it must grow one: handing bash's `--init-file` to a program that is
+             not a bash means handing it a filename to open. Nothing about the
+             degradation is new — a screen that never emits OSC 133 keeps the
+             cursor/WRAPLINE heuristics, and a session that never emits OSC 7
+             leaves the relative path undetected rather than guessing. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Shell integration</div>
+            <div class="desc">No prompt marks, no directory, no exit codes. Hyperlinks are declared anyway</div>
+          </div>
+          <div class="combo" data-combo="pfintegration">
+            <button aria-haspopup="listbox"><span class="value">Auto (None)</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="auto" role="option"><span class="tick">✓</span>Auto (None)</div>
+              <div class="combo-item" data-v="ps" role="option"><span class="tick">✓</span>PowerShell script</div>
+              <div class="combo-item" data-v="bash" role="option"><span class="tick">✓</span>Bash init file</div>
+              <div class="combo-item" data-v="cmd" role="option"><span class="tick">✓</span>Command Prompt</div>
+              <div class="combo-item" data-v="none" role="option"><span class="tick">✓</span>None</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="adv-foot"><button class="btn adv-reset">Reset to defaults</button></div>
+        </div>
+        </div>
+
+        <!-- DELETE IS IMMEDIATE, WITH AN UNDO TOAST, AND NO CONFIRMATION (plan
+             §2.3). This dialog has no dirty gate to route a question through and
+             every choice in it is written the instant it is made — `Restore all
+             defaults` and `Reset to defaults` were both ruled on those grounds.
+             What deletion adds is irreversibility, so what it is owed is an
+             UNDO, which this product has already struck once as `Ctrl+Shift+T`;
+             a confirmation would be the first modal over a modal here.
+
+             The toast names one fact and it is a fact this window holds: how
+             many panes are running the profile, and that they keep running. It
+             does not count seeds on disk — a number read out of a file at delete
+             time can be wrong by the day it matters, and the honest place for
+             that is the degrade banner the restarting seat already prints. -->
+        <div class="sc-foot"><button class="btn">Delete profile</button></div>
         </div>
         </section>
 
@@ -7297,6 +7964,14 @@
       const openCombo = document.querySelector(".combo.open");
       if (openCombo) { openCombo.classList.remove("open"); return; }
       if ($("auto-overlay").classList.contains("show")) { $("auto-overlay").classList.remove("show"); return; }
+      /* The profile editor is a LAYER OF the settings dialog and takes its own
+         press (slice 5): one Esc leaves the editor for the list, a second leaves
+         the dialog. Without the rung, somebody who has just typed a path into a
+         field loses the whole dialog on the keystroke that means "back". */
+      if ($("settings-overlay").classList.contains("show")
+          && document.querySelector('#settings-overlay .pf-view[data-view="edit"].shown')) {
+        pfShow("list"); return;
+      }
       if ($("settings-overlay").classList.contains("show")) { $("settings-overlay").classList.remove("show"); return; }
       if (pvFloatState) { closePvFloat(); return; }
       if (flyoutState) { closeFlyout(); return; }
@@ -8820,7 +9495,25 @@
     pages.forEach((page) => page.classList.remove("shown"));
     pages.forEach((page) => {
       page.classList.add("shown");
-      tallest = Math.max(tallest, content.scrollHeight);
+      /* A PAGE WITH SUB-VIEWS IS MEASURED AT EACH OF THEM (slice 5). The
+         Profiles page holds a list and an editor, one shown at a time, and the
+         frame must be the taller of the two whichever is up — otherwise walking
+         into the editor resizes the dialog under the rail, which is the exact
+         bug the tallest-page rule exists to close. Same walk as the pages'
+         own, one level down. */
+      const views = [...page.querySelectorAll(".pf-view")];
+      if (views.length) {
+        const up = views.map((v) => v.classList.contains("shown"));
+        views.forEach((v) => v.classList.remove("shown"));
+        views.forEach((v) => {
+          v.classList.add("shown");
+          tallest = Math.max(tallest, content.scrollHeight);
+          v.classList.remove("shown");
+        });
+        views.forEach((v, i) => v.classList.toggle("shown", up[i]));
+      } else {
+        tallest = Math.max(tallest, content.scrollHeight);
+      }
       page.classList.remove("shown");
     });
     pages.forEach((page, i) => page.classList.toggle("shown", shown[i]));
@@ -8881,6 +9574,15 @@
     combo.querySelectorAll(".combo-item").forEach(item =>
       item.addEventListener("click", (e) => {
         e.stopPropagation();
+        /* A ROW'S `⋯` IS A MENU OF VERBS, NOT A PICKER OF VALUES (slice 5). It
+           borrows this popup's face, its anchoring, its click-away and its
+           Escape, and none of the rest: nothing in it is selected, nothing in it
+           becomes a button's label, and a greyed item does nothing at all. */
+        if (combo.classList.contains("pf-more")) {
+          combo.classList.remove("open");
+          if (!item.classList.contains("dead")) pfMenuAct(item);
+          return;
+        }
         combo.querySelectorAll(".combo-item").forEach(x => x.classList.remove("selected"));
         item.classList.add("selected");
         combo.querySelector(".value").textContent = item.dataset.v[0].toUpperCase() + item.dataset.v.slice(1);
@@ -8892,6 +9594,16 @@
              `Auto` here would hide the very thing this row is in the file to
              show. */
           combo.querySelector(".value").textContent = item.lastChild.textContent.trim();
+        }
+        /* THE PROFILES PAGE'S PICKERS PRINT THE ITEM'S OWN WORDS, for
+           `splitdir`'s reason and one more: `The current pane's folder` and
+           `Auto (None)` are not their data values capitalised, and the colour
+           picker's value is a swatch beside a word rather than a word. Copied
+           without the tick, which belongs to the list and not to the button. */
+        if (kind === "pfstart" || kind === "pfcolour" || kind === "pfhyper" || kind === "pfintegration") {
+          const shown = item.cloneNode(true);
+          shown.querySelector(".tick")?.remove();
+          combo.querySelector(".value").innerHTML = shown.innerHTML.trim();
         }
         if (kind === "layout") { state.layoutMode = item.dataset.v; render(); }
         if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
@@ -8980,6 +9692,43 @@
       notifyToast(`${page} ▸ Advanced is back to its defaults`);
     });
   });
+
+  /* ── THE PROFILES PAGE (slice 5) ──
+     Two views on one page, and switching them is switching a page: the reader is
+     put at the top, exactly as the rail does, because the distance belonged to
+     the view they left. The rail keeps `Profiles` selected the whole time — the
+     editor is a layer of this page, not a sixth category — and pressing any
+     other word in the rail simply leaves it, because nothing here is unsaved:
+     every field in this dialog is written the instant it is changed.
+
+     The height is re-locked on every switch for the reason `lockSettingsHeight`
+     now measures sub-views at all: the frame must already be as tall as the
+     editor while the list is up, so that walking in changes nothing but the
+     content. Re-running it here is belt and braces — it costs one measurement
+     and it is the call that would catch a view whose rows had changed. */
+  function pfShow(view) {
+    const page = document.querySelector('#settings-overlay .settings-page[data-page="profiles"]');
+    page.querySelectorAll(".pf-view").forEach(
+      (v) => v.classList.toggle("shown", v.dataset.view === view));
+    const content = $("settings-overlay").querySelector(".content");
+    if (content) content.scrollTop = 0;
+    lockSettingsHeight();
+  }
+  document.querySelector('#settings-overlay .settings-page[data-page="profiles"]')
+    .addEventListener("click", (e) => {
+      if (e.target.closest(".pf-back")) { pfShow("list"); return; }
+      if (e.target.closest(".pf-edit-act") || e.target.closest(".pf-new")) { pfShow("edit"); return; }
+    });
+  /* Gone at once, and the toast is the way back — see the markup's own note for
+     why this is an undo and not a confirmation. The sentence names the panes
+     this window is holding, and says outright that they keep running: a profile
+     is read at spawn, so a live session owns what it was handed. It does not
+     count seeds on disk. */
+  function pfMenuAct(item) {
+    if (item.dataset.act === "del") {
+      notifyToast("Claude is gone. 2 panes are running it, and they keep running.");
+    }
+  }
 
   $("btn-rail").addEventListener("click", () => {
     state.railCollapsed = !state.railCollapsed;
