@@ -1422,6 +1422,28 @@ impl ViewportProjection {
         self.cell_height_subpixels
     }
 
+    /// One screenful, in subpixels — the page every scroll extent is measured
+    /// against.
+    pub fn viewport_height_subpixels(&self) -> i64 {
+        i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get())
+    }
+
+    /// **The furthest into history this view may be scrolled**, in subpixels:
+    /// everything the last projection measured, less the one screenful that is
+    /// showing. Zero when the whole of the document fits, which is the same
+    /// thing as "there is no scrollback to look at".
+    ///
+    /// Public because a scroll bar is a *picture* of this number and of
+    /// [`Self::scroll_offset_subpixels`], and a picture derived from anything
+    /// else would be a second opinion about how far the view can go. It is the
+    /// clamp [`Self::scroll_by_subpixels`] and [`Self::scroll_to_top`] were
+    /// already computing inline, named once so the three cannot disagree.
+    pub fn scroll_extent_subpixels(&self) -> i64 {
+        self.last_total_height_subpixels
+            .saturating_sub(self.viewport_height_subpixels())
+            .max(0)
+    }
+
     /// Track the authoritative cell height. A zoom / DPI change remeasures the font, which changes
     /// the pixel height of every row while leaving row and scroll-offset semantics untouched. The
     /// projection caches subpixel geometry (`live_row_prefix`, math band tops) keyed on this height,
@@ -1446,12 +1468,7 @@ impl ViewportProjection {
         // application transcript rewrite is superseded.
         self.displaced_review_subpixels = None;
         self.review_hold = false;
-        let pane_height =
-            i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
-        let max = self
-            .last_total_height_subpixels
-            .saturating_sub(pane_height)
-            .max(0);
+        let max = self.scroll_extent_subpixels();
         let offset = self
             .pending_scroll_offset_subpixels
             .unwrap_or(self.scroll_offset_subpixels)
@@ -1469,12 +1486,7 @@ impl ViewportProjection {
 
     pub fn scroll_to_top(&mut self) {
         self.displaced_review_subpixels = None;
-        let pane_height =
-            i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
-        let offset = self
-            .last_total_height_subpixels
-            .saturating_sub(pane_height)
-            .max(0);
+        let offset = self.scroll_extent_subpixels();
         self.live_overflow_offset_subpixels = self.last_live_overflow_subpixels;
         self.pending_scroll_offset_subpixels = Some(offset);
         if offset == 0 {

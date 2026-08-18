@@ -855,6 +855,39 @@ pub struct ChromePalette {
     /// this whole struct — two declarations, either of which could be re-struck
     /// without the other.
     pub command_tick_search_crest: [u8; 3],
+    // ── the scroll thumb that runs in the lane beside the rail ──────────────
+    //
+    // `body, body * { scrollbar-width: thin; scrollbar-color: var(--thumb)
+    // transparent }` (`design/ui-mockup.html` 95) is the whole of the mock-up's
+    // scroll bar, and the comment above it says what the two tokens are for: *"a
+    // chunky opaque thing, and a scrollbar in a terminal should be a mark on the
+    // text, not a piece of furniture beside it"* (86-94). So this is a **thumb
+    // and no track** — `transparent` is the track, stated rather than defaulted —
+    // and the pair below is `--thumb`/`--thumb-hover` composited over the one
+    // ground a terminal pane has.
+    //
+    // Two fields and not four: hover is the only state the design gives a thumb.
+    // A *held* thumb wears the hover colour, because the mock-up's stylesheet has
+    // no `:active` on it and inventing one would be this palette answering a
+    // question the design did not ask.
+    /// `--thumb` over `--termbg`: white at .22 on night, `#37352F` at .24 on
+    /// paper.
+    ///
+    /// The two alphas differ by two hundredths and that is the design's own
+    /// asymmetry, the same one `--ink`/`--ink2`/`--ink3` carry between `:root`
+    /// and `body.dark`: ink laid on paper covers more per unit of alpha than ink
+    /// laid on night, so a light thumb needs a shade more to read as the same
+    /// mark. Folding them into one number would make the light bar the fainter
+    /// of the two, which is the theme it is hardest to see on.
+    pub scroll_thumb: [u8; 3],
+    /// `--thumb-hover` over `--termbg`: .4 on night, .42 on paper — the same
+    /// mark, brought forward while a hand is near it.
+    ///
+    /// **Brightness and not width.** `scrollbar-width: thin` is declared once for
+    /// every state the mock-up has; nothing in it widens under the pointer, and
+    /// a bar that grew would move the character cell under it, which is exactly
+    /// what the reserved lane exists to stop happening.
+    pub scroll_thumb_hover: [u8; 3],
     /// A floating window's face — `--menu`, worn by `.float-win`, the term menu
     /// and the hover-peek flyout. It is deliberately *not* `title_bar`: a window
     /// that floats over content is a different plane from the chrome that frames
@@ -1353,6 +1386,10 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // `--ink2` (white .72) over the dark `--termbg` — the same mix a file row's
     // name is set in.
     command_tick_search_crest: [0x98, 0x98, 0x98],
+    // `--thumb` (white .22) and `--thumb-hover` (white .4) over the dark
+    // `--termbg`.
+    scroll_thumb: [0x4d, 0x4d, 0x4d],
+    scroll_thumb_hover: [0x76, 0x76, 0x76],
     menu_surface: [0x2a, 0x2a, 0x2a],
     menu_border: [0xff, 0xff, 0xff],
     menu_border_alpha: 24,
@@ -1576,6 +1613,12 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     command_tick_fail_crest: [0xbe, 0x12, 0x3c],
     // `--ink2` (black .72) over the light `--termbg`.
     command_tick_search_crest: [0x7d, 0x7c, 0x78],
+    // `--thumb` (`#37352F` at .24) and `--thumb-hover` (the same ink at .42)
+    // over the light `--termbg`. The ink is warm, so the third channel parts
+    // company with the other two — which is the whole reason this is a triple
+    // and not a grey level.
+    scroll_thumb: [0xcf, 0xcf, 0xcd],
+    scroll_thumb_hover: [0xab, 0xaa, 0xa8],
     menu_surface: [0xff, 0xff, 0xff],
     menu_border: [0x00, 0x00, 0x00],
     menu_border_alpha: 22,
@@ -1835,8 +1878,11 @@ pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 30.0;
 ///
 /// # A lane declared before the instrument that runs in it
 ///
-/// There is no terminal scroll bar yet — P2-9 owns it — and this constant exists
-/// precisely because there is not. The mock-up's rail carries an accident report
+/// **The instrument arrived on 2026-08-18** (P2-9 slice 1,
+/// `crates/bt-app/src/termscroll.rs`), and this section stays as written because
+/// it is the record of why the lane could be reserved two days early. When it
+/// was written there was no terminal scroll bar at all, and the constant existed
+/// precisely because there was not. The mock-up's rail carries an accident report
 /// in its own stylesheet (`design/ui-mockup.html` 1355-1357): *"inboard of the
 /// scrollbar gutter (thin ≈ 8px): the rail and the thumb are different
 /// instruments and may not share a lane (user report 2026-07-18 — ticks sat on
