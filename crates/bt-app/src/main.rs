@@ -13458,8 +13458,18 @@ fn create_leaf_session(
         // **And what makes it legible.** The profile's own arguments, the place,
         // and — for the bash family — the init file that installs OSC 133 and
         // OSC 7 into this one shell without touching anything the user owns.
+        // **The whole row and not its index** (§7.1.6c-6c): the profile's own
+        // environment is one of the things the spawn now lays down, and a
+        // function that asked this module five separate questions about one
+        // index is a function no test can put a profile in front of.
+        let row = profiles::row(seed.profile).unwrap_or_else(|| {
+            panic!(
+                "profile {:?} reached spawn with no row in the table: the picker                  must not offer a row the table does not hold",
+                chosen_id
+            )
+        });
         let command = shell_integration::shell_command(
-            seed.profile,
+            &row,
             &place.arguments,
             shell_integration::script_path(),
             wsl::facts(),
@@ -19099,10 +19109,39 @@ impl Runtime {
                 Some("0") => 2,
                 Some(_) => 1,
             },
-            capability: profiles::capability_of(index).text(),
-            // The three ghosts are not the reader's and are not counted: they
-            // are what this terminal says to every session.
+            // **The editor's own length of the same sentence**: this row has the
+            // page's whole width, where the list's third line shares its row
+            // with an action run.
+            capability: profiles::capability_in_editor(index).text(),
+            // The ghosts are not the reader's and are not counted: they are what
+            // this terminal says to a session of this profile.
             env_rows: editor.env.len(),
+            integration: settings::INTEGRATION_OPTIONS
+                .iter()
+                .position(|choice| *choice == profiles::integration_choice(index))
+                .unwrap_or_default(),
+            integration_auto: profiles::integration_auto_label(index),
+            // **What this terminal will say to a session of this profile, less
+            // whatever this profile has already said.** Derived on both counts:
+            // a PowerShell gets no `FORCE_HYPERLINK` ghost because its own
+            // script is the half that declares links, and a name the reader has
+            // a row for is no longer the terminal's to say — which is what makes
+            // adopting a ghost a move and not a duplication.
+            ghosts: {
+                let declared =
+                    shell_integration::declared_environment(profiles::integration(index));
+                let mut slots = [None; 3];
+                for (slot, (name, value)) in
+                    slots
+                        .iter_mut()
+                        .zip(declared.into_iter().filter(|(name, _)| {
+                            !env.iter().any(|(mine, _)| mine.eq_ignore_ascii_case(name))
+                        }))
+                {
+                    *slot = Some((name, value));
+                }
+                slots
+            },
         })
     }
 
@@ -20422,7 +20461,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// One press on the Profiles page: move a row, or copy one.
+    /// One press on a row's arrows: move it up, or move it down.
     ///
     /// **Both leave through [`Self::store_profiles`]**, which is the one place
     /// the file, the programs probe and the window's measurements are moved
@@ -20433,7 +20472,6 @@ impl Runtime {
         let moved = match action {
             settings::ProfileAction::MoveUp(index) => profiles::move_profile(index, false),
             settings::ProfileAction::MoveDown(index) => profiles::move_profile(index, true),
-            settings::ProfileAction::Duplicate(index) => profiles::duplicate(index).is_some(),
         };
         if !moved {
             return Ok(());
@@ -20612,6 +20650,33 @@ impl Runtime {
                 // it becomes one the moment it is named.
                 return Ok(());
             }
+            // **Adopting a ghost** (§7.1.6c-6c): the line the terminal was going
+            // to fill in becomes one of the reader's own, carrying the name and
+            // the value it was showing, and the ghost stops being drawn because
+            // the terminal no longer gets to say that name. The caret lands in
+            // the value box, which is the box somebody who adopted a row came to
+            // change — the name is already right, which is why they pressed
+            // *that* row rather than `Add`.
+            settings::SettingsTarget::EnvGhost(ordinal) => {
+                let Some(index) = editor_index else {
+                    return Ok(());
+                };
+                let Some((name, value)) = self
+                    .editor_subject()
+                    .and_then(|subject| subject.ghosts().nth(ordinal))
+                else {
+                    return Ok(());
+                };
+                let mut env = profiles::env(index);
+                env.push((name.to_owned(), value.to_owned()));
+                profiles::set_env(index, env);
+                self.store_profiles()?;
+                self.reseed_editor_env(index)?;
+                let adopted = profiles::env(index).len().saturating_sub(1);
+                self.settings
+                    .press(settings::SettingsTarget::EnvValue(adopted));
+                return Ok(());
+            }
             settings::SettingsTarget::EnvRemove(row) => {
                 let Some(index) = editor_index else {
                     return Ok(());
@@ -20701,6 +20766,27 @@ impl Runtime {
                     // The table under the row changed too, so the editor's own
                     // rows are re-seeded from it rather than left describing what
                     // the environment used to hold.
+                    self.store_profiles()?;
+                    return self.reseed_editor_env(index);
+                }
+                // **Which door serves this profile** (§7.1.6c-6c). Changing it
+                // re-derives three things at once and in one place: what the
+                // spawn injects (`shell_integration::shell_command`), which
+                // spelling of a path the profile speaks (`set_integration`
+                // carries the namespace with it), and the capability sentence
+                // under the picker — all read back off the table on the next
+                // frame rather than cached here.
+                settings::SettingsRow::ProfileIntegration => {
+                    let Some(choice) = settings::INTEGRATION_OPTIONS.get(item).copied() else {
+                        return Ok(());
+                    };
+                    if !profiles::set_integration(index, choice) {
+                        return Ok(());
+                    }
+                    // The ghost list is derived from the door — a PowerShell is
+                    // not told `FORCE_HYPERLINK` by this terminal — so the table
+                    // under the row has changed shape even though its contents
+                    // have not.
                     self.store_profiles()?;
                     return self.reseed_editor_env(index);
                 }
@@ -21150,7 +21236,6 @@ impl Runtime {
             | settings::SettingsTarget::CustomiseScheme
             | settings::SettingsTarget::ProfileUp(_)
             | settings::SettingsTarget::ProfileDown(_)
-            | settings::SettingsTarget::ProfileDuplicate(_)
             | settings::SettingsTarget::DeleteScheme) => {
                 self.apply_settings_choice(target)?;
             }
@@ -21174,6 +21259,7 @@ impl Runtime {
             | settings::SettingsTarget::EditorBack
             | settings::SettingsTarget::EditorBrowse
             | settings::SettingsTarget::EnvRemove(_)
+            | settings::SettingsTarget::EnvGhost(_)
             | settings::SettingsTarget::EnvAdd
             | settings::SettingsTarget::EditorRestore
             | settings::SettingsTarget::EditorDelete) => {

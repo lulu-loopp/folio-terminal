@@ -173,8 +173,9 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
 | **WSL** (zsh/fish login shell) | no | no | no | no | no | — | set, but not forwarded | that shell's own |
 | **Command Prompt** | **no** | **no** | no | no | **yes** | refused — see below | yes | not promised |
+| **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
 
-Five rows need their reasons stated, because each looks like an omission and is not.
+Six rows need their reasons stated, because each looks like an omission and is not.
 
 **The two PowerShells are two profiles** (user ruling 2026-08-11), which is Windows Terminal's own
 arrangement and what a machine with both installed makes necessary: 7 and 5.1 are different
@@ -248,6 +249,47 @@ Across the WSL boundary the name is listed in `WSLENV` whether or not this proce
 user's own answer travels too — but only on the path that has an init file, so a distribution
 logging into zsh gets the variable on the Win32 side and nothing in the distribution, which is the
 same boundary `TERM_PROGRAM` already stops at.
+
+**A profile's own environment is the last word, and it can change this table.** The three layers
+are: what this window inherited, then what this terminal declares (`TERM_PROGRAM`,
+`TERM_PROGRAM_VERSION`, `COLORTERM`, `TERM`, the `FORCE_HYPERLINK` declaration above, `PROMPT` for
+`cmd` and `BT_SHELL_INTEGRATION` for a bash), then the rows of the profile's own `env` — which
+therefore **win**, `TERM_PROGRAM` included. A profile's environment is the most specific sentence
+anybody says about its sessions, and the rule this page already states about `FORCE_HYPERLINK` —
+whoever set the variable has answered the question — is the same rule one layer up. `BT_SHELL`
+surviving as a debugging back door says the same thing: this machine belongs to the person using
+it. Two of those rows change a row of the matrix, and the settings page derives its sentence from
+both rather than repeating a promise this build would not keep: `FORCE_HYPERLINK=0` takes the
+hyperlink column away, and on either PowerShell a `TERM_PROGRAM` override does too, because
+`folio.ps1` declares links only for a session whose `TERM_PROGRAM` it recognises as this
+terminal's. An empty value **takes the variable away** from that profile's sessions, including one the window
+itself inherited: Windows removes an environment-block entry whose value is empty rather than
+binding the name to the empty string, so `FOO=` in a profile means "no `FOO` here". That is the
+operating system's answer and is left to it rather than filtered, and it is also what a reader who
+cleared a value box meant, so the storage needs no third state. A row with an empty *name* is not a
+variable and never reaches a child.
+
+**Which door serves a profile is derived from its program, and may be named outright.** `Auto` —
+what every shipped profile carries — reads the program's file name: `pwsh`/`powershell` take the
+PowerShell script, `bash`/`sh`/`zsh`/`wsl` take the init file, `cmd` takes the `PROMPT` variable,
+and anything else takes no door at all. That derivation reproduces the five doors above exactly
+(`auto_derives_the_door_every_shipped_profile_has_always_had`), which is why the rows carry the
+rule rather than five constants standing beside it. A profile of the reader's own running an
+arbitrary executable is the case the last answer exists for: `--init-file` handed to a program that
+is not a bash is a filename it will try to open. Nothing about the degradation is new — a screen
+that never sees OSC 133 keeps the cursor/WRAPLINE heuristics byte for byte, and a session that
+never sees OSC 7 leaves the relative path undetected rather than guessing a directory.
+
+**A WSL profile's own variables are listed in `WSLENV` so that they cross.** A variable set on
+`wsl.exe` is set on a *Win32* process, and the distribution behind it sees nothing that was not
+named in `WSLENV`; a stored row that never reached the shell it was aimed at would be honoured by
+every check except the only one that matters. The names are listed `/u` — Win32 to WSL, value
+carried verbatim — because that is what they are: values, and this terminal has no way to know that
+one of them holds a path wanting translation. A reader who wants something else writes their own
+`WSLENV` row, and the layering above lets it win. This is the reader's instruction and crosses
+whatever the login shell turns out to be, which is why the zsh row above still says "set, but not
+forwarded" about *this terminal's* five: those are listed by the install path alone and that has
+not changed.
 
 **"↑ history" is not ours to promise.** The `DESIGN.md` §7.1.4 wording is limited to a profile
 where PSReadLine is detected with persistent history enabled. `cmd`'s recall is `doskey`'s and dies

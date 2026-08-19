@@ -42,7 +42,7 @@ use bt_render::{
 
 use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer};
-use crate::profiles;
+use crate::profiles::{self, Integration, IntegrationChoice};
 use crate::seats::{RailMode, TabLayoutMode};
 use crate::text_field::TextField;
 
@@ -537,17 +537,25 @@ const ENV_REMOVE_SIDE_LOGICAL_PX: f32 = 22.0;
 /// of the list rather than closing it.
 const ENV_ADD_WIDTH_LOGICAL_PX: f32 = 62.0;
 const ENV_ADD_HEIGHT_LOGICAL_PX: f32 = 24.0;
-/// **The three rows this terminal fills in on the reader's behalf** (plan §1.7,
-/// user ruling 2026-08-17 Q7) — what it already says to every session it starts.
+/// **The most rows this terminal ever fills in on the reader's behalf** (plan
+/// §1.7, user ruling 2026-08-17 Q7) — what it says to a session it starts.
 ///
 /// Showing them is both the foolproof default (you can see what is being said on
-/// your behalf) and the honest one (there is no invisible second layer). They
-/// are drawn dashed and greyed and are not editable in this slice: a press that
-/// turned a ghost into a row of the reader's own is the plan's own next step and
-/// it belongs with the spawn wiring (5c), because a ghost the reader has adopted
-/// and nothing reads is a row that lies twice.
+/// your behalf) and the honest one (there is no invisible second layer).
+///
+/// **Which of them a given profile actually shows is derived**
+/// (`shell_integration::declared_environment`) and not this list: a PowerShell
+/// is the one door this terminal does not declare `FORCE_HYPERLINK` through —
+/// its own script is the half that says it — so a third ghost drawn there would
+/// be the page pretending. And a name the reader has a row of their own for
+/// stops being a ghost, because the terminal no longer gets to say it: that is
+/// what a press on a ghost does (§7.1.6c-6c), and two rows of one name would be
+/// two pictures of one fact.
+///
+/// The constant survives as the **upper bound**, which is what a geometry test
+/// with no profile table under it needs.
 const ENV_GHOSTS: [(&str, &str); 3] = [
-    ("TERM_PROGRAM", "Folio"),
+    ("TERM_PROGRAM", bt_pty::TERM_PROGRAM),
     ("COLORTERM", "truecolor"),
     (FORCE_HYPERLINK_NAME, "1"),
 ];
@@ -816,14 +824,38 @@ pub const HYPERLINK_OPTIONS: [ForceHyperlink; 3] = [
     ForceHyperlink::Off,
 ];
 
+/// The five answers to **which door serves this profile** — the mock-up's own
+/// list (`data-combo="pfintegration"`), in its order.
+///
+/// `Auto` first because it is the rule and the default, then the three doors
+/// this terminal has, then the absence of one. Naming the mechanisms rather than
+/// the shells is the same ruling the i18n entries carry: a `zsh` under WSL and a
+/// Git Bash are both served by the init file.
+pub const INTEGRATION_OPTIONS: [IntegrationChoice; 5] = [
+    IntegrationChoice::Auto,
+    IntegrationChoice::Named(Integration::PowerShellOptIn),
+    IntegrationChoice::Named(Integration::BashInitFile),
+    IntegrationChoice::Named(Integration::CmdPrompt),
+    IntegrationChoice::Named(Integration::None),
+];
+
+fn integration_label(choice: IntegrationChoice) -> &'static str {
+    match choice {
+        IntegrationChoice::Auto => Text::ProfilesAuto.text(),
+        IntegrationChoice::Named(named) => profiles::integration_name(named).text(),
+    }
+}
+
 /// The name this terminal's own `FORCE_HYPERLINK` declaration goes out under,
 /// and the name the [`ForceHyperlink`] row reads and writes in a profile's
 /// environment.
 ///
-/// Named once here rather than spelled at the three places that touch it — the
-/// ghost row, the row's current value and the write — because a variable whose
-/// name is written three times is a variable that will one day be written twice.
-pub const FORCE_HYPERLINK_NAME: &str = "FORCE_HYPERLINK";
+/// **The spawn path's own constant** (§7.1.6c-6c), re-exported rather than
+/// spelled again: this used to be a second literal beside
+/// `shell_integration`'s, which is exactly the drift its own comment warned
+/// about — and the symptom of the two coming apart would be a picker that
+/// appeared to do nothing rather than anything that looks like a typo.
+pub const FORCE_HYPERLINK_NAME: &str = crate::shell_integration::FORCE_HYPERLINK;
 /// The three answers to "which language is this window written in", in the order
 /// [`THEME_OPTIONS`] established and for its reason: the two named answers first,
 /// and the one that means "ask somebody else" after them.
@@ -1521,15 +1553,6 @@ pub enum SettingsControl {
     /// locked to the tallest *page*, so a new variable makes this page scroll a
     /// little further and never makes the dialog grow under the rail.
     EnvTable,
-    /// No control at all — a row that reports rather than asks.
-    ///
-    /// The Shell integration row is one: its description *is* the capability
-    /// sentence, quoted from `docs/shell-integration.md`'s matrix through
-    /// `profiles::capability_text`, and choosing which script serves a profile is
-    /// slice 5c's (plan §5.2), which is where the `Auto` derivation it needs
-    /// lands. A row drawn with a picker that wrote nothing would be the
-    /// pretending this page exists to stop.
-    Sentence,
 }
 
 impl SettingsControl {
@@ -1870,8 +1893,9 @@ pub enum SettingsRow {
     /// The mock-up says so in as many words ("A ROW OF ITS OWN as well as a line
     /// in the table").
     ProfileHyperlink,
-    /// Which script serves this profile — **a sentence and not a picker in this
-    /// slice**. See [`SettingsControl::Sentence`].
+    /// Which door serves this profile: `Auto` and the four this terminal has.
+    /// Its description is the capability sentence, so the choice and what the
+    /// choice costs stand together (§7.1.6c-6c).
     ProfileIntegration,
 }
 
@@ -2157,7 +2181,11 @@ impl SettingsRow {
             Self::ProfileName | Self::ProfileArgs => SettingsControl::Field,
             Self::ProfileProgram => SettingsControl::FieldPair,
             Self::ProfileEnv => SettingsControl::EnvTable,
-            Self::ProfileIntegration => SettingsControl::Sentence,
+            // **A picker since §7.1.6c-6c**, which is the slice that landed the
+            // `Auto` derivation it was waiting for. Its description stays the
+            // capability sentence, so the control and the sentence under it are
+            // the choice and its consequence standing together.
+            Self::ProfileIntegration => SettingsControl::Combo,
             _ => SettingsControl::Combo,
         }
     }
@@ -2280,7 +2308,7 @@ impl SettingsRow {
             // surface they are standing on, which is what makes a press on the
             // table's own background — the gap between two lines — land nowhere
             // instead of on whichever of its parts was named here.
-            SettingsControl::EnvTable | SettingsControl::Sentence => SettingsTarget::Panel,
+            SettingsControl::EnvTable => SettingsTarget::Panel,
         }
     }
 
@@ -2334,17 +2362,17 @@ impl SettingsRow {
             Self::ProfileStartAt => START_AT_OPTIONS.len(),
             Self::ProfileColour => MarkColour::ALL.len(),
             Self::ProfileHyperlink => HYPERLINK_OPTIONS.len(),
-            // A field, a table and a sentence open no menu. Zero rather than a
-            // refusal, on the sliders' own ruling above: `option_labels` is what
-            // the control column is measured against, and the honest measurement
-            // of a control with no items is no words at all.
+            Self::ProfileIntegration => INTEGRATION_OPTIONS.len(),
+            // A field and a table open no menu. Zero rather than a refusal, on
+            // the sliders' own ruling above: `option_labels` is what the control
+            // column is measured against, and the honest measurement of a
+            // control with no items is no words at all.
             Self::ImageOpacity
             | Self::BackgroundOpacity
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
-            | Self::ProfileEnv
-            | Self::ProfileIntegration => 0,
+            | Self::ProfileEnv => 0,
         }
     }
 
@@ -2399,13 +2427,20 @@ impl SettingsRow {
                 .copied()
                 .map(|colour| crate::i18n::colour_name(colour).text()),
             Self::ProfileHyperlink => HYPERLINK_OPTIONS.get(index).copied().map(hyperlink_label),
+            // The bare word for `Auto`, with the door it derived on the button
+            // instead — see [`SettingsRow::value_text`]. An item is a thing to
+            // choose, and what the rule will decide is a fact about this row
+            // rather than about the choosing.
+            Self::ProfileIntegration => INTEGRATION_OPTIONS
+                .get(index)
+                .copied()
+                .map(integration_label),
             Self::ImageOpacity
             | Self::BackgroundOpacity
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
-            | Self::ProfileEnv
-            | Self::ProfileIntegration => None,
+            | Self::ProfileEnv => None,
         }
     }
 
@@ -2437,6 +2472,12 @@ impl SettingsRow {
                 .colour
                 .is_none()
                 .then(|| Text::ProfilesColourInherited.text()),
+            // **A third row whose value is not one of its words** — and unlike
+            // the two above it *is* still ticking one of them: `Auto` is the
+            // answer, and `Auto (Bash init file)` is that answer said in full.
+            // A picker that printed the bare rule would be a control saying
+            // which question it is answering rather than what it answered.
+            Self::ProfileIntegration => editor.integration_auto,
             _ => None,
         }
     }
@@ -2572,13 +2613,13 @@ impl SettingsRow {
             Self::ProfileStartAt => values.editor.map(|editor| editor.start_at),
             Self::ProfileColour => values.editor.and_then(|editor| editor.colour),
             Self::ProfileHyperlink => values.editor.map(|editor| editor.hyperlink),
+            Self::ProfileIntegration => values.editor.map(|editor| editor.integration),
             Self::ImageOpacity
             | Self::BackgroundOpacity
             | Self::ProfileName
             | Self::ProfileProgram
             | Self::ProfileArgs
-            | Self::ProfileEnv
-            | Self::ProfileIntegration => None,
+            | Self::ProfileEnv => None,
         }
     }
 }
@@ -3075,10 +3116,39 @@ pub struct EditorSubject {
     /// The capability sentence, which is the `Shell integration` row's whole
     /// description and the same string the list's third line carries.
     pub capability: &'static str,
-    /// How many environment rows the reader has of their own. The three ghosts
-    /// are constant and are not counted here — they are what this terminal says
-    /// to every session, not what this profile says.
+    /// How many environment rows the reader has of their own. The ghosts are not
+    /// counted here — they are what this terminal says to a session, not what
+    /// this profile says.
     pub env_rows: usize,
+    /// Which of [`INTEGRATION_OPTIONS`] this profile's door is on.
+    pub integration: usize,
+    /// `Auto (Bash init file)` — the picker's caption while the row is on the
+    /// rule, and `None` once it has named a door (the ticked item's own word is
+    /// the caption then, as everywhere else in this dialog).
+    pub integration_auto: Option<&'static str>,
+    /// **The rows this terminal fills in for this profile**, in the order they
+    /// are drawn, above the reader's own.
+    ///
+    /// Resolved by the runtime through `shell_integration::declared_environment`
+    /// and then stripped of every name the reader has a row of their own for,
+    /// because the terminal does not get to say a thing this profile has already
+    /// said. A fixed-length array of slots rather than a `Vec`, so this stays
+    /// `Copy` — every `option_*` call reads it off a borrowed `SettingsValues`.
+    pub ghosts: [Option<(&'static str, &'static str)>; ENV_GHOSTS.len()],
+}
+
+impl EditorSubject {
+    /// The ghost rows, in the order they are drawn.
+    pub fn ghosts(self) -> impl Iterator<Item = (&'static str, &'static str)> {
+        self.ghosts.into_iter().flatten()
+    }
+
+    /// How many of them there are — the count the layout, the hit test, the
+    /// draw and the focus walk all place their rows from.
+    #[must_use]
+    pub fn ghost_count(self) -> usize {
+        self.ghosts().count()
+    }
 }
 
 /// Whether the dialog is up, and what is open inside it.
@@ -3592,7 +3662,6 @@ impl SettingsPanel {
             | SettingsTarget::CustomiseScheme
             | SettingsTarget::ProfileUp(_)
             | SettingsTarget::ProfileDown(_)
-            | SettingsTarget::ProfileDuplicate(_)
             | SettingsTarget::ProfileEdit(_)
             | SettingsTarget::ProfileMore(_)
             | SettingsTarget::ProfileNew
@@ -3605,6 +3674,12 @@ impl SettingsPanel {
             | SettingsTarget::EnvName(_)
             | SettingsTarget::EnvValue(_)
             | SettingsTarget::EnvRemove(_)
+            // A ghost holds the ring for exactly as long as it takes the
+            // runtime to adopt it, which is the same press: the row becomes the
+            // reader's, and the ring moves to its value box with the caret,
+            // because that is what somebody who just adopted a row is about to
+            // type in.
+            | SettingsTarget::EnvGhost(_)
             | SettingsTarget::EnvAdd
             | SettingsTarget::EditorRestore
             | SettingsTarget::EditorDelete
@@ -4431,6 +4506,7 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
     // there: a collapsed group's rows are already out of `page_items`, and its
     // `Reset` with them.
     let env_rows = content.editor.map_or(0, |editor| editor.env_rows);
+    let env_ghosts = content.editor.map_or(0, EditorSubject::ghost_count);
     page_items(content, category)
         .into_iter()
         .flat_map(|item| match item {
@@ -4443,19 +4519,22 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
                 SettingsTarget::Field(SettingsRow::ProfileProgram),
                 SettingsTarget::EditorBrowse,
             ],
-            PageItem::Row(SettingsRow::ProfileEnv) => (0..env_rows)
-                .flat_map(|index| {
+            // **The ghosts are stops now** (§7.1.6c-6c). They were not while
+            // they could not be pressed, and the rule has not changed — a thing
+            // a reader can see and act on has to be reachable from the keyboard,
+            // and adopting a ghost is an action. One stop per ghost, because the
+            // whole line is one target.
+            PageItem::Row(SettingsRow::ProfileEnv) => (0..env_ghosts)
+                .map(SettingsTarget::EnvGhost)
+                .chain((0..env_rows).flat_map(|index| {
                     [
                         SettingsTarget::EnvName(index),
                         SettingsTarget::EnvValue(index),
                         SettingsTarget::EnvRemove(index),
                     ]
-                })
+                }))
                 .chain(std::iter::once(SettingsTarget::EnvAdd))
                 .collect(),
-            // A row that only reports is not a stop: the ring answers "where
-            // will the next key go", and nothing goes there.
-            PageItem::Row(SettingsRow::ProfileIntegration) => Vec::new(),
             PageItem::Row(row) => vec![row.control_target()],
             // **The disclosure is a focus stop** (user ruling 2026-08-17): Enter
             // and Space turn it, which is the whole of "keyboard focusable".
@@ -4475,6 +4554,37 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
             PageItem::Heading(_) => Vec::new(),
         })
         .collect()
+}
+
+impl SettingsTarget {
+    /// Which row of the Profiles list this target belongs to, if any — **the
+    /// one predicate the reveal is derived from** (user ruling 2026-08-18, item
+    /// B).
+    ///
+    /// A row's action run is drawn only while the row is engaged, and "engaged"
+    /// used to be a hand-written list of four targets that had gone stale: 5b
+    /// moved `Duplicate` into the `⋯` and put `Edit` in the open, and the list
+    /// was not moved with it. The measured symptom is the reported one — the run
+    /// appears while the pointer crosses the row's text and *vanishes the moment
+    /// it reaches the verb it was heading for*, so the button flickers on the
+    /// way in and looks unpressable once the pointer is on it.
+    ///
+    /// Stated as a derivation so that it cannot go stale again: a verb added to
+    /// this run tomorrow is a verb that reveals the run, by construction, and
+    /// the geometry agrees for free because every one of these boxes is inside
+    /// the row's own band.
+    #[must_use]
+    pub const fn profile_row(self) -> Option<usize> {
+        match self {
+            Self::ProfileRow(index)
+            | Self::ProfileUp(index)
+            | Self::ProfileDown(index)
+            | Self::ProfileEdit(index)
+            | Self::ProfileMore(index)
+            | Self::ProfileMoreItem(index, _) => Some(index),
+            _ => None,
+        }
+    }
 }
 
 /// Something in the overlay the pointer can be over — **and the same enumeration
@@ -4571,8 +4681,6 @@ pub enum SettingsTarget {
     ProfileUp(usize),
     /// The `↓` on one row of the Profiles page.
     ProfileDown(usize),
-    /// `Duplicate` on one row of the Profiles page.
-    ProfileDuplicate(usize),
     /// One row of the Profiles page, away from its verbs.
     ///
     /// **A hover target and a focus stop** (§7.1.6c-6b). The action run is
@@ -4609,10 +4717,20 @@ pub enum SettingsTarget {
     /// `Browse…`, the verb beside the `Program` field.
     EditorBrowse,
     /// One cell of the environment table. The `usize` is the row's place among
-    /// **the reader's own** variables — the three ghosts are not addressable,
-    /// because they are what this terminal says and not what this profile does.
+    /// **the reader's own** variables — a ghost is addressed by
+    /// [`Self::EnvGhost`] instead, because it has one verb and no cells.
     EnvName(usize),
     EnvValue(usize),
+    /// A ghost row, by its place among the ghosts this profile shows.
+    ///
+    /// **One target for the whole line, and pressing it adopts the row**
+    /// (§7.1.6c-6c): the line becomes one of the reader's own, carrying the name
+    /// and the value the terminal was going to use, and the ghost stops being
+    /// drawn because the terminal no longer gets to say it. It is one target and
+    /// not two cells because there is nothing to edit *in* a ghost — the
+    /// editing starts once it is the reader's, which is the moment the caret
+    /// lands in its value box.
+    EnvGhost(usize),
     /// The `✕` that takes one of the reader's rows out.
     EnvRemove(usize),
     /// The `Add` under the table.
@@ -5114,7 +5232,6 @@ impl SettingsLayout {
             SettingsTarget::RestoreAll => self.restore_all,
             SettingsTarget::ProfileUp(index)
             | SettingsTarget::ProfileDown(index)
-            | SettingsTarget::ProfileDuplicate(index)
             | SettingsTarget::ProfileEdit(index)
             | SettingsTarget::ProfileMore(index)
             | SettingsTarget::ProfileMoreItem(index, _)
@@ -5134,6 +5251,7 @@ impl SettingsLayout {
             SettingsTarget::EnvName(_)
             | SettingsTarget::EnvValue(_)
             | SettingsTarget::EnvRemove(_)
+            | SettingsTarget::EnvGhost(_)
             | SettingsTarget::EnvAdd => self.row(SettingsRow::ProfileEnv).map(|placed| placed.band),
             SettingsTarget::EditorBack => self.crumb.map(|crumb| crumb.band),
             SettingsTarget::EditorRestore | SettingsTarget::EditorDelete => self.editor_foot,
@@ -5200,14 +5318,19 @@ pub fn theme_requested(target: SettingsTarget) -> Option<ThemeModeV1> {
 #[must_use]
 /// What a press on the Profiles page asked for.
 ///
-/// A verb and an index rather than three bare targets crossing into `main.rs`:
-/// the dialog's job ends at "this row, this verb", and what a move or a copy
-/// *is* belongs to `profiles.rs`, which owns the table.
+/// A verb and an index rather than bare targets crossing into `main.rs`: the
+/// dialog's job ends at "this row, this verb", and what a move *is* belongs to
+/// `profiles.rs`, which owns the table.
+///
+/// **`Duplicate` left this enum in §7.1.6c-6c**, and it left because 5b moved
+/// the verb: a copy is made from the row's `⋯` now (`RowVerb::Duplicate`), and
+/// a second door standing open with nothing behind it is the drift this file
+/// keeps deleting. The two arrows are what is left, because they are the two
+/// verbs still in the open on a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileAction {
     MoveUp(usize),
     MoveDown(usize),
-    Duplicate(usize),
 }
 
 /// The verb a target names, or `None` for a target that is not on this page.
@@ -5220,7 +5343,6 @@ pub fn profile_action_requested(target: SettingsTarget) -> Option<ProfileAction>
     match target {
         SettingsTarget::ProfileUp(index) => Some(ProfileAction::MoveUp(index)),
         SettingsTarget::ProfileDown(index) => Some(ProfileAction::MoveDown(index)),
-        SettingsTarget::ProfileDuplicate(index) => Some(ProfileAction::Duplicate(index)),
         _ => None,
     }
 }
@@ -5886,7 +6008,13 @@ pub fn layout_for_menu(
                     }
                     SettingsControl::EnvTable => {
                         let mut line = control_top;
-                        let ghosts = ENV_GHOSTS.len();
+                        // The upper bound when there is no profile under the
+                        // page, which is what a geometry test builds: the table
+                        // is then at its tallest, which is the honest thing for
+                        // a measurement to be taken against.
+                        let ghosts = content_of
+                            .editor
+                            .map_or(ENV_GHOSTS.len(), EditorSubject::ghost_count);
                         let mine = content_of.editor.map_or(0, |editor| editor.env_rows);
                         for ordinal in 0..ghosts + mine {
                             let remove_side = px(ENV_REMOVE_SIDE_LOGICAL_PX);
@@ -5949,16 +6077,7 @@ pub fn layout_for_menu(
                 // (`COMBO_MAX_ROW_SHARE`) is what keeps this column off zero. The
                 // sentence that does not fit what is left is ellipsised and never
                 // allowed to run under the button: see `build`.
-                // **A row with no control gets the whole row for its words.**
-                // The column is a reserve for a control, and reserving it under a
-                // sentence that is the row's entire content would cut the one
-                // thing the row is there to say — which for `Shell integration`
-                // is the capability sentence, quoted from one authority.
-                let text_column_right = if placed_control(row) {
-                    combo[0] - px(ROW_GAP_LOGICAL_PX)
-                } else {
-                    row_right
-                };
+                let text_column_right = combo[0] - px(ROW_GAP_LOGICAL_PX);
                 let title = [
                     row_left,
                     top,
@@ -6552,7 +6671,17 @@ fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<P
                 // deletes the file behind the scheme those rows select.
                 items.push(PageItem::Delete);
             }
-            items.push(PageItem::Reset);
+            // **Except in the profile editor** (user ruling 2026-08-18). Every
+            // other Advanced group ends in this verb; this page's foot already
+            // carries `Restore all defaults`, which puts the *whole* profile
+            // back to the shipped table — the Advanced rows included. Two verbs
+            // one line apart, saying almost the same words about scopes only one
+            // of them names, is a reader flipping a coin. The page-scoped one
+            // gives way, because the profile-scoped one is the one that is
+            // complete.
+            if !editing {
+                items.push(PageItem::Reset);
+            }
         }
     }
     if editing {
@@ -6695,15 +6824,6 @@ impl StackMetrics {
         }
         px(CONTENT_PADDING_TOP_LOGICAL_PX) + stack + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX)
     }
-}
-
-/// Whether this row puts anything in the page's control column.
-///
-/// One predicate rather than a `matches!` at each of the four places that ask —
-/// the layout, the draw, the hit test and the focus walk — because a row that is
-/// drawn without a control and hit-tested with one is a target nobody can see.
-fn placed_control(row: SettingsRow) -> bool {
-    !matches!(row.control(), SettingsControl::Sentence)
 }
 
 /// The widest label this row's picker will draw, in the face that will draw it.
@@ -7035,21 +7155,29 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         if !layout.shows(placed.band) {
             continue;
         }
-        // **A dark button answers `Panel`**, which is the same sentence an
-        // unavailable picker item answers with `Menu`: nothing happened, and the
-        // press belongs to the surface the control is standing on. The rule is
-        // asked here and by the draw from one predicate, so a button that looks
-        // pressable and does nothing cannot exist.
+        // **A dark button answers with its own row**, which is the same
+        // sentence an unavailable picker item answers with `Menu`: nothing
+        // happened, and the press belongs to the surface the control is standing
+        // on. The rule is asked here and by the draw from one predicate, so a
+        // button that looks pressable and does nothing cannot exist.
+        //
+        // That surface is the **row** and not the panel (user ruling
+        // 2026-08-18, item B). `Panel` was claiming the pointer had left the row
+        // while it was standing on a button drawn inside the row's own band, so
+        // the run vanished under the pointer the moment it touched the first
+        // row's dark `↑`. `ProfileRow` says the true thing and costs nothing:
+        // pressing a row's band already does nothing but move the focus, which
+        // is exactly what a press on a dark button is owed.
         if contains(placed.up, x, y) {
             return if placed.index == 0 {
-                SettingsTarget::Panel
+                SettingsTarget::ProfileRow(placed.index)
             } else {
                 SettingsTarget::ProfileUp(placed.index)
             };
         }
         if contains(placed.down, x, y) {
             return if placed.index + 1 >= layout.profiles.len() {
-                SettingsTarget::Panel
+                SettingsTarget::ProfileRow(placed.index)
             } else {
                 SettingsTarget::ProfileDown(placed.index)
             };
@@ -7082,12 +7210,20 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
     {
         return SettingsTarget::EditorBrowse;
     }
-    for line in &layout.env_rows {
-        // A ghost is what this terminal says on the reader's behalf and not a
-        // control: it is drawn, it is not pressable, and its `✕` is reserved and
-        // never struck — a column that disappeared on three rows would bend the
-        // table's right edge (mock-up, `.envrow.ghost .env-del`).
-        let Some(index) = line.index else { continue };
+    for (ordinal, line) in layout.env_rows.iter().enumerate() {
+        // **A ghost is one target and the whole line is it** (§7.1.6c-6c): a
+        // press adopts it, and until then there are no cells to land in — its
+        // `✕` is reserved and never struck, because a column that disappeared on
+        // the first rows would bend the table's right edge (mock-up,
+        // `.envrow.ghost .env-del`).
+        let Some(index) = line.index else {
+            if (layout.shows(line.name) && contains(line.name, x, y))
+                || (layout.shows(line.value) && contains(line.value, x, y))
+            {
+                return SettingsTarget::EnvGhost(ordinal);
+            }
+            continue;
+        };
         if layout.shows(line.name) && contains(line.name, x, y) {
             return SettingsTarget::EnvName(index);
         }
@@ -7540,9 +7676,6 @@ pub fn build(
             // The table draws itself below, with its ghosts; the row's own box
             // is the area it occupies and carries no face of its own.
             SettingsControl::EnvTable => {}
-            // A row that reports has drawn everything it has: its title and the
-            // sentence under it, which is the capability line.
-            SettingsControl::Sentence => {}
         }
         // After the control it names, because a ring is a fill and a layer draws
         // its fills in order — pushed before, the control's own face would cover
@@ -8044,14 +8177,10 @@ fn push_profile_page(
         // `opacity: 0`, and this window's text runs carry an ink and no alpha,
         // so the honest reading of a zero-opacity control here is one that is
         // not there.
-        let engaged = [
-            SettingsTarget::ProfileRow(placed.index),
-            SettingsTarget::ProfileUp(placed.index),
-            SettingsTarget::ProfileDown(placed.index),
-            SettingsTarget::ProfileDuplicate(placed.index),
-        ]
-        .into_iter()
-        .any(|target| hover == Some(target) || focus == Some(target));
+        let engaged = [hover, focus]
+            .into_iter()
+            .flatten()
+            .any(|target| target.profile_row() == Some(placed.index));
         // **Two different greys for two different sentences.** A hidden row is
         // one you switched off — everything on it is muted, and its mark is
         // faded *and* desaturated, which is the register this file already
@@ -8386,18 +8515,22 @@ fn push_editor_page(
         }
     }
     // **The ghosts are the table's first rows by construction**, which is why
-    // the ordinal is enough to name them: the layout pushes `ENV_GHOSTS` and
-    // then the reader's own, in that order, and `EnvRowLayout::index` is `None`
-    // for exactly the first three.
+    // the ordinal is enough to name them: the layout pushes this profile's
+    // ghosts and then the reader's own, in that order, and `EnvRowLayout::index`
+    // is `None` for exactly the leading run.
     for (ordinal, line) in layout.env_rows.iter().enumerate() {
         // **A ghost is what this terminal already says on the reader's behalf**
-        // (plan §1.7): drawn, muted, and not pressable. Its `✕` keeps its column
-        // and is simply not struck, exactly as the mock-up hides rather than
-        // removes it — a column that vanished on three rows would shorten those
-        // rows' value fields and bend the table's right edge.
+        // (plan §1.7): drawn, muted, and one press away from being the reader's.
+        // Its `✕` keeps its column and is simply not struck, exactly as the
+        // mock-up hides rather than removes it — a column that vanished on the
+        // leading rows would shorten their value fields and bend the table's
+        // right edge.
         let (name, value, index) = match line.index {
             None => {
-                let (name, value) = ENV_GHOSTS[ordinal.min(ENV_GHOSTS.len() - 1)];
+                let (name, value) = values
+                    .editor
+                    .and_then(|editor| editor.ghosts().nth(ordinal))
+                    .unwrap_or(ENV_GHOSTS[ordinal.min(ENV_GHOSTS.len() - 1)]);
                 (name.to_owned(), value.to_owned(), None)
             }
             Some(index) => {
@@ -16518,8 +16651,18 @@ mod tests {
             start_at: 0,
             fixed_folder: None,
             hyperlink: 0,
-            capability: Text::CapNone.text(),
+            capability: Text::CapNoneLong.text(),
             env_rows: 1,
+            // `Auto`, deriving `None` — the mock-up's own drawing of this row.
+            integration: 0,
+            integration_auto: Some("Auto (None)"),
+            // All three, which is what a profile served by no script and holding
+            // no row of these names shows.
+            ghosts: [
+                Some(("TERM_PROGRAM", bt_pty::TERM_PROGRAM)),
+                Some(("COLORTERM", "truecolor")),
+                Some((FORCE_HYPERLINK_NAME, "1")),
+            ],
         }
     }
 
@@ -16795,15 +16938,19 @@ mod tests {
         );
     }
 
-    /// PIN — **the three ghosts are drawn and are not controls** (plan §1.7,
-    /// user ruling Q7).
+    /// PIN — **the ghosts are drawn, and pressing one adopts it** (plan §1.7,
+    /// user ruling Q7; the press is §7.1.6c-6c's).
     ///
     /// Showing them is both the foolproof default — you can see what is being
     /// said on your behalf — and the honest one: there is no invisible second
-    /// layer. They are not pressable in this slice, because a ghost the reader
-    /// has adopted and nothing reads is a row that lies twice.
+    /// layer. The press was withheld for exactly one slice, while nothing read
+    /// the table into a session and an adopted row would have lied twice.
+    ///
+    /// Red gate on the geometry: a ghost line is **one** target and not three
+    /// cells, and its `✕` is reserved rather than removed — a column that
+    /// disappeared on the leading rows would bend the table's right edge.
     #[test]
-    fn the_terminals_own_declarations_are_shown_and_cannot_be_pressed() {
+    fn a_ghost_is_one_target_and_pressing_it_adopts_the_row() {
         let subject = editor_subject(true);
         let placed = editor_page_showing(subject, |page| {
             page.row(SettingsRow::ProfileEnv).expect("the table").band
@@ -16814,18 +16961,45 @@ mod tests {
             .iter()
             .filter(|line| line.index.is_none())
             .collect();
-        assert_eq!(ghosts.len(), ENV_GHOSTS.len());
-        for ghost in ghosts {
-            let centre = (
-                f64::from((ghost.name[0] + ghost.name[2]) / 2.0),
-                f64::from((ghost.name[1] + ghost.name[3]) / 2.0),
+        assert_eq!(ghosts.len(), subject.ghost_count());
+        for (ordinal, ghost) in ghosts.into_iter().enumerate() {
+            for box_of in [ghost.name, ghost.value] {
+                let centre = (
+                    f64::from((box_of[0] + box_of[2]) / 2.0),
+                    f64::from((box_of[1] + box_of[3]) / 2.0),
+                );
+                assert_eq!(
+                    hit(&placed, &values, centre.0, centre.1),
+                    SettingsTarget::EnvGhost(ordinal),
+                    "the whole line is the target, because there is nothing to                      edit in a ghost until it is the reader's"
+                );
+            }
+            let cross = (
+                f64::from((ghost.remove[0] + ghost.remove[2]) / 2.0),
+                f64::from((ghost.remove[1] + ghost.remove[3]) / 2.0),
             );
             assert_eq!(
-                hit(&placed, &values, centre.0, centre.1),
+                hit(&placed, &values, cross.0, cross.1),
                 SettingsTarget::Panel,
-                "a ghost is what this terminal says, not what this profile does"
+                "a ghost's ✕ keeps its column and is never struck"
             );
         }
+        // A name the reader already has a row of their own for is no longer this
+        // terminal's to say, so it is not among the ghosts.
+        let adopted = EditorSubject {
+            ghosts: [
+                Some(("COLORTERM", "truecolor")),
+                Some((FORCE_HYPERLINK_NAME, "1")),
+                None,
+            ],
+            ..subject
+        };
+        assert_eq!(adopted.ghost_count(), 2);
+        assert_eq!(
+            adopted.ghosts().next(),
+            Some(("COLORTERM", "truecolor")),
+            "the adopted name leaves the list rather than standing beside its              own override"
+        );
         let mine = placed
             .env_rows
             .iter()
@@ -16974,14 +17148,25 @@ mod tests {
                 SettingsTarget::Combo(SettingsRow::ProfileColour),
                 SettingsTarget::Advanced(SettingsCategory::Profiles),
                 SettingsTarget::Field(SettingsRow::ProfileArgs),
+                // **The ghosts are stops since §7.1.6c-6c**, because a press on
+                // one adopts it — and a thing a reader can see and act on that
+                // the keyboard cannot reach does not exist for the keyboard.
+                SettingsTarget::EnvGhost(0),
+                SettingsTarget::EnvGhost(1),
+                SettingsTarget::EnvGhost(2),
                 SettingsTarget::EnvName(0),
                 SettingsTarget::EnvValue(0),
                 SettingsTarget::EnvRemove(0),
                 SettingsTarget::EnvAdd,
                 SettingsTarget::Combo(SettingsRow::ProfileHyperlink),
-                // `Shell integration` reports and is not a stop: the ring
-                // answers "where will the next key go", and nothing goes there.
-                SettingsTarget::ResetAdvanced(SettingsCategory::Profiles),
+                SettingsTarget::Combo(SettingsRow::ProfileIntegration),
+                // **And no `Reset to defaults`** (user ruling 2026-08-18, item
+                // A): every other Advanced group ends in that verb, and this
+                // page's foot already carries `Restore all defaults`, which puts
+                // the whole profile back — the Advanced rows included. Two verbs
+                // one line apart saying almost the same words is a reader
+                // flipping a coin, so the page-scoped one gives way to the
+                // profile-scoped one.
                 SettingsTarget::EditorDelete,
             ][..]
         );
@@ -17014,6 +17199,27 @@ mod tests {
             1,
             "and so does the ring, on the row holding it"
         );
+        // **And it holds on every verb in the run** (user ruling 2026-08-18,
+        // item B). This is the reported bug in one line: the reveal was a
+        // hand-written list of four targets that 5b left behind when `Edit` took
+        // the open slot and `Duplicate` went behind the `⋯`, so the run appeared
+        // while the pointer crossed the row's text and vanished the moment it
+        // reached the verb it was heading for. It is derived from the row a
+        // target belongs to now, so a verb added tomorrow reveals the run by
+        // construction.
+        for verb in [
+            SettingsTarget::ProfileUp(1),
+            SettingsTarget::ProfileDown(1),
+            SettingsTarget::ProfileEdit(1),
+            SettingsTarget::ProfileMore(1),
+            SettingsTarget::ProfileMoreItem(1, RowVerb::Duplicate),
+        ] {
+            assert_eq!(
+                words(Some(verb), None),
+                1,
+                "the pointer parked on {verb:?} keeps its row's run revealed"
+            );
+        }
     }
 
     /// PIN — **the first row's `↑` and the last row's `↓` are dark, not absent,
@@ -17039,8 +17245,19 @@ mod tests {
                 f64::from((box_[1] + box_[3]) / 2.0),
             )
         };
-        assert_eq!(press(placed.profiles[0].up), SettingsTarget::Panel);
-        assert_eq!(press(placed.profiles[last].down), SettingsTarget::Panel);
+        // **A dark arrow answers with its own row** (user ruling 2026-08-18,
+        // item B). It used to answer `Panel`, which claimed the pointer had left
+        // the row while it was standing on a button drawn inside that row's own
+        // band — and the run, which is revealed for the row the pointer is on,
+        // vanished under it. `ProfileRow` is the true answer and costs nothing:
+        // a press on a row's band already does nothing but move the focus, which
+        // is exactly what a press on a dark button is owed.
+        assert_eq!(press(placed.profiles[0].up), SettingsTarget::ProfileRow(0));
+        assert_eq!(
+            press(placed.profiles[last].down),
+            SettingsTarget::ProfileRow(last)
+        );
+        assert_eq!(profile_action_requested(press(placed.profiles[0].up)), None);
         assert_eq!(
             press(placed.profiles[0].down),
             SettingsTarget::ProfileDown(0)
@@ -17122,10 +17339,6 @@ mod tests {
         assert_eq!(
             profile_action_requested(SettingsTarget::ProfileDown(2)),
             Some(ProfileAction::MoveDown(2))
-        );
-        assert_eq!(
-            profile_action_requested(SettingsTarget::ProfileDuplicate(2)),
-            Some(ProfileAction::Duplicate(2))
         );
         assert_eq!(profile_action_requested(SettingsTarget::Close), None);
         assert_eq!(
