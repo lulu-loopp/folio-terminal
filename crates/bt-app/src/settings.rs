@@ -304,6 +304,68 @@ const ITEM_GAP_LOGICAL_PX: f32 = 8.0;
 /// `.combo-item .tick { width: 14px; font-size: 11px }` — a fixed column, so
 /// every item's text starts at the same x whether or not it is the selected one.
 const TICK_WIDTH_LOGICAL_PX: f32 = 14.0;
+// ── the picker is where a list is managed (user ruling 2026-08-19) ─────────
+//
+// Three buttons stood at the foot of `Appearance ▸ Advanced` — `Customise
+// scheme…`, `Delete scheme…`, `Reset to defaults` — and a line above them
+// saying which scheme the first two would act on. Every one of those words was
+// written to answer the same question: WHICH scheme. There is only ever one
+// list of schemes and the reader is already looking at it, so the verbs moved
+// onto the rows they act on and the foot lost two of its three buttons.
+//
+// WHAT A MANAGED PICKER HOLDS, IN ORDER: values, a hairline, more values, a
+// hairline, and one action. Each hairline says what changed — the first "these
+// came with the product and those are yours", the second "everything above is a
+// choice and this is not".
+
+/// `.combo-sep { height: 1px; background: var(--border-soft); margin: 4px 6px }`
+/// — `.tm-sep`'s recipe at the popup's own inset. Not a new colour and not a
+/// new height: this window draws one hairline between menu items.
+const MENU_SEPARATOR_HEIGHT_LOGICAL_PX: f32 = 1.0;
+/// The `4px` of that margin.
+const MENU_SEPARATOR_MARGIN_Y_LOGICAL_PX: f32 = 4.0;
+/// The `6px` of it. The menu's own 4px of padding plus this 6 puts the rule's
+/// ends where the items' rounded corners already are.
+const MENU_SEPARATOR_INSET_LOGICAL_PX: f32 = 6.0;
+/// What a hairline costs the list: the rule and the air on both sides of it.
+///
+/// **The cap does not grow for it.** [`MENU_MAX_VISIBLE_ITEMS`] is eight ITEMS
+/// and stays eight items — `max-height: calc(8 * 27.5px + 2 * 4px + 2 * 1px)`
+/// counts no rules either — so a hairline inside the visible run costs a
+/// fraction of the ninth item's room and nothing else.
+const MENU_SEPARATOR_BAND_LOGICAL_PX: f32 =
+    MENU_SEPARATOR_HEIGHT_LOGICAL_PX + 2.0 * MENU_SEPARATOR_MARGIN_Y_LOGICAL_PX;
+/// `.combo-item .ci-act { width: 18px; height: 18px }` — one of the two verbs a
+/// row that is a FILE reveals under the pointer.
+///
+/// Eighteen and not `.pf-act`'s 26: a combo item is 27.5 tall, and a 26px hit
+/// box inside it would be a button wearing the row.
+const MENU_ACT_SIDE_LOGICAL_PX: f32 = 18.0;
+/// `.ci-acts { gap: 1px }`, the profile row's own gap between two verbs.
+const MENU_ACT_GAP_LOGICAL_PX: f32 = 1.0;
+/// `.ci-acts { padding-left: 12px }` — the air between the longest name and the
+/// first verb. It is reserved in the popup's WIDTH whether the run is revealed
+/// or not, because a popup that grew when the pointer crossed a row would be a
+/// list that moves under the pointer.
+const MENU_ACT_INSET_LOGICAL_PX: f32 = 12.0;
+/// `.ci-act { border-radius: 4px }`, the ground one wears under the pointer.
+const MENU_ACT_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// `.combo-item .ci-act svg { width: 12px }` — the pencil, drawn on a 16 viewBox
+/// with its ink inside the margins.
+const MENU_EDIT_MARK_LOGICAL_PX: f32 = 12.0;
+/// `.combo-item .ci-del svg { width: 10px }` — the ×, drawn on a 10 viewBox with
+/// its ink corner to corner. Two numbers and one optical size: at one width the
+/// × came out both larger and heavier than the mark beside it.
+const MENU_DELETE_MARK_LOGICAL_PX: f32 = 10.0;
+/// The whole trailing run, which is what the popup's width has to hold.
+const MENU_ACT_RUN_LOGICAL_PX: f32 =
+    MENU_ACT_INSET_LOGICAL_PX + 2.0 * MENU_ACT_SIDE_LOGICAL_PX + MENU_ACT_GAP_LOGICAL_PX;
+/// The mark an ACTION carries where a value carries its tick: a `+` in a column
+/// of exactly the tick's width, so `Add scheme…` starts on the same x as `Nord`
+/// above it.
+const MENU_ACTION_MARK: &str = "+";
+/// `.combo-item.act .actmark { font-size: 12px }`.
+const MENU_ACTION_MARK_FONT_LOGICAL_PX: f32 = 12.0;
 const TICK_FONT_LOGICAL_PX: f32 = 11.0;
 const TICK: &str = "\u{2713}";
 
@@ -441,43 +503,13 @@ const RESTORE_ALL_WIDTH_LOGICAL_PX: f32 = 152.0;
 /// `Reset to defaults` — narrower than `Restore all defaults` because it says
 /// less: the shortcut page's verb has a whole table in scope and says so, this
 /// one has the group it closes and nothing else.
+///
+/// **The foot is one verb again** (user ruling 2026-08-19). `Customise scheme…`
+/// took 152 and `Delete scheme…` took this same 140, they stood in a row with an
+/// 8px gap and a muted line above them naming the scheme they would act on, and
+/// all four of those numbers left with the two verbs — which are marks on the
+/// picker's own rows now. What is left is this one, at the width it always had.
 const RESET_ADVANCED_WIDTH_LOGICAL_PX: f32 = 140.0;
-/// And `Customise scheme…`, the other verb an Advanced foot can carry
-/// (§7.1.6c-4c).
-///
-/// The shortcut page's 152 rather than the Reset's 140, because the word is
-/// longer: `Customise scheme…` is the widest label any `.btn` in this dialog
-/// carries, and a button sized to a shorter one would print it cut.
-const CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX: f32 = 152.0;
-/// `Delete scheme` — the third verb the foot carries (§7.1.6c-4d, user ruling
-/// 2026-08-18).
-///
-/// The `Reset`'s 140 and not the `Customise`'s 152, on the same measure: it is
-/// two words with no ellipsis after them, because unlike its neighbour it
-/// finishes what it names. A press sends one file to the Recycle Bin and the
-/// card says so; nothing is handed back to the reader to go on doing.
-const DELETE_SCHEME_WIDTH_LOGICAL_PX: f32 = 140.0;
-/// The line above the scheme foot's verbs, where they say what they will do.
-///
-/// `.row .desc`'s own line box, because that is what it is: one muted line under
-/// a control saying the one thing worth saying about it. It exists because the
-/// foot line itself has **no room** — 504px of row less 448px of three buttons
-/// and their gaps leaves 48, which is not a sentence — and because a reason
-/// that appeared only when a verb went dark would make an Advanced group change
-/// height according to which colour scheme is in force.
-///
-/// So the line is **always there and always says something**: which file
-/// `Delete scheme` would send to the bin, or why there is no file. That is the
-/// greyed-row idiom's "the reason lives in the description line" carried onto a
-/// verb, and it is the only shape of it whose geometry does not depend on a
-/// value.
-const FOOT_HINT_LINE_LOGICAL_PX: f32 = 12.0 * 1.5;
-/// The gap between two verbs standing on one foot line.
-///
-/// The `.btn` row's own `gap: 8px`. It exists because the foot became a *row*
-/// the day it grew a second verb, and two buttons that touch read as one control
-/// split in half.
-const FOOT_BUTTON_GAP_LOGICAL_PX: f32 = 8.0;
 const BUTTON_HEIGHT_LOGICAL_PX: f32 = 27.5;
 
 // ── the Profiles page (§7.1.6c-6) ───────────────────────────────────────────
@@ -686,42 +718,30 @@ pub fn row_menu_items(line: &crate::profiles::ProfileLine) -> Vec<RowMenuItem> {
 // it changes — and it would put the two colour-scheme rows and a background
 // picture behind the same door.
 
-/// The disclosure row is a `.row` with a title and no sentence: one line box
+/// The disclosure row is a `.row` with a heading and no sentence: one line box
 /// between the same two 11px paddings every other row in the dialog is built
 /// from, so the group's heading sits in the rhythm of the list it heads.
+///
+/// **The line box is the group label's and not the row title's** (user ruling
+/// 2026-08-19): the word is set in `.group-label`'s type now, so the box it
+/// stands in is that type's box. 35 and not 38.5, and the three and a half
+/// pixels are arithmetic falling out of a face rather than a number anybody
+/// picked.
 const DISCLOSURE_HEIGHT_LOGICAL_PX: f32 =
-    2.0 * ROW_PADDING_Y_LOGICAL_PX + ROW_TITLE_LINE_LOGICAL_PX;
-/// The triangle's own square — [`crate::seats::FILES_ROW_TRI_LOGICAL_PX`], and
-/// the same [`ChromeMark::TreeDisclosure`] the files tree turns, because a
-/// reader who has opened a folder in this window has already learned this glyph.
-const DISCLOSURE_MARK_LOGICAL_PX: f32 = crate::seats::FILES_ROW_TRI_LOGICAL_PX;
-/// Between the triangle and the word it turns.
-const DISCLOSURE_GAP_LOGICAL_PX: f32 = 8.0;
-/// **The triangle's own gutter, to the left of the page's text column** (user
-/// report 2026-08-18).
+    2.0 * ROW_PADDING_Y_LOGICAL_PX + GROUP_LABEL_LINE_LOGICAL_PX;
+/// The chevron's box: `.adv-head .adv-chev { width: 10px; height: 6px }`.
 ///
-/// The word used to start where the triangle ended, which put `Advanced` ten
-/// pixels and a gap to the right of every other title on the page — a heading
-/// out of line with the list it heads, in a dialog whose whole left edge is one
-/// column. The files tree settled this shape already: `push_files_tree` places a
-/// row's triangle at `content_left` and the name at `content_left + tri + gap`,
-/// so a file with no triangle still starts its name where a folder's does. The
-/// triangle lives in a gutter; the text column does not move for it.
-///
-/// Here the gutter hangs *outside* the row rather than inside it, because this
-/// dialog has only the one disclosure and the column it must line up with is the
-/// column every other row already owns. `.adv-head .tri { margin-left: -18px }`
-/// is the mock-up's way of saying the same thing, and 18 is this constant: the
-/// 10px mark and the 8px gap. It reaches back into `.content`'s own 22px
-/// padding, which is what leaves it room.
-///
-/// **The hit box does not move with it.** The mock-up's own sentence — "a 10px
-/// triangle is not a thing to ask anybody to hit, and the word beside it is what
-/// they were aiming at" — is what makes the whole `.row` band the control, and
-/// the band is the row: from the text column to the right margin, exactly like
-/// every other row's. The triangle is the mark that says which way the row is
-/// pointing, not a second target.
-const DISCLOSURE_GUTTER_LOGICAL_PX: f32 = DISCLOSURE_MARK_LOGICAL_PX + DISCLOSURE_GAP_LOGICAL_PX;
+/// **A chevron and no longer a triangle** (user ruling 2026-08-19, the hybrid).
+/// Three treatments were drawn for the choosing and the answer took the word
+/// from one and the mark from another; what this constant records is the second
+/// half. The mark left the head of the row for its foot, and in leaving it took
+/// the gutter argument with it — there is nothing to the left of `ADVANCED` at
+/// all, so there is no column to cut out of a margin and nothing to be too
+/// narrow. It is the same [`crate::marks::ChromeMark::chevron`] the preview
+/// head and the tab strip turn, at the same 180°, through the same door.
+const DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX: f32 = 10.0;
+/// The chevron's height; see [`DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX`].
+const DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 6.0;
 
 // ── every word this dialog puts in front of a person ───────────────────────
 //
@@ -971,35 +991,113 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 /// This machine's monospaced families, enumerated once and kept for the life of
 /// the process.
 ///
-/// **The `OnceLock` is what makes `option_label`'s `&'static str` honest.** A
-/// family name is a runtime string, and every other picker in this dialog hands
-/// back a literal; leaking one `Vec<String>` into a `static` gives the same
+/// **The `&'static` list is what makes `option_label`'s `&'static str` honest.**
+/// A family name is a runtime string, and every other picker in this dialog
+/// hands back a literal; leaking one `Vec<MonospaceFamily>` gives the same
 /// lifetime without a `Box::leak` per row, without allocating on a dialog that
 /// redraws on hover, and without changing the signature of nine functions and
-/// their thirty call sites. The list cannot change under it, because the answer
-/// is only wanted while a picker is open and a font installed mid-session is a
-/// case every other program answers with "restart" too.
+/// their thirty call sites.
 ///
 /// Enumerated lazily — the first time a caller actually asks — rather than at
 /// startup, because opening a system font collection is exactly the cost
 /// `bt_render::terminal_font_system` refuses to pay on every launch. The Settings
 /// dialog is the only thing that asks.
-static MONOSPACE_FAMILIES: std::sync::OnceLock<Vec<bt_platform::MonospaceFamily>> =
-    std::sync::OnceLock::new();
+///
+/// **It was a `OnceLock` until 2026-08-19, and the comment beside it said the
+/// list cannot change under it — "a font installed mid-session is a case every
+/// other program answers with restart too".** The `Install fonts…` ruling made
+/// that sentence false: the picker now ends in a door onto Windows' own Fonts
+/// page, so a reader is *expected* to leave, install a family and come back, and
+/// telling them to restart the terminal they were invited out of would be the
+/// rudest possible answer.
+///
+/// So the slot is keyed, on the shape [`SchemeLabelSlot`] already solved this
+/// exact problem with: a revision the list was built at, compared on every read,
+/// re-enumerated only when it has moved. The key is bumped by
+/// [`rescan_monospace_families`] and by nothing else.
+///
+/// **THE LIST RESCANS WHEN THE DIALOG REOPENS, NOT WHILE IT IS UP.**
+/// DirectWrite's collection is snapshotted when a picker is built, a font
+/// installed behind an open dialog would need that collection invalidated and
+/// every open popup rebuilt under the pointer, and the gesture that put the font
+/// there — leaving, dropping a file on a Windows page, coming back — already
+/// crosses a close and a reopen. So the rule is the plainest one available and
+/// needs no watcher.
+///
+/// The leak is per rescan and not per call. It is bounded by how many times one
+/// session opens the dialog *after installing a font*, since a rescan that finds
+/// the same families keeps the list it already had — which is
+/// [`schemes::rescan`]'s own arithmetic one crate over.
+struct MonospaceFamilySlot(std::sync::RwLock<(u64, &'static [bt_platform::MonospaceFamily])>);
+
+impl MonospaceFamilySlot {
+    const fn new() -> Self {
+        Self(std::sync::RwLock::new((0, &[])))
+    }
+
+    fn get(&self, revision: u64) -> &'static [bt_platform::MonospaceFamily] {
+        {
+            let held = self
+                .0
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Revision zero is "never enumerated", so it can never be a hit —
+            // which is what makes the empty slice above unreachable rather than
+            // merely unlikely.
+            if held.0 == revision && revision > 0 {
+                return held.1;
+            }
+        }
+        let mut held = self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.0 == revision && revision > 0 {
+            return held.1;
+        }
+        #[cfg(windows)]
+        let enumerated = bt_platform::monospace_font_families();
+        #[cfg(not(windows))]
+        let enumerated = bt_platform::order_monospace_families(Vec::new());
+        // The families this machine had a moment ago are the families it has
+        // now, on every launch but the one where somebody installed a font — so
+        // the common rescan keeps the slice it already leaked and costs the
+        // enumeration and a comparison, nothing more.
+        if held.1 == enumerated.as_slice() {
+            *held = (revision, held.1);
+            return held.1;
+        }
+        let leaked: &'static [bt_platform::MonospaceFamily] =
+            Box::leak(enumerated.into_boxed_slice());
+        *held = (revision, leaked);
+        leaked
+    }
+}
+
+static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
+/// Which enumeration the picker's list is from. Zero until the first one.
+static MONOSPACE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Every monospaced family this machine has, in the order the picker draws them.
 #[must_use]
 pub fn monospace_families() -> &'static [bt_platform::MonospaceFamily] {
-    MONOSPACE_FAMILIES.get_or_init(|| {
-        #[cfg(windows)]
-        {
-            bt_platform::monospace_font_families()
-        }
-        #[cfg(not(windows))]
-        {
-            bt_platform::order_monospace_families(Vec::new())
-        }
-    })
+    MONOSPACE_FAMILIES.get(MONOSPACE_REVISION.load(std::sync::atomic::Ordering::Acquire))
+}
+
+/// **Ask the machine again the next time somebody wants the list** (user ruling
+/// 2026-08-19).
+///
+/// Called when the Settings dialog OPENS and nowhere else: that is the moment
+/// the ruling names, and it is the one moment at which no picker is drawn, no
+/// popup is anchored and no measurement is in flight — so a list that comes back
+/// one family longer moves nothing under anybody's pointer.
+///
+/// It marks rather than enumerates. Opening a system font collection costs what
+/// `bt_render::terminal_font_system` refuses to pay at launch, and a reader who
+/// opens the dialog to change a shortcut should not pay it either; the next
+/// caller who actually wants a family pays, exactly as the first one always did.
+pub fn rescan_monospace_families() {
+    MONOSPACE_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 /// Which row of the family picker a stored family name is.
@@ -1372,10 +1470,44 @@ pub enum SettingsCategory {
 
 impl SettingsCategory {
     /// Every category this build knows, in the rail's own order.
+    /// **THE RAIL IS 从看到用 — WHAT YOU SEE BEFORE WHAT YOU RUN** (user ruling
+    /// 2026-08-19). Both axes of this dialog had been ordered a decision at a
+    /// time and each of those decisions was right; none of them was a rule, so
+    /// every new page had to be argued from scratch. This is the rule they were
+    /// all instances of. Read down the array and the questions get narrower and
+    /// later:
+    ///
+    /// - `General` — the product, and what it does when it starts;
+    /// - `Appearance` — what the WINDOW looks like: one window, one answer, and
+    ///   the answer is visible before a single command has been typed;
+    /// - `Profiles` — the KINDS of session that window can open, still about
+    ///   what you see but one level in from the window;
+    /// - `Terminal` — how ONE pane behaves once something is running;
+    /// - `RenderedBlocks` — what that pane draws inside itself;
+    /// - `Shortcuts` — the keys, which reach all five above and so cannot come
+    ///   before any of them.
+    ///
+    /// **`Appearance` and `Profiles` swapped** for exactly that reading. The old
+    /// order had `Profiles` second on the strength of one row on the page above
+    /// it naming the table — a true sentence about two rows, used to order six
+    /// pages. Adjacency to `Default profile` is worth less than the rail being
+    /// read down: a table of shell definitions standing in front of `Theme` asks
+    /// a reader to name a session before they have looked at the window it will
+    /// open in. The `Default profile` → `Profiles` path is unhurt — it is a
+    /// picker whose own menu is that table, one rail word away either way.
+    ///
+    /// **Within a page the rule is: everyday first, siblings adjacent, Advanced
+    /// last** — the other half of the same ruling, applied in that order, and
+    /// carried by [`visible_rows`] rather than here.
+    ///
+    /// **This array is the only place the order lives.** [`Self::index`],
+    /// `nav_items`, `first_category`, the arrow walk and Home/End all read it;
+    /// nothing on disk does ([`Self::key`] says why), so a reorder is this
+    /// literal and the two pins that quote it.
     pub const ALL: [Self; 6] = [
         Self::General,
-        Self::Profiles,
         Self::Appearance,
+        Self::Profiles,
         Self::Terminal,
         Self::RenderedBlocks,
         Self::Shortcuts,
@@ -2557,6 +2689,69 @@ impl SettingsRow {
         }
     }
 
+    /// **The one verb a picker may end with, behind a hairline** (user ruling
+    /// 2026-08-19).
+    ///
+    /// AN ACTION IS NOT A VALUE. It takes no tick — nothing here is ever the
+    /// current answer — it does not become the button's label, and it leaves the
+    /// row's answer exactly as it found it. What it gets instead is a `+` in a
+    /// mark column of exactly the tick's width, so it starts on the same x as
+    /// the names above it, and an ellipsis, which is this house's standing
+    /// promise that something opens.
+    ///
+    /// TWO ROWS HAVE ONE AND THEY ARE THE SAME SHAPE said twice: a list of
+    /// values, a rule, and the door the values come in through. `Add scheme…`
+    /// copies the scheme in force and opens the copy; `Install fonts…` opens the
+    /// system's own Fonts page, because the honest answer to "my font isn't
+    /// here" is "install it" and this picker used to end without saying so.
+    /// Two pickers doing the same thing differently would be two idioms; one is
+    /// an idiom.
+    #[must_use]
+    pub fn menu_action(self) -> Option<&'static str> {
+        match self {
+            Self::LightScheme | Self::DarkScheme => Some(Text::AddScheme.text()),
+            Self::TerminalFont => Some(Text::InstallFonts.text()),
+            _ => None,
+        }
+    }
+
+    /// **Which canvas a scheme row is about** — `Some(true)` for the Light row,
+    /// `Some(false)` for the Dark one, `None` for every other row.
+    ///
+    /// The two rows already carry this in their names, and the runtime already
+    /// branched on them at three call sites; this is that branch written once,
+    /// so a verb pressed on one of these rows can copy, open or recycle a scheme
+    /// **for the row it was pressed on** rather than for the canvas the window
+    /// happens to be painting. That is the whole of the 2026-08-19 correction to
+    /// `Add scheme…`: the foot had to guess and a row does not.
+    #[must_use]
+    pub fn scheme_canvas(self) -> Option<bool> {
+        match self {
+            Self::LightScheme => Some(true),
+            Self::DarkScheme => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Whether this picker's items can be **files of the reader's own** — rows
+    /// that reveal a pencil and a × under the pointer.
+    ///
+    /// A question about the ROW and not about an item, because it decides
+    /// whether the popup reserves width for a run of verbs at all; which of the
+    /// row's items are actually files is a fact about the folder and is read off
+    /// [`SettingsContent::scheme_files`] one frame at a time.
+    ///
+    /// The font picker answers `false` and always will: **there is no in-app
+    /// font management and there will not be.** A font is a machine-wide
+    /// resource, installing one affects every program on the desk, and deletion
+    /// belongs to Windows for exactly that reason — a terminal that could remove
+    /// a family another program was drawing with is a terminal that has taken a
+    /// decision that was never its to take.
+    #[must_use]
+    pub fn lists_user_files(self) -> bool {
+        self.scheme_canvas().is_some()
+    }
+
     /// What the picker's *button* says, when that is not simply the word on the
     /// item that is ticked.
     ///
@@ -3387,13 +3582,6 @@ pub struct SettingsPanel {
     editor: Option<ProfileEditor>,
     /// Which row's `⋯` is open, by its index in the profile table.
     row_menu: Option<usize>,
-    /// Whether the foot's `Delete scheme…` menu is open (user report
-    /// 2026-08-18).
-    ///
-    /// A `bool` and not an index, because there is one of it: the foot belongs
-    /// to the page and the menu lists the folder, so unlike a row's `⋯` there is
-    /// no second one it could be confused with.
-    delete_menu: bool,
 }
 
 /// The editor sub-page's own state: which profile, and the text of its three
@@ -3512,6 +3700,13 @@ impl SettingsPanel {
         self.open
     }
 
+    /// Put the ring somewhere, so a pin can start a walk from a named place
+    /// rather than by pressing its way there.
+    #[cfg(test)]
+    fn focus_to(&mut self, target: SettingsTarget) {
+        self.focus = Some(target);
+    }
+
     pub fn menu(&self) -> Option<SettingsRow> {
         self.menu
     }
@@ -3587,7 +3782,6 @@ impl SettingsPanel {
         // nothing to save and nothing to ask.
         self.editor = None;
         self.row_menu = None;
-        self.delete_menu = false;
         self.focus = Some(SettingsTarget::Nav(category));
         true
     }
@@ -3615,7 +3809,6 @@ impl SettingsPanel {
         self.focus_visible = false;
         self.editor = None;
         self.row_menu = None;
-        self.delete_menu = false;
         self.category = content.first_category();
         self.focus = self
             .open
@@ -3648,15 +3841,6 @@ impl SettingsPanel {
         if let Some(index) = self.row_menu.take() {
             self.hover = None;
             self.focus = Some(SettingsTarget::ProfileMore(index));
-            return true;
-        }
-        // The scheme menu is the same rung on the other page: innermost thing
-        // open, and closing it hands the keyboard back to the button it hangs
-        // from.
-        if self.delete_menu {
-            self.delete_menu = false;
-            self.hover = None;
-            self.focus = Some(SettingsTarget::DeleteScheme);
             return true;
         }
         if let Some(row) = self.menu {
@@ -3697,7 +3881,6 @@ impl SettingsPanel {
         self.focus_visible = false;
         self.editor = None;
         self.row_menu = None;
-        self.delete_menu = false;
     }
 
     /// The editor sub-page's state, or `None` while the list is the view.
@@ -3717,31 +3900,6 @@ impl SettingsPanel {
         self.row_menu
     }
 
-    /// Whether the foot's `Delete scheme…` menu is showing.
-    #[must_use]
-    pub fn delete_menu(&self) -> bool {
-        self.delete_menu
-    }
-
-    /// A press on `Delete scheme…`: open it, or shut the one already open —
-    /// [`Self::toggle_menu`]'s own shape, because it is the same gesture.
-    ///
-    /// **It takes the picker's place**, and the scroll with it. Both popups are
-    /// capped at the same eight items and both are navigated by the same
-    /// `menu_scroll`, so a second one open behind the first would be two boxes
-    /// answering one number — and the wheel would move the one nobody is looking
-    /// at.
-    pub fn toggle_delete_menu(&mut self) {
-        self.delete_menu = !self.delete_menu;
-        self.menu = None;
-        self.menu_scroll = 0.0;
-    }
-
-    pub fn close_delete_menu(&mut self) {
-        self.delete_menu = false;
-        self.menu_scroll = 0.0;
-    }
-
     /// A press on a row's `⋯`: open it, or shut the one already open on this
     /// row — [`Self::toggle_menu`]'s own shape, because it is the same gesture.
     pub fn toggle_row_menu(&mut self, index: usize) {
@@ -3757,7 +3915,6 @@ impl SettingsPanel {
     /// about to type into.
     pub fn open_editor(&mut self, editor: ProfileEditor) {
         self.row_menu = None;
-        self.delete_menu = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.focus = Some(SettingsTarget::Field(SettingsRow::ProfileName));
@@ -3852,17 +4009,6 @@ impl SettingsPanel {
         }) {
             self.row_menu = None;
         }
-        // And the scheme menu's, which is the same sentence: a press anywhere
-        // that is not this menu or the button it hangs from closes it, and a
-        // press on the button belongs to `toggle_delete_menu`.
-        if self.delete_menu
-            && !matches!(
-                target,
-                SettingsTarget::DeleteScheme | SettingsTarget::DeleteSchemeItem(_)
-            )
-        {
-            self.delete_menu = false;
-        }
         match target {
             SettingsTarget::Close
             | SettingsTarget::Combo(_)
@@ -3873,7 +4019,6 @@ impl SettingsPanel {
             | SettingsTarget::RestoreAll
             | SettingsTarget::Advanced(_)
             | SettingsTarget::ResetAdvanced(_)
-            | SettingsTarget::CustomiseScheme
             | SettingsTarget::ProfileUp(_)
             | SettingsTarget::ProfileDown(_)
             | SettingsTarget::ProfileEdit(_)
@@ -3901,25 +4046,35 @@ impl SettingsPanel {
             // editor (§7.1.6c-6b). It was not one while there was nothing for
             // `Enter` to do, because a ring on a thing that cannot be activated
             // is a ring that lies.
-            | SettingsTarget::ProfileRow(_)
-            | SettingsTarget::DeleteScheme => self.focus = Some(target),
+            | SettingsTarget::ProfileRow(_) => self.focus = Some(target),
             // An item of a row's `⋯` focuses the trigger it hangs from, exactly
             // as a picker's item focuses its row: the menu is about to close,
             // and the ring belongs on the thing that stays.
             SettingsTarget::ProfileMoreItem(index, _) => {
                 self.focus = Some(SettingsTarget::ProfileMore(index));
             }
-            // An item of the scheme menu focuses the button it hangs from, for
-            // the same reason: the menu is about to close, and the ring belongs
-            // on the thing that stays.
-            SettingsTarget::DeleteSchemeItem(_) => {
-                self.focus = Some(SettingsTarget::DeleteScheme);
-            }
             // An item's own row is what the keyboard lands on: the menu is about
             // to close, and a focus naming an item of a shut picker names
-            // nothing.
-            SettingsTarget::Choice(row, _) | SettingsTarget::Menu(row) => {
+            // nothing. The pencil and the picker's own verb go the same way for
+            // the same reason — both close the list they were pressed in.
+            SettingsTarget::Choice(row, _)
+            | SettingsTarget::Menu(row)
+            | SettingsTarget::MenuAction(row)
+            | SettingsTarget::MenuItemEdit(row, _) => {
                 self.focus = Some(SettingsTarget::Combo(row));
+            }
+            // **The × leaves the ring in the menu**, because the ruling leaves
+            // the menu itself standing (user ruling 2026-08-19): management
+            // comes in runs, and a reader tidying three files out of a folder
+            // must not have to reopen the list between them.
+            //
+            // One row up and not the same index, because the row under the ring
+            // is the one that just went. The list always holds the bundled
+            // schemes, so `index - 1` is a row that exists whichever one was
+            // recycled — and when the first item was the file, `0` is where the
+            // ring stays.
+            SettingsTarget::MenuItemDelete(row, index) => {
+                self.focus = Some(SettingsTarget::Choice(row, index.saturating_sub(1)));
             }
             SettingsTarget::Scrim | SettingsTarget::Panel => {}
         }
@@ -3973,9 +4128,30 @@ impl SettingsPanel {
         {
             return;
         }
-        if self.delete_menu
-            && let Some(SettingsTarget::DeleteSchemeItem(index)) = self.focus
-            && index < content.scheme_files.len()
+        // **And a mark on a picker's own item**, which is the same sentence a
+        // third time: the run of verbs is open INSIDE a picker exactly as the
+        // picker is open inside a page, so a ring standing on one is in no Tab
+        // order and is not lost.
+        if let (
+            Some(menu),
+            Some(
+                SettingsTarget::MenuItemEdit(row, index)
+                | SettingsTarget::MenuItemDelete(row, index),
+            ),
+        ) = (self.menu, self.focus)
+            && menu == row
+            && rows.contains(&row)
+            && menu_item_is_user_file(row, index, content)
+        {
+            return;
+        }
+        // The verb a picker ends with is a legal place too, and it needs no
+        // index: [`SettingsRow::menu_action`] is what says whether this row has
+        // one at all.
+        if let (Some(menu), Some(SettingsTarget::MenuAction(row))) = (self.menu, self.focus)
+            && menu == row
+            && rows.contains(&row)
+            && row.menu_action().is_some()
         {
             return;
         }
@@ -4135,14 +4311,31 @@ impl SettingsPanel {
             // already has: while you are *inside* a control, the arrows are the
             // control's. Tab and Shift+Tab still leave, which is why nothing
             // becomes unreachable.
-            SettingsKey::Left => match self.slider_key(values, SliderKey::Step(-1)) {
-                Some(verdict) => return verdict,
-                None => self.step_out_of_page(content),
-            },
-            SettingsKey::Right => match self.slider_key(values, SliderKey::Step(1)) {
-                Some(verdict) => return verdict,
-                None => self.step_into_page(content),
-            },
+            // **And an open picker's row owns them too, when that row is a
+            // file** (user ruling 2026-08-19). Asked before the slider, because
+            // the slider's own answer is already "not while a menu is open" —
+            // and asked before the rail, because the ring is INSIDE a control
+            // and `←` there means "out of this column", not "out of this page".
+            SettingsKey::Left => {
+                if self.step_menu_column(content, -1) {
+                    true
+                } else {
+                    match self.slider_key(values, SliderKey::Step(-1)) {
+                        Some(verdict) => return verdict,
+                        None => self.step_out_of_page(content),
+                    }
+                }
+            }
+            SettingsKey::Right => {
+                if self.step_menu_column(content, 1) {
+                    true
+                } else {
+                    match self.slider_key(values, SliderKey::Step(1)) {
+                        Some(verdict) => return verdict,
+                        None => self.step_into_page(content),
+                    }
+                }
+            }
             SettingsKey::Home => match self.slider_key(values, SliderKey::End(false)) {
                 Some(verdict) => return verdict,
                 None => self.jump(content, values, false),
@@ -4196,6 +4389,47 @@ impl SettingsPanel {
         } else {
             SettingsKeyVerdict::Adjusted(row, next)
         })
+    }
+
+    /// **`←`/`→` inside an open picker: the second axis of a row that is a
+    /// file** (user ruling 2026-08-19).
+    ///
+    /// A picker is walked with `↑` and `↓` and always has been, so the ROW is
+    /// the unit the vertical keys move between and the two marks are a second
+    /// axis on the row the walk is standing on: `→` steps the highlight from the
+    /// item to the pencil to the `×` and stops there, `←` steps back and stops
+    /// on the item, and Enter or Space presses whichever of the three is lit.
+    ///
+    /// **A bundled row has no second axis** and neither does the picker's own
+    /// verb: `←` and `→` do nothing at all on them, which is the same sentence
+    /// their missing marks make with the pointer. Nothing is greyed and nothing
+    /// is skipped over — there is simply one column on those rows and three on a
+    /// row that is a file.
+    ///
+    /// It CLAMPS rather than wrapping, unlike every vertical walk in this
+    /// dialog. A wrap would put `←` from the item onto the `×` two columns away,
+    /// which is a recycle bin one key press from a list somebody is reading.
+    fn step_menu_column(&mut self, content: SettingsContent<'_>, delta: isize) -> bool {
+        let Some(menu) = self.menu else {
+            return false;
+        };
+        let (row, index, column) = match self.focus {
+            Some(SettingsTarget::Choice(row, index)) => (row, index, 0_isize),
+            Some(SettingsTarget::MenuItemEdit(row, index)) => (row, index, 1),
+            Some(SettingsTarget::MenuItemDelete(row, index)) => (row, index, 2),
+            _ => return false,
+        };
+        if row != menu || !menu_item_is_user_file(row, index, content) {
+            return false;
+        }
+        let landing = match (column + delta).clamp(0, 2) {
+            0 => SettingsTarget::Choice(row, index),
+            1 => SettingsTarget::MenuItemEdit(row, index),
+            _ => SettingsTarget::MenuItemDelete(row, index),
+        };
+        let changed = self.focus != Some(landing);
+        self.focus = Some(landing);
+        changed
     }
 
     /// `→` from the rail: into the page, onto its first control.
@@ -4308,38 +4542,27 @@ impl SettingsPanel {
                 // the same body a press on them runs, which is the rule this
                 // verdict exists for.
                 | SettingsTarget::Advanced(_)
-                | SettingsTarget::ResetAdvanced(_)
-                // And `Customise scheme…` for the same reason twice over: it
-                // writes a file, selects a scheme and shuts this dialog, none
-                // of which this type can reach.
-                | SettingsTarget::CustomiseScheme),
+                | SettingsTarget::ResetAdvanced(_)),
             ) => SettingsKeyVerdict::Chose(target),
-            // A verb with nothing to act on refuses Enter, exactly as a greyed
-            // row does: the ring may stand on it and the reason beside it may be
-            // read, and nothing more.
-            Some(SettingsTarget::DeleteScheme) if !delete_scheme_enabled(content) => {
-                SettingsKeyVerdict::Inert
+            // **The picker's own verb, and the two marks on its rows** (user
+            // ruling 2026-08-19). All three leave through `Chose` for one
+            // reason: each writes, copies or recycles a FILE, and this type has
+            // no way to reach a folder.
+            //
+            // `Add scheme…` and the pencil shut the list, because what they open
+            // needs the room — both end with a scheme's file in a preview pane
+            // with the keyboard in it, and this whole dialog goes with the menu.
+            Some(target @ (SettingsTarget::MenuAction(_) | SettingsTarget::MenuItemEdit(..))) => {
+                self.close_menu();
+                SettingsKeyVerdict::Chose(target)
             }
-            // **It opens its menu here**, the way the `⋯` does and for the same
-            // reason: opening a menu changes nothing outside this dialog, so
-            // there is nothing for the runtime to be told. The ring lands on the
-            // first file so the arrows have somewhere to start.
-            Some(SettingsTarget::DeleteScheme) => {
-                if content.scheme_files.is_empty() {
-                    return SettingsKeyVerdict::Inert;
-                }
-                self.delete_menu = true;
-                self.focus = Some(SettingsTarget::DeleteSchemeItem(0));
-                SettingsKeyVerdict::Moved
-            }
-            // Choosing a file *is* a file operation, so it leaves through
-            // `Chose` exactly as the verbs beside it do — this type has no way
-            // to reach a Recycle Bin.
-            Some(target @ SettingsTarget::DeleteSchemeItem(index)) => {
-                if content.scheme_files.get(index).is_none() {
-                    return SettingsKeyVerdict::Inert;
-                }
-                self.delete_menu = false;
+            // **The × leaves the list standing**, which is the half of the
+            // ruling this arm exists to carry: a picker whose rows can be
+            // managed is a management surface, and it closes on a value, on
+            // Escape and on a press outside it — never on a verb about one of
+            // its own rows. The ring moves in `press`; this only refuses to
+            // shut the menu.
+            Some(target @ SettingsTarget::MenuItemDelete(..)) => {
                 SettingsKeyVerdict::Chose(target)
             }
             // **`Enter` on a row of the Profiles list opens its editor** (plan
@@ -4442,22 +4665,43 @@ impl SettingsPanel {
             self.focus = Some(SettingsTarget::ProfileMoreItem(index, items[next].verb));
             return true;
         }
-        // The scheme menu owns them for the same reason, and it is the simpler
-        // of the two: every line in it is live, so a step is a step.
-        if self.delete_menu
-            && let Some(SettingsTarget::DeleteSchemeItem(at)) = self.focus
-        {
-            let last = content.scheme_files.len().saturating_sub(1);
-            let next = at.saturating_add_signed(delta).min(last);
-            if next == at {
-                return false;
-            }
-            self.focus = Some(SettingsTarget::DeleteSchemeItem(next));
-            return true;
-        }
         match (self.menu, self.focus) {
-            (Some(menu), Some(SettingsTarget::Choice(row, index))) if menu == row => {
+            // **\u2191 and \u2193 reset the column to the item** (user ruling
+            // 2026-08-19), which is what folding the three targets into one arm
+            // does: `step_option` lands on `Choice`, whichever of the three the
+            // ring was standing on. A reader who moves to another scheme is
+            // choosing a scheme — landing on somebody's × because the row above
+            // happened to leave the highlight there is the one thing this
+            // surface must never do.
+            (
+                Some(menu),
+                Some(
+                    SettingsTarget::Choice(row, index)
+                    | SettingsTarget::MenuItemEdit(row, index)
+                    | SettingsTarget::MenuItemDelete(row, index),
+                ),
+            ) if menu == row => {
+                // **↓ off the last value lands on the picker's own verb**, which
+                // is what makes it reachable at all: it is drawn below the last
+                // item behind a hairline, so the walk that stops one row above
+                // it is a walk that cannot see it. Only downwards, and only
+                // from the end — the wrap that takes ↓ back to the top belongs
+                // to the values, and a verb that appeared in the middle of it
+                // would be a door in the middle of a list.
+                if delta > 0 && row.menu_action().is_some() && index + 1 == row.option_count() {
+                    self.focus = Some(SettingsTarget::MenuAction(row));
+                    return true;
+                }
                 self.step_option(row, values, index, delta)
+            }
+            // The verb at the foot of a managed picker is one step below its
+            // last value, and `\u2191` from it goes back into the list.
+            (Some(menu), Some(SettingsTarget::MenuAction(row))) if menu == row => {
+                if delta < 0 {
+                    self.step_option_from(row, values, row.option_count() as isize, -1)
+                } else {
+                    false
+                }
             }
             (_, Some(SettingsTarget::Nav(_))) => self.step_nav(content, delta),
             _ => self.step_in(&page_order(content, self.category), delta),
@@ -4813,8 +5057,6 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
             // **The disclosure is a focus stop** (user ruling 2026-08-17): Enter
             // and Space turn it, which is the whole of "keyboard focusable".
             PageItem::Disclosure(_) => vec![SettingsTarget::Advanced(category)],
-            PageItem::Customise => vec![SettingsTarget::CustomiseScheme],
-            PageItem::Delete => vec![SettingsTarget::DeleteScheme],
             PageItem::Reset => vec![SettingsTarget::ResetAdvanced(category)],
             // `‹ Profiles` opens the editor's Tab order, which is plan §3.5's
             // own: the way back first, then the fields, then the disclosure and
@@ -5025,67 +5267,24 @@ pub enum SettingsTarget {
     /// That group's closing verb: `Reset to defaults`, for this page's advanced
     /// rows and no others.
     ResetAdvanced(SettingsCategory),
-    /// `Customise scheme…` (§7.1.6c-4c).
+    /// **The verb an open picker ends with**, behind its last hairline (user
+    /// ruling 2026-08-19) — `Add scheme…` on the two scheme rows,
+    /// `Install fonts…` on the font row.
     ///
-    /// Carries no category, unlike the two above: there is one scheme in force
-    /// in this window and the verb copies it, so there is nothing for a page to
-    /// qualify. [`SettingsLayout`] holds one box for it and a page that does not
-    /// draw it holds `None`, which is the same shape `restore_all` has.
-    CustomiseScheme,
-    /// `Delete scheme` (§7.1.6c-4d, user ruling 2026-08-18).
+    /// It carries the row and no index: there is exactly one of these per
+    /// picker, and [`SettingsRow::menu_action`] is what says whether this row
+    /// has one at all.
+    MenuAction(SettingsRow),
+    /// The pencil on an open picker's item — open that scheme's file.
     ///
-    /// [`Self::CustomiseScheme`]'s twin and carries no category for the same
-    /// reason: there is one scheme in force and this verb sends *its* file to
-    /// the Recycle Bin.
-    DeleteScheme,
-    /// One file in the `Delete scheme…` menu, by its index in
-    /// [`SettingsContent::scheme_files`].
-    ///
-    /// **An index and not a name**, which is [`SettingsTarget::Choice`]'s own
-    /// shape: a target is a place in this frame's dialog, and the frame that
-    /// drew the menu is the frame that answers for it.
-    DeleteSchemeItem(usize),
-}
-
-/// **Whether `Delete scheme` can act** (§7.1.6c-4d, user ruling 2026-08-18).
-///
-/// One reading, asked by the hit test, by `activate` and by the draw alike —
-/// [`SettingsRow::option_enabled`]'s ruling on a verb instead of on an item, and
-/// it is the same ruling because it is the same failure: spelled only at the
-/// click it lights a button that does nothing, spelled only at the draw it
-/// leaves a dark button that still acts.
-///
-/// **It is enabled whenever the folder holds a scheme the reader wrote** (user
-/// report 2026-08-18), and dark only when it holds none.
-///
-/// It used to act on the scheme *in force*, and that was the bug: a reader with
-/// two custom schemes whose row was sitting on a bundled one found the verb dark
-/// under a sentence about built-in schemes, with no way to reach their own files
-/// short of selecting each one first — a select-then-delete dance nobody
-/// discovers. The verb now opens a menu of the folder's own files, so what it
-/// can act on is what is in the folder, and the only honest reason for it to be
-/// dark is that there is nothing there.
-/// **What the foot's first verb says**, which depends on what the row in force
-/// is on (user report 2026-08-18).
-///
-/// `Customise scheme…` over a bundled scheme, because there is nothing of it on
-/// disk and the verb has to make one; `Edit scheme…` over a file the reader
-/// already owns, because there is nothing left to copy and copying anyway is
-/// what filled a folder with `(custom 2)`. One verb and two words rather than
-/// two buttons: the reader's intent is the same either way — put this scheme in
-/// front of me so I can change it — and only the first step differs.
-#[must_use]
-pub fn customise_scheme_verb(values: &SettingsValues) -> &'static str {
-    if values.scheme_in_force_is_user_file {
-        Text::EditScheme.text()
-    } else {
-        Text::CustomiseScheme.text()
-    }
-}
-
-#[must_use]
-pub fn delete_scheme_enabled(content: SettingsContent<'_>) -> bool {
-    !content.scheme_files.is_empty()
+    /// The row and the index, exactly as [`Self::Choice`] carries them, because
+    /// a mark is a verb ABOUT an item and an item is a place in this frame's
+    /// list. Only ever drawn, and only ever answered, over an item the folder
+    /// says is a file of the reader's own.
+    MenuItemEdit(SettingsRow, usize),
+    /// The × on an open picker's item — send that scheme's file to the Recycle
+    /// Bin. [`Self::MenuItemEdit`]'s twin in every respect but the verb.
+    MenuItemDelete(SettingsRow, usize),
 }
 
 /// One row's three boxes, and which row they belong to.
@@ -5202,28 +5401,22 @@ pub struct ProfileLineLayout {
     pub more: [f32; 4],
 }
 
-/// One line of the `Delete scheme…` menu: a scheme file the reader wrote.
+/// One colour scheme the reader wrote, as the picker that lists it needs it.
 ///
-/// **The name and the file, both.** The name is what the menu draws, because it
-/// is the word the reader picked in the picker and the only one they have ever
-/// seen; the file is what goes to the Recycle Bin, and it is what the card
-/// afterwards names, because a file in the bin is spelled the way the file was.
+/// **The name and the file, both.** The name is what the menu draws — the word
+/// the reader picked in the picker and the only one they have ever seen — and
+/// it is also what tells a row of the picker apart from a bundled one. The file
+/// is what a pencil opens and what a `×` sends to the Recycle Bin, and it is
+/// what the card afterwards names, because a file in the bin is spelled the way
+/// the file was.
+///
+/// It outlived the `Delete scheme…` menu it was struck for (user ruling
+/// 2026-08-19): the verbs moved onto the picker's rows and this is still the
+/// answer to which of those rows are files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemeFileLine {
     pub name: String,
     pub file: String,
-}
-
-/// The `Delete scheme…` menu, placed (user report 2026-08-18).
-///
-/// It borrows the pickers' popup whole through [`menu_layout`], exactly as a
-/// row's `⋯` menu does, and hangs from the button that opened it. No tick
-/// column: nothing in it is a current value, it is a list of files to act on.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SchemeMenuLayout {
-    pub frame: [f32; 4],
-    /// The lines, top to bottom, paired with their boxes.
-    pub items: Vec<([f32; 4], SchemeFileLine)>,
 }
 
 /// One line of a row's `⋯` menu — which verb, and whether it can be pressed.
@@ -5359,24 +5552,6 @@ pub struct SettingsLayout {
     /// while the group is shut, because a verb inside a collapsed group is a
     /// verb nobody can see and the focus order must not hold it.
     reset_advanced: Option<[f32; 4]>,
-    /// `Customise scheme…`, on the same terms: only while the group holding it
-    /// is open, and only on a page that offers a scheme.
-    customise_scheme: Option<[f32; 4]>,
-    /// `Delete scheme`, on exactly those terms again.
-    delete_scheme: Option<[f32; 4]>,
-    /// Whether that verb can act — resolved here, once, off the content, so the
-    /// hit test and the draw read one answer rather than each asking.
-    delete_enabled: bool,
-    /// The `Delete scheme…` menu, when it is open.
-    delete_menu: Option<SchemeMenuLayout>,
-    /// The muted line **above** the foot's verbs, where `Delete scheme` says
-    /// what it will do or why it cannot (§7.1.6c-4d).
-    ///
-    /// `None` exactly when `delete_scheme` is: it belongs to the foot the two
-    /// scheme verbs stand on, and a page without them has nothing to explain.
-    /// Present in both of the verb's states, because the alternative is an
-    /// Advanced group whose height depends on which colour scheme is in force.
-    delete_reason: Option<[f32; 4]>,
     /// The open menu's border box and its items, top to bottom in its row's own
     /// option order. Empty when the menu is shut.
     ///
@@ -5387,6 +5562,20 @@ pub struct SettingsLayout {
     /// whole one. [`Self::menu_body`] is the box they are cut to.
     menu: Option<[f32; 4]>,
     items: Vec<[f32; 4]>,
+    /// The hairlines this picker's runs are told apart by — empty for a picker
+    /// that is one run of values, which is most of them.
+    menu_separators: Vec<[f32; 4]>,
+    /// The trailing verbs, one entry per drawn item and `None` for every item
+    /// that is not a file of the reader's own (user ruling 2026-08-19).
+    ///
+    /// Placed for every such item whether or not the pointer is on it: the
+    /// reveal is a fact about the DRAW, and a box that only existed while it was
+    /// visible would be a hit test that had to ask about hover before it could
+    /// answer where the pointer is.
+    menu_acts: Vec<Option<MenuItemActs>>,
+    /// Which drawn item is the picker's own verb, when it has one — always the
+    /// last, always behind a hairline. `None` for a picker that ends in a value.
+    menu_action: Option<usize>,
     menu_kind: Option<SettingsRow>,
     /// The open menu's own scrollable body — its frame less the border and the
     /// 4px padding — and the bar down its right edge when the list is longer
@@ -5463,33 +5652,6 @@ impl SettingsLayout {
     #[must_use]
     pub fn reset_advanced(&self) -> Option<[f32; 4]> {
         self.reset_advanced
-    }
-
-    /// The open group's `Customise scheme…`, or `None` when this page has none.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn customise_scheme(&self) -> Option<[f32; 4]> {
-        self.customise_scheme
-    }
-
-    /// The open group's `Delete scheme`, or `None` when this page has none.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn delete_scheme(&self) -> Option<[f32; 4]> {
-        self.delete_scheme
-    }
-
-    /// Whether `Delete scheme…` can act — the folder holds a file it could send
-    /// to the Recycle Bin.
-    #[must_use]
-    pub fn delete_enabled(&self) -> bool {
-        self.delete_enabled
-    }
-
-    /// The open `Delete scheme…` menu, if there is one.
-    #[must_use]
-    pub fn delete_menu(&self) -> Option<&SchemeMenuLayout> {
-        self.delete_menu.as_ref()
     }
 
     /// The open picker's scrollable body, or `None` while none is open.
@@ -5571,7 +5733,10 @@ impl SettingsLayout {
             SettingsTarget::Combo(row)
             | SettingsTarget::Slider(row)
             | SettingsTarget::Menu(row) => self.row(row).map(|placed| placed.band),
-            SettingsTarget::Choice(row, _) => self.row(row).map(|placed| placed.band),
+            SettingsTarget::Choice(row, _)
+            | SettingsTarget::MenuAction(row)
+            | SettingsTarget::MenuItemEdit(row, _)
+            | SettingsTarget::MenuItemDelete(row, _) => self.row(row).map(|placed| placed.band),
             SettingsTarget::Record(index) | SettingsTarget::RestoreRow(index) => self
                 .shortcuts
                 .iter()
@@ -5605,13 +5770,6 @@ impl SettingsLayout {
             SettingsTarget::EditorRestore | SettingsTarget::EditorDelete => self.editor_foot,
             SettingsTarget::Advanced(_) => self.advanced.map(|group| group.band),
             SettingsTarget::ResetAdvanced(_) => self.reset_advanced,
-            SettingsTarget::CustomiseScheme => self.customise_scheme,
-            SettingsTarget::DeleteScheme => self.delete_scheme,
-            SettingsTarget::DeleteSchemeItem(index) => self
-                .delete_menu
-                .as_ref()
-                .and_then(|menu| menu.items.get(index))
-                .map(|(box_of, _)| *box_of),
             SettingsTarget::Nav(_)
             | SettingsTarget::Close
             | SettingsTarget::Scrim
@@ -6150,7 +6308,6 @@ pub fn layout_for_menu(
         scale,
         menu_kind,
         row_menu,
-        false,
         content_of,
         category,
         scroll,
@@ -6171,7 +6328,7 @@ pub fn layout_for_menu(
 #[allow(
     clippy::too_many_arguments,
     reason = "see `layout_for_menu`: one more fact only the caller has, which is \
-              whether the foot's own menu is open"
+              which row's own menu is open"
 )]
 pub fn layout_for_menus(
     surface_width: f32,
@@ -6179,7 +6336,6 @@ pub fn layout_for_menus(
     scale: f32,
     menu_kind: Option<SettingsRow>,
     row_menu: Option<usize>,
-    delete_menu_open: bool,
     content_of: SettingsContent<'_>,
     category: SettingsCategory,
     scroll: f32,
@@ -6364,9 +6520,6 @@ pub fn layout_for_menus(
     let mut placed_env_add: Option<[f32; 4]> = None;
     let mut editor_foot: Option<[f32; 4]> = None;
     let mut reset_advanced: Option<[f32; 4]> = None;
-    let mut customise_scheme: Option<[f32; 4]> = None;
-    let mut delete_scheme: Option<[f32; 4]> = None;
-    let mut delete_reason: Option<[f32; 4]> = None;
     for item in &items {
         match *item {
             PageItem::Heading(group) => {
@@ -6515,83 +6668,62 @@ pub fn layout_for_menus(
                     combo,
                 });
             }
+            // **THE TWO EDGES ANSWER TO TWO COLUMNS** (user ruling 2026-08-19).
+            //
+            // A gutter for a leading mark was cut out of the content padding on
+            // 2026-08-18 and reported too narrow to stand in a day later; the
+            // ruling that settled it deleted the mark rather than widening the
+            // gutter, and put a chevron at the other end of the row. So there
+            // is nothing to the left of the word at all, and the row's two ends
+            // are placed by two different arguments.
+            //
+            // The word stands on the HEADING column — `text_left`, where every
+            // `.group-label` starts — because it is `APPEARANCE`'s type and
+            // `APPEARANCE` is the comparison it was chosen for. The chevron ends
+            // on the CONTROL column — `row_right`, where every picker on the
+            // page ends. Two pixels apart: the row's own
+            // `ROW_PADDING_X_LOGICAL_PX` lives on one side of this band and not
+            // on the other, and each edge is exactly where the thing standing on
+            // it belongs.
+            //
+            // The band spans both, because a band is what a press lands in and
+            // it must hold everything the row draws. The mock-up's own sentence
+            // — "a 10px triangle is not a thing to ask anybody to hit, and the
+            // word beside it is what they were aiming at" — survives the mark
+            // moving to the other end: what changed is where the glyph is drawn,
+            // never what a press lands in.
             PageItem::Disclosure(open) => {
                 let band = [
-                    row_left,
+                    text_left,
                     cursor,
                     row_right,
                     cursor + metrics.disclosure_height,
                 ];
                 cursor += metrics.disclosure_height;
-                let side = px(DISCLOSURE_MARK_LOGICAL_PX);
+                let mark_width = px(DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX);
+                let mark_height = px(DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX);
                 let middle = (band[1] + band[3]) / 2.0;
-                // **The gutter is outside the band**, which is the whole of the
-                // fix: the word starts at the row's own text column and the
-                // triangle hangs back into the content padding beside it. See
-                // [`DISCLOSURE_GUTTER_LOGICAL_PX`].
-                let mark_left = band[0] - px(DISCLOSURE_GUTTER_LOGICAL_PX);
                 let mark = [
-                    mark_left,
-                    middle - side / 2.0,
-                    mark_left + side,
-                    middle + side / 2.0,
+                    band[2] - mark_width,
+                    middle - mark_height / 2.0,
+                    band[2],
+                    middle + mark_height / 2.0,
                 ];
                 placed_advanced = Some(AdvancedLayout {
                     group: category,
                     open,
                     band,
                     mark,
+                    // The group label's own line box, for the group label's own
+                    // type. It stops short of the chevron for the reason every
+                    // other title on the page stops short of its picker.
                     label: [
                         band[0],
                         band[1] + px(ROW_PADDING_Y_LOGICAL_PX),
-                        band[2],
-                        band[1] + px(ROW_PADDING_Y_LOGICAL_PX + ROW_TITLE_LINE_LOGICAL_PX),
+                        mark[0] - px(ROW_GAP_LOGICAL_PX),
+                        band[1] + px(ROW_PADDING_Y_LOGICAL_PX + GROUP_LABEL_LINE_LOGICAL_PX),
                     ],
                 });
-            }
-            // **The foot is one line, and the first verb on it opens the
-            // line.** Both of these are right-aligned and neither advances the
-            // cursor until the last one has been placed, which is what makes a
-            // group with one verb and a group with two the same height — and
-            // what stops a page that grows a third verb from having to restate
-            // the margin.
-            PageItem::Customise => {
-                cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
-                let button = px(CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX);
-                let right = row_right
-                    - px(RESET_ADVANCED_WIDTH_LOGICAL_PX
-                        + FOOT_BUTTON_GAP_LOGICAL_PX
-                        + DELETE_SCHEME_WIDTH_LOGICAL_PX
-                        + FOOT_BUTTON_GAP_LOGICAL_PX);
-                // **The hint line first**, across the whole row: the verbs
-                // fill their own line to within 48px, so the one thing they say
-                // about themselves has to stand above them. Always placed, never
-                // conditional on a value — the draw picks which of two sentences
-                // goes in it, and the box is the same either way.
-                delete_reason = Some([
-                    row_left,
-                    cursor,
-                    row_right,
-                    cursor + px(FOOT_HINT_LINE_LOGICAL_PX),
-                ]);
-                cursor += px(FOOT_HINT_LINE_LOGICAL_PX);
-                customise_scheme = Some([
-                    right - button,
-                    cursor,
-                    right,
-                    cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
-                ]);
-            }
-            PageItem::Delete => {
-                let button = px(DELETE_SCHEME_WIDTH_LOGICAL_PX);
-                let right =
-                    row_right - px(RESET_ADVANCED_WIDTH_LOGICAL_PX + FOOT_BUTTON_GAP_LOGICAL_PX);
-                delete_scheme = Some([
-                    right - button,
-                    cursor,
-                    right,
-                    cursor + px(BUTTON_HEIGHT_LOGICAL_PX),
-                ]);
             }
             // The editor's heading, in the heading's own slot and wearing its
             // type. It is not a second rail: the rail keeps `Profiles` selected,
@@ -6654,10 +6786,16 @@ pub fn layout_for_menus(
                 ]);
                 cursor += px(BUTTON_HEIGHT_LOGICAL_PX);
             }
+            // **The foot is one verb again** (user ruling 2026-08-19). It stood
+            // as three for a day — `Customise scheme…`, `Delete scheme…` and this
+            // — with a line above them naming the scheme the first two would act
+            // on, and that line was the tell: both of those verbs were about a
+            // row in a list the reader was not looking at. They are marks on
+            // that list's own rows now. This one stays because it is the GROUP's
+            // verb and it acts on the group's rows, and it takes back the
+            // margin the hint line used to open.
             PageItem::Reset => {
-                if customise_scheme.is_none() {
-                    cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
-                }
+                cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
                 let button = px(RESET_ADVANCED_WIDTH_LOGICAL_PX);
                 reset_advanced = Some([
                     row_right - button,
@@ -6913,19 +7051,77 @@ pub fn layout_for_menus(
             .filter(|placed| placed.combo[1] >= clip[1] && placed.combo[3] <= clip[3])
             .map(|placed| (row, placed.combo))
     });
-    let popup = active.map(|(row, combo)| {
-        menu_layout(
+    // **A managed picker is values, a hairline, values, a hairline, a verb**
+    // (user ruling 2026-08-19). Everything below is derived from two questions
+    // and neither of them is asked twice: which of this row's items are files
+    // the reader wrote, and whether this row ends in an action.
+    let menu = active.map(|(row, combo)| {
+        let font = px(COMBO_FONT_LOGICAL_PX);
+        let values_count = row.option_count();
+        let action = row.menu_action();
+        // **A file is told from a bundled item by the folder and not by the
+        // list**, because the list is a run of names and a name is all a picker
+        // ever knew. `scheme_files` is what `%APPDATA%\Folio\schemes` holds this
+        // frame, which is the same answer the retired `Delete scheme…` menu was
+        // built from — the fact moved rooms, it did not change.
+        let files: Vec<bool> = (0..values_count)
+            .map(|index| menu_item_is_user_file(row, index, content_of))
+            .collect();
+        // A hairline wherever the run changes hands, and one more before the
+        // verb. Written as "where does the answer to *is this yours* change"
+        // rather than as "after the bundled ones", because a file that names
+        // itself after a bundled scheme sits where that scheme sat — the
+        // catalogue replaces in place — and a rule that assumed one boundary
+        // would draw the hairline in the wrong place on exactly that folder.
+        let mut separators_before: Vec<usize> = (1..values_count)
+            .filter(|index| files[*index] != files[index - 1])
+            .collect();
+        if action.is_some() && values_count > 0 {
+            separators_before.push(values_count);
+        }
+        let drawn = values_count + usize::from(action.is_some());
+        // **The run of verbs is reserved in the width, revealed or not**: a
+        // popup that grew when the pointer crossed a row would be a list that
+        // moves under the pointer.
+        let mut widest = widest_option(row, scale, measure) + option_icon_advance(row, scale);
+        if let Some(label) = action {
+            widest = widest.max(measure(label, font));
+        }
+        let widest_file = (0..values_count)
+            .filter(|index| files[*index])
+            .filter_map(|index| row.option_label(index))
+            .map(|label| measure(label, font))
+            .fold(0.0_f32, f32::max);
+        if widest_file > 0.0 {
+            widest = widest.max(widest_file + px(MENU_ACT_RUN_LOGICAL_PX));
+        }
+        let geometry = menu_layout(
             combo,
             surface_width,
             surface_height,
             scale,
             border,
-            row.option_count(),
-            widest_option(row, scale, measure) + option_icon_advance(row, scale),
+            drawn,
+            &separators_before,
+            widest,
             true,
             menu_scroll,
-        )
+        );
+        let acts: Vec<Option<MenuItemActs>> = geometry
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                files
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+                    .then(|| MenuItemActs::placed(*item, scale))
+            })
+            .collect();
+        (geometry, acts, action.is_some().then_some(values_count))
     });
+    let popup = menu.as_ref().map(|(geometry, _, _)| geometry);
     // The row menu hangs off the `⋯` that opened it, on exactly the terms a
     // picker's popup hangs off its button: a trigger the page has scrolled out
     // from under its own menu is a trigger the menu cannot honestly hang from.
@@ -6947,6 +7143,7 @@ pub fn layout_for_menus(
             scale,
             border,
             items.len(),
+            &[],
             widest,
             false,
             0.0,
@@ -6957,51 +7154,6 @@ pub fn layout_for_menus(
             items: geometry.items.into_iter().zip(items).collect(),
         })
     });
-    // The scheme menu hangs off the button that opened it, on the row menu's own
-    // terms — and it is placed only when the button itself was, so a page whose
-    // foot is not drawn cannot leave a menu hanging in the air.
-    //
-    // **It is capped and scrolled exactly as a picker is**, which is not a
-    // flourish: a reader with nine schemes of their own would otherwise have two
-    // of them drawn outside the box that is being painted. `menu_layout` caps at
-    // `MENU_MAX_VISIBLE_ITEMS` for every popup in this dialog, and the three
-    // numbers that make the cap navigable — the body, the bar and the reach —
-    // ride on the layout's own picker fields, because the two popups are never
-    // open at once (`toggle_delete_menu` shuts the picker) and one scroll for one
-    // open popup is what the runtime's wheel and its `shows_item` already read.
-    let mut delete_geometry = None;
-    let delete_menu = delete_scheme
-        .filter(|_| delete_menu_open && !content_of.scheme_files.is_empty())
-        .map(|button| {
-            let font = px(COMBO_FONT_LOGICAL_PX);
-            let widest = content_of
-                .scheme_files
-                .iter()
-                .map(|line| measure(&line.name, font))
-                .fold(px(ROW_MENU_MIN_WIDTH_LOGICAL_PX), f32::max);
-            let geometry = menu_layout(
-                button,
-                surface_width,
-                surface_height,
-                scale,
-                border,
-                content_of.scheme_files.len(),
-                widest,
-                false,
-                menu_scroll,
-            );
-            let placed = SchemeMenuLayout {
-                frame: geometry.frame,
-                items: geometry
-                    .items
-                    .iter()
-                    .copied()
-                    .zip(content_of.scheme_files.iter().cloned())
-                    .collect(),
-            };
-            delete_geometry = Some(geometry);
-            placed
-        });
     Some(SettingsLayout {
         scale,
         surface: [surface_width, surface_height],
@@ -7028,28 +7180,17 @@ pub fn layout_for_menus(
         restore_all,
         advanced: placed_advanced,
         reset_advanced,
-        customise_scheme,
-        delete_scheme,
-        delete_enabled: delete_scheme_enabled(content_of),
-        delete_menu,
-        delete_reason,
-        menu: popup.as_ref().map(|menu| menu.frame),
-        items: popup
+        menu: popup.map(|menu| menu.frame),
+        items: popup.map_or_else(Vec::new, |menu| menu.items.clone()),
+        menu_separators: popup.map_or_else(Vec::new, |menu| menu.separators.clone()),
+        menu_acts: menu
             .as_ref()
-            .map_or_else(Vec::new, |menu| menu.items.clone()),
+            .map_or_else(Vec::new, |(_, acts, _)| acts.clone()),
+        menu_action: menu.as_ref().and_then(|(_, _, action)| *action),
         menu_kind: active.map(|(row, _)| row),
-        menu_body: popup
-            .as_ref()
-            .or(delete_geometry.as_ref())
-            .map(|menu| menu.body),
-        menu_bar: popup
-            .as_ref()
-            .or(delete_geometry.as_ref())
-            .and_then(|menu| menu.bar),
-        menu_max_scroll: popup
-            .as_ref()
-            .or(delete_geometry.as_ref())
-            .map_or(0.0, |menu| menu.max_scroll),
+        menu_body: popup.map(|menu| menu.body),
+        menu_bar: popup.and_then(|menu| menu.bar),
+        menu_max_scroll: popup.map_or(0.0, |menu| menu.max_scroll),
     })
 }
 
@@ -7068,13 +7209,6 @@ enum PageItem {
     Row(SettingsRow),
     /// The `Advanced` heading, and whether its triangle is turned open.
     Disclosure(bool),
-    /// `Customise scheme…`, on the pages that offer a scheme to customise
-    /// (§7.1.6c-4c). It stands on the same foot line as [`Self::Reset`], to its
-    /// left, and opens that line.
-    Customise,
-    /// `Delete scheme`, between the two (§7.1.6c-4d). Reads left to right as
-    /// the life of a copy: make one, throw one away, put the page back.
-    Delete,
     /// `Reset to defaults`, which only an open group has: a verb inside a
     /// collapsed group is a verb nobody can see.
     Reset,
@@ -7136,19 +7270,6 @@ fn page_items(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<P
             items.push(PageItem::Row(row));
         }
         if open {
-            // **Derived from the rows, not from the page's name.** The verb
-            // copies the scheme in force, so it belongs to whatever page offers
-            // the two scheme rows; naming `Appearance` here would be a second
-            // place to teach the day those rows move.
-            if rows
-                .iter()
-                .any(|row| matches!(row, SettingsRow::LightScheme | SettingsRow::DarkScheme))
-            {
-                items.push(PageItem::Customise);
-                // Derived from the same rows and for the same reason: the verb
-                // deletes the file behind the scheme those rows select.
-                items.push(PageItem::Delete);
-            }
             // **Except in the profile editor** (user ruling 2026-08-18). Every
             // other Advanced group ends in this verb; this page's foot already
             // carries `Restore all defaults`, which puts the *whole* profile
@@ -7188,8 +7309,6 @@ struct StackMetrics {
     disclosure_height: f32,
     /// A closing verb and the air above it.
     foot_advance: f32,
-    /// The muted line a scheme foot puts above its verbs.
-    foot_hint_advance: f32,
     /// `.row .text`'s two stacked line boxes alone, without the control beside
     /// them — what a stacked row puts its control *under*.
     text_height: f32,
@@ -7222,7 +7341,6 @@ impl StackMetrics {
                 + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX),
             disclosure_height: px(DISCLOSURE_HEIGHT_LOGICAL_PX),
             foot_advance: px(FOOT_MARGIN_TOP_LOGICAL_PX) + px(BUTTON_HEIGHT_LOGICAL_PX),
-            foot_hint_advance: px(FOOT_HINT_LINE_LOGICAL_PX),
             text_height,
             crumb_advance: px(CRUMB_MARGIN_TOP_LOGICAL_PX)
                 + px(GROUP_LABEL_LINE_LOGICAL_PX)
@@ -7261,15 +7379,6 @@ impl StackMetrics {
             PageItem::EditorFoot => self.foot_advance,
             PageItem::Disclosure(_) => self.disclosure_height,
             PageItem::Reset => self.foot_advance,
-            // The hint line the scheme verbs stand under, and nothing else: the
-            // verbs themselves are on `Reset`'s line and `Reset` is what
-            // advances past it. This is the measuring half of the placing loop's
-            // `if customise_scheme.is_none()`, and the two say the same sentence
-            // from opposite ends — which is why a foot carrying one verb, two or
-            // three is one and the same height, and why the third verb (2026-08-18)
-            // needed no number here at all.
-            PageItem::Customise => self.foot_hint_advance,
-            PageItem::Delete => 0.0,
         }
     }
 
@@ -7478,6 +7587,8 @@ fn place_nav(items: &[SettingsCategory], nav: [f32; 4], scale: f32) -> Vec<NavLa
 /// the visible part of a whole pill rather than a shorter pill.
 #[derive(Clone, Debug)]
 struct MenuGeometry {
+    /// The hairlines between the runs, in the order they were asked for.
+    separators: Vec<[f32; 4]>,
     frame: [f32; 4],
     /// The frame less its border and its 4px padding — the scrollport.
     body: [f32; 4],
@@ -7526,6 +7637,7 @@ fn menu_layout(
     scale: f32,
     border: f32,
     option_count: usize,
+    separators_before: &[usize],
     widest_option: f32,
     ticks: bool,
     menu_scroll: f32,
@@ -7551,9 +7663,23 @@ fn menu_layout(
         };
     let width = (combo[2] - combo[0]).max((chrome + widest_option).ceil());
     let item_height = px(ITEM_HEIGHT_LOGICAL_PX);
-    let shown = option_count.min(MENU_MAX_VISIBLE_ITEMS);
-    let list = option_count as f32 * item_height;
-    let window = shown as f32 * item_height;
+    // **The cap counts items; the window is the list or the cap, whichever is
+    // smaller.** Eight is a number of answers a reader can take in, which is
+    // what `MENU_MAX_VISIBLE_ITEMS` has always meant and what
+    // `max-height: calc(8 * 27.5px …)` says in the mock-up — the hairlines
+    // between the runs are not answers, so they do not raise the ceiling.
+    //
+    // But they are still DRAWN, so a list of five items and one rule is nine
+    // pixels taller than five items, and a window measured in items alone would
+    // be nine pixels short of a list that fits: the last item would hang below
+    // the body, `shows_item` would call it hidden, and a press on
+    // `Add scheme…` would land on menu body. That was the first thing this
+    // ruling got wrong on a real window, and `min` is the whole of the fix — a
+    // list under the ceiling is shown entire, rules included, and only a list
+    // over it scrolls.
+    let separator_band = px(MENU_SEPARATOR_BAND_LOGICAL_PX);
+    let list = option_count as f32 * item_height + separators_before.len() as f32 * separator_band;
+    let window = list.min(MENU_MAX_VISIBLE_ITEMS as f32 * item_height);
     let height = 2.0 * border + 2.0 * px(MENU_PADDING_LOGICAL_PX) + window;
     // **Down unless down does not fit.** The room below is measured to the
     // window's own bottom edge less the clearance every floating box in this app
@@ -7585,12 +7711,26 @@ fn menu_layout(
     ];
     let max_scroll = (list - window).max(0.0);
     let menu_scroll = menu_scroll.clamp(0.0, max_scroll);
-    let items = (0..option_count)
-        .map(|index| {
-            let item_top = body[1] + index as f32 * item_height - menu_scroll;
-            [body[0], item_top, body[2], item_top + item_height]
-        })
-        .collect();
+    // One walk down the drawn list, items and rules together, so the boxes the
+    // pointer answers to and the boxes the ink lands in are one derivation
+    // rather than two agreeing by hand.
+    let mut separators = Vec::with_capacity(separators_before.len());
+    let mut items = Vec::with_capacity(option_count);
+    let mut item_top = body[1] - menu_scroll;
+    for index in 0..option_count {
+        if separators_before.contains(&index) {
+            let rule = item_top + px(MENU_SEPARATOR_MARGIN_Y_LOGICAL_PX);
+            separators.push([
+                body[0] + px(MENU_SEPARATOR_INSET_LOGICAL_PX),
+                rule,
+                body[2] - px(MENU_SEPARATOR_INSET_LOGICAL_PX),
+                rule + px(MENU_SEPARATOR_HEIGHT_LOGICAL_PX),
+            ]);
+            item_top += separator_band;
+        }
+        items.push([body[0], item_top, body[2], item_top + item_height]);
+        item_top += item_height;
+    }
     // The house's one scrollbar (`preview::scroll_bar`), not a second one: a
     // 2px rule against the body's right edge, a thumb that is the visible share
     // floored at something a hand can take, and `scroll_dragged_to` reading it
@@ -7604,12 +7744,80 @@ fn menu_layout(
         scale,
     );
     MenuGeometry {
+        separators,
         frame,
         body,
         items,
         bar,
         max_scroll,
     }
+}
+
+/// **The two verbs a picker row that is a FILE reveals** (user ruling
+/// 2026-08-19).
+///
+/// The pencil OPENS the file — no copy, because this row already *is* the
+/// reader's, which is the whole content of the 2026-08-18 `Edit scheme…` report
+/// now said by the marks being ABSENT from every bundled row instead of by a
+/// verb changing its word. Pressing it does not change which scheme is in
+/// force: opening a file to read it is not choosing it.
+///
+/// The × sends the file to the Recycle Bin, on §7.1.6c-4d's unchanged fallback
+/// rules.
+///
+/// A row with no file has no run — a bundled scheme travels inside the
+/// executable and there is nothing anywhere to open or move, so the marks are
+/// absent rather than drawn dark. That absence is the sentence a line of hint
+/// text under three buttons used to have to say.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuItemActs {
+    pub edit: [f32; 4],
+    pub delete: [f32; 4],
+}
+
+impl MenuItemActs {
+    /// The run, laid against an item's trailing edge.
+    fn placed(item: [f32; 4], scale: f32) -> Self {
+        let px = |value: f32| value * scale;
+        let side = px(MENU_ACT_SIDE_LOGICAL_PX);
+        let middle = (item[1] + item[3]) / 2.0;
+        let right = item[2] - px(ITEM_PADDING_X_LOGICAL_PX);
+        let delete = [
+            right - side,
+            middle - side / 2.0,
+            right,
+            middle + side / 2.0,
+        ];
+        let edit_right = delete[0] - px(MENU_ACT_GAP_LOGICAL_PX);
+        Self {
+            edit: [edit_right - side, delete[1], edit_right, delete[3]],
+            delete,
+        }
+    }
+}
+
+/// **Whether an open picker's item is a file of the reader's own** (user ruling
+/// 2026-08-19).
+///
+/// One question, asked by the layout that reserves the run's width, by the draw
+/// that reveals it, by the hit test that answers for it and by the `←`/`→` walk
+/// that reaches it — so none of the four can come to believe a different thing
+/// about the same row. It is [`SettingsRow::option_enabled`]'s shape for a fact
+/// about a FILE rather than about a machine.
+///
+/// The answer comes from the folder, never from the name: a picker's item has
+/// only ever been a string, and `%APPDATA%\Folio\schemes` is what says which of
+/// those strings somebody wrote.
+#[must_use]
+pub fn menu_item_is_user_file(
+    row: SettingsRow,
+    index: usize,
+    content: SettingsContent<'_>,
+) -> bool {
+    row.lists_user_files()
+        && row
+            .option_label(index)
+            .is_some_and(|label| content.scheme_files.iter().any(|line| line.name == label))
 }
 
 /// What the pointer is over. Never `None`: a modal owns every pixel.
@@ -7645,19 +7853,6 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
     // one hangs off a row of the Profiles list and the other off the Appearance
     // page's foot — so the order between them is arbitrary and stated only so it
     // is not accidental.
-    if let Some(menu) = layout.delete_menu() {
-        for (index, (box_of, _)) in menu.items.iter().enumerate() {
-            // An item the cap scrolled out of the body is menu body — the same
-            // sentence the picker's own items answer to, and for the same
-            // reason: an item drawn nowhere must not answer a press.
-            if layout.shows_item(*box_of) && contains(*box_of, x, y) {
-                return SettingsTarget::DeleteSchemeItem(index);
-            }
-        }
-        if contains(menu.frame, x, y) {
-            return SettingsTarget::DeleteScheme;
-        }
-    }
     if let (Some(menu), Some(row)) = (layout.menu, layout.menu_kind) {
         for (index, item) in layout.items.iter().enumerate() {
             // **An item the cap scrolled out of the body is menu body**, which
@@ -7665,6 +7860,29 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
             // must not answer a press, and one sliced by the body's edge would
             // take the click aimed at its neighbour.
             if layout.shows_item(*item) && contains(*item, x, y) {
+                // **A mark is a verb about the row, not the row's answer** (user
+                // ruling 2026-08-19), and it is asked first because it lives
+                // INSIDE the item: a press on the pencil must not also pick the
+                // scheme it names. Opening a file to read it is not choosing it,
+                // and recycling one is certainly not.
+                //
+                // The boxes are asked without asking about hover, which is the
+                // reveal's other half: the run is drawn only under the pointer,
+                // and the pointer being on a mark is what put it there.
+                if let Some(acts) = layout.menu_acts.get(index).copied().flatten() {
+                    if contains(acts.edit, x, y) {
+                        return SettingsTarget::MenuItemEdit(row, index);
+                    }
+                    if contains(acts.delete, x, y) {
+                        return SettingsTarget::MenuItemDelete(row, index);
+                    }
+                }
+                // **An action is not a value**: it takes no tick, it does not
+                // become the button's label, and it is never greyed — a door is
+                // open or it is not there.
+                if layout.menu_action == Some(index) {
+                    return SettingsTarget::MenuAction(row);
+                }
                 // **An item this machine cannot honour is menu body**, which is
                 // where the greying is enforced — one answer read by the hover
                 // and the click alike (`SettingsRow::option_enabled`). The menu
@@ -7840,22 +8058,6 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         && contains(reset, x, y)
     {
         return SettingsTarget::ResetAdvanced(layout.category);
-    }
-    if let Some(customise) = layout.customise_scheme
-        && layout.shows(customise)
-        && contains(customise, x, y)
-    {
-        return SettingsTarget::CustomiseScheme;
-    }
-    // The other half of `delete_scheme_enabled`: a verb that cannot act is not
-    // a target either, so the press falls through to `Panel` and the pointer
-    // never lights it.
-    if let Some(delete) = layout.delete_scheme
-        && layout.shows(delete)
-        && contains(delete, x, y)
-        && layout.delete_enabled()
-    {
-        return SettingsTarget::DeleteScheme;
     }
     if contains(layout.frame, x, y) {
         return SettingsTarget::Panel;
@@ -8050,20 +8252,13 @@ pub fn build(
     let clip = layout.clip;
     let mut content_stack = OverlayLayer::default();
     for headed in &layout.groups {
-        content_stack.labels.push(ChromeLabel {
-            text: headed.group.label().to_owned(),
-            rect: headed.label,
-            font_size_px: px(GROUP_LABEL_FONT_LOGICAL_PX),
-            color: palette.dialog_muted_text,
-            align_right: false,
-            align_center: false,
-            // A ratio, so it carries no `scale`: the shaper adds it to a
-            // glyph's advance before the font size multiplies both.
-            letter_spacing_em: GROUP_LABEL_TRACKING_EM,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
+        push_group_label(
+            &mut content_stack.labels,
+            headed.group.label().to_owned(),
+            headed.label,
+            scale,
+            palette.dialog_muted_text,
+        );
     }
     for placed in &layout.rows {
         // A row the machine cannot honour is greyed WHOLE — title, sentence and
@@ -8246,7 +8441,6 @@ pub fn build(
         layout,
         hover,
         focus,
-        values,
         scale,
         border,
         palette,
@@ -8303,9 +8497,83 @@ pub fn build(
             palette.menu_border,
             alpha(palette.menu_border_alpha),
         );
+        // **The hairlines between the runs.** `.combo-sep` is a rule and not a
+        // gap: a picker that told the reader's own files from the product's by
+        // spacing alone would be saying it in the one dimension a scrolled list
+        // does not keep.
+        for rule in &layout.menu_separators {
+            menu_stack.quads.push(OverlayQuad {
+                rect: *rule,
+                color: palette.menu_border,
+                alpha: f32::from(palette.menu_border_alpha) / 255.0,
+            });
+        }
         let selected = row.selected_index(values);
         let icon_advance = option_icon_advance(row, scale);
         for (index, item) in layout.items.iter().enumerate() {
+            // **The verb this picker ends with**, behind the last hairline. It
+            // takes no tick, it is never greyed, and it wears the same ink every
+            // other item wears — drawn in the accent first, and the accent was
+            // wrong: this house does not colour a menu item, and an accented row
+            // in a list of muted ones was the loudest thing in a dialog whose
+            // whole register is quiet. The hairline above it already says it is
+            // not a value. What the accent IS for is the MARK under the pointer,
+            // which is `.term-menu .tm-item:hover svg` verbatim: the item lights
+            // like any other item, and its `+` lights to say the press does
+            // something rather than choosing something.
+            if layout.menu_action == Some(index) {
+                let action = row.menu_action().unwrap_or_default();
+                let lit = hover == Some(SettingsTarget::MenuAction(row))
+                    || focus == Some(SettingsTarget::MenuAction(row));
+                if lit {
+                    menu_stack.quads.extend(rounded_overlay_fill(
+                        *item,
+                        px(ITEM_RADIUS_LOGICAL_PX),
+                        palette.menu_item_hover,
+                        1.0,
+                    ));
+                }
+                let mark_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
+                let mark_right = mark_left + px(TICK_WIDTH_LOGICAL_PX);
+                menu_stack.labels.push(ChromeLabel {
+                    text: MENU_ACTION_MARK.to_owned(),
+                    rect: [mark_left, item[1], mark_right, item[3]],
+                    font_size_px: px(MENU_ACTION_MARK_FONT_LOGICAL_PX),
+                    color: if lit {
+                        palette.accent
+                    } else {
+                        palette.menu_item_hint_text
+                    },
+                    align_right: false,
+                    align_center: true,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                });
+                menu_stack.labels.push(ChromeLabel {
+                    text: action.to_owned(),
+                    rect: [
+                        mark_right + px(ITEM_GAP_LOGICAL_PX),
+                        item[1],
+                        item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+                        item[3],
+                    ],
+                    font_size_px: px(COMBO_FONT_LOGICAL_PX),
+                    color: if lit {
+                        palette.menu_item_text_selected
+                    } else {
+                        palette.menu_item_text
+                    },
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: None,
+                });
+                continue;
+            }
             let label = row.option_label(index).unwrap_or_default();
             let is_selected = selected == Some(index);
             let enabled = row.option_enabled(index, values);
@@ -8391,6 +8659,72 @@ pub fn build(
                 tabular_numerals: false,
                 clip: None,
             });
+            // **THE MARKS ARE REVEALED AND THEIR SPACE IS NOT** (user ruling
+            // 2026-08-19). `.pf-acts`' idiom exactly: absent at rest, whole
+            // under the pointer, and revealed by the keyboard as well because a
+            // mark that can be pressed can be seen (`:focus-within`). The width
+            // they occupy was reserved by the layout whether they are drawn or
+            // not — a popup whose width changed when the pointer crossed a row
+            // would be a list that moves under the pointer.
+            //
+            // Nothing at all is pushed for a bundled row: there is no file to
+            // open and none to recycle, which is a fact about the row and not a
+            // state of it, so the run is absent rather than drawn dark.
+            let Some(acts) = layout.menu_acts.get(index).copied().flatten() else {
+                continue;
+            };
+            let engaged = [hover, focus].into_iter().flatten().any(|target| {
+                matches!(
+                    target,
+                    SettingsTarget::Choice(at, on)
+                        | SettingsTarget::MenuItemEdit(at, on)
+                        | SettingsTarget::MenuItemDelete(at, on)
+                    if at == row && on == index
+                )
+            });
+            if !engaged {
+                continue;
+            }
+            for (box_of, mark, side, target) in [
+                (
+                    acts.edit,
+                    crate::marks::ChromeMark::Pencil,
+                    MENU_EDIT_MARK_LOGICAL_PX,
+                    SettingsTarget::MenuItemEdit(row, index),
+                ),
+                (
+                    acts.delete,
+                    crate::marks::ChromeMark::WindowClose,
+                    MENU_DELETE_MARK_LOGICAL_PX,
+                    SettingsTarget::MenuItemDelete(row, index),
+                ),
+            ] {
+                let lit = hover == Some(target) || focus == Some(target);
+                if lit {
+                    menu_stack.quads.extend(rounded_overlay_fill(
+                        box_of,
+                        px(MENU_ACT_RADIUS_LOGICAL_PX),
+                        palette.dialog_hover,
+                        1.0,
+                    ));
+                }
+                // **Two glyph sizes and one optical size**: `i-pencil` is drawn
+                // on a 16 viewBox with its ink inside the margins and `i-close`
+                // on a 10 with its ink corner to corner, so at one width the
+                // × came out both larger and heavier than the mark beside it.
+                let glyph = px(side).round().max(1.0);
+                let left = ((box_of[0] + box_of[2] - glyph) / 2.0).round();
+                let top = ((box_of[1] + box_of[3] - glyph) / 2.0).round();
+                menu_stack.sprites.push(ChromeSprite::new(
+                    mark,
+                    [left, top, left + glyph, top + glyph],
+                    if lit {
+                        palette.menu_item_text_selected
+                    } else {
+                        palette.menu_item_hint_text
+                    },
+                ));
+            }
         }
         // Cut to the body the cap gave the list, and only then does the bar go
         // on: a rule that scrolled with the items it measures would be a picture
@@ -8487,73 +8821,6 @@ pub fn build(
             }
         }
     }
-    // The scheme menu, in the same popup layer and on the same recipe. It has no
-    // refusal column: every line in it is a file that can be recycled, which is
-    // the whole reason the list is the folder's own contents.
-    if let Some(menu) = layout.delete_menu() {
-        push_float_window(
-            &mut popup.quads,
-            menu.frame,
-            px(MENU_RADIUS_LOGICAL_PX),
-            border,
-            px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
-            palette.menu_surface,
-            palette.menu_shadow,
-            alpha(palette.menu_popup_shadow_inner_alpha),
-            alpha(palette.menu_popup_shadow_outer_alpha),
-            palette.menu_border,
-            alpha(palette.menu_border_alpha),
-        );
-        for (index, (box_of, line)) in menu.items.iter().enumerate() {
-            if !layout.shows_item(*box_of) {
-                continue;
-            }
-            let hovered = hover == Some(SettingsTarget::DeleteSchemeItem(index));
-            if hovered {
-                popup.quads.extend(rounded_overlay_fill(
-                    *box_of,
-                    px(ITEM_RADIUS_LOGICAL_PX),
-                    palette.menu_item_hover,
-                    1.0,
-                ));
-            }
-            let font = px(COMBO_FONT_LOGICAL_PX);
-            let inset = px(ITEM_PADDING_X_LOGICAL_PX);
-            popup.labels.push(ChromeLabel {
-                // **The scheme's name and not the file's.** The name is the word
-                // this reader chose in the picker and the only one they have
-                // seen; the file is what the card afterwards names, because a
-                // file in the Recycle Bin is spelled the way the file was.
-                text: ellipsized(
-                    &line.name,
-                    (box_of[2] - inset) - (box_of[0] + inset),
-                    font,
-                    measure,
-                ),
-                rect: [box_of[0] + inset, box_of[1], box_of[2] - inset, box_of[3]],
-                font_size_px: font,
-                color: if hovered {
-                    palette.menu_item_text_selected
-                } else {
-                    palette.menu_item_text
-                },
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: None,
-            });
-            if focus == Some(SettingsTarget::DeleteSchemeItem(index)) {
-                popup
-                    .quads
-                    .extend(focus_ring(*box_of, scale, palette.accent));
-            }
-        }
-        if let Some(bar) = layout.menu_bar {
-            push_menu_bar(&mut popup.quads, bar, palette);
-        }
-    }
 
     let content = OverlayLayer {
         quads,
@@ -8606,13 +8873,47 @@ fn push_menu_bar(
 /// who has opened a folder in this window has already learned what a turned
 /// triangle means, and teaching them a chevron here would be teaching them that
 /// the two are different things.
+/// One heading in the `.group-label` grammar, into `labels`.
+///
+/// **Written once because two things want it** (user ruling 2026-08-19): a
+/// page's own word at the top of it, and the `Advanced` header at the foot,
+/// which that ruling set in this exact type. Two copies of five declarations is
+/// two headings that agree until somebody edits one, and this file has the
+/// `.group-label` slot precisely so there is one answer to what a heading looks
+/// like here.
+///
+/// The ink is the parameter and nothing else is: a page's heading is muted and
+/// stays muted, the header lights under the pointer because it is a control.
+/// That is the whole of what the two disagree about.
+fn push_group_label(
+    labels: &mut Vec<ChromeLabel>,
+    text: String,
+    rect: [f32; 4],
+    scale: f32,
+    color: [u8; 3],
+) {
+    labels.push(ChromeLabel {
+        text,
+        rect,
+        font_size_px: GROUP_LABEL_FONT_LOGICAL_PX * scale,
+        color,
+        align_right: false,
+        align_center: false,
+        // A ratio, so it carries no `scale`: the shaper adds it to a glyph's
+        // advance before the font size multiplies both.
+        letter_spacing_em: GROUP_LABEL_TRACKING_EM,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_advanced_group(
     stack: &mut OverlayLayer,
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
     focus: Option<SettingsTarget>,
-    values: &SettingsValues,
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
@@ -8636,106 +8937,34 @@ fn push_advanced_group(
             .quads
             .extend(focus_ring(group.band, scale, palette.accent));
     }
-    let side = px(DISCLOSURE_MARK_LOGICAL_PX).round().max(1.0);
-    let left = ((group.mark[0] + group.mark[2] - side) / 2.0).round();
-    let top = ((group.mark[1] + group.mark[3] - side) / 2.0).round();
+    // **The word and the mark light together** (user ruling 2026-08-19). The
+    // header is one control and a control that lights lights whole — the rail's
+    // own `.nav-item:hover { color: var(--ink) }` is the same sentence in the
+    // same dialog. At rest both wear `--ink3`, which is the ink the ruling named
+    // for the word and the ink `.adv-chev` was already drawn in.
+    let ink = if hovered {
+        palette.dialog_title_text
+    } else {
+        palette.dialog_muted_text
+    };
+    // Rounded to whole device pixels, and the box is the layout's: a 10×6
+    // chevron is not a square, so there is no `side` to centre by.
+    let width = (group.mark[2] - group.mark[0]).round().max(1.0);
+    let height = (group.mark[3] - group.mark[1]).round().max(1.0);
+    let left = group.mark[0].round();
+    let top = ((group.mark[1] + group.mark[3] - height) / 2.0).round();
     stack.sprites.push(ChromeSprite::new(
-        crate::marks::tree_disclosure(if group.open { 1.0 } else { 0.0 }),
-        [left, top, left + side, top + side],
-        if hovered {
-            palette.dialog_title_text
-        } else {
-            palette.dialog_secondary_text
-        },
+        crate::marks::ChromeMark::chevron(if group.open { 1.0 } else { 0.0 }),
+        [left, top, left + width, top + height],
+        ink,
     ));
-    stack.labels.push(ChromeLabel {
-        text: Text::AdvancedGroup.text().to_owned(),
-        rect: group.label,
-        font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
-        color: palette.dialog_title_text,
-        align_right: false,
-        align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: None,
-    });
-    // `.btn` secondary, the shortcut page's own precedent: the third button in
-    // the dialog is the same button, so it is the same call.
-    if let Some(customise) = layout.customise_scheme {
-        push_button(
-            &mut stack.quads,
-            &mut stack.labels,
-            customise,
-            customise_scheme_verb(values),
-            hover == Some(SettingsTarget::CustomiseScheme),
-            scale,
-            border,
-            palette,
-            measure,
-        );
-        if focus == Some(SettingsTarget::CustomiseScheme) {
-            stack
-                .quads
-                .extend(focus_ring(customise, scale, palette.accent));
-        }
-    }
-    // The third verb, and the only `.btn` in this dialog that can be dark. The
-    // greyed-row idiom moved onto a button: the fill and the border are the
-    // button's own, the word goes to the hint ink, and the reason takes the
-    // empty half of the line it is standing on.
-    if let Some(delete) = layout.delete_scheme {
-        let enabled = layout.delete_enabled();
-        push_button(
-            &mut stack.quads,
-            &mut stack.labels,
-            delete,
-            Text::DeleteScheme.text(),
-            enabled && hover == Some(SettingsTarget::DeleteScheme),
-            scale,
-            border,
-            palette,
-            measure,
-        );
-        if !enabled {
-            // The word goes to the hint ink. The label was pushed by
-            // `push_button` and is recoloured here rather than through a colour
-            // parameter, because within one layer the renderer draws every fill
-            // before any text — so the button's own rectangle is already down,
-            // and teaching every caller of `push_button` about a state only this
-            // one has would be the more expensive half of the same edit.
-            if let Some(label) = stack.labels.last_mut() {
-                label.color = palette.menu_item_hint_text;
-            }
-        }
-        // The line above them, in either state: what this verb will do to which
-        // file, or why there is no file for it to do it to.
-        if let Some(hint) = layout.delete_reason {
-            let font = px(ROW_DESC_FONT_LOGICAL_PX);
-            let text = if enabled {
-                Text::DeleteSchemeUserFile.text()
-            } else {
-                Text::DeleteSchemeNoFiles.text()
-            };
-            stack.labels.push(ChromeLabel {
-                text: ellipsized(text, hint[2] - hint[0], font, measure),
-                rect: hint,
-                font_size_px: font,
-                color: palette.menu_item_hint_text,
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: None,
-            });
-        }
-        if focus == Some(SettingsTarget::DeleteScheme) {
-            stack
-                .quads
-                .extend(focus_ring(delete, scale, palette.accent));
-        }
-    }
+    push_group_label(
+        &mut stack.labels,
+        Text::AdvancedGroup.text().to_owned(),
+        group.label,
+        scale,
+        ink,
+    );
     if let Some(reset) = layout.reset_advanced {
         push_button(
             &mut stack.quads,
@@ -10097,8 +10326,13 @@ mod tests {
     const ROW_HEIGHT: f32 = 54.0;
 
     /// The `Advanced` heading's own band at scale 1: `2 * 11` of `.row` padding
-    /// around one 16.5 title line, and no sentence under it.
-    const DISCLOSURE_HEIGHT: f32 = 38.5;
+    /// around one line box, and no sentence under it.
+    ///
+    /// **13 and not 16.5** since the 2026-08-19 hybrid: the word wears
+    /// `.group-label`'s type now, so the box it stands in is that type's box.
+    /// The three and a half pixels are arithmetic falling out of a face rather
+    /// than a number anybody picked, and every page's height moved with them.
+    const DISCLOSURE_HEIGHT: f32 = 35.0;
 
     /// A page's closing verb and the air above it: `14 + 27.5`.
     const FOOT_ADVANCE: f32 = 41.5;
@@ -10429,34 +10663,51 @@ mod tests {
         shaped_scrolled(category, advanced, menu, UNSCROLLED)
     }
 
-    /// **Two scheme files of the reader's own**, which is the shape the report
-    /// was made in: a `Folio Dark (custom)` and a `(custom 2)`, both dark, with
-    /// the row sitting on a bundled scheme.
+    /// **Two of the dark picker's own rows, told to the dialog as files the
+    /// reader wrote** — which is the shape the 2026-08-18 report was made in and
+    /// the shape the 2026-08-19 ruling draws: a run of the product's schemes, a
+    /// hairline, a run of the reader's.
+    ///
+    /// The names come out of `scheme_labels` rather than out of a literal, and
+    /// that is the whole reason this helper exists. A picker's item has only ever
+    /// been a string and `menu_item_is_user_file` matches on it, so a fixture
+    /// naming two schemes this build does not list would draw no marks anywhere
+    /// and every assertion about them would pass by being about nothing.
+    ///
+    /// The LAST two, so the folder's own run is one contiguous block at the foot
+    /// of the values and index 0 is reliably a bundled row — which is a real
+    /// arrangement (the catalogue lists the executable's schemes and then the
+    /// folder's) rather than a convenience.
     fn scheme_file_lines() -> Vec<SchemeFileLine> {
-        vec![
-            SchemeFileLine {
-                name: "Folio Dark (custom)".to_owned(),
-                file: "folio-dark-custom.json".to_owned(),
-            },
-            SchemeFileLine {
-                name: "Folio Dark (custom 2)".to_owned(),
-                file: "folio-dark-custom-2.json".to_owned(),
-            },
-        ]
+        let names = scheme_labels(false);
+        assert!(
+            names.len() >= 3,
+            "this build lists the dark schemes it ships"
+        );
+        names[names.len() - 2..]
+            .iter()
+            .map(|name| SchemeFileLine {
+                name: (*name).to_owned(),
+                file: format!("{}.json", name.to_lowercase().replace(' ', "-")),
+            })
+            .collect()
     }
 
-    /// The Appearance page with its group open, told what the schemes folder
-    /// holds and whether the foot's menu is up.
-    fn shaped_foot(files: &[SchemeFileLine], menu_open: bool, scroll: f32) -> SettingsLayout {
+    /// The Appearance page with its group open, one of its scheme pickers
+    /// open, and told what the schemes folder holds.
+    fn shaped_picker(
+        files: &[SchemeFileLine],
+        menu: Option<SettingsRow>,
+        scroll: f32,
+    ) -> SettingsLayout {
         let rows = flat_rows();
         let lines = shortcut_lines();
         layout_for_menus(
             SURFACE.0,
             SURFACE.1,
             1.0,
+            menu,
             None,
-            None,
-            menu_open,
             SettingsContent {
                 rows: &rows,
                 shortcuts: &lines,
@@ -11130,329 +11381,68 @@ mod tests {
         }
     }
 
-    /// PIN (§7.1.6c-4c, extended 2026-08-18) — **the Advanced foot is a row of
-    /// verbs on one line**, `Customise scheme…`, `Delete scheme` and then
-    /// `Reset to defaults`, and the first two only on a page that offers a
-    /// scheme.
+    /// PIN (user ruling 2026-08-19) — **the Advanced foot is one verb again.**
     ///
-    /// The one-line claim is the interesting one: the group's height is the same
-    /// as it was with one verb and with two, which is what says the arms of the
-    /// placing loop and the arms of the measuring loop agree. §7.1.6c-4c wrote
-    /// that down as the reason a third verb would need no numbers changed, and
-    /// the third verb is here.
+    /// It carried three for a day: `Customise scheme…`, `Delete scheme…` and
+    /// `Reset to defaults`, with a muted line above them naming the scheme the
+    /// first two would act on. That line was the tell — both of those verbs were
+    /// about a row in a list the reader was not looking at — and they are marks
+    /// on that list's own rows now.
     ///
-    /// Red gate: give `PageItem::Customise` or `PageItem::Delete` a
-    /// `foot_advance` of its own and the page grows a line it did not have,
-    /// which `the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll`
-    /// reads off the height; place either before the disclosure and the order
-    /// assertions here go red.
+    /// Red gate: put either verb back into `page_items` and the foot grows a
+    /// second box the first assertion refuses; leave the hint line's advance in
+    /// `StackMetrics` and the group is a line taller than the rows it holds,
+    /// which the height cap reads off.
     #[test]
-    fn the_advanced_foot_carries_both_verbs_on_one_line() {
-        let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
-        let reset = open.reset_advanced().expect("an open group has its verb");
-        let customise = open
-            .customise_scheme()
-            .expect("the page with the scheme rows has the copy verb");
-        let delete = open
-            .delete_scheme()
-            .expect("and, since 2026-08-18, the verb that undoes a copy");
-
-        assert_eq!(customise[1], reset[1], "one line, not two");
-        assert_eq!(customise[3], reset[3]);
-        assert_eq!(delete[1], reset[1], "nor three");
-        assert_eq!(delete[3], reset[3]);
-        assert_eq!(width(customise), CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX);
-        assert_eq!(width(delete), DELETE_SCHEME_WIDTH_LOGICAL_PX);
-        assert!(
-            customise[2] < delete[0] && delete[2] < reset[0],
-            "left to right: make a copy, throw one away, put the page back"
-        );
-        assert_eq!(
-            delete[0] - customise[2],
-            FOOT_BUTTON_GAP_LOGICAL_PX,
-            "with the button row's own gap between them"
-        );
-        assert_eq!(reset[0] - delete[2], FOOT_BUTTON_GAP_LOGICAL_PX);
-
-        // Asked at the foot of the page, where the verb is: an open group takes
-        // the page past the dialog's 600px cap, so the line both verbs stand on
-        // is below the fold until a reader scrolls to it.
-        let at_foot = shaped_scrolled(
-            SettingsCategory::Appearance,
-            every_group_open(),
-            None,
-            open.max_scroll(),
-        );
-        let foot = at_foot
-            .customise_scheme()
-            .expect("the verb is still there at the foot of the page");
-        let (x, y) = centre(foot);
-        assert_eq!(
-            hit(&at_foot, &values(), x, y),
-            SettingsTarget::CustomiseScheme,
-            "and it answers a press where it is drawn"
-        );
-        assert!(
-            labels_of(&at_foot, None, &values())
-                .iter()
-                .any(|label| label.text == Text::CustomiseScheme.text()),
-            "with its own word on it"
-        );
-
-        // Shut, it is nowhere — the same discipline the Reset lives by.
-        let shut = shaped(SettingsCategory::Appearance, AdvancedOpen::default(), None);
-        assert_eq!(shut.customise_scheme(), None);
-        assert!(
-            !focus_order(
-                content(&flat_rows(), &shortcut_lines()),
-                SettingsCategory::Appearance
-            )
-            .is_empty()
-        );
-
-        // A page whose Advanced group holds no scheme rows has one verb, and the
-        // group is no shorter for it: the foot is a line whatever stands on it.
-        let terminal = shaped(SettingsCategory::Terminal, every_group_open(), None);
-        assert_eq!(
-            terminal.customise_scheme(),
-            None,
-            "the copy verb belongs to the page the scheme rows are on"
-        );
-        assert_eq!(terminal.delete_scheme(), None, "and so does its opposite");
-    }
-
-    /// PIN (user report 2026-08-18) — **the foot's first verb reads `Edit
-    /// scheme…` over a file the reader already owns, and `Customise scheme…`
-    /// only over a bundled one.**
-    ///
-    /// The report: the reader pressed `Customise scheme…` expecting to edit the
-    /// scheme they were wearing, and got a second copy of it. That is where a
-    /// folder full of `(custom 2)` comes from — the verb copies unconditionally,
-    /// and over a scheme that is already a file of theirs the copy is pure
-    /// litter.
-    ///
-    /// One verb with two words rather than two buttons: the reader's intent is
-    /// the same either way — put this scheme in front of me so I can change it —
-    /// and only the first step differs, so only the word does.
-    ///
-    /// Red gate: return `Text::CustomiseScheme` unconditionally and the second
-    /// assertion goes red; swap the two arms and the first does.
-    #[test]
-    fn the_foot_offers_to_edit_a_scheme_the_reader_already_owns() {
-        let bundled = values();
-        assert!(
-            !bundled.scheme_in_force_is_user_file,
-            "the fixture wears a bundled scheme, which is what a fresh install does"
-        );
-        assert_eq!(
-            customise_scheme_verb(&bundled),
-            Text::CustomiseScheme.text(),
-            "over a bundled scheme there is no file yet, so the verb makes one"
-        );
-
-        let owned = SettingsValues {
-            scheme_in_force_is_user_file: true,
-            ..values()
-        };
-        assert_eq!(
-            customise_scheme_verb(&owned),
-            Text::EditScheme.text(),
-            "over a file of the reader's own there is nothing left to copy"
-        );
-        assert_ne!(Text::EditScheme.text(), Text::CustomiseScheme.text());
-
-        // And the word is drawn on the button, not merely computed.
-        let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
-        let at_foot = shaped_scrolled(
-            SettingsCategory::Appearance,
-            every_group_open(),
-            None,
-            open.max_scroll(),
-        );
-        let button = at_foot
-            .customise_scheme()
-            .expect("the verb is on the foot of the open group");
-        for (values, word) in [
-            (&bundled, Text::CustomiseScheme.text()),
-            (&owned, Text::EditScheme.text()),
-        ] {
-            let drawn = labels_of(&at_foot, None, values);
-            let label = drawn
-                .iter()
-                .find(|label| label.rect == button)
-                .expect("the button carries a word");
-            assert_eq!(label.text, word);
-        }
-        assert_eq!(
-            width(button),
-            CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX,
-            "one box for both words: a foot whose buttons moved when a scheme \
-             was chosen would be a row of verbs that shifts under the pointer"
-        );
-    }
-
-    /// PIN (user report 2026-08-18) — **`Delete scheme…` opens a menu of the
-    /// reader's own scheme files, and is dark only when there are none.**
-    ///
-    /// The report: two custom schemes the reader could not delete. The verb
-    /// acted on the scheme *in force*, their Dark row was sitting on a bundled
-    /// `Solarized Dark`, and so the button was greyed under a sentence about
-    /// built-in schemes having no file — with both of their own files a folder
-    /// away and no way to reach them but to select each one first. A
-    /// select-then-delete dance nobody discovers is a verb that does not work.
-    ///
-    /// So the verb lists the folder. What it can act on is what is in the
-    /// folder, the only honest reason for it to be dark is an empty one, and the
-    /// row in force stops being part of the question — which is what makes
-    /// deleting a scheme nobody is wearing a pure file operation.
-    ///
-    /// MUTATIONS:
-    /// (1) go back to `values.scheme_in_force_is_user_file` — the first
-    ///     assertion goes red, because these two files exist and the row is on a
-    ///     bundled scheme;
-    /// (2) list `entries()` instead of the user's own — a bundled name appears
-    ///     in the menu and the count goes red;
-    /// (3) drop the hit-test arm — a press on a file answers `DeleteScheme` and
-    ///     the menu never chooses anything.
-    #[test]
-    fn delete_scheme_lists_the_readers_own_files_and_is_dark_only_without_them() {
-        let files = scheme_file_lines();
-        let rows = flat_rows();
-        let lines = shortcut_lines();
-        assert!(
-            delete_scheme_enabled(SettingsContent {
-                rows: &rows,
-                shortcuts: &lines,
-                profiles: &[],
-                scheme_files: &files,
-                advanced: every_group_open(),
-                editor: None,
-            }),
-            "two files of the reader's own is two files this verb can act on, \
-             whatever the row in force is sitting on"
-        );
-        assert!(
-            !delete_scheme_enabled(SettingsContent {
-                rows: &rows,
-                shortcuts: &lines,
-                profiles: &[],
-                scheme_files: &[],
-                advanced: every_group_open(),
-                editor: None,
-            }),
-            "and an empty folder is the one thing that darkens it"
-        );
-
-        // Shut, at the foot of the page, with the folder holding two files.
-        let shut = shaped_foot(&files, false, 0.0);
-        let scroll = shut.max_scroll();
-        let shut = shaped_foot(&files, false, scroll);
-        assert!(shut.delete_enabled());
-        assert_eq!(
-            shut.delete_menu(),
-            None,
-            "a menu nobody opened is not drawn"
-        );
-        let delete = shut.delete_scheme().expect("the verb is on the foot");
-        let (x, y) = centre(delete);
-        assert_eq!(
-            hit(&shut, &values(), x, y),
-            SettingsTarget::DeleteScheme,
-            "the button answers a press where it is drawn"
-        );
-        assert!(
-            labels_of(&shut, None, &values())
-                .iter()
-                .any(|label| label.text == Text::DeleteSchemeUserFile.text()),
-            "and the line above it says what choosing one will do"
-        );
-
-        // Open: exactly the two files, by the names the picker lists them under.
-        let open = shaped_foot(&files, true, scroll);
-        let menu = open.delete_menu().expect("the menu is up");
-        assert_eq!(
-            menu.items
-                .iter()
-                .map(|(_, line)| line.name.as_str())
-                .collect::<Vec<_>>(),
-            ["Folio Dark (custom)", "Folio Dark (custom 2)"],
-            "the folder's own contents, in the catalogue's order"
-        );
-        let drawn = labels_of(&open, None, &values());
-        for line in &files {
-            assert!(
-                drawn.iter().any(|label| label.text == line.name),
-                "{:?} is in the menu and is not drawn; drawn: {:?}",
-                line.name,
-                drawn.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
-            );
-        }
-        assert!(
-            !drawn.iter().any(|label| label.text == "Solarized Dark"),
-            "and nothing bundled is: there is no file of it to delete"
-        );
-        for (index, (box_of, _)) in menu.items.iter().enumerate() {
-            let (x, y) = centre(*box_of);
+    fn the_advanced_foot_carries_one_verb_and_the_scheme_page_is_no_exception() {
+        for category in [SettingsCategory::Appearance, SettingsCategory::Profiles] {
+            let open = shaped(category, every_group_open(), None);
+            let Some(reset) = open.reset_advanced() else {
+                continue;
+            };
+            let group = open.advanced().expect("an open group heads its own rows");
             assert_eq!(
-                hit(&open, &values(), x, y),
-                SettingsTarget::DeleteSchemeItem(index),
-                "every line answers for itself"
+                width(reset),
+                RESET_ADVANCED_WIDTH_LOGICAL_PX,
+                "{category:?}: the one verb keeps the width it always had"
+            );
+            assert!(
+                reset[1] > group.band[3],
+                "{category:?}: and it closes the group rather than opening it"
             );
         }
-        let (x, y) = centre(menu.frame);
-        assert!(
-            matches!(
-                hit(&open, &values(), x, y),
-                SettingsTarget::DeleteSchemeItem(_) | SettingsTarget::DeleteScheme
-            ),
-            "and the menu's own body belongs to the menu, never to the page \
-             under it"
-        );
-
-        // Dark, with an empty folder: the word goes to the hint ink and the
-        // line says the only thing that is true.
-        let empty = shaped_foot(&[], false, scroll);
-        assert!(!empty.delete_enabled());
+        // The height claim, which is what the retired hint line used to move:
+        // the group is its heading plus its rows plus one foot, and the page
+        // measured is the page drawn.
+        let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
+        let reset = open.reset_advanced().expect("Appearance has the group");
+        let lowest = open
+            .rows
+            .iter()
+            .map(|row| row.band[3])
+            .fold(f32::NEG_INFINITY, f32::max);
         assert_eq!(
-            empty.delete_menu(),
-            None,
-            "and a menu cannot be opened over nothing"
-        );
-        let greyed = labels_of(&empty, None, &values());
-        assert!(
-            greyed
-                .iter()
-                .any(|label| label.text == Text::DeleteSchemeNoFiles.text()),
-            "a dark verb says why: {:?}",
-            greyed.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            greyed
-                .iter()
-                .find(|label| label.text == Text::DeleteScheme.text())
-                .expect("the word is still drawn")
-                .color,
-            chrome_palette().menu_item_hint_text,
-            "the word goes to the hint ink, which is what greyed means here"
-        );
-        let delete = empty.delete_scheme().expect("the verb keeps its box");
-        let (x, y) = centre(delete);
-        assert_eq!(
-            hit(&empty, &values(), x, y),
-            SettingsTarget::Panel,
-            "and a dark button answers the surface it stands on"
+            reset[1] - lowest,
+            FOOT_MARGIN_TOP_LOGICAL_PX,
+            "one margin between the last row and the verb, and nothing between"
         );
     }
 
-    /// PIN (user report 2026-08-18) — **the keyboard opens the menu, walks it,
-    /// chooses from it, and Esc leaves it before it leaves the page.**
+    /// PIN (user ruling 2026-08-19) — **a managed picker is values, a hairline,
+    /// values, a hairline, and one verb.**
     ///
-    /// The same ladder a row's `⋯` climbs, because it is the same shape: a popup
-    /// open inside a page. `Enter` on the verb opens rather than deletes — the
-    /// verb no longer has one file to act on — and lands the ring on the first
-    /// line so the arrows have somewhere to start.
+    /// Three claims, and each one is a thing the retired foot had to say in
+    /// words: the reader's own files are told from the product's by a rule
+    /// rather than by a sentence; the verb at the end is not a value, so it
+    /// takes no tick and never becomes the button's label; and the font picker
+    /// carries the same shape with one run and one verb, because two pickers
+    /// doing the same thing differently would be two idioms.
+    ///
+    /// Red gate: drop the action from `page`'s drawn count and the last item is
+    /// a scheme; draw the hairline after the first item unconditionally and the
+    /// separator count goes to two on a folder with no files in it.
     #[test]
-    fn the_scheme_menu_opens_walks_and_unwinds_under_the_keyboard() {
+    fn a_managed_picker_ends_in_a_verb_behind_a_hairline() {
         let files = scheme_file_lines();
         let rows = flat_rows();
         let lines = shortcut_lines();
@@ -11464,68 +11454,345 @@ mod tests {
             advanced: every_group_open(),
             editor: None,
         };
+        let row = SettingsRow::DarkScheme;
+        let open = shaped_picker(&files, Some(row), UNSCROLLED);
+        let values = row.option_count();
+        assert_eq!(
+            open.items.len(),
+            values + 1,
+            "every value, and one item that is not one"
+        );
+        assert_eq!(
+            open.menu_action,
+            Some(values),
+            "the verb is the last item and it is the only one"
+        );
+        assert_eq!(
+            row.menu_action(),
+            Some(Text::AddScheme.text()),
+            "and it is the verb the ruling named"
+        );
+        assert_eq!(
+            SettingsRow::TerminalFont.menu_action(),
+            Some(Text::InstallFonts.text()),
+            "the font picker carries the same shape with its own word"
+        );
+        assert_eq!(
+            SettingsRow::Theme.menu_action(),
+            None,
+            "and a picker that is only values ends in one"
+        );
+        // Two runs and one verb: a hairline where the answer to *is this yours*
+        // changes, and a hairline before the verb.
+        let mine: Vec<usize> = (0..values)
+            .filter(|index| menu_item_is_user_file(row, *index, content))
+            .collect();
+        assert!(
+            !mine.is_empty(),
+            "the fixture holds files of the reader's own"
+        );
+        assert_eq!(
+            open.menu_separators.len(),
+            2,
+            "one rule between the runs and one before the verb"
+        );
+        let bare = shaped_picker(&[], Some(row), UNSCROLLED);
+        assert_eq!(
+            bare.menu_separators.len(),
+            1,
+            "a folder with nothing in it draws no rule between two runs it does \
+             not have — only the one before the verb"
+        );
+        assert!(
+            bare.menu_acts.iter().all(Option::is_none),
+            "and no row on it is a file"
+        );
+    }
+
+    /// PIN (real-window report, 2026-08-19) — **a picker short enough to fit
+    /// shows its hairlines as well as its items, and its last item answers a
+    /// press.**
+    ///
+    /// The cap counts ITEMS — eight answers a reader can take in — and the
+    /// hairlines between the runs are not answers, so they must not raise it.
+    /// They are still drawn, though, so a window measured in items alone came
+    /// out one rule short of the list it was holding: the verb at the foot hung
+    /// nine pixels below the body, `shows_item` called it hidden, and a press on
+    /// `Add scheme…` landed on menu body and did nothing. This was found by
+    /// pressing it on a real window.
+    ///
+    /// Red gate: make the window `shown * item_height` again and the first
+    /// assertion goes red by exactly one separator band, and the second by the
+    /// whole verb.
+    #[test]
+    fn a_picker_that_fits_shows_its_rules_too_and_its_verb_takes_a_press() {
+        let row = SettingsRow::LightScheme;
+        // No files of the reader's own, so the list is short: values, one rule,
+        // and the verb — well under the eight-item cap.
+        let open = shaped_picker(&[], Some(row), UNSCROLLED);
+        assert_eq!(
+            open.menu_max_scroll(),
+            0.0,
+            "a list under the cap has nowhere to scroll, hairline and all"
+        );
+        let action = open.menu_action.expect("this picker ends in a verb");
+        let box_of = open.items[action];
+        assert!(
+            open.shows_item(box_of),
+            "and its last item is inside the body it is drawn in: {box_of:?} in              {:?}",
+            open.menu_body()
+        );
+        let (x, y) = centre(box_of);
+        assert_eq!(
+            hit(&open, &values(), x, y),
+            SettingsTarget::MenuAction(row),
+            "so a press on it reaches the verb rather than the menu it is in"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-19) — **a scheme the reader wrote reveals a
+    /// pencil and a ×; a bundled one reveals nothing.**
+    ///
+    /// The absence is the sentence. Ten schemes travel inside the executable and
+    /// have no file anywhere to open or move, so there is nothing to grey out —
+    /// which is what the line `Deleting sends this scheme's file to the Recycle
+    /// Bin` used to have to say under three buttons.
+    ///
+    /// Red gate: place the run on every item and the bundled assertion goes red;
+    /// hit-test the item before the marks and a press on the pencil chooses the
+    /// scheme it was meant to open.
+    #[test]
+    fn only_a_scheme_the_reader_wrote_carries_the_two_marks() {
+        let files = scheme_file_lines();
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let content = SettingsContent {
+            rows: &rows,
+            shortcuts: &lines,
+            profiles: &[],
+            scheme_files: &files,
+            advanced: every_group_open(),
+            editor: None,
+        };
+        let row = SettingsRow::DarkScheme;
+        let open = shaped_picker(&files, Some(row), UNSCROLLED);
+        for index in 0..row.option_count() {
+            let mine = menu_item_is_user_file(row, index, content);
+            let acts = open.menu_acts[index];
+            assert_eq!(
+                acts.is_some(),
+                mine,
+                "item {index} ({:?}) is a file: {mine}, and its marks say {:?}",
+                row.option_label(index),
+                acts.is_some()
+            );
+            let Some(acts) = acts else {
+                continue;
+            };
+            // Both marks answer where they are drawn, and the item still answers
+            // everywhere they are not.
+            for (box_of, expected) in [
+                (acts.edit, SettingsTarget::MenuItemEdit(row, index)),
+                (acts.delete, SettingsTarget::MenuItemDelete(row, index)),
+            ] {
+                let (x, y) = centre(box_of);
+                assert_eq!(
+                    hit(&open, &values(), x, y),
+                    expected,
+                    "a mark on item {index} answers for itself"
+                );
+                assert!(
+                    box_of[2] <= open.items[index][2] && box_of[0] > open.items[index][0],
+                    "and it is inside its own item's trailing half"
+                );
+            }
+            let (x, _) = centre(open.items[index]);
+            assert_eq!(
+                hit(&open, &values(), x, centre(open.items[index]).1),
+                SettingsTarget::Choice(row, index),
+                "the item's own words still choose the scheme"
+            );
+            assert!(
+                x < f64::from(acts.edit[0]),
+                "the words end before the marks begin"
+            );
+        }
+        // The action at the foot is not an item that can carry marks.
+        assert_eq!(
+            open.menu_acts[row.option_count()],
+            None,
+            "the verb is not a file"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-19) — **`←` and `→` reach the two marks, `↑`
+    /// and `↓` put the column back.**
+    ///
+    /// A picker is walked with the vertical keys and always has been, so the row
+    /// is the unit they move between and the marks are a second axis on the row
+    /// the walk is standing on. The reset is the half that matters: a reader who
+    /// moves to another scheme is choosing a scheme, and landing on somebody's
+    /// `×` because the row above left the highlight there is the one thing this
+    /// surface must never do.
+    ///
+    /// Red gate: let `step_menu_column` wrap and `←` from the item lands on the
+    /// `×` two columns away; fold only `Choice` into `step`'s menu arm and the
+    /// ring stops answering `↑` once it has walked into a mark.
+    #[test]
+    fn the_arrows_walk_a_scheme_row_into_its_marks_and_back() {
+        let files = scheme_file_lines();
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let content = SettingsContent {
+            rows: &rows,
+            shortcuts: &lines,
+            profiles: &[],
+            scheme_files: &files,
+            advanced: every_group_open(),
+            editor: None,
+        };
+        let row = SettingsRow::DarkScheme;
+        let mine = (0..row.option_count())
+            .find(|index| menu_item_is_user_file(row, *index, content))
+            .expect("the fixture holds a file of the reader's own");
+        let bundled = (0..row.option_count())
+            .find(|index| !menu_item_is_user_file(row, *index, content))
+            .expect("and a bundled scheme");
         let mut panel = SettingsPanel::default();
         panel.toggle(content);
         panel.select_category(SettingsCategory::Appearance);
-        panel.press(SettingsTarget::DeleteScheme);
-        assert!(!panel.delete_menu(), "a press is not an open by itself");
-
-        assert_eq!(
-            panel.key(SettingsKey::Activate, content, &values()),
-            SettingsKeyVerdict::Moved,
-            "Enter opens the menu here, because opening one changes nothing \
-             outside this dialog"
-        );
-        assert!(panel.delete_menu());
-        assert_eq!(
-            panel.focus(),
-            Some(SettingsTarget::DeleteSchemeItem(0)),
-            "and the ring lands on the first file"
-        );
-        assert!(panel.key(SettingsKey::Down, content, &values()) != SettingsKeyVerdict::Inert);
-        assert_eq!(panel.focus(), Some(SettingsTarget::DeleteSchemeItem(1)));
-        panel.key(SettingsKey::Down, content, &values());
-        assert_eq!(
-            panel.focus(),
-            Some(SettingsTarget::DeleteSchemeItem(1)),
-            "the walk stops at the end rather than wrapping"
-        );
-
-        assert!(panel.close_one_layer());
-        assert!(!panel.delete_menu(), "Esc leaves the menu first");
-        assert_eq!(
-            panel.focus(),
-            Some(SettingsTarget::DeleteScheme),
-            "and hands the keyboard back to the button it hung from"
-        );
-        assert!(panel.is_open(), "the page is still up");
-
-        // And choosing one leaves through `Chose`, because a Recycle Bin is not
-        // something this type can reach.
+        panel.press(SettingsTarget::Choice(row, mine));
+        panel.press(SettingsTarget::Combo(row));
         panel.key(SettingsKey::Activate, content, &values());
-        assert!(panel.delete_menu());
+        // Land the ring on the file, whatever the value in force is.
+        panel.press(SettingsTarget::Combo(row));
+        panel.key(SettingsKey::Activate, content, &values());
+        panel.focus_to(SettingsTarget::Choice(row, mine));
+        for (key, expected) in [
+            (SettingsKey::Right, SettingsTarget::MenuItemEdit(row, mine)),
+            (
+                SettingsKey::Right,
+                SettingsTarget::MenuItemDelete(row, mine),
+            ),
+            (
+                SettingsKey::Right,
+                SettingsTarget::MenuItemDelete(row, mine),
+            ),
+            (SettingsKey::Left, SettingsTarget::MenuItemEdit(row, mine)),
+            (SettingsKey::Left, SettingsTarget::Choice(row, mine)),
+            (SettingsKey::Left, SettingsTarget::Choice(row, mine)),
+        ] {
+            panel.key(key, content, &values());
+            assert_eq!(
+                panel.focus(),
+                Some(expected),
+                "{key:?} on a file's row walks its own columns and stops at both ends"
+            );
+        }
+        // A bundled row has one column and the arrows do nothing on it.
+        panel.focus_to(SettingsTarget::Choice(row, bundled));
+        panel.key(SettingsKey::Right, content, &values());
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Choice(row, bundled)),
+            "a row with no file has no second axis"
+        );
+        // And a vertical step from inside a mark puts the column back.
+        panel.focus_to(SettingsTarget::MenuItemDelete(row, mine));
+        panel.key(SettingsKey::Down, content, &values());
+        assert!(
+            matches!(panel.focus(), Some(SettingsTarget::Choice(at, _)) if at == row),
+            "↓ out of a mark lands on an item, never on another row's ×: {:?}",
+            panel.focus()
+        );
+        // **And the walk reaches the verb at the foot**, which is the other end
+        // of the same claim: a door drawn below the last item that the arrows
+        // stop one row above is a door the keyboard cannot open.
+        panel.focus_to(SettingsTarget::Choice(row, row.option_count() - 1));
         panel.key(SettingsKey::Down, content, &values());
         assert_eq!(
-            panel.key(SettingsKey::Activate, content, &values()),
-            SettingsKeyVerdict::Chose(SettingsTarget::DeleteSchemeItem(1))
+            panel.focus(),
+            Some(SettingsTarget::MenuAction(row)),
+            "↓ off the last value lands on `Add scheme…`"
         );
-        assert!(!panel.delete_menu(), "and the menu shuts behind it");
-
-        // An empty folder refuses the open outright: a menu of nothing is a
-        // popup with no lines in it.
-        let empty = SettingsContent {
-            scheme_files: &[],
-            ..content
-        };
-        let mut panel = SettingsPanel::default();
-        panel.toggle(empty);
-        panel.select_category(SettingsCategory::Appearance);
-        panel.press(SettingsTarget::DeleteScheme);
+        panel.key(SettingsKey::Up, content, &values());
         assert_eq!(
-            panel.key(SettingsKey::Activate, empty, &values()),
-            SettingsKeyVerdict::Inert
+            panel.focus(),
+            Some(SettingsTarget::Choice(row, row.option_count() - 1)),
+            "and ↑ goes back into the list"
         );
-        assert!(!panel.delete_menu());
+    }
+
+    /// PIN (user ruling 2026-08-19) — **the × leaves the list standing; the
+    /// pencil and the verb take it away.**
+    ///
+    /// This picker stopped being only a picker the day the verbs moved onto it.
+    /// Management comes in runs, and a reader tidying three schemes out of a
+    /// folder would otherwise reopen the same menu three times, each reopen
+    /// putting the list back under the pointer with the row they were aiming at
+    /// next moved up by one. The other two close because what they open needs
+    /// the room — both end with a file in a preview pane and this dialog gone.
+    ///
+    /// Red gate: `close_menu()` in the `MenuItemDelete` arm and the first
+    /// assertion goes red; drop it from the other two and the third does.
+    #[test]
+    fn recycling_a_scheme_leaves_its_menu_open_and_the_other_two_verbs_close_it() {
+        let files = scheme_file_lines();
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let content = SettingsContent {
+            rows: &rows,
+            shortcuts: &lines,
+            profiles: &[],
+            scheme_files: &files,
+            advanced: every_group_open(),
+            editor: None,
+        };
+        let row = SettingsRow::DarkScheme;
+        let mine = (0..row.option_count())
+            .find(|index| menu_item_is_user_file(row, *index, content))
+            .expect("the fixture holds a file of the reader's own");
+        for (target, closes) in [
+            (SettingsTarget::MenuItemDelete(row, mine), false),
+            (SettingsTarget::MenuItemEdit(row, mine), true),
+            (SettingsTarget::MenuAction(row), true),
+        ] {
+            let mut panel = SettingsPanel::default();
+            panel.toggle(content);
+            panel.select_category(SettingsCategory::Appearance);
+            panel.press(SettingsTarget::Combo(row));
+            panel.key(SettingsKey::Activate, content, &values());
+            assert_eq!(panel.menu(), Some(row), "the picker is open to begin with");
+            panel.focus_to(target);
+            assert_eq!(
+                panel.key(SettingsKey::Activate, content, &values()),
+                SettingsKeyVerdict::Chose(target),
+                "{target:?} is the runtime's to run — it reaches a folder"
+            );
+            assert_eq!(
+                panel.menu().is_none(),
+                closes,
+                "{target:?}: the list closing is {closes}"
+            );
+        }
+        // And the pointer path agrees with the keyboard's, which is the rule
+        // `apply_settings_choice` exists for.
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content);
+        panel.select_category(SettingsCategory::Appearance);
+        panel.press(SettingsTarget::Combo(row));
+        panel.key(SettingsKey::Activate, content, &values());
+        panel.press(SettingsTarget::MenuItemDelete(row, mine));
+        assert_eq!(
+            panel.menu(),
+            Some(row),
+            "a press on a × leaves the menu it was pressed in"
+        );
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::Choice(row, mine.saturating_sub(1))),
+            "and the ring steps one row up, onto a row that is still there"
+        );
     }
 
     /// PIN (§7.1.6c-4c) — **a picker re-lists when the catalogue's revision
@@ -11758,29 +12025,36 @@ mod tests {
         assert_eq!(
             hit(&open, &values(), x, y),
             SettingsTarget::Advanced(SettingsCategory::Appearance),
-            "and the heading's whole band turns it, not the 10px triangle alone"
+            "and the heading's whole band turns it, not the 10×6 chevron alone"
         );
+        // **A chevron and no longer a triangle** (user ruling 2026-08-19, the
+        // hybrid): the mark left the head of the row for its foot, and it turns
+        // over rather than swapping glyphs — this file's own ruling for the
+        // preview head's chevron and the tab strip's.
         let sprites = sprites_of(&open, None, &values());
-        let turned = sprites
+        let turned: Vec<ChromeMark> = sprites
             .iter()
-            .filter_map(|sprite| match sprite.mark {
-                ChromeMark::TreeDisclosure { turned_degrees } => Some(turned_degrees),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+            .map(|sprite| sprite.mark)
+            .filter(|mark| matches!(mark, ChromeMark::Chevron { .. }))
+            .collect();
         assert_eq!(
             turned,
-            vec![crate::marks::TREE_DISCLOSURE_OPEN_DEGREES],
-            "the files tree's own glyph, turned open — one of them, and no \
-             second kind of disclosure"
+            vec![ChromeMark::chevron(1.0)],
+            "one chevron, fully over — and no second kind of disclosure"
+        );
+        assert!(
+            !sprites
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::TreeDisclosure { .. })),
+            "the files tree's triangle is the files tree's, and this dialog no \
+             longer borrows it"
         );
         let shut_sprites = sprites_of(&shut, None, &values());
         assert!(
-            shut_sprites.iter().any(|sprite| matches!(
-                sprite.mark,
-                ChromeMark::TreeDisclosure { turned_degrees: 0 }
-            )),
-            "and the same glyph unturned while it is shut"
+            shut_sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::chevron(0.0)),
+            "and the same chevron at rest while it is shut"
         );
     }
 
@@ -13951,65 +14225,90 @@ mod tests {
         );
     }
 
-    /// PIN (user report 2026-08-18) — **`Advanced` starts in the page's title
-    /// column and its triangle hangs in a gutter to the left of it.**
+    /// PIN (user ruling 2026-08-19) — **`ADVANCED` stands where `APPEARANCE`
+    /// does, and its chevron ends where every picker on the page ends.**
     ///
-    /// The report: the word was pushed a triangle and a gap to the right of
-    /// every other title on the page, so the one heading inside the list stood
-    /// out of line with the list. The files tree settled this shape first — a
-    /// row's triangle sits in its own column and the name starts where every
-    /// other name starts — and this borrows the discipline along with the glyph.
+    /// Three treatments were drawn for the choosing — a gutter the page grew, a
+    /// group-label heading with a small triangle, a trailing chevron with no
+    /// leading mark — and the answer was a hybrid: the second one's word, the
+    /// third one's mark, and no leading mark at all. That makes the header's two
+    /// ends two different claims, and this pins both.
     ///
-    /// The band does not move with the mark. The mock-up's reason is that a 10px
-    /// triangle is not a thing to ask anybody to hit and the word beside it is
-    /// what they were aiming at, so the control is the whole row; a band that
-    /// grew a gutter would be a hover fill reaching further left than every row
-    /// above it for no reason a reader could see.
+    /// The word is a HEADING, so it starts on the heading column: `text_left`,
+    /// the same x the page's own `APPEARANCE` starts at, two pixels left of the
+    /// rows because `.group-label` carries no `.row` padding. The chevron is a
+    /// CONTROL, so it ends on the control column: `row_right`, byte-aligned with
+    /// where every picker on the page ends. Nothing at all hangs to the left of
+    /// the word — that is the whole of what the 2026-08-19 report asked for, and
+    /// it is asserted rather than implied.
     ///
-    /// Red gate: put the label back at `mark[2] + gap` and the first assertion
-    /// goes red 18 out; put the mark back at `band[0]` and the second does.
+    /// Red gate: put the word back on the rows' own title column and the first
+    /// assertion goes red two out; give the chevron back the leading gutter and
+    /// the third goes red the width of the page.
     #[test]
-    fn the_advanced_word_stands_in_the_title_column_with_its_triangle_in_the_gutter() {
+    fn the_advanced_word_stands_on_the_heading_column_and_its_chevron_on_the_control_one() {
         let placed = shaped(SettingsCategory::Appearance, AdvancedOpen::default(), None);
         let group = placed.advanced().expect("Appearance has an Advanced group");
+        let heading = placed
+            .groups
+            .first()
+            .expect("a page heads itself with its own word")
+            .label[0];
+        assert_eq!(
+            group.label[0], heading,
+            "the word starts where the page's own heading starts"
+        );
+        assert_eq!(
+            group.band[0], heading,
+            "and the band holds it, because the band is what a press lands in"
+        );
         let title = placed
             .rows
             .iter()
             .map(|row| row.title[0])
             .fold(f32::INFINITY, f32::min);
-        assert_eq!(
-            group.label[0], title,
-            "the word starts where every row's title starts"
-        );
-        assert_eq!(
-            group.band[0], title,
-            "and so does its band, which is the control"
-        );
-        assert_eq!(
-            group.mark[2],
-            group.label[0] - DISCLOSURE_GAP_LOGICAL_PX,
-            "the triangle ends one gap before the word"
-        );
-        assert_eq!(
-            group.mark[0],
-            group.label[0] - DISCLOSURE_GUTTER_LOGICAL_PX,
-            "and begins a whole gutter before it"
-        );
         assert!(
-            group.mark[0] > placed.content[0],
-            "the gutter hangs into the content's own padding and not out of the \
-             page: mark {:?} in content {:?}",
-            group.mark,
-            placed.content
+            heading < title,
+            "the heading column is the rows' own less `.row`'s padding:              heading {heading} against title {title}"
         );
+        let control = placed
+            .rows
+            .iter()
+            .map(|row| row.combo[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert_eq!(
+            group.mark[2], control,
+            "the chevron ends where every picker on the page ends"
+        );
+        assert_eq!(group.band[2], control, "and the band ends with it");
         assert_eq!(
             width(group.mark),
-            DISCLOSURE_MARK_LOGICAL_PX,
-            "and the triangle keeps the files tree's own 10px square"
+            DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX,
+            "the chevron keeps its 10"
+        );
+        assert_eq!(
+            height(group.mark),
+            DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX,
+            "and its 6"
         );
         assert!(
-            MOCKUP.contains(".adv-head .tri { margin-left: -18px; }"),
-            "`design/ui-mockup.html` hangs the triangle in the same gutter"
+            group.label[2] <= group.mark[0],
+            "nothing is drawn between the word and the mark, and nothing at all              stands left of the word: label {:?}, mark {:?}",
+            group.label,
+            group.mark
+        );
+        assert_eq!(
+            height(group.band),
+            2.0 * ROW_PADDING_Y_LOGICAL_PX + GROUP_LABEL_LINE_LOGICAL_PX,
+            "the band is the group label's line box between the row's own              paddings, which is what changed when the type did"
+        );
+        assert!(
+            MOCKUP.contains(".adv-head { padding-left: 0; }"),
+            "`design/ui-mockup.html` puts the word on the heading column too"
+        );
+        assert!(
+            !MOCKUP.contains("data-adv"),
+            "and the three-variant scaffolding is gone from it: one form is              chosen, so there is one form drawn"
         );
     }
 
@@ -14448,9 +14747,9 @@ mod tests {
         assert!(
             sprites.iter().all(|sprite| matches!(
                 sprite.mark,
-                ChromeMark::WindowClose | ChromeMark::TreeDisclosure { .. }
+                ChromeMark::WindowClose | ChromeMark::Chevron { .. }
             )),
-            "the overlay's marks are the close and the disclosure, and nothing              has quietly joined them: {:?}",
+            "the overlay's marks are the close and the disclosure's chevron,              and nothing has quietly joined them: {:?}",
             sprites.iter().map(|sprite| sprite.mark).collect::<Vec<_>>()
         );
         let glyph = closes[0].rect;
@@ -16022,15 +16321,13 @@ mod tests {
                     .filter(|row| row.advanced())
                     .map(|row| row.control_target()),
             )
-            // The foot's three verbs, left to right as they are drawn — the
-            // walk down the page and the walk down the Tab order are still one
-            // walk now that the foot is a row rather than a button
-            // (§7.1.6c-4c, and a third verb on it since §7.1.6c-4d).
-            .chain([
-                SettingsTarget::CustomiseScheme,
-                SettingsTarget::DeleteScheme,
-                SettingsTarget::ResetAdvanced(PAGE),
-            ])
+            // The foot's one verb. It carried three until 2026-08-19, when
+            // the two scheme verbs moved onto the picker's own rows — which is
+            // also why they are not in this order any more: a mark inside an
+            // open popup is reached by the arrows that walk the popup, exactly
+            // as a picker's items are, and the Tab order is a list of the page's
+            // controls.
+            .chain([SettingsTarget::ResetAdvanced(PAGE)])
             .collect();
         assert_eq!(focus_order(content(&flat, &lines), PAGE), expected);
         // And a shut group is a group whose rows and whose verb are nowhere in
@@ -17672,14 +17969,18 @@ mod tests {
             words,
             [
                 SettingsCategory::General.nav_label(),
+                SettingsCategory::Appearance.nav_label(),
                 // **The placeholder is gone** (§7.1.6c-6). This was the literal
                 // `"Profiles"` with a note saying to replace it with a
                 // `nav_label()` the day the page became a category; slice 5a is
                 // that day, so the pin is back to reading every word from the
                 // enum and the mock-up's rail and this build's rail can no
                 // longer drift apart on any of the six.
+                //
+                // **Third and no longer second** (user ruling 2026-08-19): the
+                // rail is ordered 从看到用 and the mock-up was reordered with it,
+                // so this pin is what keeps the two rails one rail.
                 SettingsCategory::Profiles.nav_label(),
-                SettingsCategory::Appearance.nav_label(),
                 SettingsCategory::Terminal.nav_label(),
                 SettingsCategory::RenderedBlocks.nav_label(),
                 SettingsCategory::Shortcuts.nav_label(),
@@ -17855,13 +18156,17 @@ mod tests {
     }
 
     /// PIN — **the rail gains `Profiles` the day the page has rows, and not
-    /// before**, and it stands second.
+    /// before**, and it stands third.
     ///
     /// The rail is derived from content and always has been; this is the first
     /// category whose content is not a list of `SettingsRow`s, so the derivation
-    /// had to learn a second question rather than gain an exception. Second and
-    /// directly under General because General's `Default profile` row points at
-    /// the very table this word opens.
+    /// had to learn a second question rather than gain an exception.
+    ///
+    /// **Third and no longer second** (user ruling 2026-08-19). It stood under
+    /// General on the strength of `Default profile` naming the table, and the
+    /// rail is now ordered 从看到用 instead: the window before the kinds of
+    /// session it can hold. See [`SettingsCategory::ALL`], which is where the
+    /// order lives and where the rule is written down.
     ///
     /// Red gate: name the category in the rail unconditionally and a build that
     /// somehow had no profiles would draw a door onto an empty room.
@@ -17880,8 +18185,8 @@ mod tests {
             profiles_content(&rows, &shortcuts, &lines).nav_items(),
             [
                 SettingsCategory::General,
-                SettingsCategory::Profiles,
                 SettingsCategory::Appearance,
+                SettingsCategory::Profiles,
                 SettingsCategory::Terminal,
                 SettingsCategory::RenderedBlocks,
                 SettingsCategory::Shortcuts,

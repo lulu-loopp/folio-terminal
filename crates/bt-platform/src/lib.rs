@@ -228,6 +228,26 @@ pub struct MonospaceFamily {
     pub files: Vec<std::path::PathBuf>,
 }
 
+/// **The page Windows installs fonts on**, and the door
+/// `open_system_fonts_page` knocks on first (user ruling 2026-08-19).
+///
+/// Named here rather than spelled at the call site so that the one URI this
+/// build hands the shell is a constant a reader can find by searching for it.
+pub const FONT_SETTINGS_URI: &str = "ms-settings:fonts";
+
+/// The folder that page is a view of — where `open_system_fonts_page` goes when
+/// the URI has no handler.
+///
+/// `%WINDIR%\Fonts`, with the documented default when the variable is unset:
+/// this is a machine-wide location, not a user one, and a terminal that guessed
+/// `C:` because an environment variable had been cleared would be opening a
+/// folder on the wrong drive on exactly the machines that clear it.
+#[must_use]
+pub fn fonts_folder() -> std::path::PathBuf {
+    let root = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+    std::path::PathBuf::from(root).join("Fonts")
+}
+
 /// The family the renderer draws when a settings file names none.
 ///
 /// It is a constant here rather than a lookup because [`monospace_font_families`]
@@ -1046,6 +1066,83 @@ mod windows_impl {
                 PCWSTR(operation.as_ptr()),
                 PCWSTR(program.as_ptr()),
                 PCWSTR(arguments.as_ptr()),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code <= 32 {
+            Err(format!("ShellExecuteW failed with code {code}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// **Open Windows' own Fonts page** (user ruling 2026-08-19).
+    ///
+    /// **A fourth bridge, and the first one that hands `ShellExecuteW` a URI.**
+    /// That is exactly the thing this codebase refuses everywhere else —
+    /// `preview.rs` will open `http` and `https` and nothing else, because
+    /// handing an arbitrary scheme to the shell is handing it whatever the
+    /// machine has registered for that scheme. The difference here is that
+    /// nothing arbitrary reaches this function: there is no parameter. The two
+    /// strings it can pass are both constants of this build, and a reader who
+    /// presses `Install fonts…` gets the one page or the other.
+    ///
+    /// `ms-settings:fonts` first, because it is where a font is installed by
+    /// dropping a file on it and where the machine's own fonts already live. It
+    /// is a Windows 10+ protocol handler and a machine can have it unregistered
+    /// — policy-managed desktops do this — so the fall-back is the folder the
+    /// page is a view of, opened through Explorer exactly as [`reveal_in_explorer`]
+    /// opens any other folder. Two doors onto one place, and the reader is never
+    /// told which one they came through: the answer to "where do fonts come
+    /// from" is the same either way.
+    ///
+    /// **This product installs and deletes nothing.** A font is a machine-wide
+    /// resource, installing one affects every program on the desk, and removing
+    /// one a program is drawing with is a decision that was never a terminal's
+    /// to take. So there is no in-app font management behind this door and there
+    /// will not be — the door is the whole feature.
+    pub fn open_system_fonts_page(hwnd: NonZeroIsize) -> Result<(), String> {
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
+        operation.push(0);
+        let mut uri = super::FONT_SETTINGS_URI.encode_utf16().collect::<Vec<_>>();
+        uri.push(0);
+        // SAFETY: the target is a compile-time constant with no embedded NUL,
+        // both buffers stay live and NUL-terminated across this synchronous
+        // call, and parameters and working directory are null so Windows never
+        // receives a command line to reparse.
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(uri.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as isize > 32 {
+            return Ok(());
+        }
+        // The URI was refused — no handler, or a policy that removed the page.
+        // The folder it is a view of is still there, and Explorer is the one
+        // program this fall-back can launch.
+        let mut program = "explorer.exe".encode_utf16().collect::<Vec<_>>();
+        program.push(0);
+        let mut folder = super::fonts_folder()
+            .into_os_string()
+            .encode_wide()
+            .collect::<Vec<_>>();
+        folder.push(0);
+        // SAFETY: as above, and the only program named is Explorer.
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(program.as_ptr()),
+                PCWSTR(folder.as_ptr()),
                 PCWSTR::null(),
                 SW_SHOWNORMAL,
             )
@@ -3576,10 +3673,11 @@ pub use windows_impl::{
     client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
     file_product_version, get_dpi_for_window, get_window_rect, get_work_area,
     install_window_class_background, is_window_minimized, message_box, monospace_font_families,
-    open_local_file, open_local_path, os_ui_language, recycle, request_window_close,
-    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
-    spawn_at_priority, system_backdrop_available, wheel_scroll_amount, write_to_console,
+    open_local_file, open_local_path, open_system_fonts_page, os_ui_language, recycle,
+    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
+    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    shell_execute, spawn_at_priority, system_backdrop_available, wheel_scroll_amount,
+    write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.
