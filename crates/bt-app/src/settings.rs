@@ -6692,21 +6692,40 @@ pub fn layout_for_menus(
             // word beside it is what they were aiming at" — survives the mark
             // moving to the other end: what changed is where the glyph is drawn,
             // never what a press lands in.
+            //
+            // **AND THE BAND IS WIDER THAN THE TWO COLUMNS IT ANSWERS TO** (user
+            // report 2026-08-19, screenshot). It used to begin exactly on
+            // `text_left` and end exactly on `row_right` — the word's own left
+            // edge and the chevron's own right one — which is a control whose
+            // content has no padding at all. Nothing showed while it was at rest
+            // (the band draws no ground), but the moment the keyboard reached it
+            // the focus ring was struck one pixel off the `A` of `ADVANCED` and
+            // one pixel off the chevron, and this dialog's every other control
+            // holds its word a dozen pixels inside its own box.
+            //
+            // So the two *contents* keep their columns to the pixel — the word on
+            // `text_left` where `APPEARANCE` starts, the chevron on `row_right`
+            // where every picker on the page ends — and it is the BAND that moves
+            // outwards, by the very padding a picker gives the same two things:
+            // `COMBO_PADDING_LEFT_LOGICAL_PX` between a button's edge and the
+            // value printed in it, `COMBO_PADDING_RIGHT_LOGICAL_PX` between its
+            // edge and the chevron. A reader comparing this header with the
+            // pickers above it is comparing the same distance twice.
             PageItem::Disclosure(open) => {
+                let mark_width = px(DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX);
+                let mark_height = px(DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX);
                 let band = [
-                    text_left,
+                    text_left - px(COMBO_PADDING_LEFT_LOGICAL_PX),
                     cursor,
-                    row_right,
+                    row_right + px(COMBO_PADDING_RIGHT_LOGICAL_PX),
                     cursor + metrics.disclosure_height,
                 ];
                 cursor += metrics.disclosure_height;
-                let mark_width = px(DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX);
-                let mark_height = px(DISCLOSURE_CHEVRON_HEIGHT_LOGICAL_PX);
                 let middle = (band[1] + band[3]) / 2.0;
                 let mark = [
-                    band[2] - mark_width,
+                    row_right - mark_width,
                     middle - mark_height / 2.0,
-                    band[2],
+                    row_right,
                     middle + mark_height / 2.0,
                 ];
                 placed_advanced = Some(AdvancedLayout {
@@ -6715,10 +6734,12 @@ pub fn layout_for_menus(
                     band,
                     mark,
                     // The group label's own line box, for the group label's own
-                    // type. It stops short of the chevron for the reason every
-                    // other title on the page stops short of its picker.
+                    // type. It starts on the heading column rather than on the
+                    // band's edge, and it stops short of the chevron for the
+                    // reason every other title on the page stops short of its
+                    // picker.
                     label: [
-                        band[0],
+                        text_left,
                         band[1] + px(ROW_PADDING_Y_LOGICAL_PX),
                         mark[0] - px(ROW_GAP_LOGICAL_PX),
                         band[1] + px(ROW_PADDING_Y_LOGICAL_PX + GROUP_LABEL_LINE_LOGICAL_PX),
@@ -10278,14 +10299,38 @@ pub(crate) fn push_float_window(
         shadow,
         bt_render::overlay_shadow_alpha(shadow_inner_alpha, shadow_outer_alpha),
     ));
+    // **THE FACE FILLS THE BORDER BOX, AND THE HAIRLINE IS STRUCK ON IT** (user
+    // report 2026-08-19, screenshots of the Settings pickers).
+    //
+    // The hairline is translucent — `menu_border` at `menu_border_alpha`, 24/255
+    // in the dark theme — and it used to be laid down FIRST, with the face
+    // inset one border inside it. That makes the outline of an opaque floating
+    // panel the one place the panel is see-through: whatever the menu covers is
+    // still visible through its own edge. In this dialog that is not a
+    // theoretical hole, because every picker on a page shares one control
+    // column: an open menu stands directly over the boxes of the rows beneath
+    // it, their hairlines land exactly under its hairline, and the two compose
+    // to twice the strength — an outline that is brighter along the stretches
+    // where a row happens to be hiding behind it and normal everywhere else.
+    // Measured on a real window: `#5C5C5C` where the menu covers dialog surface,
+    // `#797979` where it covers another combo's edge.
+    //
+    // A browser has never drawn it the other way. `background` paints the border
+    // box by default, so `border: 1px solid var(--border)` over
+    // `background: var(--menu)` composites the border against the panel's OWN
+    // ground and against nothing else — which is what the mock-up's `.combo-menu`
+    // says and what these three fills now do: the ground over the whole frame,
+    // the hairline over the ground, the ground again inside the hairline.
+    //
+    // Concentric with the box: one border in on every side, so one border less
+    // radius — anything else thickens the hairline through the corner.
+    quads.extend(rounded_overlay_fill(frame, radius, face, 1.0));
     quads.extend(rounded_overlay_fill(
         frame,
         radius,
         hairline,
         hairline_alpha,
     ));
-    // Concentric with the box: one border in on every side, so one border less
-    // radius — anything else thickens the hairline through the corner.
     quads.extend(rounded_overlay_fill(
         [
             frame[0] + border,
@@ -14258,9 +14303,30 @@ mod tests {
             group.label[0], heading,
             "the word starts where the page's own heading starts"
         );
+        // **The band holds the word with the same air a picker holds its value**
+        // (user report 2026-08-19, screenshot). The band is what a press lands
+        // in and what the focus ring is struck around, and it used to begin on
+        // the word's own left edge — so the ring came down one pixel off the `A`
+        // of `ADVANCED` while every combo on the same page held its value a
+        // dozen pixels inside its box.
+        //
+        // Red gate: put `text_left` back as `band[0]` and this goes red by the
+        // whole padding; move the *word* instead of the band and the assertion
+        // above it goes red by the same amount.
         assert_eq!(
-            group.band[0], heading,
-            "and the band holds it, because the band is what a press lands in"
+            group.label[0] - group.band[0],
+            COMBO_PADDING_LEFT_LOGICAL_PX,
+            "the word stands off its own band by a picker's own left padding"
+        );
+        assert_eq!(
+            group.band[2] - group.mark[2],
+            COMBO_PADDING_RIGHT_LOGICAL_PX,
+            "and the chevron ends a picker's own right padding short of it"
+        );
+        assert!(
+            group.band[0] < heading,
+            "which puts the band outside the heading column rather than on it:              band {:?}, heading {heading}",
+            group.band
         );
         let title = placed
             .rows
@@ -14280,7 +14346,6 @@ mod tests {
             group.mark[2], control,
             "the chevron ends where every picker on the page ends"
         );
-        assert_eq!(group.band[2], control, "and the band ends with it");
         assert_eq!(
             width(group.mark),
             DISCLOSURE_CHEVRON_WIDTH_LOGICAL_PX,
@@ -14309,6 +14374,83 @@ mod tests {
         assert!(
             !MOCKUP.contains("data-adv"),
             "and the three-variant scaffolding is gone from it: one form is              chosen, so there is one form drawn"
+        );
+    }
+
+    /// PIN (user report on a real window, 2026-08-19, "很多下拉栏都这样") —
+    /// **a floating panel is OPAQUE UNDER ITS OWN HAIRLINE.**
+    ///
+    /// The hairline is translucent by declaration — `menu_border` at 24/255 —
+    /// and it used to be the first thing laid down, with the face inset one
+    /// border inside it. So the outline of an opaque panel was the one place the
+    /// panel was see-through, and in this dialog that is not academic: every
+    /// picker on a page shares one control column, an open menu stands squarely
+    /// over the boxes of the rows beneath it, and their hairlines landed exactly
+    /// under its hairline. Measured on the real window: `#5C5C5C` along the
+    /// stretches of the menu's edge that covered dialog surface, `#797979` along
+    /// the stretches that covered another combo's edge — one outline, two
+    /// weights, and the doubling moving as the reader scrolled.
+    ///
+    /// Stated as a property of the quad list rather than as a count of quads, so
+    /// that a future third plane is free to exist: at the panel's own edge, an
+    /// opaque quad of the panel's face is laid down BEFORE the translucent one.
+    /// That is `background-clip: border-box`, which is what the mock-up's
+    /// `.combo-menu` gets from a browser for free.
+    ///
+    /// Red gate: put the hairline back in front of the face and the last
+    /// assertion goes red; drop the hairline altogether and the one above it
+    /// does.
+    #[test]
+    fn a_floating_panel_is_opaque_under_its_own_hairline() {
+        let frame = [100.0, 100.0, 300.0, 200.0];
+        let face = [0x2a, 0x2a, 0x2a];
+        let hairline = [0xff, 0xff, 0xff];
+        let mut quads: Vec<OverlayQuad> = Vec::new();
+        push_float_window(
+            &mut quads,
+            frame,
+            8.0,
+            1.0,
+            10.0,
+            face,
+            [0, 0, 0],
+            0.18,
+            0.09,
+            hairline,
+            24.0 / 255.0,
+        );
+        // Three points: the panel's own left edge, where the hairline runs and
+        // where a covered row's own edge used to show through it; its middle,
+        // which was never in doubt; and one pixel outside, which must stay the
+        // shadow's business alone.
+        let covering = |x: f32, y: f32| -> Vec<OverlayQuad> {
+            quads
+                .iter()
+                .filter(|quad| {
+                    x >= quad.rect[0] && x < quad.rect[2] && y >= quad.rect[1] && y < quad.rect[3]
+                })
+                .copied()
+                .collect()
+        };
+        let middle_y = (frame[1] + frame[3]) / 2.0;
+        for x in [frame[0] + 0.5, frame[2] - 0.5] {
+            let over = covering(x, middle_y);
+            let hair = over
+                .iter()
+                .position(|quad| quad.color == hairline)
+                .unwrap_or_else(|| panic!("the hairline runs along x = {x}"));
+            assert!(
+                over[..hair]
+                    .iter()
+                    .any(|quad| quad.color == face && quad.alpha == 1.0),
+                "x = {x}: the panel's own ground goes down before its edge does,                  so the edge is composited over the panel and never over what                  the panel covers: {over:?}"
+            );
+        }
+        assert!(
+            covering((frame[0] + frame[2]) / 2.0, middle_y)
+                .iter()
+                .any(|quad| quad.color == face && quad.alpha == 1.0),
+            "and the middle of the panel is its face at full strength"
         );
     }
 
