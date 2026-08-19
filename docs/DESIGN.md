@@ -363,7 +363,7 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 ## 7. UX 骨架
 
-同 v3（布局三档手动固定 + 渐进披露默认；分屏 = 多投影 + 单 owner；egui/AccessKit/M2 去留门）。WebView2 补充（第三轮 MAJOR）：**external protocol 一律禁用**（`msteams:` 等弹确认都不给，直接拦截）；**web message bridge 默认关闭**（预览面板与终端无 JS 通信通道）；导航白名单默认仅 `http://localhost:*` 与 `http://127.0.0.1:*`，跳转其他 origin 需显式确认；下载/新窗口/权限请求默认拦截。
+同 v3（布局三档手动固定 + 渐进披露默认；分屏 = 多投影 + 单 owner；egui/AccessKit/M2 去留门）。WebView2 补充（第三轮 MAJOR）：**external protocol 一律禁用**（`msteams:` 等弹确认都不给，直接拦截）；**web message bridge 默认关闭**（预览面板与终端无 JS 通信通道）；~~导航白名单默认仅 `http://localhost:*` 与 `http://127.0.0.1:*`，跳转其他 origin 需显式确认~~（**被 2026-08-19 Web 预览块裁决取代**：任意 http/https URL 皆可通用浏览——保留下来的是入口的默认去向（localhost 点击进预览、外部点击交系统浏览器，均可动词改道）与 scheme 安全政策（javascript:/file:/data: 等 allowlist 拒绝、NavigationStarting 二次检查），不再是 origin 白名单；全案与 Codex 三轮审阅见 `docs/plans/web-preview/`——形态 C-精简、户口预览 pane、历史=切换器、收藏=钉（pins.json）、visual hosting 三像素通道合同、W0′ 十扇门 → W1 设计 → W2 六片，排 Windows 落地块之后）；下载/新窗口/权限请求默认拦截（下载细化为「取消并外开可重放 GET」，非用户触发 popup 取消）。
 
 ### 7.0 内容 × 形态模型（2026-07-17 用户提出并共同定稿——本节是 §7.1 全部碎片裁决的总纲）
 
