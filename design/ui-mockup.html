@@ -3625,9 +3625,10 @@
              the foot verb is `Restore all defaults`, which returns every field on
              the page to the shipped table.
 
-             THREE PLACES THE SHIPPED PAGE READS DIFFERENTLY FROM THIS DRAWING,
+             FIVE PLACES THE SHIPPED PAGE READS DIFFERENTLY FROM THIS DRAWING,
              each booked here because a prototype that quietly disagrees with the
-             product is worse than no prototype (§7.1.6c-6b, 2026-08-18):
+             product is worse than no prototype (§7.1.6c-6b, 2026-08-18; three
+             and four are §7.1.6c-6c's, 2026-08-19):
 
              1. `Starting directory` says the FOLDER when it is on one. This
                 drawing's third item is a verb (`Choose a folder…`), and a button
@@ -3643,13 +3644,33 @@
                 eight is a one-way door; the way back is to duplicate the built-in
                 again.
 
-             3. `Shell integration` is a READ-ONLY line and not a picker yet. Its
-                description is already the capability sentence in this drawing,
-                and that sentence is what 5b ships; the picker needs the `Auto`
-                derivation from the program's own file name, which plan §5.2
-                slices to 5c along with `Integration::None` and the honest matrix.
-                A picker that wrote a value nothing derived would be the
-                pretending this page exists to stop.
+             3. `Shell integration` IS the picker drawn here as of §7.1.6c-6c,
+                and its five items are these five. Two departures inside it:
+                the MENU's first item is the bare word `Auto`, and it is the
+                BUTTON that says `Auto (None)` — the derived door is a fact about
+                this row rather than about the choosing, and the shipped picker's
+                item labels are `&'static str` measured once for the whole page
+                while the derivation changes with the `Program` field above.
+                And nothing in it is greyed: all four doors are mechanisms this
+                terminal has, and what happens when the wrong one is handed to a
+                program is that PROGRAM's answer, not this dialog's to predict.
+
+             4. The three greyed rows below are DERIVED and there are not always
+                three (§7.1.6c-6c). PowerShell is the one door this terminal does
+                not declare `FORCE_HYPERLINK` through — its own script is the half
+                that says it — so that row is absent on a PowerShell profile, and
+                a name the reader has a row of their own for stops being a ghost
+                entirely, because the terminal no longer gets to say it. Pressing
+                one adopts it: the line becomes the reader's, carrying the name
+                and the value it was showing, and the caret lands in its value
+                box.
+
+             5. The Advanced group here has NO `Reset to defaults` (user ruling
+                2026-08-18). Every other page's does; this page's foot already
+                carries `Restore all defaults`, which puts the whole profile back
+                — these rows included — and two verbs one line apart saying almost
+                the same words about scopes only one of them names is a reader
+                flipping a coin.
 
              `Name` writes `display_title` and NOT the string the OSC 0/2
              comparison uses (§G S103, plan §1.4). A built-in keeps its shipped
@@ -3761,10 +3782,17 @@
              opt-in script, so links worked in a PowerShell whose owner had
              installed the script and in no other pane in the window.
 
-             A profile's own row WINS over them. The environment of a profile is
-             the most specific statement anybody makes about its sessions, and
-             `hyperlink_declaration`'s own rule is already that whoever set the
-             variable has answered the question. -->
+             A profile's own row WINS over them, and since §7.1.6c-6c it really
+             does: the spawn path lays down the inherited environment, then this
+             terminal's declarations, then the profile's own rows. The
+             environment of a profile is the most specific statement anybody
+             makes about its sessions, and `hyperlink_declaration`'s own rule is
+             already that whoever set the variable has answered the question.
+             `TERM_PROGRAM` is overridable along with the rest, which is honest
+             rather than an oversight — and on a PowerShell it is load-bearing,
+             because `folio.ps1` declares hyperlinks only for a session whose
+             `TERM_PROGRAM` it recognises, so the capability sentence below
+             stops claiming links when that row is written. -->
         <div class="row stacked">
           <div class="text">
             <div class="title">Environment</div>
@@ -3836,7 +3864,10 @@
           </div>
         </div>
 
-        <div class="adv-foot"><button class="btn adv-reset">Reset to defaults</button></div>
+        <!-- NO `Reset to defaults` HERE in the shipped page (user ruling
+             2026-08-18, departure 5 above): the page's foot already carries
+             `Restore all defaults`, which is the same verb with the only scope
+             that is complete. -->
         </div>
         </div>
 

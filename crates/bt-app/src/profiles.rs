@@ -336,12 +336,28 @@ pub struct Profile {
     /// What this profile sets in its sessions' environment, over what the
     /// terminal sets for itself.
     ///
-    /// **The slot exists and is persisted; nothing reads it into a spawn yet**
-    /// — that is slice 5c, along with the layering rule (inherited environment,
-    /// then the terminal's own declarations, then this, which wins because it is
-    /// the most specific sentence anybody said). The field is here now because
-    /// the file format that carries it is here now, and a format that could not
-    /// round-trip an environment would have to change version to gain one.
+    /// **Three layers, and this one is written last** (plan §1.7, landed in
+    /// §7.1.6c-6c): the environment this window inherited, then the terminal's
+    /// own declarations (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `COLORTERM`,
+    /// `TERM`, the `FORCE_HYPERLINK` declaration, `PROMPT` for `cmd`,
+    /// `BT_SHELL_INTEGRATION` for a bash), then these. A row here therefore
+    /// **wins**, `TERM_PROGRAM` included, and that is the ruling rather than an
+    /// oversight: a profile's environment is the most specific sentence anybody
+    /// says about its sessions, and `hyperlink_declaration`'s own rule already
+    /// is that whoever set the variable has answered the question. `BT_SHELL`
+    /// surviving as a debugging back door (Q4) says the same thing — this
+    /// machine belongs to the person using it.
+    ///
+    /// **An empty value takes the variable away from this profile's sessions**
+    /// — measured on the real machine rather than assumed, because it is the
+    /// operating system's answer and not this terminal's: an environment block
+    /// entry whose value is empty removes the name instead of binding it to the
+    /// empty string, so a child of a profile carrying `FOO=` has no `FOO` at
+    /// all, *including* when the window itself inherited one. The storage
+    /// therefore needs no third state to spell "remove": clearing a value box
+    /// is that, and it is also what a reader clearing a value box means.
+    /// A row with an empty **name** is not a variable at all and never reaches
+    /// a child (`crate::shell_integration::layer_profile_environment`).
     pub env: Vec<(String, String)>,
     /// Where a leaf of this profile opens when nothing else says.
     ///
@@ -380,8 +396,10 @@ pub struct Profile {
     pub paths: PathNamespace,
     /// What this profile's title has to name before it is unambiguous here.
     pub qualifier: Qualifier,
-    /// Which shell-integration script this profile is served by, if any.
-    pub integration: Integration,
+    /// Which shell-integration script this profile is served by, if any —
+    /// derived from the program, or named outright. See [`IntegrationChoice`],
+    /// and [`served_by`] for the resolved answer every other module wants.
+    pub integration: IntegrationChoice,
     /// Kept out of the pickers.
     ///
     /// A built-in cannot be deleted — a row that is missing looks exactly like a
@@ -656,6 +674,91 @@ pub enum Integration {
     None,
 }
 
+/// Which door serves a profile's sessions, **as the editor's picker holds it**
+/// (plan §1.6, §3.3) — derived from the program, or named outright.
+///
+/// Two states rather than one more [`Integration`] variant, because they answer
+/// different questions and only one of them survives an edit to the `Program`
+/// field: `Auto` is a *rule* — whatever this row runs, serve it the way that
+/// family is served — while a named answer is a decision that outlives the
+/// program it was made about. A row that stored the derived value would forget
+/// which of the two it was the moment somebody pointed it somewhere else, and
+/// the next `Program` edit would either silently keep a door that no longer fits
+/// or silently throw away a choice.
+///
+/// **Every shipped profile is `Auto`**, and that is the derivation proving
+/// itself rather than five constants standing beside it: `derive_integration`
+/// reproduces the five doors this build has always opened, pinned by
+/// `auto_derives_the_door_every_shipped_profile_has_always_had`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegrationChoice {
+    /// Read the program's own file name — [`derive_integration`].
+    Auto,
+    /// This door, whatever the program becomes.
+    Named(Integration),
+}
+
+/// Which door a program's file name asks for (plan §1.6).
+///
+/// **The file name and not a probe.** What serves a shell is decided by which
+/// family it belongs to, and the name is the only thing about a program this
+/// dialog can read without starting it — `--init-file` handed to something that
+/// is not a bash is a filename it will try to open, and there is no way to ask
+/// first that does not involve running it.
+///
+/// The stem rather than the whole leaf, so that `bash` and `bash.exe` are one
+/// answer: a WSL distribution's login shell has no extension and a Windows one
+/// does, and the family is the same family.
+///
+/// Anything this list has not heard of gets [`Integration::None`], which is the
+/// honest answer and a whole one: a screen that never sees OSC 133 keeps the
+/// cursor/WRAPLINE heuristics byte for byte, and a session that never sees
+/// OSC 7 leaves the relative path undetected rather than guessing.
+#[must_use]
+pub fn derive_integration(program: &ProgramSource) -> Integration {
+    let leaf = match program {
+        // Not a file name at all — it is `BT_SHELL`, then a `pwsh` probe, and
+        // every path it can resolve to is a PowerShell 7.
+        ProgramSource::PowerShellSeven => return Integration::PowerShellOptIn,
+        ProgramSource::Path(path) => path.file_name().map(std::ffi::OsStr::to_string_lossy),
+        // Every candidate of one shipped row names one program family — the four
+        // Git Bash places are four `bash.exe`s — so the first is the family, and
+        // a row whose candidates disagreed would be a row that could not say what
+        // it starts either.
+        ProgramSource::FirstOf(candidates) => candidates
+            .first()
+            .map(|candidate| match candidate {
+                ProgramCandidate::Under { tail, .. }
+                | ProgramCandidate::BesideOnPath { tail, .. } => tail.as_str(),
+            })
+            .map(|tail| {
+                std::borrow::Cow::Borrowed(tail.rsplit(['\\', '/']).next().unwrap_or_default())
+            }),
+    };
+    let Some(leaf) = leaf else {
+        return Integration::None;
+    };
+    let stem = leaf
+        .rsplit_once('.')
+        .map_or(leaf.as_ref(), |(stem, _)| stem)
+        .to_ascii_lowercase();
+    match stem.as_str() {
+        "pwsh" | "powershell" => Integration::PowerShellOptIn,
+        "bash" | "sh" | "zsh" | "wsl" => Integration::BashInitFile,
+        "cmd" => Integration::CmdPrompt,
+        _ => Integration::None,
+    }
+}
+
+/// One row's door, resolved — the answer every caller outside the editor wants.
+#[must_use]
+pub fn served_by(profile: &Profile) -> Integration {
+    match profile.integration {
+        IntegrationChoice::Auto => derive_integration(&profile.program),
+        IntegrationChoice::Named(named) => named,
+    }
+}
+
 /// The profile whose PSReadLine is the one this product can repair.
 ///
 /// Named rather than spelled at the two places that compare against it: the
@@ -721,7 +824,7 @@ pub fn shipped() -> Vec<Profile> {
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
-            integration: Integration::PowerShellOptIn,
+            integration: IntegrationChoice::Auto,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -756,7 +859,7 @@ pub fn shipped() -> Vec<Profile> {
             // The same script, and it already handles this shell: `folio.ps1`
             // is written for 5.1 and 7 alike, and the PSReadLine 2.0.0 anchor repair
             // 5.1 needs is an existing no-op sentinel rather than a second code path.
-            integration: Integration::PowerShellOptIn,
+            integration: IntegrationChoice::Auto,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -795,7 +898,7 @@ pub fn shipped() -> Vec<Profile> {
             start_at: StartAt::Inherit,
             paths: PathNamespace::Wsl,
             qualifier: Qualifier::WslDistribution,
-            integration: Integration::BashInitFile,
+            integration: IntegrationChoice::Auto,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -854,7 +957,7 @@ pub fn shipped() -> Vec<Profile> {
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
-            integration: Integration::BashInitFile,
+            integration: IntegrationChoice::Auto,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -875,7 +978,7 @@ pub fn shipped() -> Vec<Profile> {
             start_at: StartAt::Inherit,
             paths: PathNamespace::Windows,
             qualifier: Qualifier::None,
-            integration: Integration::CmdPrompt,
+            integration: IntegrationChoice::Auto,
             hidden: false,
             origin: Origin::Builtin,
         },
@@ -1355,7 +1458,13 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
             // whatever distribution it meant in its own arguments. Saying it
             // twice is saying it once and once wrong.
             qualifier: Qualifier::None,
-            integration: Integration::None,
+            // **The rule and not an answer.** A row of the reader's own is born
+            // pointing at a program, and `Auto` reads that program: a
+            // `claude.exe` gets no door, a `bash.exe` gets the init file, and a
+            // row repointed tomorrow is served the way tomorrow's program is
+            // served. Writing `None` in here would have been a decision nobody
+            // made, kept forever.
+            integration: IntegrationChoice::Auto,
             hidden: false,
             origin: Origin::User,
         },
@@ -1395,9 +1504,14 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
     {
         profile.integration = named;
     }
-    if profile.origin == Origin::User {
-        profile.paths = derived_paths(&profile);
-    }
+    // **Derived for every row, built-in included** (§7.1.6c-6c). It used to be
+    // derived for a profile of the reader's own and stated for the five, which
+    // was two rules for one fact and left a built-in repointed at another
+    // program still translating directories in the namespace of the one it no
+    // longer runs. The derivation reproduces all five shipped answers —
+    // `the_namespace_every_shipped_profile_states_is_the_one_it_derives` — so
+    // what this replaces is a copy and not a decision.
+    profile.paths = derived_paths(&profile);
     profile.hidden = entry.hidden;
     Some(profile)
 }
@@ -1423,7 +1537,7 @@ fn derived_paths(profile: &Profile) -> PathNamespace {
         }),
         ProgramSource::PowerShellSeven => false,
     };
-    if launcher && profile.integration == Integration::BashInitFile {
+    if launcher && served_by(profile) == Integration::BashInitFile {
         PathNamespace::Wsl
     } else {
         PathNamespace::Windows
@@ -1563,22 +1677,30 @@ fn mark_to_file(mark: ChromeMark) -> Option<MarkV1> {
     }
 }
 
-fn integration_from_file(name: &str) -> Option<Integration> {
+/// `"auto"` is a fifth word and not an absent key, because absence already
+/// means something else here and means it in two different ways: on a built-in
+/// it is "whatever this build ships", and on a row of the reader's own it is
+/// "whatever the reader's own defaults are". A rule the reader chose has to be
+/// writable, or a row switched back to `Auto` would round-trip as the door it
+/// happened to be on.
+fn integration_from_file(name: &str) -> Option<IntegrationChoice> {
     match name {
-        "powershell" => Some(Integration::PowerShellOptIn),
-        "bash" => Some(Integration::BashInitFile),
-        "cmd" => Some(Integration::CmdPrompt),
-        "none" => Some(Integration::None),
+        "auto" => Some(IntegrationChoice::Auto),
+        "powershell" => Some(IntegrationChoice::Named(Integration::PowerShellOptIn)),
+        "bash" => Some(IntegrationChoice::Named(Integration::BashInitFile)),
+        "cmd" => Some(IntegrationChoice::Named(Integration::CmdPrompt)),
+        "none" => Some(IntegrationChoice::Named(Integration::None)),
         _ => None,
     }
 }
 
-fn integration_to_file(integration: Integration) -> &'static str {
+fn integration_to_file(integration: IntegrationChoice) -> &'static str {
     match integration {
-        Integration::PowerShellOptIn => "powershell",
-        Integration::BashInitFile => "bash",
-        Integration::CmdPrompt => "cmd",
-        Integration::None => "none",
+        IntegrationChoice::Auto => "auto",
+        IntegrationChoice::Named(Integration::PowerShellOptIn) => "powershell",
+        IntegrationChoice::Named(Integration::BashInitFile) => "bash",
+        IntegrationChoice::Named(Integration::CmdPrompt) => "cmd",
+        IntegrationChoice::Named(Integration::None) => "none",
     }
 }
 
@@ -1786,10 +1908,8 @@ pub fn set_args(index: usize, args: Vec<String>) -> bool {
 /// What this row sets in its sessions' environment, over what the terminal sets
 /// for itself.
 ///
-/// **Stored now, read at spawn in 5c** (plan §5.2), which is the honest
-/// statement and the one the row's own sentence makes: the slot exists, the file
-/// round-trips it, and the layering rule that makes a profile's word the last
-/// one is the next slice's.
+/// **Read at spawn, last** (plan §1.7) — see [`Profile::env`] for the three
+/// layers and for why a row here beats the terminal's own declaration.
 pub fn set_env(index: usize, env: Vec<(String, String)>) -> bool {
     registry().edit(index, |profile| {
         if profile.env == env {
@@ -1862,6 +1982,34 @@ pub fn mark_is_its_own(index: usize) -> &'static str {
     intern(&crate::i18n::profile_mark_is_its_own(title(index)))
 }
 
+/// What one door is called on the `Shell integration` picker.
+#[must_use]
+pub fn integration_name(integration: Integration) -> crate::i18n::Text {
+    match integration {
+        Integration::PowerShellOptIn => crate::i18n::Text::ProfilesIntegrationPowerShell,
+        Integration::BashInitFile => crate::i18n::Text::ProfilesIntegrationBash,
+        Integration::CmdPrompt => crate::i18n::Text::ProfilesIntegrationCmd,
+        Integration::None => crate::i18n::Text::ProfilesIntegrationNone,
+    }
+}
+
+/// `Auto (Bash init file)` — that picker's **button** while the row is on the
+/// rule, interned so the caption can ride a `Copy` snapshot of the page.
+///
+/// `None` when the row has named a door: the button then says the word on the
+/// item that is ticked, which is what every other picker in this dialog does.
+#[must_use]
+pub fn integration_auto_label(index: usize) -> Option<&'static str> {
+    with_table(|table| {
+        let profile = table.get(index)?;
+        if profile.integration != IntegrationChoice::Auto {
+            return None;
+        }
+        let door = integration_name(derive_integration(&profile.program)).text();
+        Some(intern(&crate::i18n::profile_integration_auto(door)))
+    })
+}
+
 /// A path the dialog has to draw, interned — the fixed starting folder, which is
 /// this profile's value and therefore what its picker's button says.
 ///
@@ -1872,17 +2020,6 @@ pub fn mark_is_its_own(index: usize) -> &'static str {
 #[must_use]
 pub fn intern_path(path: &Path) -> &'static str {
     intern(&path.to_string_lossy())
-}
-
-/// The honest capability sentence for one row of the table — [`capability_text`]
-/// by index, which is what a surface holding an index rather than a row can ask.
-#[must_use]
-pub fn capability_of(index: usize) -> crate::i18n::Text {
-    with_table(|table| {
-        table
-            .get(index)
-            .map_or(crate::i18n::Text::CapNone, capability_text)
-    })
 }
 
 /// Whether one row is a profile of the reader's own — which is what decides
@@ -2148,13 +2285,49 @@ pub fn paths(index: usize) -> PathNamespace {
     })
 }
 
-/// Which integration script serves one row.
+/// Which integration script serves one row — **resolved**, which is what every
+/// caller outside the editor's own picker is asking.
 #[must_use]
 pub fn integration(index: usize) -> Integration {
+    with_table(|table| table.get(index).map_or(Integration::None, served_by))
+}
+
+/// One whole row, cloned — **what the spawn path is handed** (§7.1.6c-6c).
+///
+/// `shell_command` used to take an index and ask this module four separate
+/// questions about it; it takes the row itself now, which makes it a pure
+/// function of its arguments and therefore a thing a test can put any profile in
+/// front of. The clone is five short strings and a vector, once per tab.
+#[must_use]
+pub fn row(index: usize) -> Option<Profile> {
+    with_table(|table| table.get(index).cloned())
+}
+
+/// The same question as the editor's picker holds it: the rule, or the answer.
+#[must_use]
+pub fn integration_choice(index: usize) -> IntegrationChoice {
     with_table(|table| {
         table
             .get(index)
-            .map_or(Integration::None, |profile| profile.integration)
+            .map_or(IntegrationChoice::Auto, |profile| profile.integration)
+    })
+}
+
+/// Which door serves this row's sessions — the `Shell integration` picker.
+///
+/// The namespace comes with it, because it has to: `paths` is derived from the
+/// program *and* the door (only `wsl.exe` behind a bash init file crosses into
+/// the distribution's own spelling), and a row whose door changed without its
+/// namespace following would go on translating directories for a shell it is no
+/// longer starting.
+pub fn set_integration(index: usize, choice: IntegrationChoice) -> bool {
+    registry().edit(index, |profile| {
+        if profile.integration == choice {
+            return false;
+        }
+        profile.integration = choice;
+        profile.paths = derived_paths(profile);
+        true
     })
 }
 
@@ -2297,18 +2470,77 @@ fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
 /// whether a WSL login lands in bash, are known only to a live session that has
 /// already spoken. Said this way each sentence is true in every state and never
 /// needs a probe to stay true.
+///
+/// **Hyperlinks are the third dimension** (§7.1.6c-6c, J85 closed). Every
+/// sentence above names them, and four of them would be claiming something this
+/// profile has switched off: `FORCE_HYPERLINK=0` in its own environment, or —
+/// on a PowerShell — a `TERM_PROGRAM` override, because `folio.ps1` declares
+/// links only for a session whose `TERM_PROGRAM` it recognises as this
+/// terminal's. So the answer is asked of the one place that knows it
+/// ([`crate::shell_integration::declares_hyperlinks`]) and each sentence has a
+/// twin that names their absence rather than passing over it.
 #[must_use]
 pub fn capability_text(profile: &Profile) -> crate::i18n::Text {
-    match (profile.integration, profile.paths) {
-        (Integration::PowerShellOptIn, _) => crate::i18n::Text::CapPowerShell,
+    capability_of_parts(
+        served_by(profile),
+        profile.paths,
+        crate::shell_integration::declares_hyperlinks(profile),
+        false,
+    )
+}
+
+/// [`capability_text`] with the parts named, so the editor can ask for the long
+/// form of the one sentence that has one.
+///
+/// `long` is the editor's page and not a second wording of the same fact: the
+/// list's third line shares its row with an action run and holds about
+/// fifty-eight characters, so `No shell integration` is all that fits there,
+/// while the editor's `Shell integration` row has the page's whole width and a
+/// reader standing in front of the picker is owed *what* it costs. The other
+/// four sentences are one length, because they already say what they have and
+/// what they have not.
+#[must_use]
+pub fn capability_of_parts(
+    integration: Integration,
+    paths: PathNamespace,
+    hyperlinks: bool,
+    long: bool,
+) -> crate::i18n::Text {
+    use crate::i18n::Text;
+    match (integration, paths, hyperlinks, long) {
+        (Integration::PowerShellOptIn, _, true, _) => Text::CapPowerShell,
+        (Integration::PowerShellOptIn, _, false, _) => Text::CapPowerShellNoLinks,
         // The launcher is the difference: a Git Bash is handed its init file and
         // reads it, full stop, while `wsl.exe` hands it to whatever shell the
         // distribution logs the user into.
-        (Integration::BashInitFile, PathNamespace::Wsl) => crate::i18n::Text::CapWslBash,
-        (Integration::BashInitFile, PathNamespace::Windows) => crate::i18n::Text::CapFull,
-        (Integration::CmdPrompt, _) => crate::i18n::Text::CapCmd,
-        (Integration::None, _) => crate::i18n::Text::CapNone,
+        (Integration::BashInitFile, PathNamespace::Wsl, true, _) => Text::CapWslBash,
+        (Integration::BashInitFile, PathNamespace::Wsl, false, _) => Text::CapWslBashNoLinks,
+        (Integration::BashInitFile, PathNamespace::Windows, true, _) => Text::CapFull,
+        (Integration::BashInitFile, PathNamespace::Windows, false, _) => Text::CapFullNoLinks,
+        (Integration::CmdPrompt, _, true, _) => Text::CapCmd,
+        (Integration::CmdPrompt, _, false, _) => Text::CapCmdNoLinks,
+        (Integration::None, _, _, false) => Text::CapNone,
+        (Integration::None, _, true, true) => Text::CapNoneLong,
+        (Integration::None, _, false, true) => Text::CapNoneLongNoLinks,
     }
+}
+
+/// The editor's `Shell integration` row: the same sentence the list carries, in
+/// the one length the page has room for.
+#[must_use]
+pub fn capability_in_editor(index: usize) -> crate::i18n::Text {
+    with_table(|table| {
+        table
+            .get(index)
+            .map_or(crate::i18n::Text::CapNone, |profile| {
+                capability_of_parts(
+                    served_by(profile),
+                    profile.paths,
+                    crate::shell_integration::declares_hyperlinks(profile),
+                    true,
+                )
+            })
+    })
 }
 
 /// Every spelling of one profile's name that a shell announcing it would use —
@@ -12889,6 +13121,7 @@ mod tests {
         const PROMPT_MARK: usize = 2; // `133;A`
         const EXIT_CODE: usize = 5; // `133;D` + exit code
         const DIRECTORY: usize = 6; // `OSC 7`
+        const HYPERLINK: usize = 8; // `FORCE_HYPERLINK`
 
         for (id, label) in [
             ("pwsh", "**PowerShell** (7, script installed)"),
@@ -12927,7 +13160,162 @@ mod tests {
                 says_yes(DIRECTORY),
                 "{id}: the sentence and the matrix disagree about the directory"
             );
+            // The hyperlink column is spelled three ways in the matrix, because
+            // three different mechanisms answer it: `yes` where this module
+            // declares it, `script` where `folio.ps1` does, and `yes, via
+            // WSLENV` where the declaration has a boundary to cross. All three
+            // are a session that gets links.
+            let declares = cells[HYPERLINK].starts_with("yes") || cells[HYPERLINK] == "script";
+            assert_eq!(
+                claims("hyperlinks"),
+                declares,
+                "{id}: the sentence and the matrix disagree about hyperlinks"
+            );
         }
+        // **And the row this slice added** (§7.1.6c-6c): a profile of the
+        // reader's own, served by no door, which is the case `Integration::None`
+        // exists for.
+        let cells = row_for("**a profile of the reader's own**, no door");
+        for column in [PROMPT_MARK, EXIT_CODE, DIRECTORY] {
+            assert_eq!(cells[column].trim_matches('*'), "no");
+        }
+        assert_eq!(cells[HYPERLINK], "yes");
+        let theirs = Profile {
+            integration: IntegrationChoice::Named(Integration::None),
+            ..shipped().swap_remove(0)
+        };
+        let sentence = capability_text(&theirs)
+            .in_lang(crate::i18n::Lang::English)
+            .to_lowercase();
+        assert!(!sentence.contains("prompt marks"), "{sentence}");
+        assert!(
+            capability_of_parts(Integration::None, PathNamespace::Windows, true, true)
+                .in_lang(crate::i18n::Lang::English)
+                .to_lowercase()
+                .contains("hyperlinks are declared anyway"),
+            "the editor's own length says the one thing that is not lost"
+        );
+    }
+
+    /// PIN — **a profile that switched its links off stops claiming them**
+    /// (§7.1.6c-6c, J85 closed).
+    ///
+    /// The sentence is derived from three things and not one: the door, the
+    /// namespace, and the two environment rows that can silence a link. Red
+    /// gate: leave the sentence on the door alone and a profile carrying
+    /// `FORCE_HYPERLINK=0` reads `Prompt marks, directory, exit codes and
+    /// hyperlinks` while every program in it prints plain text.
+    #[test]
+    fn a_sentence_never_claims_a_link_the_environment_took_away() {
+        let claims_links = |profile: &Profile| {
+            let sentence = capability_text(profile)
+                .in_lang(crate::i18n::Lang::English)
+                .to_lowercase();
+            sentence.contains("hyperlinks") && !sentence.contains("no hyperlinks")
+        };
+        for id in ["pwsh", "winps", "wsl", "gitbash", "cmd"] {
+            let shipped_row = shipped()
+                .into_iter()
+                .find(|profile| profile.id == id)
+                .expect("a shipped id");
+            assert!(claims_links(&shipped_row), "{id}");
+            let off = Profile {
+                env: vec![("FORCE_HYPERLINK".to_owned(), "0".to_owned())],
+                ..shipped_row.clone()
+            };
+            assert!(!claims_links(&off), "{id}");
+            let sentence = capability_text(&off).in_lang(crate::i18n::Lang::English);
+            assert!(
+                sentence.to_lowercase().contains("no hyperlinks"),
+                "{id}: a row that lost them says so rather than passing over \
+                 it: {sentence}"
+            );
+            // And the markers it still has are the ones it always had, which is
+            // what makes this a third dimension and not a fifth sentence.
+            let markers = |text: &str| {
+                ["prompt marks", "exit codes", "directory"]
+                    .into_iter()
+                    .filter(|marker| {
+                        text.contains(marker) && !text.contains(&format!("no {marker}"))
+                    })
+                    .count()
+            };
+            assert_eq!(
+                markers(
+                    &capability_text(&shipped_row)
+                        .in_lang(crate::i18n::Lang::English)
+                        .to_lowercase()
+                ),
+                markers(&sentence.to_lowercase()),
+                "{id}"
+            );
+        }
+    }
+
+    /// PIN — **the namespace every shipped profile states is the one it
+    /// derives** (§7.1.6c-6c).
+    ///
+    /// It used to be derived for a profile of the reader's own and stated for
+    /// the five, which is two rules for one fact — and left a built-in repointed
+    /// at another program still translating directories in the namespace of the
+    /// one it no longer runs. Deriving it everywhere is only safe because the
+    /// derivation agrees with all five, which is what this proves.
+    #[test]
+    fn the_namespace_every_shipped_profile_states_is_the_one_it_derives() {
+        for profile in shipped() {
+            assert_eq!(
+                derived_paths(&profile),
+                profile.paths,
+                "{}: the stated namespace and the derived one disagree",
+                profile.id
+            );
+        }
+    }
+
+    /// PIN — **the door survives the round trip, rule and answer alike.**
+    ///
+    /// `auto` is a fifth word on the wire and not an absent key, because absence
+    /// already means two other things here: on a built-in it is "whatever this
+    /// build ships", and on a row of the reader's own it is their own defaults.
+    /// Red gate: leave `Auto` unwritten and a row switched back to it reads as
+    /// the door it happened to be on when it was written.
+    #[test]
+    fn the_door_a_reader_chose_survives_the_file_and_so_does_auto() {
+        let registry = Registry::shipped();
+        let cmd = registry
+            .table()
+            .profiles()
+            .iter()
+            .position(|profile| profile.id == "cmd")
+            .expect("cmd is a row");
+        registry.edit(cmd, |profile| {
+            profile.integration = IntegrationChoice::Named(Integration::None);
+            profile.paths = derived_paths(profile);
+            true
+        });
+        let there_and_back = |registry: &Registry| {
+            let (read, faults) = merge(shipped(), &registry.to_file());
+            assert!(faults.is_empty(), "{faults:?}");
+            read
+        };
+        assert_eq!(
+            there_and_back(&registry)[cmd].integration,
+            IntegrationChoice::Named(Integration::None)
+        );
+        registry.edit(cmd, |profile| {
+            profile.integration = IntegrationChoice::Auto;
+            profile.paths = derived_paths(profile);
+            true
+        });
+        assert_eq!(
+            there_and_back(&registry)[cmd].integration,
+            IntegrationChoice::Auto,
+            "a row switched back to the rule must not read as the answer it left"
+        );
+        assert_eq!(
+            served_by(&there_and_back(&registry)[cmd]),
+            Integration::CmdPrompt
+        );
     }
 
     /// PIN — **a shell this machine does not have says why, and says nothing

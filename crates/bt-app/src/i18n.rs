@@ -769,13 +769,11 @@ pub enum Text {
     ProfilesRowArgs,
     ProfilesRowArgsDesc,
     ProfilesRowEnv,
-    /// **The present tense, and it is a fact** (J85): the slot is written to
-    /// `profiles.json` and read back, and nothing puts it into a session yet —
-    /// that is slice 5c, along with the layering rule that makes a profile's own
-    /// word the last one. The sentence the plan wrote for this row (`Set for
-    /// this profile's sessions, over what Folio sets`) is true the day the spawn
-    /// path reads it and ships then; a page that said it today would be the
-    /// pretending this page exists to stop.
+    /// **The plan's own sentence, earned** (§7.1.6c-6c). It said `Stored for
+    /// this profile. Nothing reads it into a session yet` for exactly as long as
+    /// that was true, which was one slice; the spawn path reads it now, and the
+    /// three words that matter are `over what Folio sets` — the layering rule
+    /// (`profiles::Profile::env`) said in the place a reader is standing.
     ProfilesRowEnvDesc,
     ProfilesRowHyperlink,
     ProfilesRowHyperlinkDesc,
@@ -807,6 +805,44 @@ pub enum Text {
     /// once as `Ctrl+Shift+T`, which is what a deletion with no confirmation is
     /// owed.
     ProfilesUndo,
+
+    // ── the environment, the hyperlink answer and the door (§7.1.6c-6c) ────
+    //
+    // Appended at the end of the table for the reason the `Tables` pair one
+    // family up gives: three lanes were adding rows at once and a new entry in
+    // the middle of the settings family is a conflict in every one of them. The
+    // order of this enum carries no meaning — `visible_rows` and each row's own
+    // `option_label` decide what is shown and where.
+    /// The four doors, as the `Shell integration` picker names them. `Auto` is
+    /// [`Self::ProfilesAuto`] with the derived door in parentheses, composed by
+    /// [`profile_integration_auto`], which is the mock-up's own `Auto (None)`.
+    ///
+    /// Named after the **mechanism** rather than after the shell, because that
+    /// is what the row chooses: a `zsh` under WSL and a Git Bash are both served
+    /// by the init file, and a picker that said `Git Bash` on a row starting
+    /// `zsh` would be naming the wrong thing.
+    ProfilesIntegrationPowerShell,
+    ProfilesIntegrationBash,
+    ProfilesIntegrationCmd,
+    ProfilesIntegrationNone,
+    /// The four capability sentences with their links struck out — a profile
+    /// whose own `FORCE_HYPERLINK` row says `0`, or whose `TERM_PROGRAM`
+    /// override stops `folio.ps1` recognising the session it is in.
+    ///
+    /// Twins rather than a clause bolted on, because each sentence already lists
+    /// what it has and what it has not, and a sentence that named hyperlinks in
+    /// both halves would be reading as a correction of itself.
+    CapFullNoLinks,
+    CapPowerShellNoLinks,
+    CapWslBashNoLinks,
+    CapCmdNoLinks,
+    /// `No shell integration` said at the length the editor's own row has room
+    /// for. The list's third line shares its row with an action run and holds
+    /// about fifty-eight characters; the editor's `Shell integration` row has the
+    /// page's whole width, and a reader standing in front of that picker is owed
+    /// what the answer costs rather than the category it falls in.
+    CapNoneLong,
+    CapNoneLongNoLinks,
 }
 
 impl Text {
@@ -1360,8 +1396,8 @@ impl Text {
             Self::ProfilesRowEnv => pick(lang, "Environment", "环境变量"),
             Self::ProfilesRowEnvDesc => pick(
                 lang,
-                "Stored for this profile. Nothing reads it into a session yet",
-                "为该档案保存。目前还没有会话读取它",
+                "Set for this profile's sessions, over what Folio sets",
+                "为该档案的会话设置,覆盖 Folio 设置的值",
             ),
             Self::ProfilesRowHyperlink => pick(lang, "Force hyperlinks", "强制超链接"),
             Self::ProfilesRowHyperlinkDesc => pick(
@@ -1396,6 +1432,47 @@ impl Text {
                 "已经有别的档案叫这个名字",
             ),
             Self::ProfilesUndo => pick(lang, "Undo", "撤销"),
+
+            // ── §7.1.6c-6c ─────────────────────────────────────────────────
+            Self::ProfilesIntegrationPowerShell => {
+                pick(lang, "PowerShell script", "PowerShell 脚本")
+            }
+            Self::ProfilesIntegrationBash => pick(lang, "Bash init file", "Bash 初始文件"),
+            Self::ProfilesIntegrationCmd => pick(lang, "Command Prompt", "命令提示符"),
+            Self::ProfilesIntegrationNone => pick(lang, "None", "无"),
+            Self::CapFullNoLinks => pick(
+                lang,
+                "Prompt marks, directory and exit codes; no hyperlinks",
+                "提示符标记、目录与退出码;没有超链接",
+            ),
+            Self::CapPowerShellNoLinks => pick(
+                lang,
+                "Prompt marks, directory and exit codes with folio.ps1 dot-sourced; no hyperlinks",
+                "已点源 folio.ps1 时有提示符标记、目录与退出码;没有超链接",
+            ),
+            Self::CapWslBashNoLinks => pick(
+                lang,
+                "Prompt marks, directory and exit codes on a bash login only; no hyperlinks",
+                "仅 bash 登录时有提示符标记、目录与退出码;没有超链接",
+            ),
+            Self::CapCmdNoLinks => pick(
+                lang,
+                "Directory; no prompt marks, no exit codes, no hyperlinks",
+                "目录;没有提示符标记,没有退出码,没有超链接",
+            ),
+            // The mock-up's own wording for this row (`.pf-view[data-view=edit]`,
+            // the `Shell integration` line), which says what is lost and then
+            // says the one thing that is not.
+            Self::CapNoneLong => pick(
+                lang,
+                "No prompt marks, no directory, no exit codes. Hyperlinks are declared anyway",
+                "没有提示符标记、没有目录、没有退出码。超链接仍然会被声明",
+            ),
+            Self::CapNoneLongNoLinks => pick(
+                lang,
+                "No prompt marks, no directory, no exit codes, no hyperlinks",
+                "没有提示符标记、没有目录、没有退出码、没有超链接",
+            ),
         }
     }
 
@@ -1411,7 +1488,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 225] = [
+    pub const ALL: [Self; 235] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1637,6 +1714,16 @@ impl Text {
         Self::ProfilesNameBlank,
         Self::ProfilesNameTaken,
         Self::ProfilesUndo,
+        Self::ProfilesIntegrationPowerShell,
+        Self::ProfilesIntegrationBash,
+        Self::ProfilesIntegrationCmd,
+        Self::ProfilesIntegrationNone,
+        Self::CapFullNoLinks,
+        Self::CapPowerShellNoLinks,
+        Self::CapWslBashNoLinks,
+        Self::CapCmdNoLinks,
+        Self::CapNoneLong,
+        Self::CapNoneLongNoLinks,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -1909,6 +1996,23 @@ pub fn profile_not_installed(profile_title: &str) -> String {
 /// own`), so the name is a value rather than a word in the string: the five
 /// identity colours are not this product's to repaint (S98/S31), and the row
 /// says which of the five it is standing on.
+/// `Auto (Bash init file)` — the `Shell integration` picker's button while the
+/// row is on the rule rather than on an answer.
+///
+/// **The derived door is in the caption and not only in the list**, which is the
+/// mock-up's own drawing (`Auto (None)`) and this dialog's own rule twice over:
+/// a control has to be able to say its own value, and `Auto` alone says which
+/// *rule* is in force while saying nothing about what the rule decided. The
+/// menu's first item stays the bare word, because an item is a thing to choose
+/// and what it will derive is a fact about the row rather than about the choice.
+#[must_use]
+pub fn profile_integration_auto(door: &str) -> String {
+    match current() {
+        Lang::English => format!("{} ({door})", Text::ProfilesAuto.text()),
+        Lang::Chinese => format!("{}({door})", Text::ProfilesAuto.text()),
+    }
+}
+
 #[must_use]
 pub fn profile_mark_is_its_own(profile_title: &str) -> String {
     match current() {
