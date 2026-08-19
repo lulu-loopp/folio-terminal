@@ -14472,8 +14472,15 @@ mod tests {
             "the band is the group label's line box between the row's own              paddings, which is what changed when the type did"
         );
         assert!(
-            MOCKUP.contains(".adv-head { padding-left: 0; }"),
-            "`design/ui-mockup.html` puts the word on the heading column too"
+            MOCKUP.contains(
+                ".adv-head { padding-left: 12px; padding-right: 10px; \
+                 margin-left: -10px; margin-right: -8px; }"
+            ),
+            "`design/ui-mockup.html` puts the word on the heading column too — \
+             the band wears the picker's own paddings outwards and the \
+             asymmetric margins cancel `.row`'s 2px, so the word never moves \
+             while the focus ring stops landing on the `A` (user report \
+             2026-08-19)"
         );
         assert!(
             !MOCKUP.contains("data-adv"),
