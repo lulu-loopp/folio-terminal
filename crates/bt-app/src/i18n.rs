@@ -1260,6 +1260,32 @@ pub enum Text {
     /// for a chord that opens a window would be the page lying about what the
     /// key does.
     ShortcutNewWindow,
+
+    // ── standing somewhere else (user ruling, 2026-08-19) ──────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. The
+    // three gate entries belong to `crate::restore` and the two graph entries
+    // to `crate::git_graph`; they are together here because they are one
+    // ruling, and a reader who changes the word for one of them has to see the
+    // rest.
+    /// The gate over a checkout that leaves `HEAD` on no branch. It names the
+    /// **state you come out in**, which is the thing the row you pressed does
+    /// not show — nothing is lost, and the title does not pretend otherwise.
+    GateTitleGitDetach,
+    /// And over any checkout at all while the working tree has changes, which
+    /// is the more serious half whenever both are true.
+    GateTitleGitDirtyCheckout,
+    /// The word on the button that goes through with either — the row's own
+    /// verb, on [`Self::GateDelete`]'s rule.
+    GateCheckout,
+    /// What the door out of a detached `HEAD` says when the pointer rests on
+    /// it.
+    GraphToolLeaveDetachedTip,
+    /// And what the door itself says, before the branch's own name. **A
+    /// destination and not a verb**: `Checkout` is the word the row menu uses
+    /// for going anywhere, and this button is for the one place a reader in
+    /// this state is trying to get to.
+    GraphLeaveDetached,
 }
 
 impl Text {
@@ -2262,6 +2288,19 @@ impl Text {
             // `CloseWindow`, and one product does not have two words for the
             // thing every one of its chords is scoped to.
             Self::ShortcutNewWindow => pick(lang, "New window", "新建窗口"),
+
+            // ── standing somewhere else ────────────────────────────────────
+            Self::GateTitleGitDetach => pick(lang, "Stand on this commit?", "站到这个提交上？"),
+            Self::GateTitleGitDirtyCheckout => pick(lang, "Move the working tree?", "移动工作区？"),
+            Self::GateCheckout => pick(lang, "Checkout", "检出"),
+            Self::GraphToolLeaveDetachedTip => pick(
+                lang,
+                "HEAD is on no branch — stand on one again",
+                "HEAD 不在任何分支上 —— 重新站到一条分支上",
+            ),
+            // The trailing space is part of it: the branch's own name is
+            // appended, and 「回到」takes no space before a name.
+            Self::GraphLeaveDetached => pick(lang, "Back to ", "回到 "),
         }
     }
 
@@ -2277,7 +2316,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 406] = [
+    pub const ALL: [Self; 411] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2684,6 +2723,11 @@ impl Text {
         Self::RowScrollback,
         Self::DescScrollback,
         Self::ShortcutNewWindow,
+        Self::GateTitleGitDetach,
+        Self::GateTitleGitDirtyCheckout,
+        Self::GateCheckout,
+        Self::GraphToolLeaveDetachedTip,
+        Self::GraphLeaveDetached,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -3891,6 +3935,88 @@ fn gate_clear_scrollback_message_in(lang: Lang, amount: &str) -> String {
     }
 }
 
+/// **It says what state you come out in**, because that is the whole of what
+/// makes this one worth asking. Nothing is lost and the sentence does not
+/// pretend otherwise; what it names is the thing a reader cannot see from the
+/// row they pressed — that the repository stops being on a branch.
+#[must_use]
+pub fn gate_detach_message(names: &str) -> String {
+    gate_detach_message_in(current(), names)
+}
+
+fn gate_detach_message_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => format!(
+            "The working tree moves to {names}. HEAD stops being on a branch \
+             until you check one out again."
+        ),
+        Lang::Chinese => {
+            format!("工作区会移到 {names}。在你重新检出一条分支之前，HEAD 不再站在任何分支上。")
+        }
+    }
+}
+
+/// And with work in the tree, the other half first: what could be carried into
+/// somewhere else is what a reader would want to know before anything about
+/// where they are standing.
+#[must_use]
+pub fn gate_dirty_checkout_message(names: &str, detach: bool) -> String {
+    gate_dirty_checkout_message_in(current(), names, detach)
+}
+
+fn gate_dirty_checkout_message_in(lang: Lang, names: &str, detach: bool) -> String {
+    match lang {
+        Lang::English => format!(
+            "Uncommitted changes are carried across to {names}{}. git refuses \
+             the ones it would have to overwrite.",
+            if detach {
+                ", and HEAD stops being on a branch"
+            } else {
+                ""
+            }
+        ),
+        Lang::Chinese => format!(
+            "未提交的改动会被带到 {names}{}。git 会拒绝那些必须覆盖才能完成的移动。",
+            if detach {
+                "，并且 HEAD 不再站在任何分支上"
+            } else {
+                ""
+            }
+        ),
+    }
+}
+
+/// What the card says after a checkout onto a branch.
+///
+/// **The name and nothing else.** A notice about a move whose whole content is
+/// where you moved to has no second clause worth reading, and the card's verb
+/// says what the alternative is.
+#[must_use]
+pub fn checkout_notice(branch: &str) -> String {
+    checkout_notice_in(current(), branch)
+}
+
+fn checkout_notice_in(lang: Lang, branch: &str) -> String {
+    match lang {
+        Lang::English => format!("Now on {branch}"),
+        Lang::Chinese => format!("现在在 {branch}"),
+    }
+}
+
+/// And after one onto a commit or a tag, where the state matters more than the
+/// place.
+#[must_use]
+pub fn checkout_detached_notice(short: &str) -> String {
+    checkout_detached_notice_in(current(), short)
+}
+
+fn checkout_detached_notice_in(lang: Lang, short: &str) -> String {
+    match lang {
+        Lang::English => format!("Standing on {short} \u{2014} HEAD is on no branch"),
+        Lang::Chinese => format!("站在 {short} 上 \u{2014} HEAD 不在任何分支上"),
+    }
+}
+
 /// The line over a named prompt's field — **what is being named, and where.**
 #[must_use]
 pub fn git_prompt_new_branch(subject: &str) -> String {
@@ -4593,6 +4719,23 @@ mod tests {
                 (
                     "gate_clear_scrollback_message",
                     gate_clear_scrollback_message_in(lang, "2,048 lines"),
+                ),
+                (
+                    "gate_detach_message",
+                    gate_detach_message_in(lang, "36d3949"),
+                ),
+                (
+                    "gate_dirty_checkout_message",
+                    gate_dirty_checkout_message_in(lang, "main", false),
+                ),
+                (
+                    "gate_dirty_checkout_message_detach",
+                    gate_dirty_checkout_message_in(lang, "v1", true),
+                ),
+                ("checkout_notice", checkout_notice_in(lang, "main")),
+                (
+                    "checkout_detached_notice",
+                    checkout_detached_notice_in(lang, "36d3949"),
                 ),
                 (
                     "git_prompt_new_branch",

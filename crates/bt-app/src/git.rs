@@ -3009,6 +3009,15 @@ impl GitCache {
     /// answering "nothing to ask" and cannot flood; the count is what
     /// [`Self::rereading`] reports, and it is the whole of what makes the head go
     /// quiet.
+    ///
+    /// **The history is re-asked to the depth it is currently showing**, which is
+    /// [`Self::reread_depth`]. A first page answers a `skip: 0` question by
+    /// *replacing* the list — that is what makes a rewritten history land
+    /// honestly — so a re-read that asked for one page would throw away every
+    /// page the reader had paged in, drop the list from five hundred rows to
+    /// fifty under their scroll, and then crawl back up it fifty at a time. Under
+    /// a repository something else is writing to, that is not a refresh: it is
+    /// the page collapsing and rebuilding itself every couple of seconds.
     pub fn begin_reread(&mut self) -> Vec<GitQuestion> {
         let Some(root) = self.repo.ready().cloned() else {
             return Vec::new();
@@ -3020,13 +3029,29 @@ impl GitCache {
                 root,
                 refs: self.log_refs.clone(),
                 skip: 0,
-                count: GIT_LOG_PAGE,
+                count: self.reread_depth(),
             },
         ];
         // Set rather than added to: a second press while the first is still out
         // is the same press, and it is owed the same three answers.
         self.rereading = u8::try_from(questions.len()).unwrap_or(u8::MAX);
         questions
+    }
+
+    /// **How much history a re-read asks for**: everything that is loaded, and
+    /// never less than one page.
+    ///
+    /// One page is what a *first* reading asks for, because nobody has scrolled
+    /// yet. Every reading after that is a reading of a document the reader has
+    /// already made as long as they wanted it, and the length of what is on
+    /// screen is not something a refresh is entitled to change — a page that came
+    /// back shorter than it went out is a page that lost rows the reader was
+    /// looking at.
+    #[must_use]
+    fn reread_depth(&self) -> usize {
+        self.log
+            .ready()
+            .map_or(GIT_LOG_PAGE, |log| log.commits.len().max(GIT_LOG_PAGE))
     }
 
     /// **The same three questions, unless the last set is still owed** — what an
@@ -4769,6 +4794,89 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             !cache.retarget(Path::new(r"D:\two")),
             "the same root forgets nothing"
         );
+    }
+
+    /// PIN (user report, 2026-08-19) — **a re-read asks for as much history as
+    /// is on screen**, not for the first page.
+    ///
+    /// A `skip: 0` answer *replaces* the list, which is what makes a rewritten
+    /// history land honestly. A re-read that asked for one page therefore threw
+    /// away every page the reader had paged in: five hundred rows became fifty
+    /// under their scroll, the scroll was clamped to the shorter list, and the
+    /// auto-pager then crawled back up fifty at a time. Under a repository
+    /// something else is writing to — a build, another window, another
+    /// checkout — the kernel says so every couple of seconds, and what the
+    /// reader sees is the page collapsing and rebuilding itself on a loop.
+    ///
+    /// MUTATION: put `GIT_LOG_PAGE` back and the second half of this fails; the
+    /// first half still passes, because a page that has not been paged is one
+    /// page deep already.
+    #[test]
+    fn a_re_read_asks_for_every_page_the_reader_has_loaded() {
+        let root = PathBuf::from(r"D:\repo");
+        let mut cache = GitCache::at_root(root.clone(), GitRole::Graph);
+        let depth_of = |cache: &mut GitCache| match cache
+            .begin_reread()
+            .into_iter()
+            .find(|question| matches!(question, GitQuestion::Log { .. }))
+        {
+            Some(GitQuestion::Log { count, skip, .. }) => {
+                assert_eq!(skip, 0, "a re-read re-reads from the top");
+                count
+            }
+            _ => panic!("a re-read asks about the history"),
+        };
+
+        // Nothing read yet: one page, which is what a first reading asks for.
+        assert_eq!(depth_of(&mut cache), GIT_LOG_PAGE);
+
+        let page = |from: usize, count: usize| GitLog {
+            skip: from,
+            commits: (0..count)
+                .map(|at| {
+                    let hash = format!("{:040x}", from + at);
+                    GitCommit {
+                        short: hash[..7].to_owned(),
+                        hash,
+                        subject: String::new(),
+                        author_name: String::new(),
+                        author_email: String::new(),
+                        committer_name: String::new(),
+                        committer_email: String::new(),
+                        body: String::new(),
+                        committer_unix: 0,
+                        committer_offset: 0,
+                        time_relative: String::new(),
+                        parents: Vec::new(),
+                        refs: Vec::new(),
+                    }
+                })
+                .collect(),
+            has_more: true,
+        };
+
+        assert!(cache.accept(GitAnswer::Log {
+            root: root.clone(),
+            skip: 0,
+            outcome: Ok(page(0, GIT_LOG_PAGE)),
+        }));
+        assert_eq!(depth_of(&mut cache), GIT_LOG_PAGE);
+
+        // The reader pages twice more. The re-read now has to come back with all
+        // of it, in one answer, or the page it lands on is shorter than the page
+        // it replaced.
+        for from in [GIT_LOG_PAGE, GIT_LOG_PAGE * 2] {
+            assert!(cache.accept(GitAnswer::Log {
+                root: root.clone(),
+                skip: from,
+                outcome: Ok(page(from, GIT_LOG_PAGE)),
+            }));
+        }
+        assert_eq!(
+            cache.log().ready().map(|log| log.commits.len()),
+            Some(GIT_LOG_PAGE * 3)
+        );
+        assert_eq!(depth_of(&mut cache), GIT_LOG_PAGE * 3);
     }
 
     /// PIN (R10) — a checkout git refused changes nothing but the banner.

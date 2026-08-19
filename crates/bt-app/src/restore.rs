@@ -1253,6 +1253,40 @@ pub fn gate_git_delete_branch_title() -> &'static str {
 pub fn gate_git_delete_tag_title() -> &'static str {
     crate::i18n::Text::GateTitleGitDeleteTag.text()
 }
+/// The question over a checkout that **detaches `HEAD`** (user report,
+/// 2026-08-19).
+///
+/// A commit and a tag are places with no branch behind them, so standing on one
+/// leaves the repository on no branch at all — a state every other tool the
+/// reader owns will then describe to them in a sentence they did not ask for,
+/// and one that a graph they were merely reading has no business putting them
+/// in. A checkout onto a *named branch* asks nothing: it is the ordinary verb
+/// this page is built around, it is announced by the masthead changing to the
+/// name, and undoing it is the same verb again.
+#[must_use]
+pub fn gate_git_detach_title() -> &'static str {
+    crate::i18n::Text::GateTitleGitDetach.text()
+}
+/// The question over any checkout at all while the working tree has changes
+/// (user ruling, 2026-08-19 — VSCode's own first tier).
+///
+/// git refuses the checkouts it would have to overwrite work to perform, and
+/// prints why. What it does *not* refuse is carrying uncommitted work across
+/// into somewhere else, which is a thing a reader cannot undo by pressing the
+/// same button again — so it is asked about, whether the destination is a branch
+/// or a commit.
+#[must_use]
+pub fn gate_git_dirty_checkout_title() -> &'static str {
+    crate::i18n::Text::GateTitleGitDirtyCheckout.text()
+}
+/// The word on the button that goes through with a checkout.
+///
+/// The row's own verb, on [`gate_delete_text()`]'s rule: the menu row says
+/// `Checkout` and so does the button that carries it out.
+#[must_use]
+pub fn gate_checkout_text() -> &'static str {
+    crate::i18n::Text::GateCheckout.text()
+}
 /// The question over `Clear scrollback…` — the mock-up's own first line
 /// (8250), word for word.
 #[must_use]
@@ -1286,6 +1320,54 @@ pub fn gate_message(names: &[String]) -> String {
 pub struct DirtyGate {
     open: Option<GateRequest>,
     hover: Option<GateTarget>,
+}
+
+/// **How a move onto somewhere else is spelled to git** (user ruling,
+/// 2026-08-19).
+///
+/// Three spellings and not two, because the remote row's verb is a checkout
+/// nobody had counted as one: `Checkout tracking` creates the local branch and
+/// stands on it in a single `git checkout -b … --track …`, so it moves `HEAD`
+/// exactly as the plain verb does and owes the reader exactly the same question
+/// over exactly the same work. It reached the repository through the
+/// ref-writing door instead, which asks nothing and says nothing afterwards —
+/// so over a dirty tree it was the one `HEAD`-moving verb in the product that
+/// went through unasked, and it was the *same menu row* that is asked when the
+/// local branch happens to exist already.
+///
+/// Carried on the request rather than worked out again when it is answered,
+/// because by then the menu that raised it is gone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitCheckoutKind {
+    /// `git checkout <branch>` — onto a name this repository already has.
+    Stand,
+    /// `git checkout --detach <commit-or-tag>` — onto a place with no branch
+    /// behind it, which is the half that is always asked about.
+    Detach,
+    /// `git checkout -b <local> --track <remote>` — the remote row's verb, which
+    /// creates the branch it then stands on. It lands on a *name*, so it never
+    /// detaches.
+    Track,
+}
+
+/// **Whether a move has to be asked about first** — the three tiers, in one
+/// place, so that every door into the repository answers the same rule.
+///
+/// 1. A gate, always, when the working tree has changes: git refuses the subset
+///    it would have to overwrite, in its own words, but the ones it *allows*
+///    carry uncommitted work across into somewhere else, and pressing the same
+///    button again does not undo that.
+/// 2. A gate, always, when the move detaches `HEAD`: nothing is lost, and what
+///    the sentence names is the state you come out in — the thing the row you
+///    pressed does not show.
+/// 3. No gate at all for a clean tree landing on a *name*, whether that name
+///    already exists ([`GitCheckoutKind::Stand`]) or is being created in order
+///    to be stood on ([`GitCheckoutKind::Track`]). It is the ordinary verb this
+///    page is built around, the masthead says where you landed, and the card
+///    that follows carries one press back.
+#[must_use]
+pub const fn checkout_needs_gate(kind: GitCheckoutKind, dirty: bool) -> bool {
+    dirty || matches!(kind, GitCheckoutKind::Detach)
 }
 
 /// What the window was in the middle of doing when the gate stopped it.
@@ -1347,6 +1429,43 @@ pub enum GateRequest {
         root: std::path::PathBuf,
         name: String,
     },
+    /// **Standing on a commit or a tag** — a checkout that detaches `HEAD`
+    /// (user report, 2026-08-19).
+    ///
+    /// R10 ruled a checkout ungated, and the reasoning holds for the thing it was
+    /// written about: a checkout destroys nothing, git refuses the one case where
+    /// it would, and the refusal arrives in git's own words. What the ruling did
+    /// not separate is the *other* consequence, which is not destruction and is
+    /// not refused: a commit and a tag have no branch behind them, so the
+    /// repository comes out of it standing nowhere, and every commit made from
+    /// there is reachable by nothing.
+    ///
+    /// That is not a thing to discover afterwards from two quiet words on a
+    /// masthead — which is exactly how a reader browsing the graph discovered it.
+    /// So the detaching half of the verb is asked about by name, and the naming
+    /// half is not: `Checkout` on a branch row still goes straight through.
+    ///
+    /// Keyed by **root**, on [`Self::GitDeleteBranch`]'s reason: the surface that
+    /// raised the menu may be gone by the time the gate is answered, and either
+    /// surface over the repository can carry the question.
+    GitCheckout {
+        root: std::path::PathBuf,
+        /// What git is given: a branch's name, a full hash, a tag's name, or —
+        /// for [`GitCheckoutKind::Track`] — the remote-tracking name.
+        target: String,
+        /// What the gate says out loud, which for a commit is its short hash and
+        /// its subject rather than forty characters nobody reads.
+        said: String,
+        /// How the move is spelled to git, which decides both whether the
+        /// question is asked at all and what the confirmed answer runs.
+        kind: GitCheckoutKind,
+        /// Whether the working tree has changes the move would carry across.
+        ///
+        /// It selects the sentence rather than the decision — a dirty tree is
+        /// why a *branch* checkout is asked about at all, and it is the more
+        /// serious half of the question when the move also detaches.
+        dirty: bool,
+    },
     /// **Deleting one pane's transcript** — `Clear scrollback…` (ticket #62).
     ///
     /// Here for the reason [`Self::GitDiscard`] is here: everything a
@@ -1378,6 +1497,8 @@ impl GateRequest {
             } => gate_git_delete_title(),
             Self::GitDeleteBranch { .. } => gate_git_delete_branch_title(),
             Self::GitDeleteTag { .. } => gate_git_delete_tag_title(),
+            Self::GitCheckout { dirty: true, .. } => gate_git_dirty_checkout_title(),
+            Self::GitCheckout { .. } => gate_git_detach_title(),
             Self::ClearScrollback(_) => gate_clear_scrollback_title(),
         }
     }
@@ -1394,6 +1515,7 @@ impl GateRequest {
                 gate_discard_text()
             }
             Self::GitDeleteBranch { .. } | Self::GitDeleteTag { .. } => gate_delete_text(),
+            Self::GitCheckout { .. } => gate_checkout_text(),
             Self::ClearScrollback(_) => gate_clear_text(),
         }
     }
@@ -1423,6 +1545,23 @@ impl GateRequest {
                 crate::i18n::gate_delete_branch_message(&names.join(", "))
             }
             Self::GitDeleteTag { .. } => crate::i18n::gate_delete_tag_message(&names.join(", ")),
+            // **It says what state you come out in**, because that is the whole
+            // of what makes this one worth asking. Nothing is lost and the
+            // sentence does not pretend otherwise; what it names is the thing a
+            // reader cannot see from the row they pressed — that the repository
+            // stops being on a branch, and that getting back is a branch away.
+            Self::GitCheckout {
+                kind: GitCheckoutKind::Detach,
+                dirty: false,
+                ..
+            } => crate::i18n::gate_detach_message(&names.join(", ")),
+            // And with work in the tree, the other half first: what could be
+            // carried into somewhere else is what a reader would want to know
+            // before anything about where they are standing.
+            Self::GitCheckout { kind, .. } => crate::i18n::gate_dirty_checkout_message(
+                &names.join(", "),
+                matches!(kind, GitCheckoutKind::Detach),
+            ),
             // **By count, because there is no name** (§7.1.3's "by name, always"
             // read for a subject that has none): every other request on this list
             // names a file or a ref, and what this one deletes is a pane's own
@@ -3123,6 +3262,159 @@ in the folders you left them, as new shells."
             brightened([0xf5, 0x00, 0x80], 1.07),
             [0xff, 0x00, 0x89],
             "and it clamps at white rather than wrapping"
+        );
+    }
+
+    /// PIN (user ruling, 2026-08-19) — **the three tiers of a checkout, in the
+    /// gate's own words**.
+    ///
+    /// A reader browsing the commit graph found their repository standing on a
+    /// commit in the middle of its own history and could not say what they had
+    /// pressed. The verb that did it has been withdrawn from the gesture that
+    /// carried it; what is left is a menu row somebody reads before they press,
+    /// and this is what stands between that row and the working tree:
+    ///
+    /// ① a clean tree moving onto a **branch** is asked nothing — it is the
+    ///    ordinary verb, the masthead says where you landed, and undoing it is
+    ///    the same verb again;
+    /// ② a move that **detaches** is asked about, and the sentence names the
+    ///    state you come out in rather than promising a loss that will not
+    ///    happen;
+    /// ③ a move over **uncommitted work** is asked about whatever its
+    ///    destination, and that sentence leads with the work.
+    ///
+    /// Tier ① is asserted at its own layer — `Runtime::ask_to_checkout` is what
+    /// declines to build a request at all — so what is pinned here is that the
+    /// two requests that *are* built say different things, name their subject,
+    /// and carry the row's own verb on the button.
+    ///
+    /// MUTATION: give both the same title and ② stops being distinguishable from
+    /// ③ at a glance, which is the whole of what a title is for; answer
+    /// `gate_delete_text()` and the button offers to delete the commit.
+    #[test]
+    fn a_checkout_that_detaches_or_crosses_work_says_which_it_is() {
+        let root = std::path::PathBuf::from(r"D:\repo");
+        let detach = GateRequest::GitCheckout {
+            root: root.clone(),
+            target: "aaf09cd0000000000000000000000000000000ff".to_owned(),
+            said: "aaf09cd merge settings-followup".to_owned(),
+            kind: GitCheckoutKind::Detach,
+            dirty: false,
+        };
+        let dirty_branch = GateRequest::GitCheckout {
+            root: root.clone(),
+            target: "main".to_owned(),
+            said: "main".to_owned(),
+            kind: GitCheckoutKind::Stand,
+            dirty: true,
+        };
+        let dirty_detach = GateRequest::GitCheckout {
+            root,
+            target: "v1.0".to_owned(),
+            said: "v1.0".to_owned(),
+            kind: GitCheckoutKind::Detach,
+            dirty: true,
+        };
+
+        assert_eq!(detach.title(), gate_git_detach_title());
+        assert_eq!(dirty_branch.title(), gate_git_dirty_checkout_title());
+        assert_eq!(
+            dirty_detach.title(),
+            gate_git_dirty_checkout_title(),
+            "with work in the tree that is the more serious half, and the title \
+             says the more serious half"
+        );
+        for request in [&detach, &dirty_branch, &dirty_detach] {
+            assert_eq!(
+                request.answer_text(),
+                gate_checkout_text(),
+                "the button carries the row's own verb"
+            );
+        }
+
+        // ② names the state, and does not claim anything is lost.
+        let said = detach.message(&["aaf09cd merge settings-followup".to_owned()]);
+        assert!(said.contains("aaf09cd"), "by name, always: {said}");
+        assert!(
+            said.contains("HEAD stops being on a branch"),
+            "the sentence names the state you come out in: {said}"
+        );
+        assert!(
+            !said.contains("cannot be undone"),
+            "nothing is lost by standing somewhere else: {said}"
+        );
+
+        // ③ leads with the work, and still names where it is going.
+        let said = dirty_branch.message(&["main".to_owned()]);
+        assert!(said.starts_with("Uncommitted changes"), "{said}");
+        assert!(said.contains("main"), "{said}");
+        assert!(
+            !said.contains("HEAD stops being on a branch"),
+            "a branch is a branch: {said}"
+        );
+        let said = dirty_detach.message(&["v1.0".to_owned()]);
+        assert!(said.starts_with("Uncommitted changes"), "{said}");
+        assert!(
+            said.contains("HEAD stops being on a branch"),
+            "and both halves are said when both are true: {said}"
+        );
+    }
+
+    /// PIN (user ruling, 2026-08-19) — **the three tiers as one rule, and every
+    /// spelling of the verb answers it.**
+    ///
+    /// [`checkout_needs_gate`] exists because the tiers were a sentence each
+    /// door repeated, and one door did not: `Checkout tracking` on a
+    /// remote-tracking row runs `git checkout -b <local> --track <remote>`,
+    /// which moves `HEAD` as surely as the plain verb, and it reached the
+    /// repository through the ref-writing path — which asks nothing, whatever
+    /// is in the working tree. The same menu row *was* asked when the local
+    /// branch already existed, so whether a reader was warned about their
+    /// uncommitted work depended on a fact about the repository that has
+    /// nothing to do with the danger.
+    ///
+    /// MUTATION: drop `Track` back out of tier 3 and a clean-tree tracking
+    /// checkout starts asking a question the ruling says it must not; make
+    /// `checkout_needs_gate` read only `dirty` and standing on a commit from a
+    /// clean tree goes through silently again, which is the report this whole
+    /// ruling came from.
+    #[test]
+    fn every_spelling_of_a_checkout_answers_the_same_three_tiers() {
+        use GitCheckoutKind::{Detach, Stand, Track};
+        // ③ a clean tree landing on a *name* is asked nothing — and a name being
+        //   created in order to be stood on is still a name.
+        assert!(!checkout_needs_gate(Stand, false));
+        assert!(
+            !checkout_needs_gate(Track, false),
+            "a tracking checkout lands on a branch, so it is the ordinary verb"
+        );
+        // ② detaching is asked about however clean the tree is.
+        assert!(checkout_needs_gate(Detach, false));
+        // ① and work in the tree is asked about whatever the destination, which
+        //    is the tier the tracking verb was missing altogether.
+        for kind in [Stand, Detach, Track] {
+            assert!(
+                checkout_needs_gate(kind, true),
+                "{kind:?} carries uncommitted work across and must say so"
+            );
+        }
+
+        // And the request a tracking move raises is a checkout request, so it
+        // wears the checkout's own title and verb rather than a ref write's.
+        let tracking = GateRequest::GitCheckout {
+            root: std::path::PathBuf::from(r"D:\repo"),
+            target: "origin/side".to_owned(),
+            said: "side".to_owned(),
+            kind: Track,
+            dirty: true,
+        };
+        assert_eq!(tracking.title(), gate_git_dirty_checkout_title());
+        assert_eq!(tracking.answer_text(), gate_checkout_text());
+        let said = tracking.message(&["side".to_owned()]);
+        assert!(said.contains("side"), "by name, always: {said}");
+        assert!(
+            !said.contains("HEAD stops being on a branch"),
+            "a tracking checkout lands on a branch: {said}"
         );
     }
 
