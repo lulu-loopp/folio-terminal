@@ -16995,48 +16995,13 @@ impl Runtime {
         // indices under a hand that has not moved — and it is registered only
         // while a rail is hot, which is the only time there is anything to glance
         // at. `retain` below therefore takes the card down the moment the pointer
-        // leaves the rail, and the pointer's own 380ms is the delay the ruling
-        // asked to reuse rather than a clock of the card's own.
+        // leaves the rail, and the wait in front of it is the card's own
+        // `PEEK_INTENT_DELAY` (user report, 2026-08-19): the tip's single host and
+        // single fade are still shared, only the length of the countdown is not.
         if self.window.drag.is_none()
-            && let Some((seat, index)) = self.window.command_rail_hover
-            && let Some(cache) = self.window.command_rails.get(&seat)
-            && let Some(tick) = cache.rail().ticks.get(index).copied()
-            && let Some(host) = cmdrail::peek_host(cache.rail(), index)
-            && let Some(leaf) = self.sessions.get(&seat)
+            && let Some((id, host, text, face)) = self.command_tick_card()
         {
-            // The matched line's own text, for a tick the search put there —
-            // read once, here, because it is the only place a rail ever needs a
-            // line rather than a command.
-            let line = match tick.target {
-                cmdrail::Target::Match(hit) => self.search_hit_line_text(hit),
-                cmdrail::Target::Command(_) => None,
-            };
-            // And the failing command's own last word, read the same way and for
-            // the same reason: it is the one thing a card can add that saves the
-            // reader opening the pane. Asked only of a mark the shell called
-            // failed, so a wall of successful commands walks the transcript
-            // exactly never.
-            let tail = match tick.target {
-                cmdrail::Target::Command(id) => leaf
-                    .session
-                    .command_mark(id)
-                    .is_some_and(bt_term::CommandMark::failed)
-                    .then(|| leaf.session.command_output_last_line(id))
-                    .flatten(),
-                cmdrail::Target::Match(_) => None,
-            };
-            let (text, muted) = cmdrail::peek_text(
-                &tick,
-                leaf.session.command_marks(),
-                line.as_deref(),
-                tail.as_deref(),
-            );
-            anchors.push_faced(
-                tooltip::TooltipAnchorId::CommandTick(seat, tick.target),
-                host,
-                text,
-                tooltip::TipFace::Peek { muted },
-            );
+            anchors.push_faced(id, host, text, face);
         }
         // The colour under the pointer, on the pointer's own 380ms and the
         // tip's own surface (§7.1.6c-4c). Pushed last of the content anchors and
@@ -17155,23 +17120,29 @@ impl Runtime {
             .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
     }
 
-    /// Note what the pointer is over and repaint if the answer took a tip down.
-    fn note_tooltip(&mut self, anchor: Option<tooltip::TooltipAnchorId>) -> Result<()> {
+    /// Note what the pointer is over — and in which face it would be answered,
+    /// because that is what decides how long the pointer has to hold still
+    /// ([`tooltip::TipFace::intent_delay`]) — and repaint if the answer took a tip
+    /// down.
+    fn note_tooltip(
+        &mut self,
+        anchor: Option<(tooltip::TooltipAnchorId, tooltip::TipFace)>,
+    ) -> Result<()> {
         if self.window.tooltip.observe(anchor, Instant::now()) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
     }
 
-    /// The anchor under the pointer right now, if any.
+    /// The anchor under the pointer right now and the face its tip wears, if any.
     fn tooltip_anchor_at(
         &self,
         position: PhysicalPosition<f64>,
-    ) -> Option<tooltip::TooltipAnchorId> {
+    ) -> Option<(tooltip::TooltipAnchorId, tooltip::TipFace)> {
         self.window
             .tooltip_anchors
             .at(position.x as f32, position.y as f32)
-            .map(|anchor| anchor.id)
+            .map(|anchor| (anchor.id, anchor.face))
     }
 
     /// Raise a notice (user ruling, 2026-08-16).
@@ -17937,26 +17908,76 @@ impl Runtime {
         .map(|index| (seat, index))
     }
 
-    /// The glance card's anchor for the tick the crest is on, if a rail is hot.
-    /// The colour token under the pointer, as an anchor identity.
-    fn preview_hex_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
+    /// The colour token under the pointer, as an anchor identity and the face its
+    /// card is drawn in.
+    fn preview_hex_anchor(&self) -> Option<(tooltip::TooltipAnchorId, tooltip::TipFace)> {
         let hover = self.window.preview_hex_hover.as_ref()?;
-        Some(tooltip::TooltipAnchorId::PreviewHex(
-            hover.surface,
-            hover.offset,
+        Some((
+            tooltip::TooltipAnchorId::PreviewHex(hover.surface, hover.offset),
+            tooltip::TipFace::Swatch { rgba: hover.rgba },
         ))
     }
 
-    fn command_tick_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
+    /// Everything the hot rail's glance card is: where it stands, what it says,
+    /// what it is, and which face it wears.
+    ///
+    /// **One derivation with two readers.** `rebuild_tooltip_anchors` registers
+    /// it, and [`Self::command_tick_anchor`] hands the same identity to the
+    /// pointer path one line before the anchor list has caught up with the crest.
+    /// They used to build the id twice over, which was survivable while the face
+    /// was only ever consulted by the painter — and is not now that the face is
+    /// what sets the clock, because the second reader would have had to invent a
+    /// muteness that only the ledger can answer.
+    ///
+    /// Answers only while a rail is hot, which is the only time there is anything
+    /// to glance at.
+    fn command_tick_card(
+        &self,
+    ) -> Option<(tooltip::TooltipAnchorId, [f32; 4], String, tooltip::TipFace)> {
         let (seat, index) = self.window.command_rail_hover?;
-        let tick = self
-            .window
-            .command_rails
-            .get(&seat)?
-            .rail()
-            .ticks
-            .get(index)?;
-        Some(tooltip::TooltipAnchorId::CommandTick(seat, tick.target))
+        let cache = self.window.command_rails.get(&seat)?;
+        let tick = cache.rail().ticks.get(index).copied()?;
+        let host = cmdrail::peek_host(cache.rail(), index)?;
+        let leaf = self.sessions.get(&seat)?;
+        // The matched line's own text, for a tick the search put there —
+        // read once, here, because it is the only place a rail ever needs a
+        // line rather than a command.
+        let line = match tick.target {
+            cmdrail::Target::Match(hit) => self.search_hit_line_text(hit),
+            cmdrail::Target::Command(_) => None,
+        };
+        // And the failing command's own last word, read the same way and for
+        // the same reason: it is the one thing a card can add that saves the
+        // reader opening the pane. Asked only of a mark the shell called
+        // failed, so a wall of successful commands walks the transcript
+        // exactly never.
+        let tail = match tick.target {
+            cmdrail::Target::Command(id) => leaf
+                .session
+                .command_mark(id)
+                .is_some_and(bt_term::CommandMark::failed)
+                .then(|| leaf.session.command_output_last_line(id))
+                .flatten(),
+            cmdrail::Target::Match(_) => None,
+        };
+        let (text, muted) = cmdrail::peek_text(
+            &tick,
+            leaf.session.command_marks(),
+            line.as_deref(),
+            tail.as_deref(),
+        );
+        Some((
+            tooltip::TooltipAnchorId::CommandTick(seat, tick.target),
+            host,
+            text,
+            tooltip::TipFace::Peek { muted },
+        ))
+    }
+
+    /// The glance card's anchor and face for the tick the crest is on, if a rail
+    /// is hot.
+    fn command_tick_anchor(&self) -> Option<(tooltip::TooltipAnchorId, tooltip::TipFace)> {
+        self.command_tick_card().map(|(id, _, _, face)| (id, face))
     }
 
     /// While any rail still owes a frame to one of its four clocks, one frame at
@@ -39715,9 +39736,9 @@ impl Runtime {
                 // under it, and `tooltip_anchor_at` would otherwise hand back a
                 // tab's tip for a point over the menu's own body, printing a tip
                 // about something the pointer cannot see.
-                let anchor = self
-                    .tooltip_anchor_at(position)
-                    .filter(|anchor| matches!(anchor, tooltip::TooltipAnchorId::ProfileRow(_)));
+                let anchor = self.tooltip_anchor_at(position).filter(|(anchor, _)| {
+                    matches!(anchor, tooltip::TooltipAnchorId::ProfileRow(_))
+                });
                 self.note_tooltip(anchor)?;
                 self.update_chrome_hover_target(None)?;
                 return Ok(());
@@ -39732,7 +39753,7 @@ impl Runtime {
             if over.is_some() {
                 let anchor = self
                     .tooltip_anchor_at(position)
-                    .filter(|anchor| matches!(anchor, tooltip::TooltipAnchorId::RootRow(_)));
+                    .filter(|(anchor, _)| matches!(anchor, tooltip::TooltipAnchorId::RootRow(_)));
                 self.note_tooltip(anchor)?;
                 self.update_chrome_hover_target(None)?;
                 return Ok(());
@@ -40007,7 +40028,7 @@ impl Runtime {
             .or_else(|| self.preview_hex_anchor())
             .or_else(|| {
                 self.tooltip_anchor_at(position)
-                    .filter(|anchor| !self.layout_peek_suppresses(*anchor))
+                    .filter(|(anchor, _)| !self.layout_peek_suppresses(*anchor))
             });
         self.note_tooltip(anchor)?;
         // Which pane the pointer is in, settled before anything asks a question of it. Everything

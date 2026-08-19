@@ -2224,7 +2224,13 @@ mod tests {
         let mut peek = PeekHost::default();
         let mut tip = crate::tooltip::TooltipHost::default();
         peek.observe(Some(2), start);
-        tip.observe(Some(crate::tooltip::TooltipAnchorId::Tab(2)), start);
+        tip.observe(
+            Some((
+                crate::tooltip::TooltipAnchorId::Tab(2),
+                crate::tooltip::TipFace::Chrome,
+            )),
+            start,
+        );
 
         // At the peek's due instant the tip is still counting.
         assert!(peek.activate_if_due(start + PEEK_DELAY));
