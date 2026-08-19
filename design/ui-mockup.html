@@ -634,6 +634,46 @@
   .preview-head .pv-name.switch .rootchev { width: 9px; height: 9px; flex: none; color: var(--ink3); transition: transform .15s ease; }
   .preview-head .pv-name.pvopen .rootchev { transform: rotate(180deg); }
   @media (prefers-reduced-motion: reduce) { .preview-head .pv-name.switch .rootchev { transition: none; } }
+  /* ══ THE NAME IS THE FILE'S NAME, SO IT IS EDITABLE (user ruling 2026-08-19) ══
+     A double-click on the head's file name opens a text field in its place and
+     Enter renames the file on disk. IT IS THE TAB STRIP'S FORM, borrowed whole
+     (`.rename`, see the tab editor's own note): the field IS the label — same
+     face, same weight, same ink, no border and no fill — because what is under
+     it is already the right shape, and a box drawn on top would be a field about
+     the name rather than the name in edit mode. Escape restores and leaves,
+     Enter and blur commit; two paths and not three, for the tab strip's reason.
+
+     WHAT DIFFERS FROM A TAB, and why:
+       · a tab's name is an OVERRIDE, so its box starts holding your name only
+         and the placeholder shows what is underneath. A file has no name under
+         its name. The box starts holding the whole name, THE STEM SELECTED AND
+         THE SUFFIX NOT — typing replaces `notes` and leaves `.md`, which is what
+         renaming a file almost always means, and the suffix is one Ctrl+A away
+         for the times it does not;
+       · a tab's box fills its tab (`flex: 1 1 auto; width: 100%`), which is
+         right in a fixed-width box and wrong in a header that lays its parts out
+         from the left: filling here would shove the dirty dot and the tools to
+         the far edge and back. It is sized to the name it holds instead, by the
+         `size` attribute, which is the one width that is exactly the label's.
+
+     REFUSALS ARE QUIET. An empty name, a name that is unchanged, a name holding
+     a character Windows will not take (`\\ / : * ? " < > |`), a collision, a
+     file the filesystem will not let go of — every one of them leaves the name
+     as it was and says nothing. This is a rename in a preview header, not a
+     dialog: the reader can see whether it worked, because the name is right
+     there. (The one refusal that DOES speak is the one the reader cannot see —
+     a rename that fails after the file has already moved — and there is no such
+     case: a rename either happens or does not.)
+
+     VIRTUAL DOCUMENTS DO NOT OFFER IT. A git diff opened from a review has no
+     file behind its name; neither will anything else this pane learns to show
+     that it did not read off the disk. They carry `virtual` and the affordance
+     is absent — not refused, absent — which is the same sentence a bundled
+     colour scheme's missing marks make one page away. */
+  .preview-head .pv-rename {
+    flex: none; width: auto; min-width: 0;
+    font-size: 12.5px; font-weight: 600; color: var(--ink);
+  }
   .preview-head .pv-count {
     font-size: 10px; font-weight: 700; color: var(--ink3); background: var(--hover);
     border-radius: 8px; padding: 0 5px; line-height: 14px; flex: none;
@@ -957,6 +997,106 @@
      further left than every row above it would be a gutter nobody asked to
      hit. */
   .adv-head .tri { margin-left: -18px; }
+
+  /* ══ THE GUTTER IS TOO NARROW TO STAND IN (user report 2026-08-19) ═════════
+     「挺丑，左侧的箭头与左侧的边距好窄」. The arithmetic the gutter was cut out of
+     is exact and the picture it draws is cramped, which is what happens when a
+     column is subtracted from a margin instead of added to a page:
+
+         .settings .content   padding-left  22
+         .row                 padding-left   2   → the title column is at 24
+         .adv-head .tri       margin-left  -18   → the 10px BOX begins at   6
+         #i-tri's own ink starts 3.2/10 into that box → the INK begins at 9.2
+
+     Six pixels of paper to the left of a mark, under a page whose every other
+     edge respects twenty-two. Nothing is misaligned — the word is exactly where
+     the ruling put it — and it still reads as a glyph that fell off the page.
+
+     THREE ANSWERS ARE DRAWN HERE AND ONE WILL BE KEPT. `<body data-adv>` picks;
+     `?adv=a|b|c` in the address sets it at load, which is how the three are
+     photographed side by side. The DOM is one shape for all three (a leading
+     `.tri` and a trailing `.adv-chev`, each shown by exactly one variant), so
+     choosing is deleting the two blocks below that lost, and nothing else.
+
+       A — BREATHING GUTTER. The gutter stops being carved out of the margin and
+           becomes a column the PAGE grew: the page's left inset goes 22 → 38 and
+           the title column with it, 24 → 40, so the triangle's box lands on 22 —
+           the same 22 the header's own title, every group label and every row on
+           every page already stand on. 38 = 22 + 18 − 2 (the margin, plus the
+           gutter, less the row's own padding). The header moves with the content
+           because `Settings` is the title column's first word and a heading that
+           stopped agreeing with the rows under it would be a worse fault than
+           the one being fixed. THE PRICE IS 16px OF ROW WIDTH, and it is paid on
+           every page rather than on this one, because the pages are one shape:
+           a dialog whose text column moved when you pressed `Appearance` would
+           be a rail that resizes what it selects.
+
+       B — GROUP-LABEL FAMILY. The header stops being a row that looks like a
+           heading and becomes a heading: 11px, 600, .05em, uppercase, `--ink3` —
+           `.group-label`'s own five declarations, borrowed rather than restated —
+           with the triangle before it and no hairline under it. The gutter
+           question does not get answered so much as withdrawn: what hangs there
+           is an 8px mark in the ink of a label, not a 10px control the reader is
+           aiming at, and the band is still the whole hit target. 14 = 8 + 6,
+           and the word lands on 22 — flush with `APPEARANCE` at the top of the
+           same page, which is the comparison this variant is for.
+
+       C — TRAILING CHEVRON. No leading mark at all: `Advanced` starts on 24 with
+           every other title, and the disclosure's chevron sits at the row's
+           trailing edge, where every picker on the page ends (24 from the
+           dialog's right edge — `.content`'s 22 plus the row's 2). It turns over
+           rather than swapping glyphs, which is this file's own ruling for the
+           preview head's chevron and for the tab strip's. It is the idiom every
+           collapsible section on Windows uses, and it costs the page nothing:
+           no inset, no new column, no borrowed type. What it gives up is the
+           kinship with the files tree — a reader who learned the triangle there
+           learns a second mark here.
+
+     The variants touch NOTHING but the header. The rows inside the group, the
+     `Reset to defaults` foot, the height lock and the keyboard are all one
+     implementation under all three. */
+  /* One 10×6 chevron, drawn only by C, turning only when C is up. It borrows
+     `.frow .tri`'s duration and curve rather than declaring a second one: this
+     window has one speed at which a disclosure turns. */
+  .adv-head .adv-chev {
+    display: none;
+    width: 10px; height: 6px; flex: none; color: var(--ink3);
+    transition: transform 120ms cubic-bezier(.2,0,0,1);
+  }
+  @media (prefers-reduced-motion: reduce) { .adv-head .adv-chev { transition: none; } }
+
+  /* ── A ── the page grows the gutter; see the arithmetic above. Both insets in
+     one place so they cannot drift apart. */
+  body[data-adv="a"] .settings .content { padding-left: 38px; }
+  body[data-adv="a"] .settings header { padding-left: 38px; }
+
+  /* ── B ── `.group-label`'s five declarations, and the mark sized to the type
+     that carries it: an 8px triangle against 11px caps, where the shipped 10
+     against 13.5 would have been the loudest thing in a muted line. `padding:
+     2px 0` is the 2 the group label leaves under itself said as padding, so the
+     band that turns the disclosure is a band and not a text baseline; 14 above
+     is the 16 a heading inside a list needs to stand off the row above it, less
+     that 2. No hairline in either state — a heading does not close the list
+     above it, and `.adv:not(.open) .adv-head` was already saying so for one of
+     the two. */
+  body[data-adv="b"] .adv-head {
+    padding: 2px 0; margin: 14px 0 0; border-bottom: none; gap: 6px;
+  }
+  body[data-adv="b"] .adv.open .adv-head { border-bottom: none; }
+  body[data-adv="b"] .adv-head .title {
+    font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--ink3);
+  }
+  body[data-adv="b"] .adv-head .tri { width: 8px; height: 8px; margin-left: -14px; }
+
+  /* ── C ── the leading mark is gone rather than hidden (`display: none` takes
+     its flex gap with it, which is what puts `Advanced` back on 24 with no
+     second number), and the chevron takes the control column's trailing edge
+     because `.text { flex: 1 }` already pushes it there — the same mechanism
+     that puts every picker on this page against the same right edge. */
+  body[data-adv="c"] .adv-head .tri { display: none; }
+  body[data-adv="c"] .adv-head .adv-chev { display: block; }
+  body[data-adv="c"] .adv.open .adv-head .adv-chev { transform: rotate(180deg); }
   .frow .tri.leaf { visibility: hidden; }
   .frow .fico { width: 15px; height: 15px; flex: none; }
   .frow .fico.folder { color: var(--accent); }
@@ -2558,6 +2698,89 @@
   .combo-item.selected .tick { visibility: visible; }
   .combo-item.selected { color: var(--ink); }
 
+  /* ══ THE PICKER IS WHERE THE SCHEMES ARE MANAGED (user ruling 2026-08-19) ══
+     Three buttons stood at the foot of `Appearance ▸ Advanced` — `Customise
+     scheme…`, `Delete scheme…`, `Reset to defaults` — and a line above them
+     explaining what the first two would act on. Every one of those words was
+     written to answer the same question: WHICH scheme. The 4c foot acted on the
+     scheme in force and could not reach the others; the 4d fix answered by
+     opening a second menu listing the folder's files. At that point the dialog
+     was drawing a picker of schemes, a hint about the picker of schemes, and a
+     button that opened another picker of schemes — three lists of one list.
+
+     There is only ever one list, and the reader is already looking at it. So the
+     verbs move onto the rows they act on, and the foot loses two of its three
+     buttons (`Reset to defaults` stays: it is the group's own verb and it acts
+     on the group, not on a scheme).
+
+     WHAT THE MENU HOLDS, IN ORDER: the bundled schemes for this canvas, a
+     hairline, the reader's own files, a hairline, and one action. That is the
+     one shape a picker of this kind can have — values, then values, then a verb —
+     and each hairline says what changed: the first says "these came with the
+     product and those are yours", the second says "everything above is a choice
+     and this is not".
+
+     THE SEPARATOR IS `.tm-sep`'s recipe at the popup's own inset (4px of padding
+     means 6px of margin puts the line's ends where the items' rounded corners
+     already are). Not a new colour and not a new height: this window draws one
+     hairline between menu items.
+
+     THE MARKS ARE REVEALED ON HOVER AND THEIR SPACE IS NOT. `.pf-acts`' idiom
+     exactly — `opacity: 0` and .12s, revealed by `:hover` and by `:focus-within`
+     so the keyboard reaches them — because a popup whose width changed when the
+     pointer crossed a row would be a list that moves under the pointer, and
+     because the marks are verbs about a row rather than part of what the row
+     says. Bundled rows reveal nothing: there is no file to open and none to
+     recycle, which is a fact about the row and not a state of it, so the run is
+     simply absent rather than drawn dark. 15 and not `.pf-act`'s 26: a
+     combo item is 27.5 tall, and a 26px hit box inside it would be a button
+     wearing the row. */
+  .combo-sep { height: 1px; background: var(--border-soft); margin: 4px 6px; }
+  /* An ACTION and not a value: no tick (nothing here is ever the current answer)
+     and a `+` in a mark column of exactly the tick's 14, so `Add your own
+     scheme…` starts on the same x as `Nord` above it. The ellipsis is this
+     file's standing promise that something opens.
+
+     IT WEARS THE SAME INK AS EVERY OTHER ITEM. Drawn in the accent first, and
+     the accent was wrong: this house does not colour a menu item — the profile
+     row's `Duplicate`, `Hide` and `Set as default` are verbs in a popup and all
+     three are `--ink2` — and an accented row in a list of muted ones was the
+     loudest thing in a dialog whose whole register is quiet, pulling the eye to
+     the one row that is not an answer to the question the row asked. The
+     hairline above it already says it is not a value. What the accent is good
+     for is the MARK UNDER THE POINTER, which is `.term-menu .tm-item:hover svg`
+     verbatim: the item lights like any other item, and its `+` lights in the
+     accent to say the press does something rather than choosing something. */
+  .combo-item.act .actmark {
+    width: 14px; font-size: 12px; flex: none; text-align: center; color: var(--ink3);
+  }
+  .combo-item.act:hover .actmark { color: var(--accent); }
+  /* The trailing run. `margin-left: auto` and not a spacer element: the item is
+     already a flex row, and a name long enough to reach the marks should push
+     them rather than be cut by them. */
+  .combo-item .ci-acts {
+    margin-left: auto; padding-left: 12px;
+    display: flex; align-items: center; gap: 1px; flex: none;
+    opacity: 0; transition: opacity .12s ease;
+  }
+  .combo-item:hover .ci-acts, .combo-item:focus-within .ci-acts { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .combo-item .ci-acts { transition: none; } }
+  .combo-item .ci-act {
+    width: 18px; height: 18px; flex: none; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; background: none; border-radius: 4px;
+    color: var(--ink3); font-family: inherit; font-size: 12px; cursor: pointer;
+  }
+  /* 12 for the pencil and 10 for the ×, which is not two sizes but one: `i-pencil`
+     is drawn on a 16 viewBox with its ink inside the margins, `i-close` on a 10
+     viewBox with its ink corner to corner, so at one width the × came out both
+     larger and heavier than the mark beside it. The numbers are the ratio that
+     makes the two glyphs the same optical size — the same reason `.dlg-close`
+     draws its 10-box close at 10 while `.pv-tool` draws its 16-box marks at 13. */
+  .combo-item .ci-act svg { width: 12px; height: 12px; }
+  .combo-item .ci-del svg { width: 10px; height: 10px; }
+  .combo-item .ci-act:hover { background: var(--active); color: var(--ink); }
+
   /* ── THE SLIDER, born 2026-08-17 (Settings extension block, slice 4b) ──
      The dialog's second control form, and the first one added since it was
      built. It exists because two of this slice's four rows answer with a
@@ -2771,30 +2994,14 @@
      numbers would be two answers to how far a foot stands off its list. 140 and
      not 152 because the verb says less: the shortcut page's has a whole table in
      scope and says so, this one has the group it closes and nothing else. */
-  /* The foot became a *row* the day it grew a second verb (§7.1.6c-4c): `gap`
-     rather than a margin on one of them, so the day a third arrives it needs no
-     new number. 152 for `Customise scheme…` — the shortcut page's width, because
-     its word is the longest any `.btn` in this dialog carries — beside the
-     reset's own 140. */
+  /* The foot became a *row* the day it grew a second verb (§7.1.6c-4c) and a
+     column again on 2026-08-19, when both scheme verbs moved onto the picker's
+     own rows. `gap` stays rather than reverting to a margin: it is what let a
+     verb arrive and leave without a new number either time, and it costs nothing
+     over one button. The 152 that `Customise scheme…` needed leaves with it —
+     140 is the width of every `.btn` in this foot again, and the only one. */
   .sc-foot, .adv-foot { display: flex; justify-content: flex-end; margin-top: 14px; gap: 8px; }
   .adv-foot .btn { width: 140px; }
-  .adv-foot .adv-customise { width: 152px; }
-  /* A third verb arrived on 2026-08-18 and needed no new number, which is what
-     the `gap` above was written for. `Delete scheme` takes the reset's 140 and
-     not the customise's 152: two words and no ellipsis after them, because
-     unlike its neighbour it finishes what it names.
-
-     Its own line above the row, `.row .desc`'s line box: the three buttons and
-     their gaps are 448 of a 504px row, so the sentence cannot stand beside
-     them — and it is drawn in BOTH states so that opening this group is not a
-     different height depending on which scheme is in force. The margin belongs
-     to the hint when the hint is there, so `.adv-foot` loses its own. */
-  .adv-foot-hint {
-    margin-top: 14px; line-height: 1.5; font-size: 12px; color: var(--ink2);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .adv-foot-hint + .adv-foot { margin-top: 0; }
-  .adv-foot .adv-delete[disabled] { color: var(--ink2); cursor: default; }
   /* The colour under the pointer (§7.1.6c-4c). `#cmd-peek`'s card wearing a
      third face: same 380ms, same surface, same radius — a 28px well before the
      token, and the line box IS the well, so the card is exactly as tall as the
@@ -3087,7 +3294,7 @@
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
 </style>
 </head>
-<body>
+<body data-adv="a">
 
 <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
   <symbol id="i-min" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></symbol>
@@ -3275,6 +3482,11 @@
   <symbol id="i-select" viewBox="0 0 16 16"><path d="M2.4 4.4v-2h2M11.6 2.4h2v2M13.6 11.6v2h-2M4.4 13.6h-2v-2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.8 8h6.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
   <symbol id="i-broom" viewBox="0 0 16 16"><path d="M9.6 2.2l4.2 4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11.7 6.4L9.6 4.3 3.4 9.7c-.9.8-1.2 2-.8 3.1l.6 1.5 1.5.6c1.1.4 2.3.1 3.1-.8l3.9-4.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></symbol>
   <symbol id="i-save" viewBox="0 0 16 16"><path d="M3.2 2.6h7.9l2.3 2.3v8c0 .3-.3.6-.6.6H3.2c-.3 0-.6-.3-.6-.6V3.2c0-.3.3-.6.6-.6z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.3 2.8v2.9h5.2V2.8M5.1 13.4V9.3h5.8v4.1" fill="none" stroke="currentColor" stroke-width="1.15"/></symbol>
+  <!-- The pencil is a verb about a FILE and nowhere else in this window is one
+       drawn, so it is born here: a nib, a shaft, and the shaft's top corner cut
+       square, at `i-save`'s own 1.3 stroke so the two read as one family when
+       both are on screen (they never are, but the family is the point). -->
+  <symbol id="i-pencil" viewBox="0 0 16 16"><path d="M10.6 2.4l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11.5 1.5l3 3-8.4 8.4-3.9.9.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
   <symbol id="i-gear" viewBox="0 0 24 24"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></symbol>
 </svg>
 
@@ -3438,15 +3650,71 @@
            height. That derivation is the placeholder ruling: `Profiles` and
            `Language` are absent rather than present-and-empty. -->
       <div class="settings-body">
+        <!-- ══ THE ORDERING RULE, WRITTEN DOWN (user ruling 2026-08-19) ═══════
+             Both axes of this dialog had been ordered a decision at a time —
+             `Profiles` went second on the day it was born because General names
+             it, `Sidebar` came back up beside `Tab layout` because a reader had
+             lost it. Each of those was right and none of them was a rule, so
+             every new page had to be argued from scratch. This is the rule they
+             were all instances of.
+
+             THE RAIL IS 从看到用 — WHAT YOU SEE BEFORE WHAT YOU RUN. Read down
+             it, the questions get narrower and later: the window as a whole,
+             then the kinds of session it can hold, then how one pane behaves,
+             then what the pane draws inside itself, then the keys that drive all
+             of it.
+
+               General          the product, and what it does when it starts
+               Appearance       what the WINDOW looks like — one window, one
+                                answer, and the answer is visible before a
+                                single command has been typed
+               Profiles         the KINDS of session that window can open —
+                                still about what you see (the picker, the icons,
+                                the colours), but one level in from the window
+               Terminal         how ONE pane behaves once something is running
+               Rendered blocks  what that pane draws inside itself
+               Shortcuts        the keys, which reach all five above and so
+                                cannot come before any of them
+
+             APPEARANCE AND PROFILES SWAPPED for exactly that reading. The old
+             order had `Profiles` second on the strength of one row on the page
+             above it naming the table — a true sentence about two rows, used to
+             order six pages. Adjacency to `Default profile` is worth less than
+             the rail being read down: the window is the thing a reader has in
+             front of them before they have decided anything, and a table of
+             shell definitions standing in front of `Theme` asks them to name a
+             session before they have looked at the window it will open in. The
+             `Default profile` → `Profiles` path is unhurt: it is a picker whose
+             own menu is that table, one rail word away either way.
+
+             WITHIN A PAGE: EVERYDAY FIRST, SIBLINGS ADJACENT, ADVANCED LAST.
+             Three clauses and they are applied in that order —
+               · everyday first: the rows most readers open the page for stand
+                 at the top, in the order a person decides them, never in the
+                 order they were built in (§7.1.6c-5 said this once, for one
+                 page; it holds for all of them);
+               · siblings adjacent: a row whose answer raises the next question
+                 stands beside it, and a dependent row stands under the row it
+                 depends on — the condition hides it, the disclosure never does
+                 (`Sidebar`, 2026-08-18, is the case that proved it);
+               · Advanced last: the disclosure closes the page, holds only rows
+                 somebody NAMED, and nothing is swept into it by resemblance.
+
+             THE SECTIONS BELOW WERE MOVED TO MATCH. Nothing in the machinery
+             reads their order — a page is shown by a class and the rail is a
+             list of words — so the swap buys exactly one thing, and it is the
+             thing this file is for: a reader scrolling the markup meets the
+             pages in the order the rule puts them in, rather than in the order
+             the slices were built in. -->
         <nav class="settings-nav" id="settings-nav" aria-label="Settings categories">
           <button class="nav-item selected" data-page="general">General</button>
-          <!-- SECOND, and directly under General, because General's `Default
-               profile` row names the very table this word opens. The rail is
-               still derived from which categories have rows — `Profiles` is not
-               a door onto an empty room, it arrives on the day its rows do, and
-               this is that day (slice 5). -->
-          <button class="nav-item" data-page="profiles">Profiles</button>
           <button class="nav-item" data-page="appearance">Appearance</button>
+          <!-- The rail is still derived from which categories have rows —
+               `Profiles` is not a door onto an empty room, it arrives on the day
+               its rows do, and that day was slice 5. Where it arrived is now the
+               rule's answer rather than its own: the kinds of session, one level
+               in from the window they open in. -->
+          <button class="nav-item" data-page="profiles">Profiles</button>
           <button class="nav-item" data-page="terminal">Terminal</button>
           <button class="nav-item" data-page="blocks">Rendered blocks</button>
           <button class="nav-item" data-page="shortcuts">Shortcuts</button>
@@ -3463,6 +3731,531 @@
             <button aria-haspopup="listbox"><span class="value">PowerShell</span><span class="chev">▼</span></button>
             <div class="combo-menu" role="listbox" id="profile-options"></div>
           </div>
+        </div>
+        </section>
+
+        <section class="settings-page" data-page="appearance">
+        <div class="group-label">Appearance</div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Theme</div>
+            <div class="desc">Light, dark, or follow your system setting</div>
+          </div>
+          <div class="combo" data-combo="theme">
+            <button aria-haspopup="listbox"><span class="value">System</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="light" role="option"><span class="tick">✓</span>Light</div>
+              <div class="combo-item" data-v="dark" role="option"><span class="tick">✓</span>Dark</div>
+              <div class="combo-item selected" data-v="system" role="option"><span class="tick">✓</span>System</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- COLOUR SCHEMES (§7.1.6c-4a, 2026-08-17).
+
+             Two rows directly under Theme, because the three are one decision
+             read in sequence: Theme says WHICH canvas, and these two say what
+             that canvas looks like. A scheme never overrules the mode — a window
+             on Dark stays dark whatever is chosen here — which is exactly why
+             there are two rows and not one: the half you are not currently
+             looking at has to be settable too, or switching the theme means
+             coming back here.
+
+             A scheme is twenty-one colours: the ANSI sixteen, plus background,
+             foreground, cursor, selection and accent. The window's own ~139
+             chrome colours are DERIVED from those, never stored — which is the
+             difference between a colour scheme and a skin. Nobody has to name a
+             divider, and no scheme can produce a window whose tab strip
+             disagrees with its terminal. The proof is a test: deriving from
+             Folio Dark reproduces the struck dark palette byte for byte, and
+             the same for light.
+
+             The file format is Windows Terminal's scheme JSON unchanged, so a
+             scheme copied off windowsterminalthemes.dev pastes in as it stands;
+             Folio adds one optional key, `accent`, defaulting to the scheme's
+             `blue`. Ten travel inside the executable and every *.json in
+             %APPDATA%\Folio\schemes joins them at startup, through the very same
+             parser. A file that will not parse is skipped and says which file
+             and why, once, in an error toast — never a crash, and never silence.
+
+             EACH ROW LISTS ONLY THE SCHEMES WHOSE CANVAS IS ITS OWN, and that is
+             correctness rather than tidiness: the chrome picks its palette from
+             the luma of the background actually painted, so a dark scheme in the
+             Light row would paint a dark canvas and then be dressed in the other
+             row's chrome. Filtering makes that state unreachable.
+
+             The folder is named once, on the dark row, because the pair is read
+             together and a path printed twice reads as two paths — and it is
+             named in a sentence short enough to fit the row, because a
+             description that ellipsises away the path names nothing. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Light scheme</div>
+            <div class="desc">The colours a Light window is drawn in, terminal and chrome alike</div>
+          </div>
+          <!-- Both scheme pickers carry the same three-part list; the semantics
+               are written once, over the Dark row below, because it is the row
+               the folder is named on and the pair is read together. -->
+          <div class="combo" data-combo="lightscheme">
+            <button aria-haspopup="listbox"><span class="value">Folio Light</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="folio-light" role="option"><span class="tick">✓</span>Folio Light</div>
+              <div class="combo-item" data-v="gruvbox-light" role="option"><span class="tick">✓</span>Gruvbox Light</div>
+              <div class="combo-item" data-v="one-half-light" role="option"><span class="tick">✓</span>One Half Light</div>
+              <div class="combo-item" data-v="solarized-light" role="option"><span class="tick">✓</span>Solarized Light</div>
+              <div class="combo-sep"></div>
+              <div class="combo-item mine" data-v="paper-custom" role="option"><span class="tick">✓</span>Paper (custom)<span class="ci-acts">
+                <button class="ci-act ci-edit" title="Open this scheme's file" aria-label="Open Paper (custom)"><svg><use href="#i-pencil"/></svg></button>
+                <button class="ci-act ci-del" title="Send this scheme's file to the Recycle Bin" aria-label="Delete Paper (custom)"><svg><use href="#i-close"/></svg></button>
+              </span></div>
+              <div class="combo-sep"></div>
+              <div class="combo-item act" data-act="addscheme" role="option"><span class="actmark">+</span>Add your own scheme…</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Dark scheme</div>
+            <div class="desc">The same for a Dark window. Files: %APPDATA%\Folio\schemes</div>
+          </div>
+          <!-- ══ THE VERBS LIVE ON THE ROWS THEY ACT ON (user ruling 2026-08-19)
+               The three semantics this list now carries, in the order the eye
+               meets them:
+
+               `+ Add your own scheme…`  COPIES THE SCHEME IN FORCE and opens the
+                   copy. It is `Customise scheme…` unchanged in everything but
+                   where it is written: the scheme in force is the one ticked two
+                   rows above the verb, so the verb no longer has to say which
+                   scheme it will copy — the reader can see it. The file is
+                   `%APPDATA%\Folio\schemes\<Name> (custom).json`, it is ticked
+                   in this row the moment it exists, the dialog shuts and the
+                   file opens in a preview pane with the keyboard in it. The
+                   folder is watched, so Ctrl+S recolours the window: the window
+                   is the preview, which is why there is no colour picker here
+                   and is not going to be one (§7.1.6c-4a made a scheme a Windows
+                   Terminal JSON object, and an editor of our own would be a
+                   worse way to edit a format the ecosystem already edits).
+
+               ✎  OPENS THE FILE. No copy, because this row already IS the
+                   reader's file — which is the whole content of the 2026-08-18
+                   `Edit scheme…` report, now said by the mark being ABSENT from
+                   every bundled row instead of by a verb changing its word.
+                   Pressing it does not change which scheme is in force: opening
+                   a file to read it is not choosing it.
+
+               ×  SENDS THE FILE TO THE RECYCLE BIN. A colour scheme is a file
+                   somebody wrote by hand, often over an afternoon; the card that
+                   follows says where it went, which is both the fact and the
+                   undo. FALLBACK RULES UNCHANGED (§7.1.6c-4d): if the deleted
+                   scheme was the one in force, the row falls back to the default
+                   scheme, hot. If it was not, nothing repaints.
+
+               BUNDLED ROWS SHOW NOTHING EXTRA ON HOVER. Ten schemes travel
+               inside the executable and have no file anywhere to open or move,
+               so there is nothing to grey out — the run is absent, and its
+               absence is the sentence `Deleting sends this scheme's file to the
+               Recycle Bin` used to have to say in a line of its own under three
+               buttons.
+
+               `Reset to defaults` DOES NOT REACH ANY OF THIS and still deletes
+               nothing in that folder: the files are the user's. -->
+          <div class="combo" data-combo="darkscheme">
+            <button aria-haspopup="listbox"><span class="value">Folio Dark</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="folio-dark" role="option"><span class="tick">✓</span>Folio Dark</div>
+              <div class="combo-item" data-v="dracula" role="option"><span class="tick">✓</span>Dracula</div>
+              <div class="combo-item" data-v="gruvbox-dark" role="option"><span class="tick">✓</span>Gruvbox Dark</div>
+              <div class="combo-item" data-v="nord" role="option"><span class="tick">✓</span>Nord</div>
+              <div class="combo-item" data-v="one-half-dark" role="option"><span class="tick">✓</span>One Half Dark</div>
+              <div class="combo-item" data-v="solarized-dark" role="option"><span class="tick">✓</span>Solarized Dark</div>
+              <div class="combo-sep"></div>
+              <div class="combo-item mine" data-v="kanagawa-custom" role="option"><span class="tick">✓</span>Kanagawa (custom)<span class="ci-acts">
+                <button class="ci-act ci-edit" title="Open this scheme's file" aria-label="Open Kanagawa (custom)"><svg><use href="#i-pencil"/></svg></button>
+                <button class="ci-act ci-del" title="Send this scheme's file to the Recycle Bin" aria-label="Delete Kanagawa (custom)"><svg><use href="#i-close"/></svg></button>
+              </span></div>
+              <div class="combo-item mine" data-v="folio-dark-custom" role="option"><span class="tick">✓</span>Folio Dark (custom)<span class="ci-acts">
+                <button class="ci-act ci-edit" title="Open this scheme's file" aria-label="Open Folio Dark (custom)"><svg><use href="#i-pencil"/></svg></button>
+                <button class="ci-act ci-del" title="Send this scheme's file to the Recycle Bin" aria-label="Delete Folio Dark (custom)"><svg><use href="#i-close"/></svg></button>
+              </span></div>
+              <div class="combo-sep"></div>
+              <div class="combo-item act" data-act="addscheme" role="option"><span class="actmark">+</span>Add your own scheme…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- THE GRID'S FACE, AND NOT THE WINDOW'S (§7.1.6c-3b).
+
+             Two rows and not one, next to each other, because they are one
+             decision made in two halves — and a reader who has changed either
+             is about to look for the other. Both are hot: the DPI path already
+             exists to re-measure a grid and tell every shell its new column
+             count, and a font change is that same event arriving through
+             another door.
+
+             The description names what the row does NOT move, because "font" on
+             a terminal's settings page reads as "all the text". The window's own
+             labels keep their face, and that is a stated left-out rather than an
+             oversight: `chrome_cap_height_ratio` is resolved once because a
+             chrome face cannot change, and the font loader deliberately never
+             enumerates `Fonts/` at startup. Both would have to move first.
+
+             The family list is every monospaced family DirectWrite reports
+             (`IDWriteFont1::IsMonospacedFont`), alphabetical without regard to
+             case, with the default always among them — a combo whose selected
+             row is missing from its own list draws as a blank. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Terminal font</div>
+            <div class="desc">The face the grid is drawn in; the window's own labels keep theirs</div>
+          </div>
+          <!-- ══ `Install fonts…` (user ruling 2026-08-19) ═════════════════════
+               The list is every monospaced family DirectWrite reports, which
+               means the honest answer to "my font isn't here" is "install it",
+               and until now this picker ended without saying so — a reader who
+               had downloaded a Nerd Font ten minutes earlier had no way to learn
+               from this row that the machine, not Folio, was the thing that had
+               not heard of it yet.
+
+               IT OPENS THE SYSTEM'S OWN FONTS PAGE (`ms-settings:fonts`), where
+               a font is installed by dropping the file on it, and where the
+               product's own installed fonts already live beside every other
+               font on the machine.
+
+               THERE IS NO IN-APP FONT MANAGEMENT AND THERE WILL NOT BE. Folio
+               does not copy files into a private folder, does not keep a second
+               list, and does not delete anything: a font is a machine-wide
+               resource, installing one affects every program on the desk, and
+               DELETION BELONGS TO WINDOWS for exactly that reason — a terminal
+               that could remove a family another program was drawing with is a
+               terminal that has taken a decision that was never its to take.
+
+               THE LIST RESCANS WHEN THE DIALOG REOPENS. Not while it is up:
+               DirectWrite's collection is snapshotted when the picker is built,
+               a font installed behind an open dialog would need the collection
+               invalidated and every open popup rebuilt under the pointer, and
+               the gesture that put the font there — leaving Folio, dropping a
+               file on a Windows page, coming back — already crosses a close and
+               a reopen. So the rule is the plainest one available and needs no
+               watcher: shut the dialog, open it again, the face is there.
+
+               IT IS THE LAST ITEM, BEHIND A HAIRLINE, and it is the scheme
+               picker's shape said a second time: values, then a rule, then a
+               verb. Two pickers doing the same thing differently would be two
+               idioms; one is an idiom. -->
+          <div class="combo" data-combo="termfont">
+            <button aria-haspopup="listbox"><span class="value">Consolas</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="cascadia" role="option"><span class="tick">✓</span>Cascadia Mono</div>
+              <div class="combo-item selected" data-v="consolas" role="option"><span class="tick">✓</span>Consolas</div>
+              <div class="combo-item" data-v="lucida" role="option"><span class="tick">✓</span>Lucida Console</div>
+              <div class="combo-sep"></div>
+              <div class="combo-item act" data-act="installfonts" role="option"><span class="actmark">+</span>Install fonts…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- A list and not a spinner, which is every other picker's ruling here:
+             a control that accepts any number owes the user a validator, a clamp
+             and an answer to what happens at 4 and at 400. One-pixel steps
+             through the range anybody reads at, then two-pixel steps above it —
+             at 20 logical pixels a single pixel is a 5% change nobody picking
+             from a list is trying to express. 16 is the default and the size
+             every frame before this row existed was drawn at. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Font size</div>
+            <div class="desc">How large grid text is drawn, before the display's scaling</div>
+          </div>
+          <div class="combo" data-combo="fontsize">
+            <button aria-haspopup="listbox"><span class="value">16</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="12" role="option"><span class="tick">✓</span>12</div>
+              <div class="combo-item" data-v="14" role="option"><span class="tick">✓</span>14</div>
+              <div class="combo-item selected" data-v="16" role="option"><span class="tick">✓</span>16</div>
+              <div class="combo-item" data-v="18" role="option"><span class="tick">✓</span>18</div>
+              <div class="combo-item" data-v="20" role="option"><span class="tick">✓</span>20</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- THE CARET'S OWN SHAPE, under the two rows that say what the grid is
+             written in, because a reader who has just changed the face is
+             looking at the same text the caret sits in. Three answers and no
+             fourth: a caret is one of three shapes on every terminal anybody has
+             used, and a width in pixels would be a number nobody can picture. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Cursor</div>
+            <div class="desc">Focused cursor shape</div>
+          </div>
+          <div class="combo" data-combo="cursor">
+            <button aria-haspopup="listbox"><span class="value">Bar</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="bar" role="option"><span class="tick">✓</span>Bar</div>
+              <div class="combo-item" data-v="block" role="option"><span class="tick">✓</span>Block</div>
+              <div class="combo-item" data-v="underline" role="option"><span class="tick">✓</span>Underline</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Tab layout</div>
+            <div class="desc">Choose where tabs appear in the window</div>
+          </div>
+          <div class="combo" data-combo="layout">
+            <button aria-haspopup="listbox"><span class="value">Horizontal</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="horizontal" role="option"><span class="tick">✓</span>Horizontal</div>
+              <div class="combo-item" data-v="vertical" role="option"><span class="tick">✓</span>Vertical</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SIDEBAR TOUCHES TAB LAYOUT AGAIN (user ruling 2026-08-18),
+             reversing the 2026-08-17 filing of it under Advanced. The argument
+             for the move was that the CONDITION carries the dependency once the
+             group does the hiding — the row is not there at all while the tabs
+             run across the top. In use it does not carry it: a row that appears
+             only under a vertical rail, two headings below the row that turns
+             the rail on and behind a collapsed disclosure, is a row nobody
+             meets. The disclosure had hidden the answer to the question the row
+             above it had just raised. Adjacency again, condition unchanged. -->
+        <div class="row" id="row-railmode">
+          <div class="text">
+            <div class="title">Sidebar</div>
+            <div class="desc">How the vertical tab sidebar rests</div>
+          </div>
+          <div class="combo" data-combo="railmode">
+            <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
+            <!-- user ruling 2026-08-10: "Icons, expand on hover" → "Icons".
+                 The sentence form named the hover behaviour in the one place a
+                 label has no room for it, and it was the only option string in
+                 the whole dialog wide enough to overrun its own popup. The
+                 hover-to-expand behaviour is unchanged — it is simply not
+                 spelled out in the picker any more. -->
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
+              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Waiting badge</div>
+            <div class="desc">A pill in the title bar counts sessions waiting for your input. Off hides the pill; Ctrl+Shift+A still jumps to the longest-waiting one</div>
+          </div>
+          <div class="combo" data-combo="attnchip">
+            <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── THE ORDER CHANGED HERE, AND SO DID WHAT CARRIES THE DEPENDENCY
+             (user ruling 2026-08-17, §7.1.6c-5).
+
+             What stood here was a flat list in the order the rows had been
+             built in: Theme, the two schemes, then the six ground rows, Tab
+             layout, and only then the two font rows — a page most people open
+             to change exactly those two, with six questions about a background
+             picture standing in front of them. The rows above are now the order
+             of a DECISION rather than of a history: what the window is made of
+             (theme, then the palette for each of its two canvases), what the
+             grid is written in (face, then size), what the caret looks like, and
+             where the tabs go.
+
+             `Waiting badge` keeps its place at the end of that run because it
+             is not one of the rows the ruling named: nothing is advanced unless
+             it was named, and a row swept in by resemblance is a row nobody
+             ruled on.
+
+             SIDEBAR IS NOT IN THIS GROUP. It was, for one day (2026-08-17),
+             on the ground that the CONDITION carries the dependency once the
+             group does the hiding. The 2026-08-18 ruling put it back above,
+             directly under the row it depends on; the note beside it there
+             records why. -->
+        <div class="adv" id="adv-appearance">
+        <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-appearance-rows">
+          <svg class="tri"><use href="#i-tri"/></svg>
+          <div class="text"><div class="title">Advanced</div></div>
+          <!-- Drawn by variant C only (see `.adv-head .adv-chev`). It is in the
+               markup under all three so that choosing a variant is deleting CSS
+               and not editing every disclosure in the dialog. -->
+          <svg class="adv-chev"><use href="#i-chev"/></svg>
+        </div>
+        <div class="adv-rows" id="adv-appearance-rows">
+        <!-- ── THE WINDOW'S GROUND: A PICTURE, AND HOW MUCH OF IT (§7.1.6c-4b) ──
+
+             Four rows for the ground and two for the window, in the order a
+             person actually decides them: is there a picture, how does it meet
+             a window that is not its shape, how much of it comes through, how
+             much of the DESKTOP comes through, is that blurred, and does the
+             window stay in front.
+
+             ONE PICTURE PER WINDOW, BEHIND EVERY PANE. A split is two views of
+             one place, not two places, so a picture drawn per pane would cut
+             itself in half at every divider and jump every time you dragged
+             one. It is painted once, over the whole window, under everything —
+             which is also why it costs one quad and one texture no matter how
+             many panes are open.
+
+             FIT IS THREE ANSWERS AND NOT A NUMBER: Stretch takes the window's
+             shape, Fill keeps the picture's and crops what will not fit, Tile
+             repeats it at its own size from the top-left. They are the three
+             things anybody means by "make it fit", and each is a different
+             sentence about what may be lost — aspect, edges, or nothing.
+
+             THE TWO PERCENTAGES ARE NOT THE SAME KNOB. Image opacity mixes the
+             picture with the scheme's background colour; background opacity
+             decides how much of that finished ground is there at all. Turning
+             the first down leaves an opaque window with a faint picture in it;
+             turning the second down lets the desktop through. A single knob
+             could not say both.
+
+             TEXT NEVER FADES. The ground is the clear and the panes' own
+             fills; every glyph, menu, dialog and float on top of it is opaque
+             at any setting, because a terminal you cannot read is not a
+             terminal. This is why the floor is 30% and not 0: below it the
+             ground stops being a surface and becomes a hole.
+
+             ACRYLIC IS THE SYSTEM'S BLUR, not ours (`DWMWA_SYSTEMBACKDROP_TYPE`
+             = `DWMSBT_TRANSIENTWINDOW`), and it has nothing to blur while the
+             ground is opaque — the description says so as a fact, not as a
+             warning. Where Windows does not know the attribute the row is
+             greyed whole and its sentence becomes the reason. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Background image</div>
+            <div class="desc">Drawn once behind the window, beneath every pane</div>
+          </div>
+          <div class="combo" data-combo="bgimage">
+            <button aria-haspopup="listbox"><span class="value">None</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="none" role="option"><span class="tick">✓</span>None</div>
+              <div class="combo-item" data-v="choose" role="option"><span class="tick">✓</span>Choose…</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Image fit</div>
+            <div class="desc">How the picture meets a window that is not its shape</div>
+          </div>
+          <div class="combo" data-combo="bgfit">
+            <button aria-haspopup="listbox"><span class="value">Fill</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="stretch" role="option"><span class="tick">✓</span>Stretch</div>
+              <div class="combo-item selected" data-v="fill" role="option"><span class="tick">✓</span>Fill</div>
+              <div class="combo-item" data-v="tile" role="option"><span class="tick">✓</span>Tile</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Image opacity</div>
+            <div class="desc">How much of the picture reaches the window</div>
+          </div>
+          <div class="slider" tabindex="0" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+            <div class="track"><div class="fill" style="right:0"></div><div class="thumb" style="left:100%"></div></div>
+            <div class="num">100%</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Background opacity</div>
+            <div class="desc">Panes and the window ground; text and menus stay opaque</div>
+          </div>
+          <div class="slider" tabindex="0" role="slider" aria-valuemin="30" aria-valuemax="100" aria-valuenow="100">
+            <div class="track"><div class="fill" style="right:0"></div><div class="thumb" style="left:100%"></div></div>
+            <div class="num">100%</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Acrylic</div>
+            <div class="desc">A Windows blur behind the ground. Visible only below full opacity</div>
+          </div>
+          <div class="combo" data-combo="acrylic">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Always on top</div>
+            <div class="desc">The window stays above other windows</div>
+          </div>
+          <div class="combo" data-combo="ontop">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- THE ROW THAT PROVED A PICKER IS AS WIDE AS ITS WORDS (§7.1.6c-5).
+             `Auto` says what it does in a parenthesis, against the ruling that a
+             picker item is a name and not a sentence about it — the two are not
+             in conflict, because `Auto` alone names nothing: every other item
+             here names a direction, and the one that names a RULE has to say
+             which rule. That parenthesis is the string that came out of the
+             button as `Auto (long…`, and the reason `.combo`'s width now comes
+             from the words. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Split direction</div>
+            <div class="desc">Where a split with no direction of its own puts the new pane</div>
+          </div>
+          <div class="combo" data-combo="splitdir">
+            <button aria-haspopup="listbox"><span class="value">Auto (longer edge)</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="auto" role="option"><span class="tick">✓</span>Auto (longer edge)</div>
+              <div class="combo-item" data-v="right" role="option"><span class="tick">✓</span>Right</div>
+              <div class="combo-item" data-v="down" role="option"><span class="tick">✓</span>Down</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- IT RESETS THIS PAGE'S ADVANCED ROWS ONLY, HOT, and says which page in
+             an Ok toast — `Appearance ▸ Advanced is back to its defaults`. Only
+             the group's rows, because the group is what the button closes: a
+             reader pressing the foot of a table is undoing the table, not the
+             seven rows above it that they may have spent the session getting
+             right. No confirmation, which is `Restore all defaults`' own ruling
+             for its own page: this dialog has no dirty gate to route a question
+             through, every choice in it is written the instant it is made, and
+             what this discards is exactly the rows the reader is looking at
+             while they press it. -->
+        <!-- ── THE TWO SCHEME VERBS LEFT THIS FOOT (user ruling 2026-08-19).
+             `Customise scheme…` (§7.1.6c-4c) and `Delete scheme…` (§7.1.6c-4d)
+             stood here with a line above them saying which scheme they would
+             act on, and that line was the tell: both verbs were about a row in
+             a list the reader was not looking at. They are now marks on that
+             list's own rows — see the block over the Dark scheme picker for the
+             semantics, which are unchanged in every respect but where they are
+             pressed. Gone with them: `.adv-foot-hint`, whose whole job was to
+             name the scheme in force, and the disabled state, whose whole job
+             was to say a bundled scheme has no file (a bundled row simply
+             reveals no marks now, which says the same thing without a sentence).
+
+             `Reset to defaults` STAYS, alone, and the foot is a foot again: it
+             is the GROUP's verb, it acts on the group's rows, and it never
+             touched the schemes folder in the first place. The `gap` and the
+             two widths above it are kept — the day a third verb about this
+             group arrives it needs no new number, which is what they were
+             written for. -->
+        <div class="adv-foot">
+          <button class="btn adv-reset">Reset to defaults</button>
+        </div>
+        </div>
         </div>
         </section>
 
@@ -3655,7 +4448,11 @@
              it. Everything else is behind the page's own Advanced — arguments,
              the environment, the hyperlink answer and which integration script
              it is served by — because those four are what the disclosure exists
-             for, by the same measure that put `Customise scheme…` behind one.
+             for, by the same measure that put writing a colour scheme by hand
+             behind one. (That verb has since moved onto the scheme picker's own
+             rows and reads `+ Add your own scheme…`; the measure it was cited
+             for — an everyday choice in front, a file to edit behind — is what
+             is being borrowed here and is unchanged.)
 
              PICTURED HERE: a profile of the user's own, which is why `Colour` is
              live and the page's foot verb is `Delete profile`. On a BUILT-IN the
@@ -3803,6 +4600,10 @@
         <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-profile-rows">
           <svg class="tri"><use href="#i-tri"/></svg>
           <div class="text"><div class="title">Advanced</div></div>
+          <!-- Drawn by variant C only (see `.adv-head .adv-chev`). It is in the
+               markup under all three so that choosing a variant is deleting CSS
+               and not editing every disclosure in the dialog. -->
+          <svg class="adv-chev"><use href="#i-chev"/></svg>
         </div>
         <div class="adv-rows" id="adv-profile-rows">
 
@@ -3929,481 +4730,6 @@
              with anything on it to press; its form — one word, right-aligned on
              a row of its own, never hidden — is struck at `.toast-act` above. -->
         <div class="sc-foot"><button class="btn">Delete profile</button></div>
-        </div>
-        </section>
-
-        <section class="settings-page" data-page="appearance">
-        <div class="group-label">Appearance</div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Theme</div>
-            <div class="desc">Light, dark, or follow your system setting</div>
-          </div>
-          <div class="combo" data-combo="theme">
-            <button aria-haspopup="listbox"><span class="value">System</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="light" role="option"><span class="tick">✓</span>Light</div>
-              <div class="combo-item" data-v="dark" role="option"><span class="tick">✓</span>Dark</div>
-              <div class="combo-item selected" data-v="system" role="option"><span class="tick">✓</span>System</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- COLOUR SCHEMES (§7.1.6c-4a, 2026-08-17).
-
-             Two rows directly under Theme, because the three are one decision
-             read in sequence: Theme says WHICH canvas, and these two say what
-             that canvas looks like. A scheme never overrules the mode — a window
-             on Dark stays dark whatever is chosen here — which is exactly why
-             there are two rows and not one: the half you are not currently
-             looking at has to be settable too, or switching the theme means
-             coming back here.
-
-             A scheme is twenty-one colours: the ANSI sixteen, plus background,
-             foreground, cursor, selection and accent. The window's own ~139
-             chrome colours are DERIVED from those, never stored — which is the
-             difference between a colour scheme and a skin. Nobody has to name a
-             divider, and no scheme can produce a window whose tab strip
-             disagrees with its terminal. The proof is a test: deriving from
-             Folio Dark reproduces the struck dark palette byte for byte, and
-             the same for light.
-
-             The file format is Windows Terminal's scheme JSON unchanged, so a
-             scheme copied off windowsterminalthemes.dev pastes in as it stands;
-             Folio adds one optional key, `accent`, defaulting to the scheme's
-             `blue`. Ten travel inside the executable and every *.json in
-             %APPDATA%\Folio\schemes joins them at startup, through the very same
-             parser. A file that will not parse is skipped and says which file
-             and why, once, in an error toast — never a crash, and never silence.
-
-             EACH ROW LISTS ONLY THE SCHEMES WHOSE CANVAS IS ITS OWN, and that is
-             correctness rather than tidiness: the chrome picks its palette from
-             the luma of the background actually painted, so a dark scheme in the
-             Light row would paint a dark canvas and then be dressed in the other
-             row's chrome. Filtering makes that state unreachable.
-
-             The folder is named once, on the dark row, because the pair is read
-             together and a path printed twice reads as two paths — and it is
-             named in a sentence short enough to fit the row, because a
-             description that ellipsises away the path names nothing. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Light scheme</div>
-            <div class="desc">The colours a Light window is drawn in, terminal and chrome alike</div>
-          </div>
-          <div class="combo" data-combo="lightscheme">
-            <button aria-haspopup="listbox"><span class="value">Folio Light</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="folio-light" role="option"><span class="tick">✓</span>Folio Light</div>
-              <div class="combo-item" data-v="gruvbox-light" role="option"><span class="tick">✓</span>Gruvbox Light</div>
-              <div class="combo-item" data-v="one-half-light" role="option"><span class="tick">✓</span>One Half Light</div>
-              <div class="combo-item" data-v="solarized-light" role="option"><span class="tick">✓</span>Solarized Light</div>
-            </div>
-          </div>
-        </div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Dark scheme</div>
-            <div class="desc">The same for a Dark window. Files: %APPDATA%\Folio\schemes</div>
-          </div>
-          <div class="combo" data-combo="darkscheme">
-            <button aria-haspopup="listbox"><span class="value">Folio Dark</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="folio-dark" role="option"><span class="tick">✓</span>Folio Dark</div>
-              <div class="combo-item" data-v="dracula" role="option"><span class="tick">✓</span>Dracula</div>
-              <div class="combo-item" data-v="gruvbox-dark" role="option"><span class="tick">✓</span>Gruvbox Dark</div>
-              <div class="combo-item" data-v="nord" role="option"><span class="tick">✓</span>Nord</div>
-              <div class="combo-item" data-v="one-half-dark" role="option"><span class="tick">✓</span>One Half Dark</div>
-              <div class="combo-item" data-v="solarized-dark" role="option"><span class="tick">✓</span>Solarized Dark</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- THE GRID'S FACE, AND NOT THE WINDOW'S (§7.1.6c-3b).
-
-             Two rows and not one, next to each other, because they are one
-             decision made in two halves — and a reader who has changed either
-             is about to look for the other. Both are hot: the DPI path already
-             exists to re-measure a grid and tell every shell its new column
-             count, and a font change is that same event arriving through
-             another door.
-
-             The description names what the row does NOT move, because "font" on
-             a terminal's settings page reads as "all the text". The window's own
-             labels keep their face, and that is a stated left-out rather than an
-             oversight: `chrome_cap_height_ratio` is resolved once because a
-             chrome face cannot change, and the font loader deliberately never
-             enumerates `Fonts/` at startup. Both would have to move first.
-
-             The family list is every monospaced family DirectWrite reports
-             (`IDWriteFont1::IsMonospacedFont`), alphabetical without regard to
-             case, with the default always among them — a combo whose selected
-             row is missing from its own list draws as a blank. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Terminal font</div>
-            <div class="desc">The face the grid is drawn in; the window's own labels keep theirs</div>
-          </div>
-          <div class="combo" data-combo="termfont">
-            <button aria-haspopup="listbox"><span class="value">Consolas</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="cascadia" role="option"><span class="tick">✓</span>Cascadia Mono</div>
-              <div class="combo-item selected" data-v="consolas" role="option"><span class="tick">✓</span>Consolas</div>
-              <div class="combo-item" data-v="lucida" role="option"><span class="tick">✓</span>Lucida Console</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- A list and not a spinner, which is every other picker's ruling here:
-             a control that accepts any number owes the user a validator, a clamp
-             and an answer to what happens at 4 and at 400. One-pixel steps
-             through the range anybody reads at, then two-pixel steps above it —
-             at 20 logical pixels a single pixel is a 5% change nobody picking
-             from a list is trying to express. 16 is the default and the size
-             every frame before this row existed was drawn at. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Font size</div>
-            <div class="desc">How large grid text is drawn, before the display's scaling</div>
-          </div>
-          <div class="combo" data-combo="fontsize">
-            <button aria-haspopup="listbox"><span class="value">16</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="12" role="option"><span class="tick">✓</span>12</div>
-              <div class="combo-item" data-v="14" role="option"><span class="tick">✓</span>14</div>
-              <div class="combo-item selected" data-v="16" role="option"><span class="tick">✓</span>16</div>
-              <div class="combo-item" data-v="18" role="option"><span class="tick">✓</span>18</div>
-              <div class="combo-item" data-v="20" role="option"><span class="tick">✓</span>20</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- THE CARET'S OWN SHAPE, under the two rows that say what the grid is
-             written in, because a reader who has just changed the face is
-             looking at the same text the caret sits in. Three answers and no
-             fourth: a caret is one of three shapes on every terminal anybody has
-             used, and a width in pixels would be a number nobody can picture. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Cursor</div>
-            <div class="desc">Focused cursor shape</div>
-          </div>
-          <div class="combo" data-combo="cursor">
-            <button aria-haspopup="listbox"><span class="value">Bar</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="bar" role="option"><span class="tick">✓</span>Bar</div>
-              <div class="combo-item" data-v="block" role="option"><span class="tick">✓</span>Block</div>
-              <div class="combo-item" data-v="underline" role="option"><span class="tick">✓</span>Underline</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="text">
-            <div class="title">Tab layout</div>
-            <div class="desc">Choose where tabs appear in the window</div>
-          </div>
-          <div class="combo" data-combo="layout">
-            <button aria-haspopup="listbox"><span class="value">Horizontal</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="horizontal" role="option"><span class="tick">✓</span>Horizontal</div>
-              <div class="combo-item" data-v="vertical" role="option"><span class="tick">✓</span>Vertical</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- SIDEBAR TOUCHES TAB LAYOUT AGAIN (user ruling 2026-08-18),
-             reversing the 2026-08-17 filing of it under Advanced. The argument
-             for the move was that the CONDITION carries the dependency once the
-             group does the hiding — the row is not there at all while the tabs
-             run across the top. In use it does not carry it: a row that appears
-             only under a vertical rail, two headings below the row that turns
-             the rail on and behind a collapsed disclosure, is a row nobody
-             meets. The disclosure had hidden the answer to the question the row
-             above it had just raised. Adjacency again, condition unchanged. -->
-        <div class="row" id="row-railmode">
-          <div class="text">
-            <div class="title">Sidebar</div>
-            <div class="desc">How the vertical tab sidebar rests</div>
-          </div>
-          <div class="combo" data-combo="railmode">
-            <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
-            <!-- user ruling 2026-08-10: "Icons, expand on hover" → "Icons".
-                 The sentence form named the hover behaviour in the one place a
-                 label has no room for it, and it was the only option string in
-                 the whole dialog wide enough to overrun its own popup. The
-                 hover-to-expand behaviour is unchanged — it is simply not
-                 spelled out in the picker any more. -->
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
-              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="text">
-            <div class="title">Waiting badge</div>
-            <div class="desc">A pill in the title bar counts sessions waiting for your input. Off hides the pill; Ctrl+Shift+A still jumps to the longest-waiting one</div>
-          </div>
-          <div class="combo" data-combo="attnchip">
-            <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
-              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- ── THE ORDER CHANGED HERE, AND SO DID WHAT CARRIES THE DEPENDENCY
-             (user ruling 2026-08-17, §7.1.6c-5).
-
-             What stood here was a flat list in the order the rows had been
-             built in: Theme, the two schemes, then the six ground rows, Tab
-             layout, and only then the two font rows — a page most people open
-             to change exactly those two, with six questions about a background
-             picture standing in front of them. The rows above are now the order
-             of a DECISION rather than of a history: what the window is made of
-             (theme, then the palette for each of its two canvases), what the
-             grid is written in (face, then size), what the caret looks like, and
-             where the tabs go.
-
-             `Waiting badge` keeps its place at the end of that run because it
-             is not one of the rows the ruling named: nothing is advanced unless
-             it was named, and a row swept in by resemblance is a row nobody
-             ruled on.
-
-             SIDEBAR IS NOT IN THIS GROUP. It was, for one day (2026-08-17),
-             on the ground that the CONDITION carries the dependency once the
-             group does the hiding. The 2026-08-18 ruling put it back above,
-             directly under the row it depends on; the note beside it there
-             records why. -->
-        <div class="adv" id="adv-appearance">
-        <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-appearance-rows">
-          <svg class="tri"><use href="#i-tri"/></svg>
-          <div class="text"><div class="title">Advanced</div></div>
-        </div>
-        <div class="adv-rows" id="adv-appearance-rows">
-        <!-- ── THE WINDOW'S GROUND: A PICTURE, AND HOW MUCH OF IT (§7.1.6c-4b) ──
-
-             Four rows for the ground and two for the window, in the order a
-             person actually decides them: is there a picture, how does it meet
-             a window that is not its shape, how much of it comes through, how
-             much of the DESKTOP comes through, is that blurred, and does the
-             window stay in front.
-
-             ONE PICTURE PER WINDOW, BEHIND EVERY PANE. A split is two views of
-             one place, not two places, so a picture drawn per pane would cut
-             itself in half at every divider and jump every time you dragged
-             one. It is painted once, over the whole window, under everything —
-             which is also why it costs one quad and one texture no matter how
-             many panes are open.
-
-             FIT IS THREE ANSWERS AND NOT A NUMBER: Stretch takes the window's
-             shape, Fill keeps the picture's and crops what will not fit, Tile
-             repeats it at its own size from the top-left. They are the three
-             things anybody means by "make it fit", and each is a different
-             sentence about what may be lost — aspect, edges, or nothing.
-
-             THE TWO PERCENTAGES ARE NOT THE SAME KNOB. Image opacity mixes the
-             picture with the scheme's background colour; background opacity
-             decides how much of that finished ground is there at all. Turning
-             the first down leaves an opaque window with a faint picture in it;
-             turning the second down lets the desktop through. A single knob
-             could not say both.
-
-             TEXT NEVER FADES. The ground is the clear and the panes' own
-             fills; every glyph, menu, dialog and float on top of it is opaque
-             at any setting, because a terminal you cannot read is not a
-             terminal. This is why the floor is 30% and not 0: below it the
-             ground stops being a surface and becomes a hole.
-
-             ACRYLIC IS THE SYSTEM'S BLUR, not ours (`DWMWA_SYSTEMBACKDROP_TYPE`
-             = `DWMSBT_TRANSIENTWINDOW`), and it has nothing to blur while the
-             ground is opaque — the description says so as a fact, not as a
-             warning. Where Windows does not know the attribute the row is
-             greyed whole and its sentence becomes the reason. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Background image</div>
-            <div class="desc">Drawn once behind the window, beneath every pane</div>
-          </div>
-          <div class="combo" data-combo="bgimage">
-            <button aria-haspopup="listbox"><span class="value">None</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="none" role="option"><span class="tick">✓</span>None</div>
-              <div class="combo-item" data-v="choose" role="option"><span class="tick">✓</span>Choose…</div>
-            </div>
-          </div>
-        </div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Image fit</div>
-            <div class="desc">How the picture meets a window that is not its shape</div>
-          </div>
-          <div class="combo" data-combo="bgfit">
-            <button aria-haspopup="listbox"><span class="value">Fill</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="stretch" role="option"><span class="tick">✓</span>Stretch</div>
-              <div class="combo-item selected" data-v="fill" role="option"><span class="tick">✓</span>Fill</div>
-              <div class="combo-item" data-v="tile" role="option"><span class="tick">✓</span>Tile</div>
-            </div>
-          </div>
-        </div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Image opacity</div>
-            <div class="desc">How much of the picture reaches the window</div>
-          </div>
-          <div class="slider" tabindex="0" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
-            <div class="track"><div class="fill" style="right:0"></div><div class="thumb" style="left:100%"></div></div>
-            <div class="num">100%</div>
-          </div>
-        </div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Background opacity</div>
-            <div class="desc">Panes and the window ground; text and menus stay opaque</div>
-          </div>
-          <div class="slider" tabindex="0" role="slider" aria-valuemin="30" aria-valuemax="100" aria-valuenow="100">
-            <div class="track"><div class="fill" style="right:0"></div><div class="thumb" style="left:100%"></div></div>
-            <div class="num">100%</div>
-          </div>
-        </div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Acrylic</div>
-            <div class="desc">A Windows blur behind the ground. Visible only below full opacity</div>
-          </div>
-          <div class="combo" data-combo="acrylic">
-            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
-              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
-            </div>
-          </div>
-        </div>
-        <div class="row">
-          <div class="text">
-            <div class="title">Always on top</div>
-            <div class="desc">The window stays above other windows</div>
-          </div>
-          <div class="combo" data-combo="ontop">
-            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
-              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- THE ROW THAT PROVED A PICKER IS AS WIDE AS ITS WORDS (§7.1.6c-5).
-             `Auto` says what it does in a parenthesis, against the ruling that a
-             picker item is a name and not a sentence about it — the two are not
-             in conflict, because `Auto` alone names nothing: every other item
-             here names a direction, and the one that names a RULE has to say
-             which rule. That parenthesis is the string that came out of the
-             button as `Auto (long…`, and the reason `.combo`'s width now comes
-             from the words. -->
-        <div class="row">
-          <div class="text">
-            <div class="title">Split direction</div>
-            <div class="desc">Where a split with no direction of its own puts the new pane</div>
-          </div>
-          <div class="combo" data-combo="splitdir">
-            <button aria-haspopup="listbox"><span class="value">Auto (longer edge)</span><span class="chev">▼</span></button>
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="auto" role="option"><span class="tick">✓</span>Auto (longer edge)</div>
-              <div class="combo-item" data-v="right" role="option"><span class="tick">✓</span>Right</div>
-              <div class="combo-item" data-v="down" role="option"><span class="tick">✓</span>Down</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- IT RESETS THIS PAGE'S ADVANCED ROWS ONLY, HOT, and says which page in
-             an Ok toast — `Appearance ▸ Advanced is back to its defaults`. Only
-             the group's rows, because the group is what the button closes: a
-             reader pressing the foot of a table is undoing the table, not the
-             seven rows above it that they may have spent the session getting
-             right. No confirmation, which is `Restore all defaults`' own ruling
-             for its own page: this dialog has no dirty gate to route a question
-             through, every choice in it is written the instant it is made, and
-             what this discards is exactly the rows the reader is looking at
-             while they press it. -->
-        <!-- CUSTOMISE SCHEME… (§7.1.6c-4c, user ruling 2026-08-17: route B).
-             There is no colour picker in this dialog and there is not going to
-             be one: §7.1.6c-4a made a scheme a Windows Terminal JSON object, so
-             an editor of our own would be a worse way to edit a format the
-             ecosystem already edits. What was missing was a *copy to edit*.
-             Pressing this takes the scheme the window is actually wearing,
-             writes it to `%APPDATA%\Folio\schemes\<Name> (custom).json`, ticks
-             it in the row for that canvas, shuts this dialog and opens the file
-             in a preview pane with the keyboard in it. The folder is watched
-             from then on, so Ctrl+S recolours the window — the editor is a
-             scheme editor because the colour under the pointer has a swatch and
-             the window itself is the preview.
-
-             It is in Advanced and the two scheme rows are not: choosing a scheme
-             is an everyday decision, and writing a file to edit by hand is the
-             one the disclosure exists for. `Reset to defaults` does not touch
-             it, and does not delete anything in that folder: the files are the
-             user's. -->
-        <!-- DELETE SCHEME (§7.1.6c-4d, user ruling 2026-08-18). `Customise
-             scheme…` could only ever make files: press it twice and the folder
-             holds two copies, the picker holds two more names, and the only way
-             back was Explorer. This is the way back.
-
-             IT SENDS THE FILE TO THE RECYCLE BIN, not to oblivion. A colour
-             scheme is a file somebody wrote by hand, often over an afternoon,
-             and a delete button in a settings dialog that destroys one is a
-             button nobody can afford to press. The card says where it went,
-             which is both the fact and the undo. The row then falls back to the
-             default scheme, hot.
-
-             IT IS DARK FOR A BUILT-IN SCHEME, and the line above the verbs says
-             why. A bundled scheme travels inside the executable and has no file
-             anywhere to move; so does the stored default. Greyed rather than
-             hidden, because the reason is what a reader came for — the same
-             ruling the Acrylic row lives under, and the reason lives in a muted
-             line for the same reason it does there.
-
-             THAT LINE IS ALWAYS THERE AND ALWAYS SAYS SOMETHING. The verb row
-             is 448px of button inside a 504px row; there is no room beside them
-             for a sentence. And a line that appeared only when the verb went
-             dark would make this group's height depend on which colour scheme
-             is in force. So it stands above them in both states: what the verb
-             will do, or why it cannot. -->
-        <div class="adv-foot-hint">Deleting sends this scheme's file to the Recycle Bin</div>
-        <div class="adv-foot">
-          <!-- IT READS `Edit scheme…` OVER A FILE THE READER ALREADY OWNS
-               (user report 2026-08-18). `Customise scheme…` copies and then
-               opens, which is right over a bundled scheme and wrong over a file
-               that is already theirs: pressing it expecting to edit produced
-               `(custom 2)`, which is where a folder full of copies comes from.
-               One verb with two words rather than two buttons — the intent is
-               the same either way, and only the first step differs — and one
-               box, because a foot whose buttons moved when a scheme was chosen
-               would be a row of verbs that shifts under the pointer. -->
-          <button class="btn adv-customise">Customise scheme…</button>
-          <!-- IT OPENS A MENU OF THE READER'S OWN SCHEME FILES (user report
-               2026-08-18), and deletes nothing by itself. It used to act on the
-               scheme IN FORCE: a reader with two custom schemes whose Dark row
-               was sitting on a bundled `Solarized Dark` found it greyed under a
-               sentence about built-in schemes having no file, with both of
-               their own files a folder away and no way to reach them but to
-               select each one first. A select-then-delete dance nobody
-               discovers is a verb that does not work.
-
-               The menu is the pickers' own popup (no tick column: nothing in it
-               is a current value), it lists the folder's files under the names
-               the picker lists them by, both canvases together, and never
-               anything bundled — there is no file of a bundled scheme to send
-               anywhere. Greyed only when the folder is empty, which is now the
-               only honest reason for it to be. -->
-          <button class="btn adv-delete">Delete scheme…</button>
-          <button class="btn adv-reset">Reset to defaults</button>
-        </div>
-        </div>
         </div>
         </section>
 
@@ -5293,7 +5619,14 @@
   const PV_BUFFER_CAP = 8;
   const mkPreviewState = (path, name) => {
     const ftype = previewFtype(name);
-    return { path, name, ftype, dirty: false, mdSource: false,
+    /* `virtual` is what a buffer READ OFF THE DISK is not: a git diff produced by
+       a review, and anything else this pane learns to show that has no file
+       behind its name. Every buffer this prototype makes comes from the files
+       tree, so it is false in all of them — it is declared rather than inferred
+       because the rename affordance asks the buffer and not the path, and a
+       field that only exists on the buffers that lack it would be a question
+       with two spellings. */
+    return { path, name, ftype, dirty: false, mdSource: false, virtual: false,
              content: (ftype === "text" || ftype === "markdown" || ftype === "table") ? mockFileContent(name, ftype) : null };
   };
   const poolOf = (w) => w.pvPool || (w.pvPool = []);
@@ -7210,7 +7543,7 @@
        a chevron + count say "there are others here", the dropdown lists them */
     const nameBits = `
               <svg class="files-ico"><use href="#i-file"/></svg>
-              <span class="pv-name ${many ? "switch" : ""} ${menuOpen ? "pvopen" : ""}" data-leaf="${leaf.id}" title="${pv.path}${many ? " — click to switch files" : ""}">${esc(pv.name)}${many ? `<svg class="rootchev"><use href="#i-chev"/></svg><span class="pv-count ${othersDirty ? "dirty" : ""}">${pool.length}</span>` : ""}</span>`;
+              <span class="pv-name ${many ? "switch" : ""} ${menuOpen ? "pvopen" : ""}" data-leaf="${leaf.id}" title="${pv.path}${many ? " — click to switch files" : ""}${pv.virtual ? "" : " — double-click to rename"}">${esc(pv.name)}${many ? `<svg class="rootchev"><use href="#i-chev"/></svg><span class="pv-count ${othersDirty ? "dirty" : ""}">${pool.length}</span>` : ""}</span>`;
     return `<div class="preview-head panehead" data-leaf="${leaf.id}">
               ${nameBits}
               <span class="pv-dirty ${pv.dirty ? "on" : ""}" title="Unsaved changes">●</span>
@@ -9969,6 +10302,14 @@
       <span class="tick">✓</span><span class="ticon">${p.icon}</span>${p.title}
     </div>`).join("");
 
+  /* AN ITEM'S OWN WORDS. Everything between the tick column and whatever trails
+     the row — the name, and only the name. Written once because three things
+     now want it: the button's label, the toasts the marks raise, and the scheme
+     `+ Add your own scheme…` copies. Reading `lastChild` would have worked until
+     the day a row grew a trailing run, which is this day. */
+  const itemWords = (item) => [...(item?.childNodes || [])]
+    .filter(n => n.nodeType === 3).map(n => n.textContent).join("").trim();
+
   document.querySelectorAll(".combo").forEach(combo => {
     const btn = combo.querySelector("button");
     btn.addEventListener("click", (e) => {
@@ -10015,6 +10356,53 @@
           if (!item.classList.contains("dead")) pfMenuAct(item);
           return;
         }
+        /* A MARK IS A VERB ABOUT THE ROW, NOT THE ROW'S ANSWER (2026-08-19).
+           Checked before anything else, because the pencil and the × live INSIDE
+           the item and their clicks arrive here: pressing one must not also pick
+           the scheme it names. Opening a file to read it is not choosing it, and
+           recycling one is certainly not. */
+        const mark = e.target.closest(".ci-act");
+        if (mark) {
+          const name = itemWords(item);
+          combo.classList.remove("open");
+          if (mark.classList.contains("ci-edit")) {
+            /* the native build shuts this dialog and opens the file in a preview
+               pane with the keyboard in it; the folder is watched, so Ctrl+S
+               recolours the window while the dialog is gone */
+            notifyToast(`Opened ${name}.json`);
+          } else {
+            /* the card says where it went, which is both the fact and the undo;
+               the fallback (§7.1.6c-4d) is unchanged and only fires when the
+               scheme recycled was the one in force */
+            const inForce = item.classList.contains("selected");
+            item.remove();
+            notifyToast(`${name} went to the Recycle Bin`);
+            if (inForce) {
+              const home = combo.querySelector(".combo-item:not(.act)");
+              home?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            }
+            lockSettingsHeight();
+          }
+          return;
+        }
+        /* AN ACTION IS NOT A VALUE (2026-08-19). `+ Add your own scheme…` and
+           `Install fonts…` close their lists behind a hairline, and the one thing
+           they must not do is what every item above them does — take the tick and
+           become the button's label. They act and leave the row's answer exactly
+           as they found it. */
+        if (item.classList.contains("act")) {
+          combo.classList.remove("open");
+          const act = item.dataset.act;
+          if (act === "addscheme") {
+            /* it copies THE SCHEME IN FORCE, which is the item the reader can see
+               ticked two rows above the verb — which is why the verb no longer
+               has to name it */
+            const from = itemWords(combo.querySelector(".combo-item.selected"));
+            notifyToast(`Copied ${from} → ${from} (custom).json`);
+          }
+          if (act === "installfonts") notifyToast("Opened Windows font settings");
+          return;
+        }
         combo.querySelectorAll(".combo-item").forEach(x => x.classList.remove("selected"));
         item.classList.add("selected");
         combo.querySelector(".value").textContent = item.dataset.v[0].toUpperCase() + item.dataset.v.slice(1);
@@ -10036,6 +10424,15 @@
           const shown = item.cloneNode(true);
           shown.querySelector(".tick")?.remove();
           combo.querySelector(".value").innerHTML = shown.innerHTML.trim();
+        }
+        /* THE SCHEME AND FONT PICKERS PRINT THE ITEM'S OWN WORDS, for
+           `splitdir`'s reason: `folio-dark` capitalised is `Folio-dark`, which
+           is not the name of anything, and `Kanagawa (custom)` has a bracket in
+           it that no data value could ever carry. The WORDS and not the
+           innerHTML, because a custom scheme's row also holds two marks and a
+           picker's face is not the place to draw them. */
+        if (kind === "darkscheme" || kind === "lightscheme" || kind === "termfont") {
+          combo.querySelector(".value").textContent = itemWords(item);
         }
         if (kind === "layout") { state.layoutMode = item.dataset.v; render(); }
         if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
@@ -10112,7 +10509,17 @@
     head.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); turn(); }
     });
-    group.querySelector(".adv-reset").addEventListener("click", (e) => {
+    /* `?.` AND NOT AN ASSUMPTION (bug found 2026-08-19, present since slice 5).
+       Two `.adv` groups are wired by this walk and only one of them has a foot:
+       the Profiles page's Advanced group was ruled to carry NO `Reset to
+       defaults` (its own comment says so), so `querySelector` came back null,
+       the line threw, and — because this is a top-level script — EVERY
+       registration after it was skipped. That is why the tab strip's
+       `setRailOpen` was reported uninitialised and why the boot restore prompt
+       never appeared: one missing button was taking the second half of the
+       prototype's wiring down with it. The group's own ruling is what is
+       optional here, so the optional call is what states it. */
+    group.querySelector(".adv-reset")?.addEventListener("click", (e) => {
       e.stopPropagation();
       shipped.forEach(([combo, v]) => combo
         .querySelector(`.combo-item[data-v="${v}"]`)
@@ -10211,6 +10618,24 @@
       const liveBtn = $("termhost").querySelector(`.files-root[data-leaf="${rootBtn.dataset.leaf}"]`) || rootBtn;
       if (leaf) openRootMenu(leaf, liveBtn);
       return;
+    }
+    /* THE SECOND CLICK OF A PAIR ON THE NAME OPENS THE EDITOR (2026-08-19).
+       Read off `e.detail` and NOT off a `dblclick` listener, which is this
+       file's own hard-won lesson said a fourth time: a re-render between the two
+       clicks detaches the node they landed on and Chrome then fires no `dblclick`
+       at all (the tab strip, the files tree, the pane header). `detail` is
+       counted by the browser against the pointer and survives whatever the DOM
+       does underneath it — and the first click of the pair, on a pane holding
+       several files, has just opened the switcher, which is why the editor
+       closes it on the way in. */
+    if (e.detail >= 2) {
+      const nm = e.target.closest(".pv-name");
+      if (nm) {
+        e.stopPropagation();
+        closePvMenu();
+        startPreviewRename(+nm.dataset.leaf);
+        return;
+      }
     }
     /* the filename switcher: list this pane's live buffers, dirty dots and all */
     const sw = e.target.closest(".pv-name.switch");
@@ -10328,6 +10753,72 @@
       ta.blur();
     }
   });
+  /* ── rename the file the preview head names (user ruling 2026-08-19) ──
+     The whole contract lives in the CSS beside `.pv-rename`; what is here is the
+     three things the JS owns.
+
+     THE STEM IS SELECTED AND THE SUFFIX IS NOT — `lastIndexOf(".")`, and only
+     when it is not the first character, because `.gitignore` is a name and not
+     an empty stem with a suffix.
+
+     THE BOX IS SIZED TO THE NAME (`size`), never to the header: a field that
+     filled the head would push the dirty dot and the tools to the far edge and
+     drag them back on commit. Two characters of slack so the first keystroke
+     past the current length does not start scrolling the box.
+
+     A REFUSAL IS THE SAME LINE AS A NO-OP — `render()` and nothing else. Empty,
+     unchanged, or holding one of the nine characters Windows reserves: the name
+     comes back exactly as it was and no card is raised, because the reader is
+     looking straight at the answer. The native build adds the two refusals a
+     browser cannot have (a name already taken in that folder, a handle the
+     filesystem will not release) to the same silent branch. */
+  function startPreviewRename(leafId) {
+    const leaf = findLeafIn(activeTab(), leafId);
+    if (!leaf || !isPreviewLeaf(leaf)) return;
+    const pv = leaf.preview;
+    if (!pv || pv.virtual) return;      /* nothing on disk to rename */
+    const host = $("termhost").querySelector(`.preview-head[data-leaf="${leafId}"] .pv-name`);
+    if (!host) return;
+
+    const input = document.createElement("input");
+    input.className = "rename pv-rename";
+    input.value = pv.name;
+    input.size = pv.name.length + 2;
+    input.spellcheck = false;
+    input.setAttribute("aria-label", `Rename ${pv.name}`);
+    host.replaceWith(input);
+    input.focus();
+    const dot = pv.name.lastIndexOf(".");
+    input.setSelectionRange(0, dot > 0 ? dot : pv.name.length);
+
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim();
+      if (commit && v && v !== pv.name && !/[\\/:*?"<>|]/.test(v)) {
+        const cut = Math.max(pv.path.lastIndexOf("\\"), pv.path.lastIndexOf("/"));
+        pv.path = pv.path.slice(0, cut + 1) + v;
+        pv.name = v;
+        /* the suffix is what the body is drawn from, so a rename that changes it
+           changes the view — renaming `notes.md` to `notes.txt` really does turn
+           a rendered document into a text editor, which is the filesystem's
+           answer and not ours to soften */
+        pv.ftype = previewFtype(v);
+      }
+      render();
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();             /* the terminal is not listening while you type a name */
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+    input.addEventListener("pointerdown", (e) => e.stopPropagation());
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("dblclick", (e) => e.stopPropagation());
+  }
+
   function savePreview(leafId) {
     const leaf = findLeafIn(activeTab(), leafId);
     if (!leaf || !isPreviewLeaf(leaf) || !leaf.preview.dirty) return;
@@ -11515,6 +12006,16 @@
     document.addEventListener("pointerup", up);
     document.addEventListener("pointercancel", up);
   });
+
+  /* ── the Advanced-header variant, for as long as there are three ──
+     `?adv=a|b|c` sets `<body data-adv>` at load; everything else about the three
+     is CSS (see `.adv-head .adv-chev` and the block above it). Nothing in the
+     product will ship this line: the day one variant is chosen, the two losing
+     blocks and this reader go together and `data-adv` stops existing. */
+  {
+    const pick = new URLSearchParams(location.search).get("adv");
+    if (["a", "b", "c"].includes(pick)) document.body.dataset.adv = pick;
+  }
 
   applyTheme();
   render();
