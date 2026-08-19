@@ -4300,6 +4300,26 @@ struct App {
     /// file keeps meaning the last thing it meant — because a migration would be
     /// this slice inventing the per-window policy slice D exists to decide.
     session_window: WindowId,
+    /// **What the application changed under its windows, and who has paid for
+    /// it already** (multiwindow slice C).
+    ///
+    /// Three of the things a settings row can move are not settings of a window
+    /// at all — they are process state that every window draws out of. The grid's
+    /// face and size live on the shared `FontSystem`, and
+    /// `GpuContext::set_terminal_font` says in its own doc that the caller must
+    /// follow it with `WindowRenderer::apply_font_change` **for every window on
+    /// the device**; the palette and the schemes live in `bt-render`'s `THEME`;
+    /// the language lives in `i18n`. The verb that moves any of them runs in one
+    /// window and repaints that one, which was the whole story while there was
+    /// one window and is now two thirds of it.
+    ///
+    /// So the change is written down here and the loop hands it to the windows
+    /// that have not had it — [`Runtime::adopt_application_change`] is the same
+    /// payment the originating window already made, made again, rather than a
+    /// second list of what a change costs. `paid_by` is the window that made it;
+    /// a change merged from a second window before the first was drained leaves
+    /// nobody exempt, because at that point no single window has had both.
+    pending_application_change: Option<ApplicationChange>,
     /// A window this application has been asked to open and has not opened yet.
     ///
     /// Opening one needs the `ActiveEventLoop`, which only the handler callbacks
@@ -5291,6 +5311,42 @@ struct WindowRuntime {
 /// It is built by [`FolioApp::runtime`] and nowhere else, so "which window" is
 /// answered once, at the event loop's own door, by the `WindowId` the event
 /// arrived with.
+/// **A change to the application that its windows have still to re-derive.**
+///
+/// Two flags rather than one, because the two cost different things: a face
+/// change re-measures every cell and re-sizes every shell, and a palette change
+/// repaints. A window that owes only the second must not pay the first — a
+/// redundant PTY resize is the one thing this codebase spends real care not to
+/// send. See [`App::pending_application_change`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ApplicationChange {
+    /// The grid's face or its size moved on the shared `FontSystem`.
+    font: bool,
+    /// The palette, one of the two schemes, or the language moved in a process
+    /// static.
+    look: bool,
+    /// The window whose verb made the change and which has therefore already
+    /// re-derived it — or `None` when two windows changed things between drains
+    /// and no one window has had both.
+    paid_by: Option<WindowId>,
+}
+
+impl ApplicationChange {
+    /// This change, and whatever was already owed.
+    fn merged_with(self, previous: Option<Self>) -> Self {
+        match previous {
+            None => self,
+            Some(previous) => Self {
+                font: self.font || previous.font,
+                look: self.look || previous.look,
+                paid_by: (previous.paid_by == self.paid_by)
+                    .then_some(self.paid_by)
+                    .flatten(),
+            },
+        }
+    }
+}
+
 struct Runtime<'a> {
     app: &'a mut App,
     window: &'a mut WindowRuntime,
@@ -5311,6 +5367,23 @@ mod layer_shape_tests {
     /// This file, read as text — the only witness that can answer "what is *not*
     /// in that struct".
     const SOURCE: &str = include_str!("main.rs");
+
+    /// **The declarations of a top-level struct, with its prose taken out.**
+    ///
+    /// Prose, because these pins read the body as text and a doc comment is text
+    /// too: `App`'s own doc names `WindowRenderer` in the sentence explaining why
+    /// a device is shared and a surface is not, and a pin that searched the whole
+    /// body would read that as a surface on the application (multiwindow slice
+    /// C — it did, the first time this ran). What the pins are about is what the
+    /// struct *holds*, so what they are given is its field lines and nothing
+    /// else.
+    fn struct_fields(name: &str) -> String {
+        struct_body(name)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     /// The body of a top-level `struct <name> { … }`, which is delimited by the
     /// one `}` in column zero that follows it.
@@ -5347,8 +5420,12 @@ struct {name} {{
     /// Red gate: move any one of these fields back and the test names it.
     #[test]
     fn the_window_layer_owns_nothing_the_application_owns() {
-        let body = struct_body("WindowRuntime");
+        let body = struct_fields("WindowRuntime");
         for owned_by_the_app in [
+            // The device layer, which slice C moved up: one `wgpu::Device`, one
+            // atlas and — the saving that is not on the GPU at all — one
+            // `FontSystem` for every window in the process (§2.2).
+            "GpuContext",
             "persist::SessionStore",
             "persist::SettingsStore",
             "persist::KeybindingsStore",
@@ -5371,6 +5448,51 @@ struct {name} {{
         }
     }
 
+    /// PIN (multiwindow slice C) — **the two layers of the renderer sit one
+    /// layer apart, and on the right sides.**
+    ///
+    /// §2.2 split `Renderer` into a device layer and a window layer on the day
+    /// it became possible to say "a second window is a second surface, not a
+    /// second renderer"; this is the slice that could finally put each half
+    /// where that sentence says it goes. The pair is stated positively here
+    /// because the two negative pins above cannot say it: they can only catch a
+    /// `WindowRenderer` reaching `App`, not a `GpuContext` quietly moving back
+    /// down onto the window and taking the font database with it.
+    ///
+    /// Red gate: give a window its own `GpuContext` and every window opens a
+    /// second device, re-reads thirteen font files and bakes a second atlas.
+    #[test]
+    fn the_device_is_the_applications_and_the_surface_is_the_windows() {
+        assert!(
+            struct_fields("App").contains("gpu: GpuContext,"),
+            "one device, one atlas, one font database, for the whole process"
+        );
+        assert!(
+            struct_fields("WindowRuntime").contains("renderer: WindowRenderer,"),
+            "a surface and the caches keyed by its pixel sizes are one window's"
+        );
+    }
+
+    /// PIN (multiwindow slice C) — **`session.json` is one window's picture, and
+    /// the file says which window.**
+    ///
+    /// The file's schema holds one window until slice D gives it a `windows[]`,
+    /// so the honest rule is that the window the process opened with owns it and
+    /// every later window's session dies with that window. That rule needs the
+    /// identity to be the *application's* — a window that stored "am I the
+    /// mirror?" on itself would be two windows both entitled to answer yes.
+    #[test]
+    fn the_window_the_session_file_mirrors_is_the_applications_own_fact() {
+        assert!(
+            struct_fields("App").contains("session_window: WindowId,"),
+            "which window the file is a picture of is a fact about the file"
+        );
+        assert!(
+            !struct_fields("WindowRuntime").contains("session_window"),
+            "a window that decided for itself would be two windows deciding"
+        );
+    }
+
     /// PIN (multiwindow slice B) — **and the application layer holds nothing a
     /// second window would legitimately hold a second of.**
     ///
@@ -5379,9 +5501,13 @@ struct {name} {{
     /// the moment a second window opened.
     #[test]
     fn the_application_layer_owns_nothing_one_window_owns() {
-        let body = struct_body("App");
+        let body = struct_fields("App");
         for owned_by_a_window in [
-            "Renderer",
+            // The window layer of the renderer, and pointedly not the device
+            // layer beside it: `GpuContext` on `App` is the whole of slice C's
+            // renderer move, and a `WindowRenderer` there would be the first
+            // window's surface owning every later window's.
+            "WindowRenderer",
             "Arc<Window>",
             "bt_platform::Compositor",
             "bt_platform::CustomWindowFrame",
@@ -16440,6 +16566,7 @@ impl Runtime<'_> {
             // and it is the only window that ever will be — see
             // `App::session_window`.
             session_window: window.id(),
+            pending_application_change: None,
             pending_new_window: false,
         };
         let mut window = new_window_runtime(NewWindowParts {
@@ -16514,7 +16641,8 @@ impl Runtime<'_> {
                 background_visible.as_millis()
             );
         }
-        drop(runtime);
+        // The facade's two borrows end here, at their last use: what a launch
+        // hands back is the layers themselves.
         Ok((app, window))
     }
 
@@ -16687,7 +16815,6 @@ impl Runtime<'_> {
         // Not maximized: a window nobody has told to be. The first window's
         // answer comes out of the session file, and this window is not in it.
         runtime.show_new_window(false)?;
-        drop(runtime);
         Ok((id, window))
     }
 
@@ -23540,6 +23667,13 @@ impl Runtime<'_> {
         if !i18n::install(resolved_language(self.app.settings_store.loaded().language)) {
             return Ok(());
         }
+        // `i18n::install` is a process-wide switch, so every other window is now
+        // drawing yesterday's words until it re-derives its chrome.
+        self.note_application_change(ApplicationChange {
+            font: false,
+            look: true,
+            paid_by: Some(self.window.window.id()),
+        });
         self.sync_math_layout_key();
         self.refresh_chrome();
         self.publish_frame(FrameTrigger {
@@ -23559,6 +23693,15 @@ impl Runtime<'_> {
     /// still wearing the old ones, which reads as a redraw bug rather than as a
     /// step nobody ran.
     fn adopt_new_palette(&mut self) -> Result<()> {
+        // Every other window draws out of the same `THEME`, so every other window
+        // owes itself this call (multiwindow slice C). Recorded rather than
+        // performed here: the sibling windows are not reachable from a `Runtime`,
+        // which is one window by construction.
+        self.note_application_change(ApplicationChange {
+            font: false,
+            look: true,
+            paid_by: Some(self.window.window.id()),
+        });
         // The window's own colours moved, so what the window has told DWM about
         // them may have gone stale — and DWM's acrylic plate and border are
         // drawn from that statement, not from anything in this process's frame.
@@ -24873,6 +25016,28 @@ impl Runtime<'_> {
         if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
+        // **Every window on this device, not only this one** (multiwindow slice
+        // C). `set_terminal_font` moved the font database and the size on the
+        // `GpuContext` — one database serves every window, which is exactly why
+        // its own doc requires `apply_font_change` per window: a sibling that is
+        // never told goes on composing rows in the face it no longer has.
+        self.note_application_change(ApplicationChange {
+            font: true,
+            look: false,
+            paid_by: Some(self.window.window.id()),
+        });
+        self.adopt_terminal_font()?;
+        Ok(true)
+    }
+
+    /// **What one window owes a face change** — the six steps
+    /// [`Self::apply_terminal_font`] describes, for this window.
+    ///
+    /// Its own verb because it is owed twice: once by the window whose settings
+    /// page was pressed, and once by every other window this application has
+    /// open, which never touched a row and is drawing out of the same font
+    /// database.
+    fn adopt_terminal_font(&mut self) -> Result<()> {
         let metrics = apply_stored_terminal_font(
             &mut self.app.gpu,
             &mut self.window.renderer,
@@ -24904,8 +25069,29 @@ impl Runtime<'_> {
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
-        })?;
-        Ok(true)
+        })
+    }
+
+    /// Record that the application moved under its windows. See
+    /// [`App::pending_application_change`].
+    fn note_application_change(&mut self, change: ApplicationChange) {
+        self.app.pending_application_change =
+            Some(change.merged_with(self.app.pending_application_change));
+    }
+
+    /// **Re-derive whatever the application changed** (multiwindow slice C).
+    ///
+    /// Called on the windows that were not the one the verb ran in. Each half is
+    /// the same call that window made for itself, which is what keeps this from
+    /// being a second, drifting answer to "what does a face change cost".
+    fn adopt_application_change(&mut self, change: ApplicationChange) -> Result<()> {
+        if change.font {
+            self.adopt_terminal_font()?;
+        }
+        if change.look {
+            self.adopt_new_palette()?;
+        }
+        Ok(())
     }
 
     /// What the Terminal page's PSReadLine row is describing.
@@ -25365,6 +25551,15 @@ impl Runtime<'_> {
             // different one is the strip's `+` menu, which is where the choice
             // is visible.
             shortcuts::Action::NewTab => self.new_tab(),
+            // **A debt recorded, not a window opened** (multiwindow slice C).
+            // Opening one needs the `ActiveEventLoop`, which lives for the
+            // duration of a handler callback and has never been reachable from
+            // here; the loop spends this at its own door, exactly as it spends
+            // the dirty gate's request to shut. See [`App::pending_new_window`].
+            shortcuts::Action::NewWindow => {
+                self.app.pending_new_window = true;
+                Ok(())
+            }
             // I103's chain lives inside `close_pane`: the last pane of a tab
             // closes the tab, and the last tab hands off to the window's own
             // shut flow rather than leaving an empty window behind.
@@ -47690,6 +47885,237 @@ impl App {
     }
 }
 
+/// **Every open window, in the order they opened** (multiwindow slice C).
+///
+/// A type and not two fields on [`FolioApp`], for one reason that is worth a
+/// type: the map and the order have to agree, and three verbs write both. A
+/// window removed from the map and left in the order is a window every sweep
+/// looks up and does not find — silently, because a lookup that misses is also
+/// what a legitimately late event does. Here the two are written together or
+/// not at all.
+///
+/// Generic over the key so that the rules below can be *tested*. `WindowId` is
+/// winit's and a test cannot make one, and the rules are not about winit: they
+/// are "removing one window leaves the others exactly as they were", "the order
+/// is the opening order", and "empty means the process is done". Those are
+/// pinned against an integer key in `window_registry_tests` and used against a
+/// `WindowId` here.
+struct Windows<K, W> {
+    open: HashMap<K, W>,
+    /// The keys in opening order.
+    ///
+    /// A `HashMap` has no order, and three of the things the loop does to every
+    /// window in turn are observable in the order they happen: shells are
+    /// drained, frames are published, and a `BT_PERF_TRACE` is read by a person
+    /// comparing two runs. So the order is written down rather than borrowed
+    /// from a hasher, and being the opening order it also answers the one
+    /// question the application's own clocks ask — see [`Runtime::turn`].
+    order: Vec<K>,
+}
+
+impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
+    fn new() -> Self {
+        Self {
+            open: HashMap::new(),
+            order: Vec::new(),
+        }
+    }
+
+    /// Take a newly opened window in. It goes to the back of the order, which is
+    /// what makes the order the opening order.
+    fn insert(&mut self, key: K, window: W) {
+        if self.open.insert(key, window).is_none() {
+            self.order.push(key);
+        }
+    }
+
+    /// Let one go, leaving every other window exactly as it was.
+    fn remove(&mut self, key: K) -> Option<W> {
+        let window = self.open.remove(&key)?;
+        self.order.retain(|open| *open != key);
+        Some(window)
+    }
+
+    fn get_mut(&mut self, key: K) -> Option<&mut W> {
+        self.open.get_mut(&key)
+    }
+
+    fn contains(&self, key: K) -> bool {
+        self.open.contains_key(&key)
+    }
+
+    /// The key of the window at `index` in the opening order.
+    fn key_at(&self, index: usize) -> Option<K> {
+        self.order.get(index).copied()
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.open.clear();
+        self.order.clear();
+    }
+}
+
+#[cfg(test)]
+mod window_registry_tests {
+    use super::Windows;
+
+    /// PIN (multiwindow slice C) — **closing one window leaves the others
+    /// exactly as they were.**
+    ///
+    /// The whole behavioural claim of the container change, said about the
+    /// container. Red gate: drop the `retain` in `remove` and the order below
+    /// still names a window that is gone; drop the `remove` and it is still
+    /// there to be found.
+    #[test]
+    fn closing_one_window_leaves_the_others_untouched() {
+        let mut windows = Windows::new();
+        windows.insert(1_u32, "A");
+        windows.insert(2, "B");
+        windows.insert(3, "C");
+
+        assert_eq!(windows.remove(2), Some("B"));
+
+        assert_eq!(windows.len(), 2);
+        assert!(!windows.contains(2));
+        assert_eq!(windows.get_mut(1).copied(), Some("A"));
+        assert_eq!(windows.get_mut(3).copied(), Some("C"));
+        assert_eq!(
+            (0..windows.len())
+                .filter_map(|index| windows.key_at(index))
+                .collect::<Vec<_>>(),
+            vec![1, 3],
+            "the order holds the windows that are open and only those"
+        );
+    }
+
+    /// PIN (multiwindow slice C) — **the order is the opening order**, which is
+    /// the order every sweep runs in and the one the application's clocks are
+    /// turned by.
+    #[test]
+    fn the_order_is_the_order_they_opened_in() {
+        let mut windows = Windows::new();
+        for (key, name) in [(7_u32, "first"), (2, "second"), (9, "third")] {
+            windows.insert(key, name);
+        }
+        assert_eq!(windows.key_at(0), Some(7));
+        assert_eq!(windows.key_at(1), Some(2));
+        assert_eq!(windows.key_at(2), Some(9));
+        assert_eq!(windows.key_at(3), None);
+        // And a window that opens after one has closed goes to the back, not
+        // into the gap: the first window is still the first.
+        windows.remove(2);
+        windows.insert(4, "fourth");
+        assert_eq!(windows.key_at(0), Some(7));
+        assert_eq!(windows.key_at(2), Some(4));
+    }
+
+    /// PIN (multiwindow slice C) — **empty means the last window has gone**,
+    /// which is the process exiting.
+    ///
+    /// The registry cannot exit a process, and that is the point of pinning the
+    /// predicate: `FolioApp::close` spends `App::finish` and `event_loop.exit()`
+    /// on exactly this becoming true, so it has to become true exactly when the
+    /// last window closes and not one window early.
+    #[test]
+    fn a_registry_is_empty_only_once_the_last_window_has_closed() {
+        let mut windows = Windows::new();
+        windows.insert(1_u32, ());
+        windows.insert(2, ());
+        windows.remove(1);
+        assert!(
+            !windows.is_empty(),
+            "one window left is not no windows left"
+        );
+        windows.remove(2);
+        assert!(windows.is_empty());
+    }
+
+    /// A key that is not open answers nothing rather than panicking: an event
+    /// posted for a window can arrive after that window has been removed, and
+    /// that is the platform behaving, not a defect.
+    #[test]
+    fn a_window_that_has_closed_answers_nothing() {
+        let mut windows: Windows<u32, ()> = Windows::new();
+        windows.insert(1, ());
+        windows.remove(1);
+        assert_eq!(windows.remove(1), None);
+        assert!(windows.get_mut(1).is_none());
+        assert!(!windows.contains(1));
+    }
+}
+
+#[cfg(test)]
+mod application_change_tests {
+    use super::ApplicationChange;
+    use winit::window::WindowId;
+
+    const A: fn() -> WindowId = || WindowId::from(1_u64);
+    const B: fn() -> WindowId = || WindowId::from(2_u64);
+
+    fn font(paid_by: WindowId) -> ApplicationChange {
+        ApplicationChange {
+            font: true,
+            look: false,
+            paid_by: Some(paid_by),
+        }
+    }
+
+    fn look(paid_by: WindowId) -> ApplicationChange {
+        ApplicationChange {
+            font: false,
+            look: true,
+            paid_by: Some(paid_by),
+        }
+    }
+
+    /// PIN (multiwindow slice C) — **a window pays only for what actually
+    /// changed.**
+    ///
+    /// The reason the record is two flags and not one bit: adopting a face
+    /// change re-measures every cell and resizes every shell, and sending a
+    /// redundant PTY resize is the one thing this program spends real care not
+    /// to do. Red gate: fold the two into a single "something changed" and a
+    /// scheme edit starts resizing shells in every other window.
+    #[test]
+    fn a_palette_change_does_not_ask_a_window_to_re_measure_its_cells() {
+        let merged = look(A()).merged_with(None);
+        assert!(!merged.font, "nothing touched the font database");
+        assert!(merged.look);
+    }
+
+    /// PIN — **two changes before a drain cost both, not the later one.**
+    #[test]
+    fn changes_accumulate_until_they_are_handed_out() {
+        let merged = look(A()).merged_with(Some(font(A())));
+        assert!(merged.font && merged.look);
+        assert_eq!(
+            merged.paid_by,
+            Some(A()),
+            "one window made both, so one window has had both"
+        );
+    }
+
+    /// PIN — **when two different windows changed things, nobody is exempt.**
+    ///
+    /// `paid_by` means "has already re-derived all of this". Window A has had
+    /// the font and window B has had the look; neither has had both, so the
+    /// answer that is true of every window is `None` and both adopt.
+    #[test]
+    fn a_change_made_in_two_windows_leaves_neither_of_them_exempt() {
+        let merged = look(B()).merged_with(Some(font(A())));
+        assert!(merged.font && merged.look);
+        assert_eq!(merged.paid_by, None);
+    }
+}
+
 /// **The process, and every window it has open** (multiwindow slice C).
 ///
 /// Slice B split what a `Runtime` knew into an application half and a window
@@ -47706,18 +48132,9 @@ struct FolioApp {
     /// `Option` because there is no `App` before `resumed`: everything in it is
     /// read off disk or spawned, and both need an event loop to have started.
     app: Option<App>,
-    /// Every open window, under the id its events arrive with.
-    windows: HashMap<WindowId, WindowRuntime>,
-    /// The same windows in the order they opened, which is the order every
-    /// sweep over them runs in.
-    ///
-    /// A `HashMap` has no order, and three of the things this loop does to every
-    /// window in turn are observable in the order they happen: shells are
-    /// drained, frames are published, and a `BT_PERF_TRACE` is read by a person
-    /// comparing two runs. So the order is written down rather than borrowed
-    /// from a hasher, and being the opening order it also answers the one
-    /// question the application's own clocks ask — see [`Runtime::turn`].
-    order: Vec<WindowId>,
+    /// Every open window, under the id its events arrive with, in the order
+    /// they opened.
+    windows: Windows<WindowId, WindowRuntime>,
     proxy: EventLoopProxy<AppEvent>,
     startup_started: Instant,
     /// What the process was started with, held until there is a window to honour
@@ -47730,8 +48147,7 @@ impl FolioApp {
     fn new(proxy: EventLoopProxy<AppEvent>, cli: cli::CliRequest) -> Self {
         Self {
             app: None,
-            windows: HashMap::new(),
-            order: Vec::new(),
+            windows: Windows::new(),
             proxy,
             startup_started: Instant::now(),
             cli,
@@ -47749,13 +48165,13 @@ impl FolioApp {
     /// window can arrive after that window has been removed.
     fn runtime(&mut self, id: WindowId) -> Option<Runtime<'_>> {
         let app = self.app.as_mut()?;
-        let window = self.windows.get_mut(&id)?;
+        let window = self.windows.get_mut(id)?;
         Some(Runtime { app, window })
     }
 
     /// The window at `index` in the opening order.
     fn runtime_at(&mut self, index: usize) -> Option<Runtime<'_>> {
-        let id = *self.order.get(index)?;
+        let id = self.windows.key_at(index)?;
         self.runtime(id)
     }
 
@@ -47769,7 +48185,7 @@ impl FolioApp {
         &mut self,
         mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
     ) -> Result<()> {
-        for index in 0..self.order.len() {
+        for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index) {
                 answer(&mut runtime)?;
             }
@@ -47789,8 +48205,7 @@ impl FolioApp {
             return Ok(());
         };
         let closed = runtime.close_window();
-        self.windows.remove(&id);
-        self.order.retain(|open| *open != id);
+        self.windows.remove(id);
         if self.windows.is_empty() {
             // The run's sentinel, dropped once — see `App::finish`. This is the
             // only place the process's own half of the shut is spent on the
@@ -47809,6 +48224,41 @@ impl FolioApp {
     /// Spent at the loop's door rather than where the chord was dispatched, for
     /// [`App::pending_new_window`]'s reason: opening needs the `ActiveEventLoop`
     /// and a `Runtime` has never held one.
+    /// Hand whatever the application changed to the windows that have not had
+    /// it, if anything changed.
+    ///
+    /// Drained at the same two doors the pending window is, and for the same
+    /// reason: a `Runtime` is one window by construction, so the only place that
+    /// can reach the others is the loop that holds them all.
+    fn settle_application_change(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let Some(change) = app.pending_application_change.take() else {
+            return Ok(());
+        };
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                break;
+            };
+            if change.paid_by == Some(id) {
+                continue;
+            }
+            if let Some(mut runtime) = self.runtime(id) {
+                runtime.adopt_application_change(change)?;
+            }
+        }
+        // Adopting can itself note a change — `adopt_new_palette` records one
+        // for the same reason it is being run here. Clearing after the sweep
+        // rather than before it is what stops that from being a loop that never
+        // settles: what those calls re-record is a change every window has now
+        // had.
+        if let Some(app) = self.app.as_mut() {
+            app.pending_application_change = None;
+        }
+        Ok(())
+    }
+
     fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
@@ -47818,7 +48268,6 @@ impl FolioApp {
         }
         let (id, window) = Runtime::open_window(event_loop, app)?;
         self.windows.insert(id, window);
-        self.order.push(id);
         Ok(())
     }
 
@@ -47831,7 +48280,6 @@ impl FolioApp {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
         self.windows.clear();
-        self.order.clear();
         if let Some(app) = self.app.as_mut() {
             app.finish();
         }
@@ -47854,7 +48302,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let id = window.window.id();
                 self.app = Some(app);
                 self.windows.insert(id, window);
-                self.order.push(id);
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
                 // to say it on — the store was opened before one existed. Anchored
@@ -47975,7 +48422,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // window the event happened to; before this, the loop compared it against
         // the only window there was and dropped anything else. Now it is a
         // lookup, and an id that is not open is a window that has already gone.
-        if !self.windows.contains_key(&window_id) {
+        if !self.windows.contains(window_id) {
             return;
         }
         let Some(mut runtime) = self.runtime(window_id) else {
@@ -48113,6 +48560,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         } else {
             result
         };
+        // Whatever this event changed about the *application*, handed to the
+        // windows that were not this one. Before the door below, because a window
+        // opened after a settings row was pressed reads that row's stored value
+        // when it is built and would then be handed the same change twice.
+        let result = result.and_then(|()| self.settle_application_change());
         // And the door the other way round: a window this window's keyboard asked
         // for. After the shut, because a chord cannot both close this window and
         // open another, and asking in this order means a failure to open never
@@ -48127,7 +48579,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if self.app.is_none() {
             return;
         }
-        if let Err(error) = self.open_pending_window(event_loop) {
+        if let Err(error) = self
+            .settle_application_change()
+            .and_then(|()| self.open_pending_window(event_loop))
+        {
             self.fail(event_loop, error);
             return;
         }
@@ -48137,7 +48592,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // second's would be a second window whose caret blinks only when the
         // first one's does.
         let mut wake_deadline = None;
-        for index in 0..self.order.len() {
+        for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {
                 continue;
             };
@@ -48167,7 +48622,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.windows.clear();
-        self.order.clear();
         if let Some(app) = self.app.as_mut() {
             app.finish();
         }

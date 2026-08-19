@@ -37,6 +37,11 @@ use crate::i18n::Text;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
     NewTab,
+    /// **A second window on this application** (multiwindow slice C).
+    ///
+    /// Its own row and not a mode of [`Self::NewTab`], because the two differ in
+    /// the one thing a shortcut row is about: what appears when you press it.
+    NewWindow,
     ClosePane,
     NextTab,
     PrevTab,
@@ -446,6 +451,38 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::RailNewTab,
         Action::NewTab,
         Chord::new(CTRL_SHIFT, character("n")),
+    ),
+    // **`Ctrl+Shift+M`, and it is a placeholder with its reasons written down**
+    // (multiwindow slice C, 2026-08-19).
+    //
+    // The chord this verb *wants* is `Ctrl+Shift+N`: Windows Terminal, WezTerm,
+    // Alacritty, kitty and VS Code all open a new window with it, and they can
+    // because they put `New tab` on `Ctrl+Shift+T`. This product cannot. The
+    // 2026-08-10 audit ruled `Ctrl+Shift+N` = new tab and `Ctrl+Shift+T` = undo
+    // close, and both were decided when one window was all there was. Re-pointing
+    // `Ctrl+Shift+N` would move a chord out from under a user's fingers to settle
+    // a question that user has not been asked, so **the ruling stands and this
+    // row takes a free key**. Which key it should really be is a decision for the
+    // person whose keyboard it is; the row exists so that the door does, and it
+    // is one `keybindings.json` line away from anything else.
+    //
+    // **Not `Ctrl+Shift+Enter`**, which was tried first and measured on the real
+    // window: it never arrives. A modified `Enter` does not reach this
+    // application as `NamedKey::Enter` at all — under both a Chinese IME and the
+    // US layout, `Ctrl+Shift+Enter` produced no dispatch while `Ctrl+Shift+N` on
+    // the same window opened a tab. So no row in this table may be keyed on a
+    // modified `Enter` until somebody has found out what Windows and winit
+    // between them are doing with it, and this comment is that finding.
+    //
+    // `M` wears the modifier pair every window verb in this table wears
+    // (discipline (1): bare `Ctrl+letter` belongs to the shell), and `^M` — which
+    // is what a bare `Ctrl+M` would take — stays with the terminal, where it is
+    // Return.
+    Binding::window(
+        "new-window",
+        Text::ShortcutNewWindow,
+        Action::NewWindow,
+        Chord::new(CTRL_SHIFT, character("m")),
     ),
     Binding::window(
         "close-pane",
@@ -1702,10 +1739,29 @@ mod tests {
             .union(ModifiersState::SHIFT),
     ];
 
+    /// PIN (multiwindow slice C) — **the door onto a second window, and the
+    /// chord that did not move to make room for it.**
+    ///
+    /// Both halves in one test because the second is the reason for the first:
+    /// every other terminal on this platform opens a window with
+    /// `Ctrl+Shift+N`, and this product cannot, because the 2026-08-10 audit
+    /// gave that chord to `New tab` and this slice is not the place to take it
+    /// back. Red gate: point `new-window` at `Ctrl+Shift+N` and the second
+    /// assertion names the row that was quietly rebound.
+    #[test]
+    fn a_second_window_has_a_chord_and_new_tab_keeps_its_own() {
+        assert_eq!(press(character("m"), CTRL_SHIFT), Some(Action::NewWindow));
+        assert_eq!(press(character("n"), CTRL_SHIFT), Some(Action::NewTab));
+        // And nothing was taken from the shell to do it: `^M` is Return and stays
+        // where Return is.
+        assert_eq!(press(character("m"), CTRL), None);
+    }
+
     /// Every row of the ruled table, asserted one binding at a time.
     #[test]
     fn every_ruled_binding_resolves_to_its_action() {
         assert_eq!(press(character("n"), CTRL_SHIFT), Some(Action::NewTab));
+        assert_eq!(press(character("m"), CTRL_SHIFT), Some(Action::NewWindow));
         assert_eq!(press(character("w"), CTRL_SHIFT), Some(Action::ClosePane));
         assert_eq!(
             press(Key::Named(NamedKey::Tab), CTRL),
@@ -2154,14 +2210,15 @@ mod tests {
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 19 single actions plus GotoTab(1..=9), plus the four picture-in-picture
+        // 20 single actions plus GotoTab(1..=9), plus the four picture-in-picture
         // summon slots (2026-08-17), of which only the first ships with a chord.
+        // The twentieth is `new-window` (multiwindow slice C, 2026-08-19).
         //
         // **No row names a verb twice** (user ruling 2026-08-18). `Ctrl+Shift+F`
         // used to ride here as a second chord for `OpenSearch`, and it was the
         // only place in the table where two rows meant one thing; it is retired,
         // and anybody who wants it records it onto a row of their own.
-        assert_eq!(BINDINGS.len(), 32);
+        assert_eq!(BINDINGS.len(), 33);
         assert_eq!(
             BINDINGS
                 .iter()
