@@ -261,6 +261,14 @@ let frame = bt_platform::CustomWindowFrame::install(hwnd)?;
 
 做完这一片，"第二个窗"就从 spike 变成了产品能力 —— 只是还没有 UI 能开出第二个窗。
 
+**状态：片 C 落地**（2026-08-19）——设计记于 `docs/DESIGN.md` §2.5。落地后与这份工单的三处出入，都是做的时候才看得见的：
+
+1. **门面从拥有两层改成借用两层**，而不是把 `window` 字段换成一张表。`Runtime<'a> { app: &'a mut App, window: &'a mut WindowRuntime }` 只在 `FolioApp::runtime(id)` 一处被造出来，于是"替哪扇窗"在事件循环门口回答一次，而 70000 行里的每一个 `self.window.x` / `self.app.y` 一个字都不必改——片 B 保住的那批签名，这一片继续一个没动。表本身收成了 `Windows<K, W>`（map + 开窗顺序），一个类型而不是两个字段，因为三个动词要同时写它们两个，写漏一个就是"查得到顺序、查不到窗"。键做成泛型是为了能测：`WindowId` 是 winit 的、测试造不出来，而"关一扇不动别的""顺序是开窗顺序""空了才算完"这三条规则跟 winit 无关。
+2. **`GpuContext` 也在这一片升进 `App`**，`Renderer` 那层薄门面随之删除。片 A1 写下"device 层是进程一份"的时候还没有 `App` 可放，只能让第一扇窗替所有窗拿着设备；这一片是那句话第一次能兑现。Q5 第 3 条（新窗必须走 `set_window_outer_rect`）同时兑现。
+3. **`session.json` 归进程开的那扇窗**，后开的窗从不写它。片 D 之前 schema 只装得下一扇窗，让每扇窗都写就是"开一扇草稿窗再关掉毁掉真会话"。详见 §2.5。
+
+另外量到一条给快捷键表的事实：**带修饰的 `Enter` 到不了这个应用**。`new-window` 第一版取 `Ctrl+Shift+Enter`，实机在中文 IME 与 US 布局下各试一次都完全没有派发，而同一扇窗上的 `Ctrl+Shift+N` 正常开 tab；改用 `Ctrl+Shift+M` 后立刻生效。在弄清 Windows 与 winit 对它做了什么之前，这张表里不许再有一行钉在带修饰的 `Enter` 上。
+
 **片 D —— 持久化**
 
 `schema_version` bump，`window` → `windows: []`，`TabV1` 加窗归属；`SessionStore` 收归 App 层一份（存储层的并发问题和 schema 是两件事，都要修）。恢复时按窗重建。

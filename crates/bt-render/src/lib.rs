@@ -1055,7 +1055,7 @@ pub struct PreviewImage {
     ///
     /// A displacement rather than an origin, and that is deliberate: at rest it is `[0.0, 0.0]` and
     /// the picture is centred exactly as it always was, so the resting geometry has one author and
-    /// not two. It also survives a pane FLIP for free — [`Renderer::place_preview_image`] moves the
+    /// not two. It also survives a pane FLIP for free — [`WindowRenderer::place_preview_image`] moves the
     /// seat under a picture that has already been laid out, and an offset from that seat's centre
     /// travels with it where an absolute corner would have stayed behind.
     pub pan_px: [f32; 2],
@@ -2294,7 +2294,7 @@ pub struct GpuContext {
     terminal_font_size_logical_px: f32,
     /// The device-layer half of [`RendererInitTimings`]. `surface_configure`
     /// is a window's cost and is stored on [`WindowRenderer`]; the field is left
-    /// zero here and filled in by [`Renderer::init_timings`].
+    /// zero here and filled in by [`WindowRenderer::init_timings`].
     init_timings: RendererInitTimings,
 }
 
@@ -2541,6 +2541,17 @@ pub struct WindowRenderer {
     /// `BT_PERF_TRACE`, which reports one window's frame.
     math_texture_refusals: u64,
     textureless_math_blocks: u64,
+    /// The device limit this window's swapchain is clamped by, copied from the
+    /// [`GpuContext`] that built it (multiwindow slice C).
+    ///
+    /// A window is built against exactly one device and cannot migrate to
+    /// another, so this is a property of the window as much as of the device —
+    /// and reading it here rather than through a borrow is what lets
+    /// [`Self::presentation_geometry`] be a question about this window alone.
+    /// Two windows on one device hold the same number by construction; there is
+    /// no moment at which they could disagree, because the only writer is the
+    /// constructor.
+    max_texture_dimension_2d: u32,
     metrics: CellMetrics,
     /// This window's share of [`RendererInitTimings`] — configuring its own
     /// swapchain, and measuring the cell against its own scale factor. The rest
@@ -2564,21 +2575,6 @@ pub struct WindowRenderer {
     preview_text_renderer: TextRenderer,
     trace_perf: bool,
     perf_frame: u64,
-}
-
-/// One process, one device, one window — the shape this product opens in.
-///
-/// A façade over the two layers, kept for the whole of slice A1 so that the
-/// app's several hundred `renderer.…` call sites do not have to learn the split
-/// in the same commit that introduces it. It owns exactly one of each and adds
-/// nothing: every method below is one line handing its own [`GpuContext`] to
-/// its own [`WindowRenderer`].
-///
-/// The second window arrives by constructing a second [`WindowRenderer`]
-/// against this one's [`GpuContext`], not by constructing a second `Renderer`.
-pub struct Renderer {
-    gpu: GpuContext,
-    window: WindowRenderer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3329,6 +3325,34 @@ impl HeadlessRenderProbe {
 }
 
 impl GpuContext {
+    /// Open the process's device layer and its first window in one call.
+    ///
+    /// The order is the one the hardware forces and not a preference: an
+    /// `Instance` makes the `Surface`, the `Surface` chooses the `Adapter`, the
+    /// `Adapter` names the format, and only then can an atlas and two pipelines
+    /// be baked for it. **Every later window skips the first three steps
+    /// entirely** — [`WindowRenderer::new`] against the context this returned —
+    /// which is the whole of what makes a second window a second surface rather
+    /// than a second renderer.
+    ///
+    /// The pair comes back unmarried: the device layer belongs to the process
+    /// and the window layer to one window, and a type that held both would be
+    /// the first window quietly owning every later one's device.
+    pub async fn open(
+        target: WindowTarget,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+    ) -> Result<(Self, WindowRenderer), RenderError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let kind = target.kind();
+        let surface = create_surface(&instance, target)?;
+        let mut gpu = Self::bootstrap_for_surface(instance, &surface).await?;
+        let window =
+            WindowRenderer::from_surface(&mut gpu, surface, kind, width, height, scale_factor)?;
+        Ok((gpu, window))
+    }
+
     /// Build the device layer against the surface that bootstraps it.
     ///
     /// The surface comes in by reference and stays the caller's, because two
@@ -3476,7 +3500,7 @@ impl GpuContext {
             init_timings: RendererInitTimings {
                 adapter: adapter_time,
                 device: device_time,
-                // A window's cost, filled in by `Renderer::init_timings`.
+                // A window's cost, filled in by `WindowRenderer::init_timings`.
                 surface_configure: Duration::ZERO,
                 font_system: font_system_time,
                 font_metrics: font_metrics_time,
@@ -3934,6 +3958,7 @@ impl WindowRenderer {
             overlay_text_renderers: Vec::new(),
             math_texture_refusals: 0,
             textureless_math_blocks: 0,
+            max_texture_dimension_2d: gpu.max_texture_dimension_2d,
             metrics,
             surface_configure_time,
             font_metrics_time,
@@ -4007,10 +4032,26 @@ impl WindowRenderer {
         self.alpha_report.as_ref()
     }
 
-    pub fn presentation_geometry(&self, gpu: &GpuContext) -> PresentationGeometry {
+    pub fn presentation_geometry(&self) -> PresentationGeometry {
         PresentationGeometry {
             swapchain_size: (self.config.width, self.config.height),
-            max_texture_dimension_2d: gpu.max_texture_dimension_2d,
+            max_texture_dimension_2d: self.max_texture_dimension_2d,
+        }
+    }
+
+    /// Startup phase timings, reassembled from the two layers.
+    ///
+    /// `adapter`, `device`, `font_system` and `render_resources` are charged
+    /// once per process; `surface_configure` is this window's; `font_metrics`
+    /// is both — the face's cap height is measured once and the cell is
+    /// measured per window, because the cell is a function of that window's
+    /// scale factor.
+    #[must_use]
+    pub fn init_timings(&self, gpu: &GpuContext) -> RendererInitTimings {
+        RendererInitTimings {
+            surface_configure: self.surface_configure_time,
+            font_metrics: gpu.init_timings.font_metrics + self.font_metrics_time,
+            ..gpu.init_timings
         }
     }
 
@@ -6932,273 +6973,6 @@ impl WindowRenderer {
     }
 }
 
-impl Renderer {
-    /// Open the process's device layer and its first window in one call.
-    ///
-    /// The order is the one the hardware forces and not a preference: an
-    /// `Instance` makes the `Surface`, the `Surface` chooses the `Adapter`, the
-    /// `Adapter` names the format, and only then can an atlas and two pipelines
-    /// be baked for it. A second window skips the first three steps entirely —
-    /// [`WindowRenderer::new`] against the [`GpuContext`] this built.
-    pub async fn new(
-        target: WindowTarget,
-        width: u32,
-        height: u32,
-        scale_factor: f64,
-    ) -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let kind = target.kind();
-        let surface = create_surface(&instance, target)?;
-        let mut gpu = GpuContext::bootstrap_for_surface(instance, &surface).await?;
-        let window =
-            WindowRenderer::from_surface(&mut gpu, surface, kind, width, height, scale_factor)?;
-        Ok(Self { gpu, window })
-    }
-
-    /// What the adapter offered this window's surface and what it was
-    /// configured with, for the startup trace.
-    #[must_use]
-    pub fn alpha_report(&self) -> Option<&SurfaceAlphaReport> {
-        self.window.alpha_report()
-    }
-
-    /// The two layers, borrowed apart.
-    ///
-    /// The door a second window comes through: hand the [`GpuContext`] to
-    /// [`WindowRenderer::new`] and the new window shares this one's device,
-    /// atlas and font system. It is also the shape of every method below —
-    /// this, with the pair handed straight to one call.
-    pub fn split(&mut self) -> (&mut GpuContext, &mut WindowRenderer) {
-        (&mut self.gpu, &mut self.window)
-    }
-
-    /// The device layer this window draws through.
-    #[must_use]
-    pub fn context(&self) -> &GpuContext {
-        &self.gpu
-    }
-
-    #[must_use]
-    pub fn metrics(&self) -> CellMetrics {
-        self.window.metrics()
-    }
-
-    /// Startup phase timings, reassembled from the two layers.
-    ///
-    /// `adapter`, `device`, `font_system` and `render_resources` are charged
-    /// once per process; `surface_configure` is this window's; `font_metrics`
-    /// is both — the face's cap height is measured once and the cell is
-    /// measured per window, because the cell is a function of that window's
-    /// scale factor.
-    #[must_use]
-    pub fn init_timings(&self) -> RendererInitTimings {
-        RendererInitTimings {
-            surface_configure: self.window.surface_configure_time,
-            font_metrics: self.gpu.init_timings.font_metrics + self.window.font_metrics_time,
-            ..self.gpu.init_timings
-        }
-    }
-
-    #[must_use]
-    pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
-        self.window.ime_cursor_area(frame)
-    }
-
-    #[must_use]
-    pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
-        self.window.math_hit_test(frame, x, y)
-    }
-
-    #[must_use]
-    pub fn presentation_geometry(&self) -> PresentationGeometry {
-        self.window.presentation_geometry(&self.gpu)
-    }
-
-    pub fn set_window_focused(&mut self, focused: bool) -> bool {
-        self.window.set_window_focused(focused)
-    }
-
-    pub fn set_cursor_blink_visible(&mut self, visible: bool) -> bool {
-        self.window.set_cursor_blink_visible(visible)
-    }
-
-    #[must_use]
-    pub fn peek_thumbnail_extent(
-        &self,
-        seat: SeatViewport,
-        image_width_px: u32,
-        image_height_px: u32,
-    ) -> Option<(u32, u32)> {
-        self.window
-            .peek_thumbnail_extent(seat, image_width_px, image_height_px)
-    }
-
-    pub fn set_peek_overlay(&mut self, overlay: Option<PeekImageOverlay>) -> bool {
-        self.window.set_peek_overlay(overlay)
-    }
-
-    pub fn set_preview_image(&mut self, image: Option<PreviewImage>) -> bool {
-        self.window.set_preview_image(image)
-    }
-
-    pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
-        self.window.set_preview_bodies(bodies)
-    }
-
-    pub fn set_table_blocks(&mut self, blocks: HashMap<String, TableBlockPaint>) -> bool {
-        self.window.set_table_blocks(blocks)
-    }
-
-    pub fn measure_preview_paragraph(
-        &mut self,
-        runs: &[PreviewRun],
-        width_px: f32,
-        font_size_px: f32,
-        line_height_px: f32,
-    ) -> f32 {
-        self.window.measure_preview_paragraph(
-            &mut self.gpu,
-            runs,
-            width_px,
-            font_size_px,
-            line_height_px,
-        )
-    }
-
-    pub fn measure_preview_paragraph_width(
-        &mut self,
-        runs: &[PreviewRun],
-        font_size_px: f32,
-        line_height_px: f32,
-    ) -> f32 {
-        self.window.measure_preview_paragraph_width(
-            &mut self.gpu,
-            runs,
-            font_size_px,
-            line_height_px,
-        )
-    }
-
-    pub fn measure_preview_run_boxes(
-        &mut self,
-        paragraph: &PreviewParagraph,
-    ) -> Vec<PreviewRunBox> {
-        self.window
-            .measure_preview_run_boxes(&mut self.gpu, paragraph)
-    }
-
-    pub fn preview_mono_advance(&mut self, font_size_px: f32) -> f32 {
-        self.window
-            .preview_mono_advance(&mut self.gpu, font_size_px)
-    }
-
-    pub fn place_preview_image(&mut self, seat: SeatViewport, clip: SeatViewport) -> bool {
-        self.window.place_preview_image(seat, clip)
-    }
-
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
-        self.window.resize(&self.gpu, width, height)
-    }
-
-    #[must_use]
-    pub fn seat_viewport(&self) -> SeatViewport {
-        self.window.seat_viewport()
-    }
-
-    pub fn set_seat_viewport(&mut self, seat: SeatViewport) -> bool {
-        self.window.set_seat_viewport(seat)
-    }
-
-    pub fn set_chrome(
-        &mut self,
-        quads: Vec<ChromeQuad>,
-        labels: Vec<ChromeLabel>,
-        icons: Vec<ChromeIcon>,
-    ) -> bool {
-        self.window.set_chrome(quads, labels, icons)
-    }
-
-    pub fn set_modal_overlay(&mut self, layers: Vec<OverlayLayer>) -> bool {
-        self.window.set_modal_overlay(layers)
-    }
-
-    pub fn measure_chrome_text(&mut self, text: &str, font_size_px: f32) -> f32 {
-        self.window
-            .measure_chrome_text(&mut self.gpu, text, font_size_px)
-    }
-
-    pub fn measure_chrome_label(
-        &mut self,
-        text: &str,
-        font_size_px: f32,
-        weight: ChromeLabelWeight,
-        letter_spacing_em: f32,
-        tabular_numerals: bool,
-    ) -> f32 {
-        self.window.measure_chrome_label(
-            &mut self.gpu,
-            text,
-            font_size_px,
-            weight,
-            letter_spacing_em,
-            tabular_numerals,
-        )
-    }
-
-    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
-        self.window.update_scale_factor(&mut self.gpu, scale_factor)
-    }
-
-    /// Move the grid's face and re-measure this window, as one call.
-    ///
-    /// One call because the two halves cannot be usefully separated from
-    /// outside: a device whose database has moved and a window that has not
-    /// re-measured is a window drawing rows composed in a face it is no longer
-    /// asking for, and there is no moment in between that a caller would want.
-    /// (A second window on the same device is the exception the singular has
-    /// not met yet — when it exists, it wants
-    /// [`GpuContext::set_terminal_font`] once and
-    /// [`WindowRenderer::apply_font_change`] per window.)
-    ///
-    /// The window's own labels are not affected. `docs/DESIGN.md` §7.1.6c-3b.
-    pub fn apply_terminal_font(
-        &mut self,
-        family: &str,
-        files: &[std::path::PathBuf],
-        size_logical_px: f32,
-    ) -> Result<CellMetrics, RenderError> {
-        self.gpu.set_terminal_font(family, files, size_logical_px);
-        self.window.apply_font_change(&mut self.gpu)
-    }
-
-    /// How many times this window's grid has been re-measured — see
-    /// [`WindowRenderer::font_revision`].
-    #[must_use]
-    pub fn font_revision(&self) -> u64 {
-        self.window.font_revision()
-    }
-
-    pub fn present(
-        &mut self,
-        frame: &ViewportFrame,
-        trigger: FrameTrigger,
-    ) -> Result<PresentOutcome, RenderError> {
-        self.window.present(&mut self.gpu, frame, trigger)
-    }
-
-    /// Prepare and render one window's frame, as one call.
-    ///
-    /// See [`WindowRenderer::present_frame`] for the invariant that makes it one
-    /// call and not two.
-    pub fn present_seats(
-        &mut self,
-        seats: &[SeatFrame<'_>],
-        trigger: FrameTrigger,
-    ) -> Result<PresentOutcome, RenderError> {
-        self.window.present_frame(&mut self.gpu, seats, trigger)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn prepare_text_rows(
     frame: &ViewportFrame,
@@ -7320,8 +7094,8 @@ fn prepare_text_rows(
 
 /// A chrome rectangle in whole-surface pixels.
 ///
-/// Deliberately a free function rather than a `Renderer` method: the seat-local
-/// [`Renderer::pixel_rect`] and this one differ in exactly which rectangle they
+/// Deliberately a free function rather than a `WindowRenderer` method: the seat-local
+/// [`WindowRenderer::pixel_rect`] and this one differ in exactly which rectangle they
 /// call "the world", and having them side by side as one method with a flag is
 /// how the two would eventually be confused for each other.
 /// Crop a rectangle to a clip, or `None` when nothing of it survives.
@@ -7666,7 +7440,7 @@ fn set_preview_runs(
 /// A free function because two callers need the *same* answer and for the same
 /// reason the hit test and the paint of every other surface share their
 /// geometry: [`shape_preview_body`] draws from it and
-/// [`Renderer::measure_preview_run_boxes`] reports boxes against it, and a
+/// [`WindowRenderer::measure_preview_run_boxes`] reports boxes against it, and a
 /// centred caption whose runs were measured from its left edge would hand back
 /// boxes half a paragraph away from its own glyphs.
 fn preview_paragraph_left(paragraph: &PreviewParagraph, buffer: &Buffer) -> f32 {
@@ -7994,7 +7768,7 @@ fn prepare_status_text_atlas(
 
 /// Validate the complete render frame before exposing exact presentation rows to text shaping.
 ///
-/// This is the shared slice boundary used by `Renderer::prepare_text_rows` and deterministic
+/// This is the shared slice boundary used by `WindowRenderer::prepare_text_rows` and deterministic
 /// resize replay tests. `chunks_exact` is only constructed after the presentation-rectangle proof;
 /// phase-A drawing consumes its frame-owned drawable prefix and leaves the overscan suffix intact.
 pub fn text_row_cells(
@@ -12576,7 +12350,7 @@ mod tests {
     }
 
     /// The seat rectangle a surface change leaves behind, pinned as the exact
-    /// expression `Renderer::resize` applies to `self.seat`.
+    /// expression `WindowRenderer::resize` applies to `self.seat`.
     ///
     /// A solved split must survive: substituting the whole surface here is a
     /// lone leaf's answer given to a tree that is not one, and it silently

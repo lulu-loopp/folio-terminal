@@ -1219,6 +1219,18 @@ pub enum Text {
     /// cannot infer: the number is spent once for every terminal on screen,
     /// and a window with four of them is holding four of these.
     DescScrollback,
+    // ── multiwindow slice C ───────────────────────────────────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule.
+    /// The Shortcuts row that opens a second window.
+    ///
+    /// **Its own words and not [`Self::RailNewTab`]'s**, which is the opposite
+    /// of the ruling one screen up about `New tab` and `Settings`: those two are
+    /// the same verb the rail and the gear already name, and this is a different
+    /// verb that happens to start with the same word. A row reading `New tab`
+    /// for a chord that opens a window would be the page lying about what the
+    /// key does.
+    ShortcutNewWindow,
 }
 
 impl Text {
@@ -2173,6 +2185,10 @@ impl Text {
                 "Each pane keeps this many lines; the oldest go first",
                 "每个窗格保留这么多行,最旧的先走",
             ),
+            // 「窗口」and not 「窗」: the settings page already says 「窗口」in
+            // `CloseWindow`, and one product does not have two words for the
+            // thing every one of its chords is scoped to.
+            Self::ShortcutNewWindow => pick(lang, "New window", "新建窗口"),
         }
     }
 
@@ -2188,7 +2204,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 399] = [
+    pub const ALL: [Self; 400] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2588,6 +2604,7 @@ impl Text {
         Self::DragRootTreeHere,
         Self::RowScrollback,
         Self::DescScrollback,
+        Self::ShortcutNewWindow,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

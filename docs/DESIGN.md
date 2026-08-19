@@ -169,7 +169,7 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 - **`App`（进程一份，38 个字段）**：四个磁盘文件的 store（`session_store` / `settings_store` / `keybindings_store` / `profiles_store`）与它们各自欠下的那句话（`keybindings_fault` / `profiles_fault`）、`recent`（pin / Recent / 撤销关闭三扇门读的同一个库）、`shortcuts`（这一版的默认表叠上用户的 `keybindings.json`，**一张表**而不是每窗一张）、`profile_programs`（一次文件系统探测）、`theme_mode`、四条 worker 线路（math / files / preview / git，各带 running 与 notice 两个位）、两个 watcher（`git_watch` / `scheme_watch`）与配色的两笔账（`scheme_fault` / `scheme_source`）、PSReadLine 的两个磁盘事实（`psreadline_documents` / `psreadline_installed`）、命令行留下的两笔（`cli_refusals` / `cli_preview`）、读一次就不会变的系统事实（`motion`、`acrylic_available`）、五个 trace 开关与 `startup_started`、`event_proxy`。
 - **`WindowRuntime`（每窗一份，157 个字段）**：surface 与句柄（`renderer`、`window`、`compositor`、`custom_window_frame`，以及 `MathContextMenu` / `FolderPicker` / `ImagePicker` / `ImeSystemCaret` 四座 Win32 桥）、`tabs` / `active_tab` / `next_tab_id`、输入现场（modifier、指针、四个滚轮余量、preedit）、悬停、手势、窗级 UI（float / rail / 各菜单 / 设置 / 搜索 / toast / tooltip / 重命名）、几何（`seat_viewport` / `work_area` / `size_policy` / `lawful_client_size` / `window_min_inner_size`），以及所有按像素字号或按 seat 做 key 的缓存和"上一帧画了什么"的账。
-- **`Runtime` 保留为门面**（`{ app: App, window: WindowRuntime }`），所以本片**没有改动任何一个方法签名**：全文件的方法照旧 `impl Runtime`，动的只是所有权。片 C 才是把 `window` 换成 `HashMap<WindowId, WindowRuntime>`、并让方法学会自己是替哪扇窗做事的那一片。一句 `const _: fn(Runtime) = |Runtime { app: _, window: _ }| ();` 钉住"门面只有两层"——不带 `..` 的穷尽解构，加第三个字段就编译不过，而那正是"这属于哪一层"还有人回答得出的最后一刻。
+- **`Runtime` 保留为门面**，所以片 B **没有改动任何一个方法签名**：全文件的方法照旧 `impl Runtime`，动的只是所有权。片 C 把门面从**拥有**两层改成**借用**两层（`Runtime<'a> { app: &'a mut App, window: &'a mut WindowRuntime }`），于是同一批签名一个字没动，而 `self` 的意思变了——见 §2.5。一句 `const _: fn(Runtime<'_>) = |Runtime { app: _, window: _ }| ();` 钉住"门面只有两层"——不带 `..` 的穷尽解构，加第三个字段就编译不过，而那正是"这属于哪一层"还有人回答得出的最后一刻。
 
 **三条判定规则，各自带判例：**
 
@@ -180,6 +180,32 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 **一处 deref 陷阱值得写下来，因为它不报错。** `Runtime: Deref<Target = TabState>`，而 `TabState: Deref<Target = LeafSession>`。一个字段从 `Runtime` 挪走之后，若这条链下游存在同名字段，`self.x` **不会编译失败**，而是**悄悄换成另一个东西**。全表比对下来只有一处：`last_presented_frame` 既是 `WindowRuntime` 的（窗级镜像）又是 `LeafSession` 的（那一格自己的），两个 `impl Runtime` 块里的 13 处因此是手改的，不是编译器指出来的。**任何后续切分都要先做这张同名表**，否则这一类改动的失败模式是"编译通过、测试通过、画面偶尔是另一格的"。
 
 本片不改任何用户可见行为：全套测试（含 vendor ref 45/45）绿，clippy `-D warnings` 与 `fmt --check` 干净，release 版逐画面复核与一次滚轮 `BT_PERF_TRACE` 与 main 无差别。
+
+### 2.5 一个进程，多扇窗：路由与生命周期（多窗块 片 C，2026-08-19，已落地）
+
+**`FolioApp` 持有一个 `App` 和一张 `Windows<WindowId, WindowRuntime>`，事件循环按 winit 事件自带的 `WindowId` 查表。** 片 A1 把渲染器分成 device 层与 window 层（§2.2），片 B 把状态分成 App 层与 Window 层（§2.4）；这一片是那两句话第一次同时为真的地方——`window_event` 不再拿 id 去跟"唯一那扇窗"比对然后丢弃不等的，而是查表，查不到就是那扇窗已经关了，这是平台有权发生的时序而不是缺陷。
+
+**门面从拥有变成借用，这是本片让所有签名不动的全部机制。** `Runtime` 现在是 `{ app: &'a mut App, window: &'a mut WindowRuntime }`——**这个应用，替它的某一扇窗做一件事**。它只在 `FolioApp::runtime(id)` 一处被造出来，所以"替哪扇窗"这个问题在事件循环的门口被回答一次，之后 70000 行里的每一个 `self.window.x` / `self.app.y` 都仍然是它本来的字面意思。两个 `&mut` 指向 `self` 的两个不相交字段，借用检查器因此照旧允许 `self.window.renderer.measure_chrome_text(&mut self.app.gpu, …)` 这种一手窗一手设备的写法。
+
+**渲染器的两层在这一片才真的分居两处。** §2.2 说 `GpuContext` 是进程一份、`WindowRenderer` 是每 surface 一份，但当时没有 `App` 可以放，只能让第一扇窗替所有窗拿着设备；本片把 `GpuContext` 升进 `App`、`WindowRenderer` 留在 `WindowRuntime`，`Renderer` 那层薄门面随之删除（它的 doc 自己写着"为片 A1 保留"）。共享 device、共享 atlas、共享 `FontSystem` 是 §2.2 的裁决，本片只是兑现它：新窗走 `WindowRenderer::new(&mut app.gpu, …)`，surface 由建了 device 的那个 instance 创建、格式问同一个 adapter，十三个字体文件一个进程只读一次。`WindowRenderer` 顺手记下 `max_texture_dimension_2d`——那是它建立时所在设备的极限，一扇窗不会迁移到别的设备上，于是 `presentation_geometry()` 重新变成一个只关于这扇窗的问题。
+
+**第二扇窗的门是 `Ctrl+Shift+M`，而且它是个明写理由的占位。** 这个动词想要的键是 `Ctrl+Shift+N`——Windows Terminal / WezTerm / Alacritty / kitty / VS Code 全都用它开新窗——但 2026-08-10 的快捷键审计把 `Ctrl+Shift+N` 判给了新建 tab、`Ctrl+Shift+T` 判给了撤销关闭，两条都是"当时只有一扇窗"时下的。为一个用户还没被问过的问题去搬走一个已经长在手指上的键，不是这一片该做的事，所以**裁决保留、本行取一个空键**，真正该用哪个键留给键盘的主人裁。**不是 `Ctrl+Shift+Enter`**：那是第一版的选择，实机量下来它根本不到达——中文 IME 与 US 布局下各试一次，`Ctrl+Shift+Enter` 完全没有派发，而同一扇窗上的 `Ctrl+Shift+N` 正常开出 tab。所以在弄清 Windows 与 winit 对带修饰的 `Enter` 到底做了什么之前，这张表里不许再有任何一行钉在带修饰的 `Enter` 上。
+
+**新窗的种子 = 默认 profile 的一个 tab**，与冷启动无会话可恢复时同一颗种子、与 `New tab` 同一颗种子：一句话说清"新"是什么意思，而不是三句。新窗**必须**走 `set_window_outer_rect` 重述几何（spike Q5 第 3 条），这是片 A1 只留了注的那一行终于有地方写——`WM_NCCALCSIZE` 之后 client 就是整个外框，不重述就每开一次大一圈；spike 自己的第二扇窗要 720x420 拿到 1466x911 就是证据。
+
+**关窗的语义写死成两句。** 关**非最后一扇** = 只关那扇：提交它的重命名、还回它借给 IME 的光标、关掉它自己的 shell，别的窗一个字节不动。关**最后一扇** = 进程退出，`App::finish` 落一次运行哨兵（§5.5 的干净退出信号），这是本产品一直以来的语义，只是从"循环里只可能有一扇窗"的假设变成了一句写下来的话。`shutdown()` 因此拆成窗级的 `Runtime::close_window` 与应用级的 `App::finish`。
+
+**`session.json` 是**某一扇**窗的照片，而且文件自己说是哪一扇。** 它的 schema 只装得下一扇窗（一个 `WindowStateV1`、一列 tabs、一个 active），给它 `windows[]` 是片 D 的事。在那之前只有两个不诚实的答案和一个诚实的：让每扇窗都写，等于最后动的那扇覆盖掉别人的 tabs——开一扇草稿窗再关掉就毁掉了用户真正的会话；让谁都不写，等于今天的每一次单窗启动都不再记得任何事。所以**文件归进程开的那扇窗**（`App::session_window`，只在开窗处写一次），后开的窗从不写它、关掉时也什么都不带走——**它的会话随它一起死**，这句话可以照实说给用户听，而"你的 tabs 被你刚关掉的那扇窗换掉了"不能。第一扇窗关掉后镜像**不迁移**：文件保持它最后的含义，迁移到哪去是片 D 要裁的 per-window 政策。
+
+**应用级的钟一转，窗级的钟每扇窗各转一次。** 四条 worker 与两个 watcher 是进程的（§2.4 规则 1），所以三个 watch 的 debounce 与 session 的 debounce **由开得最早的那扇窗代表整个进程转一次**（`Runtime::turn(now, application_clocks)`），否则一个文件夹会被读 N 遍、一个 debounce 会响 N 次。窗自己的三十几个钟——光标闪、tooltip、toast、rail、缩略滚动条、float、peek——每扇窗各读各的，事件循环取所有窗要求的最早那一刻作为 `ControlFlow::WaitUntil`。**一扇窗的钟不该由另一扇窗的事件来推**，这是"两窗互不扰"里最容易漏的一条。
+
+**进程级 static 改变了的东西，欠每一扇窗一次重新求解。** 三样：grid 的字体（`GpuContext::set_terminal_font` 动的是共享的 `FontSystem`，它的 doc 一直写着"调用方必须对设备上的每一扇窗跟一次 `apply_font_change`"）、配色与主题（`bt-render` 的 `THEME`）、语言（`i18n::install`）。改动作发生在某一扇窗里，那扇窗当场付清；`App::pending_application_change` 记下"改了什么、谁已经付过"，事件循环在同一轮里把同一笔账交给其余的窗——**是同一次付款再付一次，不是第二份"一次改动值多少钱"的清单**。两个位而不是一个：换字体要重量每一格并重设每个 shell 的列数，换配色只是重画，一扇窗只欠后者时绝不能让它去发一次多余的 PTY resize。
+
+**不做的三样，本片明确留给后面。** ① 撕 tab 出来成窗（片 F）；② per-window 持久化（片 D 的 `windows[]` schema 与按窗恢复）；③ 进程级 static 升进 `App`（片 E）——`profile_revision` 背后的表、`THEME` / `CURSOR_STYLE`、`WINDOW_CLASS_BACKGROUND` 与探针的 static 一律留在原地，本片只在它们改变时把账记下来发给每扇窗，没有搬动任何一个。
+
+**同名成员表（片 B 留下的铁律）。** 动手前先比对四层的字段名：`App`(43) × `WindowRuntime`(159) × `TabState`(44) × `LeafSession`(15)，六对里只有 `WindowRuntime` × `LeafSession` 的 `last_presented_frame` 一处同名，与片 B 记下的那一处完全相同——因为本片**没有把任何一个字段在两层之间搬动**（`App` 新增的三个 `gpu` / `session_window` / `pending_application_change` 都是新名字）。deref 链的静默遮蔽因此在本片没有新的接触面，但这张表仍然是下一片动手前的第一件事。
+
+**验收。** 全套测试绿（bt-app 1730，vendor ref 45/45），clippy `-D warnings` 与 `fmt --check` 干净。实机（隔离 `APPDATA` + `BT_PTY_DUMP`，release 版）：`Ctrl+Shift+M` 开出第二扇真窗；A 窗里 `echo AAA-WINDOW-A`、B 窗里 `echo BBB-WINDOW-B`，两窗同屏各自显示各自的行；只把 B 拉成 1200x900，B 自己重排而 A 的 1920x1200 与内容不动；关掉 B，进程仍活、A 完好；关掉 A，进程退出且 `session.lock` 被摘掉（干净退出走通），`session.json` 里是 A 的一个 tab 与 A 的几何——B 的 1200x900 没有覆盖它。
 
 ## 3. 内容模型
 
@@ -914,7 +940,7 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **挂点：`Runtime::advance_strip_animation` 的速率闸门之上。** `STRIP_ANIMATION_FRAME` 是**画面**的速率，它存在是为了一帧里不把弧线缓动两次；任务栏不是这个循环画的一张图，是这个程序对 shell 做的一句断言，而它最需要正确的那一帧恰恰是一次运行**结束**的那一帧——也正是没有任何东西会去调度的那一帧，因为一扇没有东西在动的窗根本不报 deadline（`strip_animation_deadline`）。放在闸门之下，空窗之前的最后一条读数可能是一根再也下不去的绿条。放在闸门之上，一次什么都没发生的循环的代价是一次对会话的折叠加一次比较。
 
-**多窗（片 C）。** `TaskbarMirror` 是 `WindowRuntime` 的字段而不是 `App` 的：按钮属于 HWND，第二扇窗要的是第二个，而不是这一个的一份共享（§2.4 判定规则 3）。`show` 收的是调用方的窗口句柄，所以片 C 把 `window` 换成 `HashMap<WindowId, WindowRuntime>` 之后，每扇窗照自己的会话镜像自己的按钮，这一片不用改。
+**多窗（片 C）。** `TaskbarMirror` 是 `WindowRuntime` 的字段而不是 `App` 的：按钮属于 HWND，第二扇窗要的是第二个，而不是这一个的一份共享（§2.4 判定规则 3）。`show` 收的是调用方的窗口句柄，所以片 C 把 `window` 换成按 `WindowId` 的表之后，每扇窗照自己的会话镜像自己的按钮——这一片确实一行没改（§2.5）。
 
 九条纯函数测试钉住聚合表（严重度、最低完成度、indeterminate 混合、无百分比、夹取、空窗）与只发变化的闸门（同一条读数不产生调用，用一个记录器收下「shell 本来会收到什么」）；实机四态（30% 绿 / 9;4;2 红 / 9;4;3 扫动 / 9;4;0 清空）在这台机器上逐张拍下。
 
