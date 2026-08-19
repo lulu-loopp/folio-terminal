@@ -17714,17 +17714,32 @@ impl Runtime {
                     .iter()
                     .position(|tab| Some(tab.id) == editor.tab())
             });
-            for (id, rect) in tab_surface_tip_boxes(
-                self.window.rail.layout,
-                &strip,
-                rail.as_ref(),
-                scale,
-                self.window.profile_menu.is_open(),
-                renaming,
-            ) {
-                anchors.push(id, rect, self.tab_surface_tip_text(id));
+            // **The same phantom this function's own doc is about, one mode
+            // later** (§7.1.6b′). `tab_strip_geometry` is a pure function of a
+            // width and a trailer list and knows nothing about focus mode, so
+            // under the card column it goes on handing back boxes for a strip
+            // nobody is drawing — and first-match-wins would answer a hover over
+            // the title bar with some tab's name. In focus mode neither tab
+            // surface is on screen, so neither registers.
+            //
+            // The column's own tips are not here and are not owed by F1: a card
+            // states its name in full and the way out says `Exit` on its face.
+            if !self.window.focus_mode {
+                for (id, rect) in tab_surface_tip_boxes(
+                    self.window.rail.layout,
+                    &strip,
+                    rail.as_ref(),
+                    scale,
+                    self.window.profile_menu.is_open(),
+                    renaming,
+                ) {
+                    anchors.push(id, rect, self.tab_surface_tip_text(id));
+                }
             }
-            for (target, rect) in seats::window_chrome_boxes(width, scale, self.window.rail) {
+            // The posture and not the preference, for `panel_covers`'s reason:
+            // the sidebar toggle is not drawn while the column is up, and a tip
+            // on a button nobody drew is a tip on the drag strip.
+            for (target, rect) in seats::window_chrome_boxes(width, scale, self.rail_posture()) {
                 let text = match target {
                     // The gear, silenced while the dialog it opens is up — the
                     // chevron's rule, for the same reason.
@@ -20061,6 +20076,19 @@ impl Runtime {
         // middle of the terminal: `tab_strip_geometry` is a pure function of a
         // width and a trailer list, so it goes on answering with a box in the
         // title bar long after the tabs have moved down the side.
+        // **The column answers first**, and it has to (§7.1.6b′): the focus rail
+        // keeps the panel's `+` and its `˅`, and `hit_focus_rail` answers
+        // `NewTabMenu` for it — so in focus mode this menu is reachable from a
+        // button that is *not* the one either branch below describes. Reading
+        // the horizontal strip's `˅` here is the very mistake this function's
+        // own comment is about, one surface later: `tab_strip_geometry` would go
+        // on answering with a box in the title bar and hang the picker there.
+        let column = self
+            .window
+            .focus_mode
+            .then(|| self.focus_rail_geometry_now(now))
+            .flatten()
+            .map(|column| (column.new_tab_menu, profiles::MenuSide::Beside));
         let (anchor, side) = match self.window.rail.layout {
             seats::TabLayoutMode::Vertical => {
                 let rail = self.rail_geometry_now(now)?;
@@ -20085,6 +20113,8 @@ impl Runtime {
                 profiles::MenuSide::Below,
             ),
         };
+        // Whichever surface is actually holding the button.
+        let (anchor, side) = column.unwrap_or((anchor, side));
         // The menu is content-sized, so laying it out is a measuring job — the
         // same renderer, the same font, the same call `build` makes when it
         // draws the strings this width was computed from.
