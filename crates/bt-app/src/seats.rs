@@ -103,12 +103,34 @@ pub const TAB_RENAME_CARET_LOGICAL_PX: f32 = 1.0;
 /// to make unrepeatable.
 pub const INLINE_RENAME_LINE_LOGICAL_PX: f32 = bt_render::WINDOW_TAB_MARK_LOGICAL_PX;
 
-/// **The two rectangles an inline name editor draws besides its text.**
+/// **How strongly a selection inside an inline name editor is washed** (user
+/// report 2026-08-19).
 ///
-/// `None` for either means "there is nothing to draw": no selection, or a caret
-/// in the dark half of its blink or walked outside the box it belongs to.
+/// The accent at three tenths, which is what the Settings dialog's own text
+/// fields have always drawn a selection as. There is one other place in this
+/// product where a person selects a run of text with a keyboard, and two text
+/// fields in one window that disagree about what "selected" looks like are two
+/// applications. It is the accent rather than a neutral grey because the field
+/// under it is now a neutral grey: the wash has to be told from its own ground,
+/// and an accent is the one ink this window guarantees will be in both themes.
+pub const INLINE_RENAME_SELECTION_ALPHA: f32 = 0.30;
+
+/// **The three rectangles an inline name editor draws besides its text.**
+///
+/// `None` means "there is nothing to draw": a box with no room for a field, no
+/// selection, or a caret in the dark half of its blink.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InlineRenameMarks {
+    /// **The editable field's own ground** (user report 2026-08-19).
+    ///
+    /// The whole of the editor's line, under the selection and under the text —
+    /// the one mark that says "this name is a field you are typing in" for as
+    /// long as the field is open. Before it existed the only thing that said so
+    /// was the selection band, and a selection is gone at the first keystroke
+    /// and never arrives at all on a tab that had no name of its own to select:
+    /// a reader who double-clicked an auto-named tab got a caret and no other
+    /// difference, which is a window with no edit mode you can see.
+    pub field: Option<[f32; 4]>,
     pub selection: Option<[f32; 4]>,
     pub caret: Option<[f32; 4]>,
 }
@@ -130,6 +152,12 @@ pub fn inline_rename_marks(box_: [f32; 4], edit: &TabEdit, scale: f32) -> Inline
     let line = (INLINE_RENAME_LINE_LOGICAL_PX * scale).round();
     let middle = (box_[1] + box_[3]) / 2.0;
     let (top, bottom) = ((middle - line / 2.0).round(), (middle + line / 2.0).round());
+    let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
+    // A field at all only when the box can hold one — the same floor the caret
+    // answers to, because a field too narrow for its own insertion point is not
+    // a field anybody can type in.
+    let roomy = box_[2] - box_[0] >= width;
+    let field = roomy.then_some([box_[0], top, box_[2], bottom]);
     let selection = (edit.selection_px > 0.0)
         .then(|| {
             [
@@ -140,15 +168,32 @@ pub fn inline_rename_marks(box_: [f32; 4], edit: &TabEdit, scale: f32) -> Inline
             ]
         })
         .filter(|band| band[2] > band[0]);
-    let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
-    let left = (box_[0] + edit.caret_px).round();
-    let caret = (edit.caret_lit && left >= box_[0] && left + width <= box_[2]).then_some([
-        left,
-        top,
-        left + width,
-        bottom,
-    ]);
-    InlineRenameMarks { selection, caret }
+    // **CLAMPED INTO THE BOX, NOT DROPPED AT ITS EDGE** (user report
+    // 2026-08-19, screenshots of the preview head).
+    //
+    // This used to refuse a caret whose hairline reached past `box_[2]`, which
+    // sounds like "the caret walked out of the visible window" and is in fact
+    // the preview head's ordinary state: that head sizes its name box to the
+    // draft's own measured width (the mock-up's `size` attribute), the editor
+    // opens with the caret at the END of the file name, and so the caret lands
+    // exactly ON the right edge every single time — one hairline too far, from
+    // the first frame, for as long as the field is open. The head was drawing a
+    // selection band and no insertion point at all.
+    //
+    // `dress_preview_name_editor` had already written the answer down for the
+    // IME's candidate anchor — `(name_box[0] + caret_px).min(name_box[2] -
+    // caret_width)` — and a caret the IME can find but the reader cannot is two
+    // answers to one question. This is that one answer, now in the one function
+    // all three surfaces draw through.
+    let left = (box_[0] + edit.caret_px)
+        .round()
+        .clamp(box_[0], box_[2] - width);
+    let caret = (edit.caret_lit && roomy).then_some([left, top, left + width, bottom]);
+    InlineRenameMarks {
+        field,
+        selection,
+        caret,
+    }
 }
 
 /// `@keyframes tab-land`'s `from`, read straight off mock-up 962-965.
@@ -7077,19 +7122,36 @@ fn window_tab_strip(
                             scale,
                         )
                     });
-                    if let Some(band) = marks.and_then(|marks| marks.selection)
-                        && within_strip(viewport, band)
+                    // **The field's ground goes down first**: for as long as the
+                    // editor is open the name wears the neutral wash a control
+                    // on this chrome wears, which is the whole of what says "you
+                    // are typing in this". `--active`, already composited over
+                    // this tab's own surface.
+                    if let Some(field) = marks.and_then(|marks| marks.field)
+                        && within_strip(viewport, field)
                     {
                         sprites.push(ChromeSprite::new(
                             ChromeMark::Fill,
-                            band,
-                            // `--active`, already composited over this tab's own
-                            // surface. The mock-up declares no `::selection` and
-                            // leans on the browser's; what it *does* have is one
-                            // neutral wash meaning "this is the chosen thing",
-                            // and it is this one.
+                            field,
                             palette.tab_close_pill_on_content,
                         ));
+                    }
+                    if let Some(band) = marks.and_then(|marks| marks.selection)
+                        && within_strip(viewport, band)
+                    {
+                        sprites.push(
+                            ChromeSprite::new(
+                                ChromeMark::Fill,
+                                band,
+                                // The dialog's own field selection — see
+                                // `INLINE_RENAME_SELECTION_ALPHA`. It used to be
+                                // the same neutral wash the field now wears,
+                                // which is why the field could not have one
+                                // until the selection stopped being it.
+                                palette.accent,
+                            )
+                            .with_opacity(INLINE_RENAME_SELECTION_ALPHA),
+                        );
                     }
                     labels.push(ChromeLabel {
                         text,
@@ -8035,7 +8097,22 @@ fn rail_chrome(
                 });
                 // Before the text and after the row's own silhouette, which is
                 // why these are sprites: a quad would go under the active row's
-                // fill, which is itself a mark.
+                // fill, which is itself a mark. The field's ground first, then
+                // the selection on it — the strip's own order, for the strip's
+                // own reason.
+                if let Some(field) = marks.and_then(|marks| marks.field)
+                    && in_list(field)
+                {
+                    let mut sprite = ChromeSprite::new(
+                        ChromeMark::Fill,
+                        clip_to_list(field),
+                        palette.tab_close_pill_on_content,
+                    );
+                    // The wash parks with the panel it is drawn in, on the
+                    // same fade the words beside it are already taking.
+                    sprite.opacity = text;
+                    sprites.push(sprite);
+                }
                 if let Some(selection) = marks.and_then(|marks| marks.selection)
                     && in_list(selection)
                 {
@@ -8043,11 +8120,9 @@ fn rail_chrome(
                         let mut sprite = ChromeSprite::new(
                             ChromeMark::Fill,
                             clip_to_list(selection),
-                            palette.tab_close_pill_on_content,
+                            palette.accent,
                         );
-                        // The wash parks with the panel it is drawn in, on the
-                        // same fade the words beside it are already taking.
-                        sprite.opacity = text;
+                        sprite.opacity = text * INLINE_RENAME_SELECTION_ALPHA;
                         sprites.push(sprite);
                     }
                 }
@@ -8838,9 +8913,13 @@ pub struct PreviewHeadContent<'a> {
     /// ruling 2026-08-19).
     ///
     /// The tab strip's own [`TabEdit`], borrowed whole: the field IS the label —
-    /// same box, same face, same weight, same ink, no border and no fill —
-    /// because what is under it is already the right shape, and a box drawn on
-    /// top would be a field *about* the name rather than the name in edit mode.
+    /// same box, same face, same weight, same ink — because what is under it is
+    /// already the right shape, and a box drawn on top would be a field *about*
+    /// the name rather than the name in edit mode. **It does take a ground**
+    /// (user report 2026-08-19): "same box, no fill" was read as "no fill at
+    /// all", and a head whose only edit-mode mark was a selection band said
+    /// nothing at all from the first keystroke on. See
+    /// [`InlineRenameMarks::field`].
     /// A head that is not being edited carries `None` and draws exactly what it
     /// drew before this existed.
     ///
@@ -10412,12 +10491,22 @@ fn push_preview_head(
             scale,
         )
     });
-    if let Some(band) = marks.and_then(|marks| marks.selection) {
+    // The field's ground first and the selection on it — the strip's own order
+    // and the strip's own reason: the ground is what says the name is a field
+    // for as long as the editor is open, and a selection that wore the same
+    // wash could not be told from it.
+    if let Some(field) = marks.and_then(|marks| marks.field) {
         sprites.push(ChromeSprite::new(
             ChromeMark::Fill,
-            band,
+            field,
             palette.pane_close_pill,
         ));
+    }
+    if let Some(band) = marks.and_then(|marks| marks.selection) {
+        sprites.push(
+            ChromeSprite::new(ChromeMark::Fill, band, palette.accent)
+                .with_opacity(INLINE_RENAME_SELECTION_ALPHA),
+        );
     }
     labels.push(ChromeLabel {
         // **The same label with a different string.** The editor takes the
@@ -14047,16 +14136,30 @@ mod tests {
                 assert_eq!(caret[2] - caret[0], width, "and it is a hairline");
             }
         }
-        // A caret walked past the box's own edge is not drawn at all, which is
-        // what keeps the strip's `within_strip` from being the only guard.
-        let outside = TabEdit {
-            caret_px: 4_000.0,
-            ..edit.clone()
-        };
-        assert_eq!(
-            inline_rename_marks([100.0, 0.0, 300.0, 32.0], &outside, 1.0).caret,
-            None
-        );
+        // **A caret at or past the box's own right edge is CLAMPED, never
+        // dropped** (user report 2026-08-19). It used to be dropped, and the
+        // surface that paid was the preview head: its name box is the draft's
+        // own measured width and its editor opens with the caret at the end of
+        // the file name, so "the caret is one hairline past the edge" was that
+        // head's ordinary, permanent state and it drew no insertion point at
+        // all. A field's last legal caret position is against its right edge.
+        //
+        // Red gate: put `left + width <= box_[2]` back in front of the caret and
+        // both of these go `None`.
+        for caret_px in [200.0_f32, 4_000.0] {
+            let outside = TabEdit {
+                caret_px,
+                ..edit.clone()
+            };
+            let caret = inline_rename_marks([100.0, 0.0, 300.0, 32.0], &outside, 1.0)
+                .caret
+                .expect("a caret at the far edge is still a caret");
+            assert_eq!(
+                [caret[0], caret[2]],
+                [299.0, 300.0],
+                "and it stands on the last hairline the box holds"
+            );
+        }
         let dark = TabEdit {
             caret_lit: false,
             ..edit
@@ -14113,6 +14216,176 @@ mod tests {",
             3,
             "and so is the line it stands in — its declaration, the doc line              that names it from `inline_rename_marks`, and the one read"
         );
+    }
+
+    /// Every `ChromeMark::Fill` a run of chrome drew, in draw order — the three
+    /// rectangles an open inline editor puts down, and nothing else in this
+    /// window uses that mark.
+    fn fills(sprites: &[ChromeSprite]) -> Vec<ChromeSprite> {
+        sprites
+            .iter()
+            .filter(|sprite| sprite.mark == ChromeMark::Fill)
+            .copied()
+            .collect()
+    }
+
+    /// PIN (user report on a real window, 2026-08-19, two screenshots) — **an
+    /// open inline name editor is DRAWN AS A FIELD, and it is drawn through the
+    /// path the window actually runs.**
+    ///
+    /// Two things were reported and they have one root: for as long as the
+    /// editor was open the only mark it ever made was a selection band, so
+    /// - a tab with no name of its own opened its editor with nothing selected
+    ///   and therefore with no mark at all, and every editor lost its last mark
+    ///   at the first keystroke (the selection collapses), and
+    /// - the preview head, whose name box is the draft's own measured width and
+    ///   whose caret opens at the END of the file name, had its caret refused by
+    ///   a bounds test for being one hairline past the box's right edge — so
+    ///   that surface drew no insertion point at all, ever.
+    ///
+    /// # Why the pin that existed did not hold
+    ///
+    /// [`one_function_draws_every_inline_name_editors_caret`] is written against
+    /// this file's own source text: it counts how many times
+    /// `inline_rename_marks(` appears and calls that one editor. That claim is
+    /// worth making and it was true the whole time — and it is *lexical*. It
+    /// cannot see a colour, an opacity, a bounds test, or whether the sprite it
+    /// counted ever reached a frame, which is the entire category the report
+    /// falls into. So this one goes the other way round: it builds real chrome
+    /// through `strip_chrome_of` and `preview_chrome` — the same two functions
+    /// one frame of the runtime goes through — and reads the sprites that come
+    /// out.
+    ///
+    /// Red gate: drop the field from `inline_rename_marks` and the first
+    /// assertion of each surface goes red; put `left + width <= box_[2]` back in
+    /// front of the caret and the preview head's caret goes missing; give the
+    /// field and the selection one colour again and the ink assertion goes red.
+    #[test]
+    fn an_open_inline_name_editor_is_drawn_as_a_field_on_every_surface() {
+        let palette = chrome_palette();
+        // ── the tab strip ──────────────────────────────────────────────────
+        let editing = |edit: Option<TabEdit>| {
+            let tabs = [TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
+                title: "left".to_owned(),
+                pane_count: 1,
+                edit,
+                ..TabContent::default()
+            }];
+            let (_, _, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);
+            fills(&sprites)
+        };
+        assert!(
+            editing(None).is_empty(),
+            "a tab that is not being renamed draws no field, no band and no caret"
+        );
+        // The state the report is about: an auto-named tab, whose editor opens
+        // holding nothing, so there is no selection to stand in for a field.
+        let typing = editing(Some(TabEdit {
+            text: String::new(),
+            placeholder: "PowerShell 7".to_owned(),
+            caret_px: 0.0,
+            selection_px: 0.0,
+            caret_lit: true,
+        }));
+        assert_eq!(
+            typing.len(),
+            2,
+            "a field and a caret — the two marks that are true of every open              editor, selection or no selection"
+        );
+        let (field, caret) = (typing[0], typing[1]);
+        assert!(
+            field.rect[0] <= caret.rect[0] && caret.rect[2] <= field.rect[2],
+            "the caret stands inside the field: field {:?}, caret {:?}",
+            field.rect,
+            caret.rect
+        );
+        assert_ne!(
+            field.color, caret.color,
+            "and it is not the same ink as the ground it stands on"
+        );
+        // With a selection, the field is still the first mark down and the band
+        // is a different ink from it — otherwise the selection is invisible,
+        // which is what having them share a colour used to mean.
+        let selected = editing(Some(TabEdit {
+            text: "left".to_owned(),
+            placeholder: String::new(),
+            caret_px: 22.0,
+            selection_px: 22.0,
+            caret_lit: true,
+        }));
+        assert_eq!(selected.len(), 3, "field, selection, caret");
+        let (field, band) = (selected[0], selected[1]);
+        assert!(
+            field.rect[0] <= band.rect[0]
+                && band.rect[2] <= field.rect[2]
+                && field.rect[2] - field.rect[0] > band.rect[2] - band.rect[0],
+            "the band is a run inside the field, not the field itself"
+        );
+        assert_ne!(
+            (field.color, field.opacity),
+            (band.color, band.opacity),
+            "and a selection you cannot tell from its own ground is not a              selection"
+        );
+        assert_eq!(
+            (band.color, band.opacity),
+            (palette.accent, INLINE_RENAME_SELECTION_ALPHA),
+            "the dialog's own field selection, so this window has one of them"
+        );
+
+        // ── the preview head ───────────────────────────────────────────────
+        // `caret_px` at the box's own far edge is not an edge case here: the
+        // head sizes its name box to the draft, and `TabRename::open_file` puts
+        // the caret at the end of the name. 4000 is the same claim made loudly.
+        let head = |edit: Option<PreviewNameEdit<'_>>| {
+            let (_, _, sprites) = preview_chrome(
+                PreviewHeadContent {
+                    tools: PreviewHeadTools {
+                        save: true,
+                        flip: true,
+                        switcher: true,
+                        name_width: 120.0,
+                        count_width: 8.0,
+                    },
+                    name: "CONVENTIONS.md",
+                    dirty: false,
+                    count: "2",
+                    others_dirty: false,
+                    flip_to_source: true,
+                    pinned: false,
+                    menu_open: false,
+                    edit,
+                },
+                ChromePointer::default(),
+            );
+            fills(&sprites)
+        };
+        assert!(
+            head(None).is_empty(),
+            "a head that is not being renamed draws no field, no band and no caret"
+        );
+        let editing_head = head(Some(PreviewNameEdit {
+            text: "CONVENTIONS.md",
+            caret_px: 4_000.0,
+            selection_px: 80.0,
+            caret_lit: true,
+        }));
+        assert_eq!(
+            editing_head.len(),
+            3,
+            "field, selection and — the whole of the second report — a caret"
+        );
+        let (field, band, caret) = (editing_head[0], editing_head[1], editing_head[2]);
+        assert_eq!(
+            caret.rect[2], field.rect[2],
+            "a caret at the end of the name stands on the field's last hairline              rather than being refused for reaching it"
+        );
+        assert!(
+            band.rect[2] <= field.rect[2] && field.rect[0] <= band.rect[0],
+            "and the band is inside the field here too"
+        );
+        assert_ne!(field.color, caret.color);
+        assert_ne!((field.color, field.opacity), (band.color, band.opacity));
     }
 
     /// Opening the preview narrows the terminal and closing it hands the pixels
@@ -17820,10 +18093,42 @@ mod tests {",
                 edit_quads, resting_quads,
                 "nothing in the tab's own structure moves when the editor opens"
             );
+            // **The tab's own furniture is untouched, and the editor adds a
+            // field to it** (user report 2026-08-19). This used to read
+            // `edit_sprites == resting_sprites` — "with the caret dark, an open
+            // editor is invisible in the sprite list" — which is a sentence
+            // stating the defect: an editor whose caret happened to be in the
+            // dark half of its blink drew nothing whatsoever, and that is the
+            // window a reader was shown. What must not move is the mark, the `×`
+            // and the silhouette; what must be added is the field's ground.
+            let added: Vec<ChromeSprite> = edit_sprites
+                .iter()
+                .filter(|sprite| !resting_sprites.contains(sprite))
+                .copied()
+                .collect();
             assert_eq!(
-                edit_sprites, resting_sprites,
-                "the mark, the × and the tab's silhouette all stay exactly where they were \
-                 — with the caret dark, an open editor is invisible in the sprite list"
+                edit_sprites
+                    .iter()
+                    .filter(|sprite| sprite.mark != ChromeMark::Fill)
+                    .copied()
+                    .collect::<Vec<_>>(),
+                resting_sprites,
+                "the mark, the × and the tab's silhouette all stay exactly where they were"
+            );
+            assert_eq!(
+                added.len(),
+                1,
+                "and the one thing the editor adds is its field: {added:?}"
+            );
+            assert_eq!(
+                added[0].rect,
+                [
+                    draft.rect[0],
+                    added[0].rect[1],
+                    draft.rect[2],
+                    added[0].rect[3]
+                ],
+                "which spans the box the draft is drawn in"
             );
         }
     }
@@ -17908,10 +18213,11 @@ mod tests {",
                 dark_sprites.len() + 1,
                 "one sprite is the whole difference between a lit caret and a dark one"
             );
-            let caret = lit_sprites
-                .iter()
-                .find(|sprite| sprite.mark == ChromeMark::Fill)
-                .expect("a lit caret is drawn");
+            // The field's ground goes down first and the caret last, so with
+            // nothing selected the caret is the second of the two fills. Taking
+            // the first would take the ground, which is a rectangle the width of
+            // the whole box and would pass none of what follows.
+            let caret = *fills(&lit_sprites).last().expect("a lit caret is drawn");
             assert_eq!(
                 caret.rect[0],
                 (title_box[0] + caret_px).round(),
@@ -17957,16 +18263,16 @@ mod tests {",
             caret_lit: false,
         });
         let (_, _, sprites) = strip_chrome_of(1.0, &[selected], 0, 0.0, None, false);
-        let band = sprites
-            .iter()
-            .find(|sprite| sprite.mark == ChromeMark::Fill)
-            .expect("a selected draft wears its band");
+        // The field's ground, then the band on it — so the band is the second
+        // fill, and its ink is no longer the ground's own (user report
+        // 2026-08-19: a selection wearing its field's colour is not one).
+        let band = fills(&sprites)[1];
         assert_eq!(band.rect[0], title_box[0], "it starts where the text does");
         assert_eq!(band.rect[2], title_box[0] + 30.0);
         assert_eq!(
-            band.color,
-            chrome_palette().tab_close_pill_on_content,
-            "`--active`, pre-composited over the surface this tab is wearing"
+            (band.color, band.opacity),
+            (chrome_palette().accent, INLINE_RENAME_SELECTION_ALPHA),
+            "the accent at the strength the dialog's own fields wash a selection"
         );
 
         // A selection wider than the box is clipped by it rather than bleeding
@@ -17979,10 +18285,7 @@ mod tests {",
             caret_lit: false,
         });
         let (_, _, sprites) = strip_chrome_of(1.0, &[overflowing], 0, 0.0, None, false);
-        let band = sprites
-            .iter()
-            .find(|sprite| sprite.mark == ChromeMark::Fill)
-            .expect("the band is still drawn");
+        let band = fills(&sprites)[1];
         assert_eq!(
             band.rect[2], title_box[2],
             "clipped to the box, which is what `overflow` does to a real input"
@@ -17998,9 +18301,10 @@ mod tests {",
             caret_lit: false,
         });
         let (_, _, sprites) = strip_chrome_of(1.0, &[plain], 0, 0.0, None, false);
-        assert!(
-            !sprites.iter().any(|sprite| sprite.mark == ChromeMark::Fill),
-            "a collapsed caret has no band behind it"
+        assert_eq!(
+            fills(&sprites).len(),
+            1,
+            "a collapsed caret has no band behind it — only the field's own              ground, which is there for as long as the editor is"
         );
     }
 
@@ -18031,7 +18335,11 @@ mod tests {",
             .filter(|(_, sprite)| sprite.mark == ChromeMark::Fill)
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        assert_eq!(fills.len(), 2, "the selection band and the caret");
+        assert_eq!(
+            fills.len(),
+            3,
+            "the field's ground, the selection band and the caret"
+        );
         assert!(
             fills.iter().all(|index| *index > body),
             "both stand after the silhouette in the painter's order"
@@ -22881,8 +23189,8 @@ mod tests {",
             !labels.iter().any(|label| label.text == "committed-title"),
             "and not the name it is replacing"
         );
-        // The selection band and the caret, both after the active row's own
-        // silhouette so neither is buried under it.
+        // The field's ground, the selection band and the caret, all three after
+        // the active row's own silhouette so none of them is buried under it.
         let body = sprites
             .iter()
             .position(|sprite| {
@@ -22896,7 +23204,11 @@ mod tests {",
             .filter(|(_, sprite)| sprite.mark == ChromeMark::Fill)
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        assert_eq!(fills.len(), 2, "the selection band and the caret");
+        assert_eq!(
+            fills.len(),
+            3,
+            "the field's ground, the selection band and the caret"
+        );
         assert!(
             fills.iter().all(|index| *index > body),
             "both stand after the silhouette in the painter's order"
