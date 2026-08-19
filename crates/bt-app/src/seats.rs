@@ -9895,6 +9895,10 @@ pub fn hit_git_graph(
                     Some(rects.refresh),
                     Some(crate::git_graph::GraphTool::Refresh),
                 ),
+                (
+                    rects.leave_detached,
+                    Some(crate::git_graph::GraphTool::LeaveDetached),
+                ),
             ] {
                 let (Some(rect), Some(tool)) = (rect, tool) else {
                     continue;

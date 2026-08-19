@@ -68,6 +68,20 @@ pub struct LaneWalker {
     /// ends.
     lanes: Vec<Option<String>>,
     rows: Vec<GraphRow>,
+    /// The commits [`Self::rows`] are about, in the same order — what makes
+    /// "is this still the history I walked?" a question with an answer.
+    ///
+    /// **Kept because a running layout is only valid over the list it was run
+    /// over.** A page can only ever be appended (`GitCache::accept` refuses one
+    /// that does not start where the list ends), so the single way the rows
+    /// already laid out can stop describing the log is a *replacement* of the
+    /// first page — a commit made, a checkout, a rebase — and that is a thing
+    /// this walker can see for itself by looking, at the moment the new list is
+    /// in its hand. The alternative the graph used to run on was for every
+    /// caller that might have caused one to throw the picture away *in advance*,
+    /// which blanked every lane on screen for the length of a subprocess and
+    /// then drew them again identically.
+    hashes: Vec<String>,
     /// The **Uncommitted Changes** row's lanes (V5), when the working tree is
     /// dirty — a synthetic tip standing above the whole history whose one parent
     /// is `HEAD`.
@@ -128,7 +142,31 @@ impl LaneWalker {
         for commit in commits.iter().skip(self.rows.len()) {
             let row = self.step(&commit.hash, &commit.parents);
             self.rows.push(row);
+            self.hashes.push(commit.hash.clone());
         }
+    }
+
+    /// **Is this the history these rows are about?**
+    ///
+    /// The whole of when a walk may be resumed, and the reason it can be asked
+    /// rather than guessed at: the rows already laid out describe the commits
+    /// they were laid out over, so `commits` may continue this walk exactly when
+    /// it still holds those commits, in those places. A list that got shorter has
+    /// lost rows this walker is still drawing; a list whose first commit changed
+    /// is a different history wearing the same length.
+    ///
+    /// Answered by looking rather than by remembering a moment, so that a caller
+    /// which *might* have rewritten the history — a refresh, a command that ended,
+    /// the kernel reporting a write — does not have to throw the picture away on
+    /// the chance that it did.
+    #[must_use]
+    pub fn resumes(&self, commits: &[GitCommit]) -> bool {
+        commits.len() >= self.hashes.len()
+            && self
+                .hashes
+                .iter()
+                .zip(commits)
+                .all(|(walked, commit)| *walked == commit.hash)
     }
 
     /// Forget everything — a history that was rewritten under us is not a
@@ -136,6 +174,7 @@ impl LaneWalker {
     pub fn reset(&mut self) {
         self.lanes.clear();
         self.rows.clear();
+        self.hashes.clear();
         self.head = None;
     }
 
@@ -859,13 +898,25 @@ pub struct GraphCommitDetail {
     /// The body, already wrapped to the description column and already capped
     /// (D1). Empty when the commit has none, which is most of them.
     pub body: Vec<String>,
-    /// Everything on the meta line **up to** the parents: the author, the date,
-    /// and the committer when there is one worth naming.
-    pub meta: String,
-    /// How wide [`Self::meta`] is, measured through the font at build time —
-    /// because where the first parent chip stands is where that string ends, and
-    /// only the thing holding the font can say where that is.
-    pub meta_width: f32,
+    /// Everything on the meta band **up to** the parents — the author, the date,
+    /// and the committer when there is one worth naming — already wrapped to the
+    /// room the band has (user report, 2026-08-19).
+    ///
+    /// **Wrapped and not one line**, for the reason the body above it is: this
+    /// sentence is as long as somebody's name plus their address plus a date plus
+    /// another name, and the pane it has to fit in is as narrow as a reader
+    /// chooses to make it. Drawn as a single line it ran under the two copy verbs
+    /// pinned at the band's right and then off the block altogether, taking the
+    /// pressable parent hashes with it — which is what left a reader looking at
+    /// half of a hash they could not finish reading or click.
+    pub meta: Vec<String>,
+    /// How many lines the whole band is: [`Self::meta`]'s, plus any line the
+    /// parent chips flowed onto after the end of the sentence.
+    ///
+    /// Decided here, where the font is, because it is what the block's *height*
+    /// is a function of — and the height is asked for by [`detail_rows`], which
+    /// has no measurer and must not have to guess.
+    pub meta_lines: usize,
     pub parents: Vec<GraphParentChip>,
 }
 
@@ -883,6 +934,15 @@ pub struct GraphParentChip {
     /// The whole hash, which is what the seek looks for.
     pub hash: String,
     pub width: f32,
+    /// Which line of the meta band it stands on, counting from the band's top.
+    ///
+    /// The chips run on from the end of the sentence that names them, and wrap
+    /// onto the next line when the room runs out — so where one stands is two
+    /// numbers, and both are worked out once, at build time, by the thing that
+    /// can measure text.
+    pub line: usize,
+    /// How far in from the band's left edge it starts.
+    pub x: f32,
 }
 
 /// The head of a comparison (D6).
@@ -1051,10 +1111,6 @@ impl GraphContent {
 pub struct GraphState {
     pub cache: crate::git::GitCache,
     lanes: LaneWalker,
-    /// How many commits the walker has already been shown, so a log that
-    /// *shrank* — a checkout onto another branch — is detected rather than
-    /// walked onto the end of the old one.
-    walked: usize,
     /// Whether the last walk was laid out with an Uncommitted Changes row above
     /// it (V5).
     ///
@@ -1071,7 +1127,6 @@ impl GraphState {
         Self {
             cache: crate::git::GitCache::at_root(root, crate::git::GitRole::Graph),
             lanes: LaneWalker::default(),
-            walked: 0,
             uncommitted: false,
         }
     }
@@ -1094,11 +1149,22 @@ impl GraphState {
 
     /// Bring the lane layout up to date with whatever the cache now holds.
     ///
-    /// **A shorter list is a different history.** Pages only ever extend a log
-    /// (`GitCache::accept` refuses one that does not start where the list ends),
-    /// so the single way the count can fall is a refresh — a checkout, a commit
-    /// — and what that gives is a history the running lane state is not about.
-    /// Resuming into it would draw roads that belong to the branch you left.
+    /// **The picture is thrown away exactly when the history under it moved, and
+    /// at the moment that can be seen rather than at the moment it was
+    /// suspected.** Pages only ever extend a log (`GitCache::accept` refuses one
+    /// that does not start where the list ends), so the single way the rows
+    /// already walked can stop being about the commits under them is a
+    /// replacement of the first page — and [`LaneWalker::resumes`] is that
+    /// question asked of the answer itself, rather than a count that only
+    /// noticed the replacements which happened to be *shorter*.
+    ///
+    /// This is what lets a re-read leave the lanes on screen alone. A refresh, a
+    /// command ending, the kernel reporting a write under `.git`: all three ask
+    /// the same three questions again without taking the page down, and none of
+    /// them knows yet whether the history moved. A picture invalidated on the
+    /// suspicion drew every dot in lane zero with no lines at all for the length
+    /// of a subprocess and then drew the identical picture again — which, under
+    /// a repository something else is writing to, is the whole graph blinking.
     pub fn sync(&mut self) {
         // **The working tree is part of the layout** (V5). Whether the tree is
         // dirty decides whether `HEAD`'s lane arrives from above or opens on its
@@ -1112,12 +1178,11 @@ impl GraphState {
         if dirty != self.uncommitted {
             self.uncommitted = dirty;
             self.lanes.reset();
-            self.walked = 0;
         }
         let Some(log) = self.cache.log().ready() else {
             return;
         };
-        if log.commits.len() < self.walked {
+        if !self.lanes.resumes(&log.commits) {
             self.lanes.reset();
         }
         if self.uncommitted
@@ -1129,21 +1194,23 @@ impl GraphState {
             self.lanes.open_with_uncommitted(&head.hash);
         }
         self.lanes.extend(&log.commits);
-        self.walked = log.commits.len();
     }
 
     /// Throw the picture away, keeping the repository.
     ///
-    /// **What a checkout owes every graph of that repository.** The lane state
-    /// is a running reading of one history; after a checkout it is a reading of
-    /// a history this repository is no longer on, and resuming into the next
-    /// answer would draw the branch you left behind the branch you moved to.
-    /// Not left to [`Self::sync`]'s shorter-list guard, which only catches it
-    /// when the new history is *shorter* — moving to a longer branch would slip
-    /// straight past it.
+    /// **What a cache that has been *emptied* owes the graph over it.** A
+    /// checkout's receipt and a filter change both put the log slot back to
+    /// `Idle`, so there is no list left for [`Self::sync`] to compare against and
+    /// nothing on screen the rows could still be about; the walk goes with it.
+    ///
+    /// **Not what a re-read owes.** A re-read leaves the answers in their slots
+    /// on purpose, and what it will come back with is not known yet — so
+    /// throwing the picture away on its account is throwing away a picture that
+    /// is very probably about to be redrawn identically. That case belongs to
+    /// [`LaneWalker::resumes`], which answers it from the new list rather than
+    /// from a suspicion.
     pub fn invalidate(&mut self) {
         self.lanes.reset();
-        self.walked = 0;
     }
 
     #[must_use]
@@ -1443,9 +1510,61 @@ pub const GRAPH_SEARCH_CARET_INSET_LOGICAL_PX: f32 = 4.0;
 /// than they are worth.
 pub const GRAPH_TOOLBAR_HEAD_MIN_LOGICAL_PX: f32 = 140.0;
 
-/// Which of the toolbar's four controls a press is on (T1).
+/// What the door out of a detached `HEAD` says, before the branch's own name.
+///
+/// **A destination and not a verb** (user report, 2026-08-19): `Checkout` would
+/// be the same word the row menu uses for going *anywhere*, and what this button
+/// is for is the one place a reader in this state is trying to get to. Naming
+/// the branch is the whole of it — a door that said `Leave detached HEAD` would
+/// be telling them what they already know.
+#[must_use]
+pub fn graph_leave_detached() -> &'static str {
+    Text::GraphLeaveDetached.text()
+}
+
+/// **What a gate calls a commit**: its short hash, and as much of its subject as
+/// a sentence can carry (user ruling, 2026-08-19).
+///
+/// "By name, always" is §7.1.3's rule and it is right, but a *name* is not a
+/// paragraph: this repository's own subjects run to two hundred words, and a
+/// confirmation that quoted one whole would be a dialog nobody reads, asking
+/// about a thing they cannot see the end of. Cut at the same bound the copy
+/// notice uses, because it is the same question — how much of a subject is still
+/// a name.
+#[must_use]
+pub fn checkout_said(short: &str, subject: &str) -> String {
+    let mut cut: String = subject.chars().take(GRAPH_COPIED_MAX_CHARS).collect();
+    if subject.chars().count() > GRAPH_COPIED_MAX_CHARS {
+        cut.push_str(GRAPH_BODY_ELLIPSIS);
+    }
+    format!("{short} {cut}")
+}
+
+/// What the card says after a checkout onto a commit or a tag, where the state
+/// matters more than the place (user ruling, 2026-08-19).
+///
+/// Here rather than beside its sentence in [`crate::i18n`] because it does this
+/// module's own arithmetic first: how much of a hash is still a name is
+/// [`GRAPH_PARENT_SHORT`], which is a measurement and not a thing that differs
+/// between languages. The branch case has no such step and is called straight
+/// (`crate::i18n::checkout_notice`).
+#[must_use]
+pub fn checkout_detached_notice(target: &str) -> String {
+    crate::i18n::checkout_detached_notice(&short_hash(target))
+}
+
+/// Which of the toolbar's controls a press is on (T1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphTool {
+    /// **The way back onto a branch**, drawn only while `HEAD` is on none (user
+    /// report, 2026-08-19).
+    ///
+    /// A repository can be detached by something this window never saw — a
+    /// `git checkout <sha>` in the terminal beside it, another tool, a script —
+    /// so a page that only said so in its masthead was leaving the reader to
+    /// work out the way back for themselves, from a surface that had a verb for
+    /// standing anywhere except where they wanted to be.
+    LeaveDetached,
     /// The branch filter button — opens the menu (T2).
     Filter,
     /// The search field's own box: pressing it takes the keyboard (T4).
@@ -1461,6 +1580,7 @@ impl GraphTool {
     #[must_use]
     pub fn tooltip(self) -> &'static str {
         match self {
+            Self::LeaveDetached => Text::GraphToolLeaveDetachedTip,
             Self::Filter => Text::GraphToolFilterTip,
             Self::Search => Text::GraphToolSearchTip,
             Self::SearchClear => Text::GraphToolSearchClearTip,
@@ -1482,6 +1602,12 @@ impl GraphTool {
 pub struct GraphToolbarRects {
     /// The repository name and the branch, on the left.
     pub head: [f32; 4],
+    /// The way back onto a branch, drawn only while there is none to be on.
+    ///
+    /// It stands between the head and the filter — beside the words it is the
+    /// answer to, rather than at the far end of the strip with the tools, which
+    /// are about the *list* and not about where the repository is standing.
+    pub leave_detached: Option<[f32; 4]>,
     /// The whole filter button. Present at every width — what shortens is its
     /// label, not the button.
     pub filter: [f32; 4],
@@ -1526,16 +1652,35 @@ pub fn graph_toolbar_rects(
     let filter_short = pad * 2.0 + mark;
     let head_min = (GRAPH_TOOLBAR_HEAD_MIN_LOGICAL_PX * scale).round();
 
-    // The three arrangements, widest first; the first that leaves the head its
+    // **The way back is shed last of all** (user ruling, 2026-08-19). It is the
+    // only thing on this strip that is about a *state* rather than about the
+    // list, so it outranks the search field and the filter's label in the
+    // collapse order — a reader whose repository is standing on no branch is
+    // looking for exactly one control, and it is this one. It takes its room
+    // from the tools rather than from the head for the same reason the others
+    // do: the head's minimum is what stops the sentence becoming an ellipsis.
+    let door_room = toolbar
+        .leave_detached
+        .as_ref()
+        .map(|door| pad * 2.0 + door.width);
+    let door_cost = door_room.map_or(0.0, |width| width + gap);
+
+    // The arrangements, widest first; the first that leaves the head its
     // minimum is the one drawn.
     let right = refresh[0] - gap;
-    let (with_search, short) = if right - (search_width + gap + filter_full) - strip[0] >= head_min
-    {
-        (true, false)
-    } else if right - filter_full - strip[0] >= head_min {
-        (false, false)
+    let fits = |cost: f32| right - cost - strip[0] >= head_min;
+    let (with_search, short, with_door) = if fits(search_width + gap + filter_full + door_cost) {
+        (true, false, true)
+    } else if fits(filter_full + door_cost) {
+        (false, false, true)
+    } else if fits(filter_short + door_cost) {
+        (false, true, true)
     } else {
-        (false, true)
+        // Nothing left to shed but the door itself, and a strip this narrow
+        // has no room for a sentence *and* an answer to it. The masthead's
+        // own badge still says the state — see `push_git_masthead` — so what
+        // is lost here is the shortcut and not the news.
+        (false, true, false)
     };
     let filter_width = if short { filter_short } else { filter_full };
     let (search, filter) = if with_search {
@@ -1556,13 +1701,17 @@ pub fn graph_toolbar_rects(
             (middle - mark / 2.0).round() + mark,
         ]
     });
+    // It stands between the head and the filter — beside the words it is the
+    // answer to, rather than at the far end of the strip with the controls that
+    // are about the list.
+    let door_right = (filter[0] - gap).max(strip[0]);
+    let leave_detached = door_room
+        .filter(|_| with_door)
+        .map(|width| [(door_right - width).max(strip[0]), top, door_right, bottom]);
+    let head_right = leave_detached.map_or(door_right, |door| (door[0] - gap).max(strip[0]));
     GraphToolbarRects {
-        head: [
-            strip[0],
-            strip[1],
-            (filter[0] - gap).max(strip[0]),
-            strip[3],
-        ],
+        head: [strip[0], strip[1], head_right, strip[3]],
+        leave_detached,
         filter,
         filter_short: short,
         search,
@@ -1631,12 +1780,25 @@ pub fn graph_search_field(
     })
 }
 
+/// The door out of a detached `HEAD`, and the branch it leads back to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphLeaveDetached {
+    /// The branch this offers to stand on.
+    pub branch: String,
+    /// `Back to main`, measured.
+    pub text: String,
+    pub width: f32,
+}
+
 /// What the toolbar draws, measured (T1).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphToolbar {
     /// The repository's own folder name — the root's last component.
     pub repo: String,
     pub repo_width: f32,
+    /// The way back onto a branch — `Some` exactly while `HEAD` is on none and
+    /// this repository has a branch worth offering (see [`leave_detached_of`]).
+    pub leave_detached: Option<GraphLeaveDetached>,
     /// `All branches`, or `3 branches`.
     pub filter: String,
     pub filter_width: f32,
@@ -2321,7 +2483,16 @@ fn toolbar_of(
         shown.clone()
     };
     let count = search_count(look.search);
+    let leave_detached = leave_detached_branch(&state.cache).map(|branch| {
+        let text = format!("{}{branch}", graph_leave_detached());
+        GraphLeaveDetached {
+            width: measure(&text, tool_font, crate::git_panel::MeasureFace::PLAIN),
+            text,
+            branch,
+        }
+    });
     GraphToolbar {
+        leave_detached,
         // `.ggv-head .repo` is 500 — measured at the regular weight the name
         // was a couple of pixels short of its own box and the masthead beside it
         // started that much too far left.
@@ -2353,6 +2524,55 @@ fn toolbar_of(
             crate::git_panel::MeasureFace::PLAIN,
         ),
         busy,
+    }
+}
+
+/// **Which branch a detached `HEAD` is offered its way back to.**
+///
+/// `None` while `HEAD` is on a branch, and `None` when there is no branch worth
+/// naming — a door that offered a guess would be worse than no door, because
+/// what it does is move the working tree.
+///
+/// The rule, in the order it is asked, and every step of it reads a list this
+/// cache already holds:
+///
+/// 1. **`main`, then `master`** — the two names git itself has used for the
+///    branch a repository is normally on, newest first. Where either exists, it
+///    is what "back" means, and no other branch in the list is a better guess
+///    than the one the project itself calls its trunk.
+/// 2. **The only local branch there is**, when there is exactly one: a
+///    repository with one branch has exactly one place to go back to, and
+///    naming it is not a guess at all.
+/// 3. **Nothing.** Several branches and none of them called what a trunk is
+///    called is a question this window cannot answer for the reader, and the
+///    honest answer is the badge on its own — the branch rows on the docked page
+///    are still there, and every one of them is a `Checkout`.
+///
+/// It is deliberately *not* "the branch you were on": that fact is not in the
+/// repository — it is in `HEAD`'s reflog, which is a second reading — and the
+/// case this door exists for is a reader who was detached by something outside
+/// this window, where the branch they were on is not a thing this window ever
+/// saw.
+#[must_use]
+pub fn leave_detached_branch(cache: &crate::git::GitCache) -> Option<String> {
+    if !cache.status().ready()?.detached {
+        return None;
+    }
+    let locals: Vec<&str> = cache
+        .refs()
+        .ready()?
+        .iter()
+        .filter(|entry| entry.kind == crate::git::GitRefKind::Local)
+        .map(|entry| entry.name.as_str())
+        .collect();
+    for trunk in ["main", "master"] {
+        if locals.contains(&trunk) {
+            return Some(trunk.to_owned());
+        }
+    }
+    match locals.as_slice() {
+        [only] => Some((*only).to_owned()),
+        _ => None,
     }
 }
 
@@ -2453,7 +2673,13 @@ fn detail_height(detail: &GraphDetail, scale: f32) -> f32 {
             } else {
                 commit.body.len() as f32 * line + gap
             };
-            pad * 2.0 + prose + meta
+            // **However many lines the band turned out to be** — the sentence
+            // wraps and the parent chips flow, so a block over a narrow pane is
+            // taller than one over a wide pane, and a height that assumed one
+            // line would be a block whose own text hung out of the bottom of it.
+            #[allow(clippy::cast_precision_loss)]
+            let band = commit.meta_lines.max(1) as f32 * meta;
+            pad * 2.0 + prose + band
         }
     }
 }
@@ -2542,16 +2768,50 @@ fn commit_detail(
         meta.push_str(graph_meta_parents());
     }
     let meta_font = GRAPH_META_FONT_LOGICAL_PX * scale;
-    let meta_width = measure(&meta, meta_font, crate::git_panel::MeasureFace::PLAIN);
-    let parents = commit
+    // **The band is narrower than the block**, by exactly the two copy verbs
+    // pinned at its right edge and the air in front of them — see
+    // [`detail_verbs_room`]. Wrapping to the block's own width instead is what
+    // ran the sentence under the buttons and pushed the parent chips off the
+    // right-hand side of the page.
+    let band = (room - detail_verbs_room(GRAPH_COMMIT_DETAIL_VERBS, scale)).max(1.0);
+    // The trailing space of `parents: ` is a *separator*, and a separator that
+    // survived into the wrap would be one on the first line and gone on the
+    // second — so it is dropped here and the chips carry their own gap.
+    let meta: Vec<String> = crate::tooltip::wrap(meta.trim_end(), band, |text| {
+        measure(text, meta_font, crate::git_panel::MeasureFace::PLAIN)
+    });
+    // Where the chips start: at the end of the last line of the sentence that
+    // names them, and on a fresh line each time the room runs out. One flow,
+    // decided here so that the block's height and the block's layout are two
+    // readings of one answer rather than two arithmetics that agree today.
+    let chip_gap = (GRAPH_PARENT_GAP_LOGICAL_PX * scale).round();
+    let mut line = meta.len().saturating_sub(1);
+    let mut x = meta
+        .last()
+        .map(|last| measure(last, meta_font, crate::git_panel::MeasureFace::PLAIN))
+        .unwrap_or(0.0);
+    let parents: Vec<GraphParentChip> = commit
         .parents
         .iter()
         .map(|parent| {
             let short = short_hash(parent);
+            let width = measure(&short, meta_font, crate::git_panel::MeasureFace::FIGURES);
+            let mut at = x + chip_gap;
+            // **A chip that does not fit moves down rather than out.** The one
+            // case it cannot help is a band too narrow for a single seven-
+            // character hash, and there the chip starts at the left edge of its
+            // own line and is cut by the block rather than by the pane.
+            if at + width > band && at > chip_gap {
+                line += 1;
+                at = 0.0;
+            }
+            x = at + width;
             GraphParentChip {
-                width: measure(&short, meta_font, crate::git_panel::MeasureFace::FIGURES),
+                width,
                 short,
                 hash: parent.clone(),
+                line,
+                x: at,
             }
         })
         .collect();
@@ -2560,10 +2820,35 @@ fn commit_detail(
         short: commit.short.clone(),
         subject: commit.subject.clone(),
         body,
+        meta_lines: (line + 1).max(meta.len()).max(1),
         meta,
-        meta_width,
         parents,
     }
+}
+
+/// How many verbs a commit's block pins at the right of its meta band.
+///
+/// `Copy subject` and `Copy hash` — named rather than counted at each of the
+/// three places that need the number, because the band's wrap, the block's
+/// height and the block's layout must all reserve the *same* strip or the
+/// sentence will be wrapped to a width it is not drawn in.
+const GRAPH_COMMIT_DETAIL_VERBS: usize = 2;
+
+/// How much of a meta band's right-hand end the hover verbs take.
+///
+/// `n` boxes, the gaps between them, and one more gap in front of the first —
+/// which is the air that keeps a sentence from ending flush against a button.
+fn detail_verbs_room(verbs: usize, scale: f32) -> f32 {
+    if verbs == 0 {
+        return 0.0;
+    }
+    let act = (crate::git_panel::GIT_ACT_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let gap = (crate::git_panel::GIT_ACT_GAP_LOGICAL_PX * scale).round();
+    #[allow(clippy::cast_precision_loss)]
+    let count = verbs as f32;
+    count * act + count * gap
 }
 
 /// How many characters of a full hash a parent chip shows.
@@ -2848,29 +3133,28 @@ pub fn row_open(
     }
 }
 
-/// What a **double** press on a graph row does (R23): stand on that commit.
-///
-/// A detached checkout, and it goes through the same door a branch row's does —
-/// no gate, git's own refusal if the tree is dirty, and no way past it from
-/// here (R10).
-#[must_use]
-pub fn row_double_open(row: &GraphViewRow) -> Option<crate::git_panel::GitRowOpen> {
-    match row {
-        GraphViewRow::Commit(commit) => Some(crate::git_panel::GitRowOpen::Checkout {
-            target: commit.hash.clone(),
-            detach: true,
-        }),
-        // A file row's second click is its first click again: opening the same
-        // document twice is asking for it again, which is what pressing a row
-        // that is already open has always meant here.
-        GraphViewRow::File(_) => None,
-        // **You cannot check out the working tree** — you are standing in it.
-        // The second click is the first click again, which folds the row back.
-        GraphViewRow::Uncommitted(_) => None,
-        GraphViewRow::Detail(_) => None,
-    }
-}
-
+// **A second click on a graph row is the first click again** — R23's double
+// click, withdrawn (user report, 2026-08-19).
+//
+// R23 gave it a detached checkout: two presses on a commit row moved the
+// working tree onto that commit, ungated, with nothing said first and nothing
+// but the masthead's two quiet words said after. What that ruling missed is the
+// gesture it was overloading. The first click of the pair *turns the row over*,
+// so a reader who double-clicks a commit to look inside it — which is what
+// double-clicking a row means everywhere else in this window, and what the row
+// under their pointer had just done once already — got a detached `HEAD`
+// instead, and found out from a repository that had stopped being on a branch.
+// That is precisely how a reader browsing this graph ended up standing on a
+// commit from the middle of their own history.
+//
+// A checkout is not a thing this page may do because a pointer was in one place
+// twice. It stays available, spelled out, on the row's own context menu — where
+// it is a word somebody read and pressed — and a checkout that *detaches* is
+// asked about first ([`crate::restore::GateRequest::GitCheckout`]).
+//
+// So there is no second-click verb here at all, and the function that used to
+// answer one is gone rather than made to answer `None`: a door that is closed
+// is not a door with nothing behind it.
 // ── the detail block's own geometry (v2 ②) ─────────────────────────────────
 
 /// Where everything inside a detail block stands.
@@ -2883,8 +3167,9 @@ pub fn row_double_open(row: &GraphViewRow) -> Option<crate::git_panel::GitRowOpe
 pub struct GraphDetailLayout {
     /// One box per wrapped line of body, top to bottom.
     pub body: Vec<[f32; 4]>,
-    /// The meta line — or, in compare mode, the comparison's own sentence.
-    pub meta: [f32; 4],
+    /// The meta band, one box per line — or, in compare mode, the one box the
+    /// comparison's own sentence stands in.
+    pub meta: Vec<[f32; 4]>,
     /// The parent hashes standing on the meta line, in git's order.
     pub parents: Vec<[f32; 4]>,
     /// The hover verbs at the line's right, right to left as they are laid out.
@@ -2925,16 +3210,39 @@ pub fn detail_layout(
             top += gap;
         }
     }
-    layout.meta = [left, top, right, top + meta_height];
+    // **The band stops short of the verbs**, and it is the same strip
+    // `commit_detail` wrapped the sentence to — one constant, read twice, so
+    // that what is drawn is what was measured.
+    let verbs = match &row.detail {
+        GraphDetail::Commit(_) => GRAPH_COMMIT_DETAIL_VERBS,
+        GraphDetail::Compare(_) => 1,
+    };
+    let band_right = (right - detail_verbs_room(verbs, scale)).max(left);
+    let band_top = top;
+    let lines = match &row.detail {
+        GraphDetail::Commit(commit) => commit.meta.len().max(1),
+        GraphDetail::Compare(_) => 1,
+    };
+    for index in 0..lines {
+        #[allow(clippy::cast_precision_loss)]
+        let offset = index as f32 * meta_height;
+        layout.meta.push([
+            left,
+            band_top + offset,
+            band_right,
+            band_top + offset + meta_height,
+        ]);
+    }
 
     // The verbs, from the right edge inwards — the order they are pinned in, so
     // that a block with one of them and a block with two put the first one in
-    // the same place.
+    // the same place. On the band's **first** line, whichever line the sentence
+    // ends on: they are the block's buttons rather than the sentence's.
     let act = (crate::git_panel::GIT_ACT_LOGICAL_PX * scale)
         .round()
         .max(1.0);
     let act_gap = (crate::git_panel::GIT_ACT_GAP_LOGICAL_PX * scale).round();
-    let act_top = ((layout.meta[1] + layout.meta[3] - act) / 2.0).round();
+    let act_top = ((band_top + band_top + meta_height - act) / 2.0).round();
     let mut cursor = right;
     let mut verb = |part: GraphDetailPart, layout: &mut GraphDetailLayout| {
         let box_ = [cursor - act, act_top, cursor, act_top + act];
@@ -2945,19 +3253,19 @@ pub fn detail_layout(
         GraphDetail::Commit(commit) => {
             verb(GraphDetailPart::CopySubject, &mut layout);
             verb(GraphDetailPart::CopyHash, &mut layout);
-            // The parents, immediately after the text that names them — which is
-            // why the meta string is measured at build time and carried here.
-            let chip_gap = (GRAPH_PARENT_GAP_LOGICAL_PX * scale).round();
-            let mut chip_left = left + commit.meta_width;
+            // The parents, where the flow put them — after the text that names
+            // them, on the line it ended on or the next one down. Both numbers
+            // were worked out by the thing holding the font; this only turns
+            // them into boxes.
             for chip in &commit.parents {
-                let box_ = [
-                    chip_left,
-                    layout.meta[1],
-                    chip_left + chip.width,
-                    layout.meta[3],
-                ];
-                chip_left = box_[2] + chip_gap;
-                layout.parents.push(box_);
+                #[allow(clippy::cast_precision_loss)]
+                let offset = chip.line as f32 * meta_height;
+                layout.parents.push([
+                    left + chip.x,
+                    band_top + offset,
+                    (left + chip.x + chip.width).min(band_right),
+                    band_top + offset + meta_height,
+                ]);
             }
         }
         GraphDetail::Compare(_) => verb(GraphDetailPart::LeaveCompare, &mut layout),
@@ -3572,6 +3880,46 @@ fn push_toolbar(
             ));
         };
 
+    // **The way back**, beside the words it answers. It wears the warning ink
+    // its badge does rather than the tools' quiet edge: it is not one more
+    // control on this strip, it is the one thing on the page a reader in this
+    // state is looking for.
+    if let (Some(box_), Some(door)) = (rects.leave_detached, toolbar.leave_detached.as_ref()) {
+        if hover == Some(GraphTool::LeaveDetached) {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill { radius_px: radius },
+                clip(box_),
+                palette.git_act_pill,
+            ));
+        }
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPillRing {
+                radius_px: radius,
+                stroke_px: edge_px,
+            },
+            clip(box_),
+            palette.status_warn,
+        ));
+        let label_rect = [
+            box_[0] + pad,
+            box_[1],
+            (box_[2] - pad).max(box_[0] + pad),
+            box_[3],
+        ];
+        labels.push(ChromeLabel {
+            text: door.text.clone(),
+            rect: label_rect,
+            font_size_px: font,
+            color: palette.status_warn,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Medium,
+            tabular_numerals: false,
+            clip: Some(clip(label_rect)),
+        });
+    }
+
     tool_ground(sprites, rects.filter, GraphTool::Filter, false);
     let chevron_left = rects.filter[2] - pad - mark;
     if !rects.filter_short {
@@ -3950,12 +4298,9 @@ fn push_detail(
             for (text, box_) in commit.body.iter().zip(&layout.body) {
                 line(text.clone(), *box_, body_font, ground.text(palette));
             }
-            line(
-                commit.meta.clone(),
-                layout.meta,
-                meta_font,
-                ground.muted(palette),
-            );
+            for (text, box_) in commit.meta.iter().zip(&layout.meta) {
+                line(text.clone(), *box_, meta_font, ground.muted(palette));
+            }
             // **The parents wear the accent**, because they are the one thing on
             // this line you can press — the same claim the accent makes
             // everywhere else in this window.
@@ -3974,12 +4319,11 @@ fn push_detail(
                 });
             }
         }
-        GraphDetail::Compare(compare) => line(
-            compare.head.clone(),
-            layout.meta,
-            meta_font,
-            ground.text(palette),
-        ),
+        GraphDetail::Compare(compare) => {
+            if let Some(box_) = layout.meta.first() {
+                line(compare.head.clone(), *box_, meta_font, ground.text(palette));
+            }
+        }
     }
 
     // R12's three rungs again, on `.pv-tool`'s ladder: absent while the pointer
@@ -4985,6 +5329,571 @@ mod tests {
         assert_eq!(walker.rows(), layout(&all).as_slice());
     }
 
+    // ── the flicker, and the arcs that looked unfinished (2026-08-19) ──────
+
+    /// A history whose fork points are deliberately far below their merges — a
+    /// trunk with a side branch that runs beside it for a while before rejoining,
+    /// so that a page boundary can be put between a merge and the place its
+    /// branch left.
+    fn forked(run: usize) -> Vec<GitCommit> {
+        let name = |kind: &str, at: usize| format!("{kind}{at}");
+        let mut commits = Vec::new();
+        // The tip, and the trunk above the merge.
+        for at in 0..run {
+            commits.push(commit(&name("t", at), &[&name("t", at + 1)]));
+        }
+        // The merge: the first parent carries the trunk on, the second opens the
+        // side.
+        commits.push(commit(
+            &name("t", run),
+            &[&name("t", run + 1), &name("s", 0)],
+        ));
+        // The trunk and the side run beside each other, the trunk first because
+        // `--topo-order` emits a merge's first-parent line before the branch it
+        // took in — which is exactly what puts a fork point below a screenful.
+        for at in 0..run {
+            commits.push(commit(
+                &name("t", run + 1 + at),
+                &[&name("t", run + 2 + at)],
+            ));
+        }
+        for at in 0..run {
+            commits.push(commit(&name("s", at), &[&name("s", at + 1)]));
+        }
+        // The fork point: where the side's last commit rejoins the trunk.
+        commits.push(commit(&name("s", run), &[&name("t", 2 * run + 1)]));
+        commits.push(commit(&name("t", 2 * run + 1), &[]));
+        commits
+    }
+
+    /// **The continuity law**: every line a row draws *above* itself is a line
+    /// the row above it drew *below* itself, and nothing is drawn into thin air.
+    ///
+    /// Stated as an equality over sets rather than as a list of expected lanes,
+    /// because it is the property the picture actually has to have — a lane that
+    /// arrived from above with nothing above it, or left downwards with nothing
+    /// below it, is exactly the "arc that starts and never ends" a reader would
+    /// see. `lower(i)` is every lane still occupied after row `i`; at row `i+1`
+    /// each of those either runs on (`upper`) or curves into the dot (`close`),
+    /// and there is no third thing it can do.
+    ///
+    /// MUTATION: drop `close.contains` from `upper`'s filter and a merge's second
+    /// head is drawn as a straight line *and* a curve over the same pixels; put a
+    /// lane in `lower` that `after` does not hold and a line leaves the bottom of
+    /// a row with nothing under it to meet.
+    #[test]
+    fn every_line_a_row_draws_above_it_is_one_the_row_above_drew_below_it() {
+        for history in [
+            straight(6),
+            forked(4),
+            vec![
+                commit("m", &["b", "s"]),
+                commit("b", &["a"]),
+                commit("s", &["a"]),
+                commit("a", &[]),
+            ],
+            vec![
+                commit("o", &["p", "q", "r"]),
+                commit("p", &["z"]),
+                commit("q", &["z"]),
+                commit("r", &["z"]),
+                commit("z", &[]),
+            ],
+        ] {
+            let rows = layout(&history);
+            for (at, pair) in rows.windows(2).enumerate() {
+                let (above, below) = (&pair[0], &pair[1]);
+                let mut arriving: Vec<usize> =
+                    below.upper.iter().chain(&below.close).copied().collect();
+                arriving.sort_unstable();
+                arriving.dedup();
+                let mut leaving = above.lower.clone();
+                leaving.sort_unstable();
+                assert_eq!(
+                    leaving,
+                    arriving,
+                    "row {at} leaves {leaving:?} and row {} takes {arriving:?}",
+                    at + 1
+                );
+                assert!(
+                    below.close.iter().all(|lane| !below.upper.contains(lane)),
+                    "a lane cannot both run through a row and curve into its dot"
+                );
+            }
+        }
+    }
+
+    /// **A lane whose fork point is below the loaded window runs to the window's
+    /// bottom edge**, and is picked up in the same lane when the next page
+    /// arrives (user report, 2026-08-19).
+    ///
+    /// This is the shape the report was about: a merge is drawn near the top of a
+    /// page and the commit where its branch left is further back than the pages
+    /// read so far, so the arc has a visible beginning and no visible end. The
+    /// ruling is that this is the *correct* picture — the road genuinely does
+    /// continue past the last row that has been read — and what has to be true is
+    /// that it reaches the bottom edge of the last loaded row rather than
+    /// stopping in mid-air above it, and that the next page continues it where it
+    /// was.
+    #[test]
+    fn a_fork_point_below_the_loaded_page_runs_to_the_bottom_edge_and_the_next_page_picks_it_up() {
+        let all = forked(4);
+        // A page that stops after the merge and its trunk — before the side
+        // branch's own commits, and long before the fork point.
+        let page = 7;
+        let mut walker = LaneWalker::default();
+        walker.extend(&all[..page]);
+        let first = walker.rows().to_vec();
+        assert_eq!(first[4].open, vec![1], "the merge opens the side lane");
+        let last = first.last().expect("a page has rows");
+        assert!(
+            last.lower.contains(&1),
+            "the side lane is still open at the bottom of the loaded page, so it \
+             is drawn to that row's bottom edge: {last:?}"
+        );
+        assert!(
+            last.lower.contains(&0),
+            "and so is the trunk it left, for the same reason"
+        );
+
+        // Load more: the rows already drawn do not move, the hanging lane carries
+        // on in the lane it was in, and it is taken back where the roads meet.
+        walker.extend(&all);
+        assert_eq!(
+            &walker.rows()[..page],
+            first.as_slice(),
+            "a second page does not redraw the first"
+        );
+        let rows = walker.rows();
+        let side_dots: Vec<usize> = (page..rows.len())
+            .filter(|at| all[*at].hash.starts_with('s'))
+            .map(|at| rows[at].dot)
+            .collect();
+        assert!(
+            !side_dots.is_empty() && side_dots.iter().all(|dot| *dot == 1),
+            "the side commits arrive in the lane that was left open for them: \
+             {side_dots:?}"
+        );
+        let root = rows.last().expect("a root ends this history");
+        assert!(
+            root.lower.is_empty(),
+            "a root commit ends every road that reached it: {root:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.close.contains(&1)),
+            "and the side lane is closed somewhere, rather than run off the end"
+        );
+        // And the whole picture is the one a single walk would have drawn.
+        assert_eq!(walker.rows(), layout(&all).as_slice());
+    }
+
+    /// **A re-read that finds the same history moves not one lane, and there is
+    /// no moment in between with no picture at all** (user report, 2026-08-19).
+    ///
+    /// The graph used to be invalidated by whoever *asked* for a re-read, before
+    /// the answer existed: for the length of a `git log` every dot stood in lane
+    /// zero with no lines and there was no Uncommitted Changes row, and then the
+    /// identical picture was drawn again. Under a repository something else is
+    /// writing to, the kernel says so every couple of seconds and the whole graph
+    /// blinks.
+    ///
+    /// MUTATION: make `sync` reset the walk whenever a log answer arrives at all
+    /// — the shape the page had before `LaneWalker::resumes` existed — and the
+    /// last two assertions fail on an empty lane list, which is exactly the frame
+    /// the reader was seeing.
+    ///
+    /// **What this does not gate**, measured rather than assumed: the caller that
+    /// used to blank the picture *before* asking. This drives the cache directly,
+    /// so restoring `Runtime::reread_git_origin`'s `invalidate()` leaves it green
+    /// — that regression is pinned at its own site, by
+    /// `a_re_read_does_not_throw_the_picture_away_before_its_answer_exists`.
+    #[test]
+    fn a_re_read_that_finds_the_same_history_redraws_nothing_and_blanks_nothing() {
+        let commits = straight(20);
+        let mut state = state_with_status(commits.clone(), DIRTY);
+        let before = frame(&state, None, WIDE);
+        let lanes = state.lanes().to_vec();
+        let head = state.head_lanes().cloned();
+        assert!(head.is_some(), "a dirty tree has its own row");
+        assert!(!lanes.is_empty());
+
+        // The re-read goes out. Nothing about the cache is Pending — that is what
+        // makes it a re-read rather than a refresh — so the page keeps every
+        // answer it had, and the picture over them has to keep every road.
+        let asked = state.cache.begin_reread();
+        assert_eq!(asked.len(), 3, "the status, the refs and the history");
+        assert_eq!(
+            state.lanes(),
+            lanes.as_slice(),
+            "the roads are still on screen while the answer is in flight"
+        );
+        assert_eq!(state.head_lanes(), head.as_ref());
+        assert_eq!(
+            frame(&state, None, WIDE).rows,
+            before.rows,
+            "and so is every row"
+        );
+
+        // The answer lands, saying what the page already said.
+        state.cache.accept(crate::git::GitAnswer::Log {
+            root: std::path::PathBuf::from(r"D:\repo"),
+            skip: 0,
+            outcome: Ok(crate::git::GitLog {
+                skip: 0,
+                commits,
+                has_more: false,
+            }),
+        });
+        state.sync();
+        assert_eq!(state.lanes(), lanes.as_slice(), "and nothing moved");
+        assert_eq!(state.head_lanes(), head.as_ref());
+        assert_eq!(frame(&state, None, WIDE).rows, before.rows);
+    }
+
+    /// **A history that was rewritten under the walk is walked again** — the
+    /// other half of the same rule, and the reason the picture may be left alone
+    /// while a re-read is in flight.
+    ///
+    /// The count is no help here: the replacing list is exactly as long as the
+    /// one it replaces. What decides it is whether the commits the rows were laid
+    /// out over are still the commits at those places.
+    #[test]
+    fn a_history_rewritten_under_the_walk_is_not_resumed_into() {
+        let mut walker = LaneWalker::default();
+        let first = [
+            commit("m", &["b", "s"]),
+            commit("b", &["a"]),
+            commit("s", &["a"]),
+            commit("a", &[]),
+        ];
+        walker.extend(&first);
+        assert!(walker.resumes(&first), "the same list resumes");
+        // One more page of the same history resumes too — that is the whole of
+        // what makes the walk incremental.
+        let longer = [
+            first[0].clone(),
+            first[1].clone(),
+            first[2].clone(),
+            first[3].clone(),
+            commit("older", &[]),
+        ];
+        assert!(walker.resumes(&longer));
+        // A rebase: same length, same shape, different commits.
+        let rewritten = [
+            commit("m2", &["b2", "s2"]),
+            commit("b2", &["a"]),
+            commit("s2", &["a"]),
+            commit("a", &[]),
+        ];
+        assert!(!walker.resumes(&rewritten));
+        // And a list that lost rows the walk is still drawing.
+        assert!(!walker.resumes(&first[..2]));
+    }
+
+    /// **A history replaced under an open graph is re-walked, even when the new
+    /// one is exactly as long** (user report, 2026-08-19).
+    ///
+    /// The state used to decide this by counting: a log shorter than the walk was
+    /// a different history and anything else was more of the same one. An amend
+    /// and a rebase both replace a page without shortening it, so the count let
+    /// them straight through and the picture went on describing commits that were
+    /// no longer there — which is why every caller that *might* have caused one
+    /// threw the whole picture away in advance, and why the graph blinked every
+    /// time anything wrote under `.git`.
+    ///
+    /// MUTATION: put the length comparison back in place of `resumes` and this
+    /// fails on the second `sync`, still holding the first history's rows.
+    #[test]
+    fn a_page_replaced_by_a_different_history_of_the_same_length_is_walked_again() {
+        let first = vec![
+            commit("m", &["b", "s"]),
+            commit("b", &["a"]),
+            commit("s", &["a"]),
+            commit("a", &[]),
+        ];
+        let mut state = state_of(first.clone(), false);
+        assert_eq!(state.lanes(), layout(&first).as_slice());
+
+        let rewritten = vec![
+            commit("m2", &["b2"]),
+            commit("b2", &["a2"]),
+            commit("s2", &["a2"]),
+            commit("a2", &[]),
+        ];
+        state.cache.accept(crate::git::GitAnswer::Log {
+            root: std::path::PathBuf::from(r"D:\repo"),
+            skip: 0,
+            outcome: Ok(crate::git::GitLog {
+                skip: 0,
+                commits: rewritten.clone(),
+                has_more: false,
+            }),
+        });
+        state.sync();
+        assert_eq!(
+            state.lanes(),
+            layout(&rewritten).as_slice(),
+            "the picture is of the history the repository now has"
+        );
+    }
+
+    /// **A detached `HEAD` is said out loud, and there is a way back out of it**
+    /// (user ruling, 2026-08-19).
+    ///
+    /// A repository can be detached by something this window never saw — a
+    /// `git checkout <sha>` in the terminal beside it, another tool, a script —
+    /// and until this ruling all the page did about it was set two words in the
+    /// same grey it sets `Reading the repository…` in. What it now does is wear
+    /// the warning ink, at the weight a branch name is set in, with a door beside
+    /// it naming the branch it leads back to.
+    ///
+    /// MUTATION: derive `detached` from `named` again and the badge goes back to
+    /// being the colour of a page that has not finished loading.
+    #[test]
+    fn a_detached_head_wears_the_warning_and_offers_the_way_back() {
+        const DETACHED: &[u8] = b"## HEAD (no branch)\x00";
+        let mut state = state_with_status(straight(6), DETACHED);
+        // The branch list is the other half of the answer: which branch the
+        // door leads back to is read off the refs, not guessed from the
+        // history.
+        state.cache.accept(crate::git::GitAnswer::Refs {
+            root: std::path::PathBuf::from(r"D:\repo"),
+            outcome: Ok(vec![crate::git::GitRefEntry {
+                kind: crate::git::GitRefKind::Local,
+                name: "main".to_owned(),
+                object: "c0".to_owned(),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                is_head: false,
+                committer_unix: 0,
+                committerdate_relative: "now".to_owned(),
+            }]),
+        });
+        let content = frame(&state, None, WIDE);
+        let head = content.head.as_ref().expect("a head");
+        assert!(head.detached, "git said HEAD is on no branch");
+        assert!(!head.named, "and there is no name to be at 600 *for*");
+        assert_eq!(head.branch, crate::git_panel::git_detached());
+
+        // On a branch it is neither, which is what stops every repository
+        // looking like it has something wrong with it.
+        let ordinary = frame(&state_with_status(straight(6), CLEAN), None, WIDE);
+        assert!(!ordinary.head.as_ref().expect("a head").detached);
+        assert!(
+            ordinary
+                .toolbar
+                .as_ref()
+                .expect("a strip")
+                .leave_detached
+                .is_none(),
+            "and there is no door out of a state you are not in"
+        );
+
+        // The door names the branch, and the branch is chosen by the rule rather
+        // than by a guess: `main` first, `master` next, the only branch there is
+        // after that, and nothing at all when the answer would be a guess.
+        let toolbar = content.toolbar.as_ref().expect("a strip");
+        let door = toolbar
+            .leave_detached
+            .as_ref()
+            .expect("a repository with `main` on it has somewhere to go back to");
+        assert_eq!(door.branch, "main");
+        assert_eq!(door.text, format!("{}main", graph_leave_detached()));
+
+        // And it is a control the strip lays out and the hit test can reach —
+        // one derivation, on this module's own rule.
+        let strip = [0.0, 0.0, 900.0, 34.0];
+        let rects = graph_toolbar_rects(strip, toolbar, 1.0);
+        let box_ = rects
+            .leave_detached
+            .expect("a wide strip has room for the way back");
+        assert!(
+            box_[0] >= rects.head[2],
+            "it stands after the words it answers"
+        );
+        assert!(box_[2] <= rects.filter[0], "and before the tools");
+        // **It is shed last.** A strip too narrow for the search field and the
+        // filter's label still draws the door: those two are about the *list*,
+        // and this one is about where the repository is standing.
+        let cramped = graph_toolbar_rects([0.0, 0.0, 300.0, 34.0], toolbar, 1.0);
+        assert!(cramped.search.is_none(), "the field goes first");
+        assert!(cramped.filter_short, "then the filter's label");
+        assert!(
+            cramped.leave_detached.is_some(),
+            "and the way back is still there: {cramped:?}"
+        );
+        // Below that there is no room for a sentence *and* an answer to it, and
+        // the masthead's own badge still says the state.
+        let tiny = graph_toolbar_rects([0.0, 0.0, 200.0, 34.0], toolbar, 1.0);
+        assert_eq!(tiny.leave_detached, None);
+    }
+
+    /// The branch a detached `HEAD` is offered back — the rule, every case.
+    #[test]
+    fn the_way_back_prefers_the_trunk_and_declines_to_guess() {
+        const DETACHED: &[u8] = b"## HEAD (no branch)\x00";
+        let root = std::path::PathBuf::from(r"D:\repo");
+        let refs = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| crate::git::GitRefEntry {
+                    kind: crate::git::GitRefKind::Local,
+                    name: (*name).to_owned(),
+                    object: format!("{name}-object"),
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    is_head: false,
+                    committer_unix: 0,
+                    committerdate_relative: "now".to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let asked = |names: &[&str], porcelain: &[u8]| {
+            let mut cache = crate::git::GitCache::at_root(root.clone(), crate::git::GitRole::Graph);
+            cache.accept(crate::git::GitAnswer::Status {
+                root: root.clone(),
+                outcome: Ok(crate::git::parse_status(porcelain)),
+            });
+            cache.accept(crate::git::GitAnswer::Refs {
+                root: root.clone(),
+                outcome: Ok(refs(names)),
+            });
+            leave_detached_branch(&cache)
+        };
+
+        assert_eq!(asked(&["main", "side"], DETACHED).as_deref(), Some("main"));
+        assert_eq!(
+            asked(&["master", "side"], DETACHED).as_deref(),
+            Some("master"),
+            "the older spelling of the same idea"
+        );
+        assert_eq!(
+            asked(&["main", "master"], DETACHED).as_deref(),
+            Some("main"),
+            "and where both exist, the newer one"
+        );
+        assert_eq!(
+            asked(&["only-one"], DETACHED).as_deref(),
+            Some("only-one"),
+            "one branch is not a guess"
+        );
+        assert_eq!(
+            asked(&["alpha", "beta"], DETACHED),
+            None,
+            "several branches and no trunk among them is a question this window \
+             cannot answer, and a door that guessed would be moving the working \
+             tree on a guess"
+        );
+        assert_eq!(
+            asked(&["main"], CLEAN),
+            None,
+            "and on a branch there is nothing to go back from"
+        );
+    }
+
+    /// **No press on any row of a graph is a checkout** (user report,
+    /// 2026-08-19).
+    ///
+    /// A double click on a commit row used to move the working tree onto that
+    /// commit, detached, with no question in front of it — which is how a reader
+    /// browsing this history ended up standing on a commit in the middle of it.
+    /// The verb lives on the row's own context menu now, and passes a gate.
+    #[test]
+    fn no_press_on_a_graph_row_answers_with_a_checkout() {
+        let state = state_with_status(told("Why."), DIRTY);
+        let content = frame(&state, Some("c0"), WIDE);
+        let root = std::path::Path::new(r"D:\repo");
+        let mut pressed = 0;
+        for row in &content.rows {
+            pressed += 1;
+            assert!(
+                !matches!(
+                    row_open(row, root),
+                    Some(crate::git_panel::GitRowOpen::Checkout { .. })
+                ),
+                "a press on {row:?} answered with a checkout"
+            );
+        }
+        assert!(pressed > 0, "the fixture drew rows to press");
+    }
+
+    /// **The detail block's own text and chips stay inside the block**, however
+    /// narrow the pane is (user report, 2026-08-19).
+    ///
+    /// The meta band used to be laid out as one line running to the block's right
+    /// edge, with the parent chips placed after the *unclipped* width of the
+    /// sentence and the two copy verbs pinned over the same strip. Over a narrow
+    /// pane that put the chips under the buttons and then off the block
+    /// altogether, which is why a reader saw half a hash they could neither
+    /// finish reading nor press.
+    ///
+    /// MUTATION: wrap the band to the block's full width instead of to the width
+    /// left over by the verbs, and the last assertion here catches the overlap.
+    #[test]
+    fn a_narrow_pane_keeps_the_detail_bands_words_and_chips_inside_the_block() {
+        for width in [900.0_f32, 620.0, 420.0, 300.0] {
+            let body = [0.0, 0.0, width, 600.0];
+            let state = state_of(told("Why it was done."), false);
+            let content = frame(&state, Some("c0"), body);
+            let detail = detail_of(&content).expect("the open row has a block");
+            let geometry = graph_geometry(body, &content, 1.0);
+            let first = geometry.row_rect(detail.index);
+            let last = geometry.row_rect(detail.index + detail.rows - 1);
+            let rect = [first[0], first[1], first[2], last[3]];
+            let layout = detail_layout(rect, detail, content.columns, 1.0);
+            let story = story_of(&content).expect("a commit's story");
+
+            let verbs_left = layout
+                .tools
+                .iter()
+                .map(|(box_, _)| box_[0])
+                .fold(f32::INFINITY, f32::min);
+            for box_ in &layout.meta {
+                assert!(
+                    box_[2] <= verbs_left,
+                    "at {width}px the band runs under its own buttons: \
+                     {box_:?} vs {verbs_left}"
+                );
+            }
+            for (chip, box_) in story.parents.iter().zip(&layout.parents) {
+                assert!(
+                    box_[2] <= verbs_left && box_[0] >= rect[0],
+                    "at {width}px the parent {} is drawn outside the block: {box_:?}",
+                    chip.short
+                );
+                assert!(
+                    box_[3] <= rect[3] + 0.5,
+                    "at {width}px the parent {} is drawn below the block: {box_:?}",
+                    chip.short
+                );
+            }
+            assert_eq!(
+                layout.meta.len(),
+                story.meta.len().max(1),
+                "one box per line of the band"
+            );
+            // Every chip is still pressable at the place it is drawn — the hit
+            // test and the paint read one layout, and a wrapped band must not
+            // separate them.
+            for (at, box_) in layout.parents.iter().enumerate() {
+                assert_eq!(
+                    detail_part_at(
+                        rect,
+                        detail,
+                        content.columns,
+                        1.0,
+                        (box_[0] + box_[2]) / 2.0,
+                        (box_[1] + box_[3]) / 2.0,
+                    ),
+                    Some(GraphDetailPart::Parent(at)),
+                    "at {width}px parent {at} does not answer a press where it is drawn"
+                );
+            }
+        }
+    }
+
     // ── v2 ①: the table (2026-08-16) ───────────────────────────────────────
 
     /// V1 — the columns stand in the ruled order, and none of them overlaps the
@@ -5362,8 +6271,6 @@ mod tests {
                 hash: GRAPH_UNCOMMITTED_HASH.to_owned()
             })
         );
-        // But it is not somewhere you can check out — you are standing in it.
-        assert_eq!(row_double_open(&content.rows[0]), None);
     }
 
     /// V8 — the selected ground is on one row and it is the row the page was
@@ -5657,6 +6564,12 @@ mod tests {
         assert!(!story.body[GRAPH_BODY_MAX_LINES - 1].ends_with(GRAPH_BODY_ELLIPSIS));
     }
 
+    /// The meta band read back as the one sentence it is — the wrap is a fact
+    /// about the room, and every assertion below is about the words.
+    fn meta_text(story: &GraphCommitDetail) -> String {
+        story.meta.join(" ")
+    }
+
     /// D2 — the meta line: who, when, and which commits this one came from.
     #[test]
     fn the_meta_line_names_the_author_the_date_and_the_parents() {
@@ -5664,7 +6577,11 @@ mod tests {
         let content = frame(&state, Some("c0"), WIDE);
         let story = story_of(&content).expect("open");
         assert_eq!(
-            story.meta, "Weiyi Shi <weiyi@example.com> \u{b7} 2026-08-15 10:18 \u{b7} parents: ",
+            meta_text(story),
+            "Weiyi Shi <weiyi@example.com> \u{b7} 2026-08-15 10:18 \u{b7} parents:",
+            // The separator space that used to end this string is gone: a chip
+            // carries its own gap, and one drawn from the trailing space of a
+            // line would have none the moment that line wrapped.
             "the absolute date and not the relative one: an opened row is being \
              read rather than scanned"
         );
@@ -5688,7 +6605,7 @@ mod tests {
         let root = frame(&root, Some("c19"), WIDE);
         let root = story_of(&root).expect("open");
         assert!(root.parents.is_empty());
-        assert!(!root.meta.contains(graph_meta_parents()));
+        assert!(!meta_text(root).contains(graph_meta_parents().trim_end()));
     }
 
     /// D2 — "committed by" appears exactly when the committer is somebody else.
@@ -5701,12 +6618,7 @@ mod tests {
     fn the_committer_is_named_only_when_they_are_not_the_author() {
         let state = state_of(told(""), false);
         let same = frame(&state, Some("c0"), WIDE);
-        assert!(
-            !story_of(&same)
-                .expect("open")
-                .meta
-                .contains(graph_meta_committed_by())
-        );
+        assert!(!meta_text(story_of(&same).expect("open")).contains(graph_meta_committed_by()));
 
         let mut commits = told("");
         commits[0].committer_name = "Rebase Bot".to_owned();
@@ -5714,9 +6626,7 @@ mod tests {
         let state = state_of(commits, false);
         let other = frame(&state, Some("c0"), WIDE);
         assert!(
-            story_of(&other)
-                .expect("open")
-                .meta
+            meta_text(story_of(&other).expect("open"))
                 .contains("committed by Rebase Bot <bot@example.com>")
         );
 
@@ -5726,12 +6636,7 @@ mod tests {
         commits[0].committer_email = "someone.else@example.com".to_owned();
         let state = state_of(commits, false);
         let addressed = frame(&state, Some("c0"), WIDE);
-        assert!(
-            story_of(&addressed)
-                .expect("open")
-                .meta
-                .contains(graph_meta_committed_by())
-        );
+        assert!(meta_text(story_of(&addressed).expect("open")).contains(graph_meta_committed_by()));
     }
 
     /// D7 — the two copy verbs stand at the line's right and answer a press
@@ -5811,6 +6716,17 @@ mod tests {
             graph_copied(&"z".repeat(GRAPH_COPIED_MAX_CHARS)),
             format!("Copied {}", "z".repeat(GRAPH_COPIED_MAX_CHARS)),
             "a subject that exactly fits is not marked"
+        );
+        // And the gate names a commit by the same measure, for the same reason:
+        // a confirmation that quoted a two-hundred-word merge subject whole is a
+        // dialog nobody reads.
+        assert_eq!(checkout_said("65b890b", "short one"), "65b890b short one");
+        let long = checkout_said("65b890b", &"z".repeat(GRAPH_COPIED_MAX_CHARS + 30));
+        assert!(long.starts_with("65b890b "));
+        assert!(long.ends_with(GRAPH_BODY_ELLIPSIS));
+        assert_eq!(
+            long.chars().count(),
+            "65b890b ".chars().count() + GRAPH_COPIED_MAX_CHARS + 1
         );
     }
 

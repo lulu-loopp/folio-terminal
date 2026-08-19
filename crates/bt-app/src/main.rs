@@ -4376,6 +4376,25 @@ struct WindowRuntime {
     /// longer matches does nothing, which is the honest answer: the thing it
     /// offered to undo is no longer the thing that would come back.
     profile_undo: Option<(toast::ToastId, profiles::Profile, usize)>,
+    /// **Where a checkout came from**, while it is in flight (user ruling,
+    /// 2026-08-19): the repository, and the branch `HEAD` was on before.
+    ///
+    /// Captured at the moment the question is issued and not read off the answer,
+    /// because by the time the answer arrives it is the one fact about the move
+    /// that no longer exists anywhere: `git status` says where you are, and the
+    /// place you left is only in a reflog this window does not read.
+    ///
+    /// The branch is `None` for a move that started on no branch — a move with
+    /// nothing to offer going back to. The flag is whether the move detaches,
+    /// which decides which sentence the card says and is known here rather than
+    /// on the receipt: git's answer is `Ok(())` and says nothing about the shape
+    /// of what it did.
+    checkout_from: Option<(std::path::PathBuf, Option<String>, bool)>,
+    /// The card offering the way back, and where back is.
+    ///
+    /// [`Self::profile_undo`]'s shape exactly, and for its reason: a verb pressed
+    /// on a card that is not the one holding the offer does nothing.
+    checkout_undo: Option<(toast::ToastId, std::path::PathBuf, String)>,
     /// How far into the open picker's thumb the hand took hold, while it is
     /// holding it (§7.1.6c-5).
     ///
@@ -5059,8 +5078,6 @@ struct WindowRuntime {
     /// The graph each preview seat drew this frame — [`Self::git_pages_shown`]'s
     /// twin, kept for the same `&self` hit test.
     git_graphs_shown: BTreeMap<SeatId, git_graph::GraphContent>,
-    /// Double clicks on graph rows, paired by commit (R23).
-    git_graph_clicks: FilesRowClicks<SeatId>,
     /// How wide each column's `Files | Git` switch is drawn, for the hit test.
     ///
     /// The third field of this family, and it exists for the reason the two above
@@ -5344,6 +5361,125 @@ struct {name} {{
                 "`{owned_by_a_window}` is a fact about one window"
             );
         }
+    }
+
+    /// The body of a top-level-in-`impl` `fn <name>(`, delimited by the one `}`
+    /// at that `fn`'s own indentation which follows it.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!(
+            "
+    fn {name}("
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+    }
+",
+                )
+                .expect("a method is closed by a `}` at the `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// PIN (user report, 2026-08-19) — **every spelling of a checkout is issued
+    /// from one place, so the three tiers cannot be answered by two doors and
+    /// skipped by the third.**
+    ///
+    /// This pins the shape of the defect rather than one instance of it. A reader
+    /// browsing the graph found their repository standing somewhere they had not
+    /// asked to stand, and the reason a rule about *when to ask* had a hole in it
+    /// was that the asking lived at the call sites: three menu arms, a row press
+    /// and a toolbar button each remembered to route through `ask_to_checkout`,
+    /// and the sixth — `Checkout tracking`, whose git command happens to be
+    /// spelled `checkout -b … --track` rather than `checkout` — went out through
+    /// the ref-writing door instead. It moved `HEAD` over uncommitted work with
+    /// nothing asked, and it was the *same menu row* that did ask whenever the
+    /// local branch already existed.
+    ///
+    /// So what is asserted is not "the tracking verb is gated" — that would go
+    /// green again the next time a seventh door is added. It is that the three
+    /// ways of telling git to stand somewhere else are **reachable from one
+    /// function**, and that that function is reached from the one that asks.
+    ///
+    /// The needles are assembled with `concat!` so that this test's own text is
+    /// not one of the occurrences it counts, and the tracking one ends at the
+    /// field's colon: `CheckoutTracking { name: …` is somebody *building* the
+    /// verb, while `CheckoutTracking { name }` is the answer-reader taking it
+    /// apart again, which moves nothing.
+    ///
+    /// MUTATION: issue `CheckoutTracking` straight from the menu arm again — the
+    /// literal bug — and its count goes to two.
+    #[test]
+    fn every_verb_that_moves_head_is_issued_from_the_one_place_that_asks_first() {
+        let tracking = concat!("GitWriteVerb::", "CheckoutTracking { name: ");
+        let column = concat!("self.checkout_", "from_column(");
+        let graph = concat!("self.checkout_", "in_graph(");
+        let performs = fn_body("checkout_at");
+        for spelling in [tracking, column, graph] {
+            assert_eq!(
+                SOURCE.matches(spelling).count(),
+                1,
+                "`{spelling}` is written in more than one place, so one of them is \
+                 a door that has not answered the tiers"
+            );
+            assert!(
+                performs.contains(spelling),
+                "and the one place is `checkout_at`: {spelling}"
+            );
+        }
+
+        // And `checkout_at` is reached from exactly two places: the question, and
+        // the gate's confirmed answer — which *is* that question, answered.
+        let asks = fn_body("ask_to_checkout");
+        let performing = concat!("self.checkout", "_at(");
+        assert_eq!(
+            SOURCE.matches(performing).count(),
+            2,
+            "a third caller of `checkout_at` is a third chance to skip the gate"
+        );
+        assert!(asks.contains(performing), "{asks}");
+        assert!(
+            asks.contains("restore::checkout_needs_gate(kind, dirty)"),
+            "and it asks the rule rather than restating it: {asks}"
+        );
+    }
+
+    /// PIN (user report, 2026-08-19) — **nobody throws the graph away before the
+    /// answer that would justify it has arrived.**
+    ///
+    /// The picture blinked because `reread_git_origin` called `invalidate()` on
+    /// the way *out*: for the length of a `git log` every dot stood in lane zero
+    /// with no lines and no Uncommitted Changes row, and then the identical
+    /// picture was drawn again. Under a repository something else is writing to,
+    /// the kernel says so every couple of seconds and the whole graph flashes.
+    /// `git_graph::GraphState::sync` decides it from the answer instead, by
+    /// asking whether the list that came back is still the list the rows were
+    /// laid out over.
+    ///
+    /// **Asserted on the source rather than on a `GraphState`**, and that is the
+    /// whole reason it exists: `git_graph`'s own
+    /// `a_re_read_that_finds_the_same_history_redraws_nothing_and_blanks_nothing`
+    /// proves the *rule* — a re-read over an unchanged history moves no lane —
+    /// but it drives the cache directly and never runs this function, so putting
+    /// the call back leaves it green. Measured, not assumed: the mutation was
+    /// performed and that test passed. The regression has a place, and this is
+    /// the place.
+    ///
+    /// MUTATION: restore the `if !questions.is_empty() { state.invalidate(); }`
+    /// this function's `Graph` arm used to end with, and the graph flickers again
+    /// and this test is what says so.
+    #[test]
+    fn a_re_read_does_not_throw_the_picture_away_before_its_answer_exists() {
+        let rereads = fn_body("reread_git_origin");
+        assert!(
+            !rereads.contains(concat!("invalid", "ate(")),
+            "a re-read does not know yet whether the history moved, so it may not \
+             blank the lanes on the chance that it did: {rereads}"
+        );
     }
 }
 
@@ -7621,21 +7757,19 @@ fn settings_key_of(key: &Key, modifiers: ModifiersState, repeat: bool) -> settin
 /// [`RowHost`], one counter serves every tree in the window and a double click
 /// means the same thing on all of them.
 ///
-/// Generic over the host's name because the graph counts its rows on the same
-/// counter with a `SeatId` for a host: what varies is *who* is being clicked
-/// in, never how a pair is decided.
-struct FilesRowClicks<H = RowHost> {
-    last: Option<(H, String, Instant)>,
+/// **Trees and only trees.** It used to be generic over the host's name so that
+/// the graph could count its own rows on a second copy of it with a `SeatId` for
+/// a host; that counter is gone with the verb it fed (R23's double click, see
+/// `git_graph`'s tombstone), and a graph row's second press is now its first
+/// press again. A type parameter with one instantiation left is a claim that
+/// something varies when nothing does.
+#[derive(Default)]
+struct FilesRowClicks {
+    last: Option<(RowHost, String, Instant)>,
 }
 
-impl<H> Default for FilesRowClicks<H> {
-    fn default() -> Self {
-        Self { last: None }
-    }
-}
-
-impl<H: PartialEq> FilesRowClicks<H> {
-    fn register(&mut self, host: H, key: &str, now: Instant) -> TabClick {
+impl FilesRowClicks {
+    fn register(&mut self, host: RowHost, key: &str, now: Instant) -> TabClick {
         let paired = self.last.as_ref().is_some_and(|(last_host, last_key, at)| {
             *last_host == host
                 && last_key == key
@@ -16230,6 +16364,8 @@ impl Runtime {
                 chrome_marks: marks::ChromeMarkRasters::default(),
                 settings: settings::SettingsPanel::default(),
                 profile_undo: None,
+                checkout_from: None,
+                checkout_undo: None,
                 settings_scroll: 0.0,
                 profile_menu: profiles::ProfileMenu::default(),
                 chevron_turn: ChevronTurn::default(),
@@ -16291,7 +16427,6 @@ impl Runtime {
                 files_name_widths: BTreeMap::new(),
                 git_pages_shown: BTreeMap::new(),
                 git_graphs_shown: BTreeMap::new(),
-                git_graph_clicks: FilesRowClicks::default(),
                 files_view_widths: BTreeMap::new(),
                 files_notice: None,
                 files_focus: FilesKeyboardFocus::default(),
@@ -18217,6 +18352,7 @@ impl Runtime {
         // no longer true.
         if let toast::ToastHit::Action(id) = hit {
             self.take_profile_undo(id)?;
+            self.take_checkout_undo(id)?;
             if self.window.toasts.dismiss(id, Instant::now()) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -22175,6 +22311,51 @@ impl Runtime {
         )?;
         self.window.profile_undo = Some((id, removed, index));
         Ok(())
+    }
+
+    /// **Say where the working tree landed, and offer the way back** (user
+    /// ruling, 2026-08-19).
+    ///
+    /// The card carries a verb only when there is somewhere to go back *to* — a
+    /// branch `HEAD` was on before this move. Starting from a detached `HEAD`, or
+    /// from a repository with no branch at all, there is nothing a single press
+    /// could restore, and a button that said `Back to` with nothing after it
+    /// would be worse than no button.
+    fn announce_checkout(&mut self, host: &git::GitHost, target: &str) -> Result<()> {
+        let anchor = self.git_toast_anchor(host);
+        let from = self.window.checkout_from.take();
+        let said = match from.as_ref().is_some_and(|(_, _, detach)| *detach) {
+            true => git_graph::checkout_detached_notice(target),
+            false => crate::i18n::checkout_notice(target),
+        };
+        let back = from.and_then(|(root, branch, _)| Some((root, branch?)));
+        let Some((root, branch)) = back.filter(|(_, branch)| branch != target) else {
+            return self.toast(toast::ToastKind::Info, anchor, None, said);
+        };
+        let verb = format!("{}{branch}", git_graph::graph_leave_detached());
+        let id = self.toast_with_verb(toast::ToastKind::Info, anchor, said, &verb)?;
+        self.window.checkout_undo = Some((id, root, branch));
+        Ok(())
+    }
+
+    /// The card's verb: stand back on the branch this move left.
+    ///
+    /// It goes through the same door every other checkout goes through, so the
+    /// tree being dirty asks the same question here as it does on a menu row —
+    /// undoing a move is still a move.
+    fn take_checkout_undo(&mut self, card: toast::ToastId) -> Result<()> {
+        let Some((id, root, branch)) = self.window.checkout_undo.take() else {
+            return Ok(());
+        };
+        if id != card {
+            self.window.checkout_undo = Some((id, root, branch));
+            return Ok(());
+        }
+        let Some(origin) = self.git_origin_for_root(&root) else {
+            return Ok(());
+        };
+        let said = branch.clone();
+        self.ask_to_checkout(&origin, root, branch, said, restore::GitCheckoutKind::Stand)
     }
 
     /// The card's verb: put the row back where it was, with its own id.
@@ -30059,6 +30240,37 @@ impl Runtime {
                     // fault, and those keep the page's own quiet sentence (see
                     // `git_panel::build`). Nothing about a machine with no git is
                     // going to change in six seconds.
+                    // **A checkout that went through says so, and offers the
+                    // way back** (user ruling, 2026-08-19). Moving where you are
+                    // standing is reversible and named, so it is not asked about
+                    // on a clean tree — but a page that changed under a reader
+                    // with nothing to attribute the change to is the same silence
+                    // in a different place, and the honest answer to a reversible
+                    // move is a notice that says where you landed and one press
+                    // that undoes it.
+                    //
+                    // **Both spellings, because both moved you.** A tracking
+                    // checkout comes back as a `Write` — one command that made
+                    // the branch and stood on it — and a reader who pressed
+                    // `Checkout tracking` is owed the same sentence and the same
+                    // one press back as a reader who pressed `Checkout`. It says
+                    // the *local* name, which is where they are now standing.
+                    let landed = match &answer {
+                        git::GitAnswer::Checkout {
+                            target,
+                            outcome: Ok(()),
+                            ..
+                        } => Some(target.clone()),
+                        git::GitAnswer::Write {
+                            verb: git::GitWriteVerb::CheckoutTracking { name },
+                            outcome: Ok(()),
+                            ..
+                        } => Some(git::tracking_local_name(name).to_owned()),
+                        _ => None,
+                    };
+                    if let Some(landed) = landed {
+                        self.announce_checkout(&host, &landed)?;
+                    }
                     if let Some(words) = git_answer_notice(&answer) {
                         let anchor = self.git_toast_anchor(&host);
                         self.toast(
@@ -30531,8 +30743,17 @@ impl Runtime {
                 renamed_from,
             } => self.open_git_document(seat, source, name, renamed_from),
             git_panel::GitRowOpen::Expand { hash } => self.expand_commit(seat, &hash),
+            // **A branch row is the ordinary verb** and goes straight through on
+            // a clean tree (tier 3 of the 2026-08-19 ruling) — but not over work
+            // it would carry with it, which is what `ask_to_checkout` decides.
             git_panel::GitRowOpen::Checkout { target, detach } => {
-                self.checkout_from_column(seat, target, detach)
+                let said = target.clone();
+                let kind = if detach {
+                    restore::GitCheckoutKind::Detach
+                } else {
+                    restore::GitCheckoutKind::Stand
+                };
+                self.ask_to_checkout(&GitOrigin::Column(seat), root, target, said, kind)
             }
         }
     }
@@ -31082,7 +31303,7 @@ impl Runtime {
     }
 
     /// A graph row's body, pressed — one click.
-    fn press_graph_row(&mut self, seat: SeatId, index: usize, now: Instant) -> Result<()> {
+    fn press_graph_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
         let active = self.window.active_tab;
         let Some(root) = self.window.tabs[active]
             .git_graph_view
@@ -31125,21 +31346,12 @@ impl Runtime {
                 return Ok(());
             }
         }
-        // **The double click is synthesised, not read** — winit has no click
-        // count and this window has never asked for one. The identity paired on
-        // is the row's own subject (a commit's hash, a file's path), never its
-        // index, for [`FilesRowClicks`]'s reason: a page appended between the two
-        // clicks moves nothing above the pointer here, but an accordion opened by
-        // the *first* click moves everything below it, and a pair keyed on the
-        // index would then be a pair keyed on two different rows.
-        let key = match &row {
-            // The working tree is one thing and there is one of it, so its own
-            // name is enough to pair two clicks on.
-            git_graph::GraphViewRow::Uncommitted(_) => git_graph::GRAPH_UNCOMMITTED_HASH.to_owned(),
-            git_graph::GraphViewRow::Commit(commit) => commit.hash.clone(),
-            git_graph::GraphViewRow::File(file) => format!("{}\u{1f}{}", file.hash, file.path),
-            git_graph::GraphViewRow::Detail(detail) => format!("detail\u{1f}{}", detail.index),
-        };
+        // **A graph row has no second-click verb**, so no pair of clicks is
+        // synthesised here any more — see [`git_graph`]'s note where
+        // `row_double_open` used to stand. The one verb it answered was a
+        // detached checkout, and a checkout is not something this page may do
+        // because a pointer was in one place twice.
+        //
         // **A plain press leaves compare mode** (D6). The gesture that entered it
         // said "these two"; an unmodified click says "this one", and a page that
         // went on holding two rows lit after that would be remembering a question
@@ -31149,13 +31361,9 @@ impl Runtime {
         // the keyboard walks from where the pointer last was, which is what makes
         // clicking a row and then pressing `↓` mean the row under it.
         self.select_graph_row(seat, index);
-        let double = self.window.git_graph_clicks.register(seat, &key, now) == TabClick::Double;
-        let open = if double {
-            git_graph::row_double_open(&row).or_else(|| git_graph::row_open(&row, &root))
-        } else {
-            git_graph::row_open(&row, &root)
+        let Some(open) = git_graph::row_open(&row, &root) else {
+            return Ok(());
         };
-        let Some(open) = open else { return Ok(()) };
         match open {
             git_panel::GitRowOpen::Document {
                 source,
@@ -31163,9 +31371,10 @@ impl Runtime {
                 renamed_from,
             } => self.open_git_document_for_graph(&root, source, name, renamed_from),
             git_panel::GitRowOpen::Expand { hash } => self.expand_graph_commit(seat, &root, &hash),
-            git_panel::GitRowOpen::Checkout { target, detach } => {
-                self.checkout_in_graph(&root, target, detach)
-            }
+            // No row of a graph answers a press with a checkout — the branch
+            // rows that do live on the docked page, and this arm is here because
+            // the two surfaces share one `GitRowOpen`.
+            git_panel::GitRowOpen::Checkout { .. } => Ok(()),
         }
     }
 
@@ -31527,7 +31736,8 @@ impl Runtime {
         Ok(())
     }
 
-    /// The same, from a double click in the graph — a detached checkout.
+    /// The same, from the graph — which is a document keyed by root and belongs
+    /// to no column, so it names the repository rather than a seat.
     ///
     /// **Every column on this repository is invalidated too**, and that is not
     /// tidiness: after this the branch head, the status and the history are
@@ -33395,6 +33605,12 @@ impl Runtime {
             // never lets one of these through unasked.
             restore::GateRequest::GitDeleteBranch { name, .. }
             | restore::GateRequest::GitDeleteTag { name, .. } => vec![name.clone()],
+            // A detaching checkout names where it is about to put you, and it is
+            // never empty either — `said` is a short hash and a subject, or a
+            // tag's name, worked out at the moment the menu row was pressed and
+            // carried rather than looked up again from a history that may have
+            // been re-read since.
+            restore::GateRequest::GitCheckout { said, .. } => vec![said.clone()],
             // **An empty scrollback is asked nothing** (ticket #62), which is
             // the emptiness rule this list was written for, applied to a fourth
             // subject: `raise_dirty_gate` reads an empty list as "there is
@@ -33529,6 +33745,17 @@ impl Runtime {
                     return Ok(());
                 };
                 self.issue_git_write(&origin, git::GitWriteVerb::DeleteTag { name }, Vec::new())
+            }
+            // **The detaching checkout**, on the two deletions' own shape: the
+            // gate stands in front of the verb rather than behind it, so this is
+            // where the repository is actually asked.
+            restore::GateRequest::GitCheckout {
+                root, target, kind, ..
+            } => {
+                let Some(origin) = self.git_origin_for_root(&root) else {
+                    return Ok(());
+                };
+                self.checkout_at(&origin, target, kind)
             }
             // The gate stands *in front of* this one too (`GitDiscard`'s shape),
             // so the confirmed answer is the deletion itself rather than a re-run
@@ -34246,24 +34473,54 @@ impl Runtime {
         } = menu;
         match (row, &target) {
             // ── standing somewhere else ──
-            (profiles::GitMenuRow::Checkout, profiles::GitMenuTarget::Commit { hash, .. }) => {
-                self.checkout_at(&origin, hash.clone(), true)
-            }
+            //
+            // **The two that detach go behind the gate** (user report,
+            // 2026-08-19). A commit and a tag are places with no branch behind
+            // them, and coming out of one standing nowhere is the consequence a
+            // reader cannot see from the row they pressed — see
+            // [`restore::GateRequest::GitCheckout`]. The branch arm below asks
+            // nothing, because there the name *is* the answer.
+            (
+                profiles::GitMenuRow::Checkout,
+                profiles::GitMenuTarget::Commit {
+                    hash,
+                    short,
+                    subject,
+                    ..
+                },
+            ) => self.ask_to_checkout(
+                &origin,
+                root,
+                hash.clone(),
+                git_graph::checkout_said(short, subject),
+                restore::GitCheckoutKind::Detach,
+            ),
             // A tag is a name for a commit, so standing on it is a detached
             // checkout — exactly as it is for the commit under it. `--detach`
             // and not a bare name for [`git::GitQuestion::Checkout::detach`]'s
             // own reason: a tag whose name also spells a branch would otherwise
             // silently move the branch.
-            (profiles::GitMenuRow::Checkout, profiles::GitMenuTarget::Tag { name }) => {
-                self.checkout_at(&origin, name.clone(), true)
-            }
+            (profiles::GitMenuRow::Checkout, profiles::GitMenuTarget::Tag { name }) => self
+                .ask_to_checkout(
+                    &origin,
+                    root,
+                    name.clone(),
+                    name.clone(),
+                    restore::GitCheckoutKind::Detach,
+                ),
             (
                 profiles::GitMenuRow::Checkout,
                 profiles::GitMenuTarget::LocalBranch {
                     name,
                     current: false,
                 },
-            ) => self.checkout_at(&origin, name.clone(), false),
+            ) => self.ask_to_checkout(
+                &origin,
+                root,
+                name.clone(),
+                name.clone(),
+                restore::GitCheckoutKind::Stand,
+            ),
             // **Prefer the local that is already there** (M10). `git checkout -b`
             // on a name that is taken is a refusal, and what the reader meant by
             // pressing this row is "put me on that branch".
@@ -34273,12 +34530,29 @@ impl Runtime {
                     .git_cache_at(&origin)
                     .is_some_and(|cache| cache.has_local_branch(&local))
                 {
-                    return self.checkout_at(&origin, local, false);
+                    let said = local.clone();
+                    return self.ask_to_checkout(
+                        &origin,
+                        root,
+                        local,
+                        said,
+                        restore::GitCheckoutKind::Stand,
+                    );
                 }
-                self.issue_git_write(
+                // **And the other half of the same row through the same door**
+                // (user report, 2026-08-19). `git checkout -b <local> --track`
+                // moves `HEAD` exactly as the branch arm above does; it used to go
+                // straight to `issue_git_write`, which asks nothing whatever is in
+                // the working tree — so one menu row was gated or ungated
+                // depending on whether the local branch happened to exist already.
+                // The gate names the *local* branch, because that is where the
+                // reader lands and what the card afterwards offers to leave.
+                self.ask_to_checkout(
                     &origin,
-                    git::GitWriteVerb::CheckoutTracking { name: name.clone() },
-                    Vec::new(),
+                    root,
+                    name.clone(),
+                    local,
+                    restore::GitCheckoutKind::Track,
                 )
             }
             // ── the two deletions, both behind the gate ──
@@ -34554,8 +34828,100 @@ impl Runtime {
         Ok(())
     }
 
-    /// Stand somewhere else, from whichever surface asked.
-    fn checkout_at(&mut self, origin: &GitOrigin, target: String, detach: bool) -> Result<()> {
+    /// **Every checkout this window issues goes through here** (user ruling,
+    /// 2026-08-19), and here is where it is decided whether a question is put
+    /// first.
+    ///
+    /// Three tiers, in the ruling's own words and in the order they are asked:
+    ///
+    /// 1. **A gate, always, when the working tree has changes.** git refuses the
+    ///    subset of these it would have to overwrite, in its own words, and the
+    ///    page prints them — but the ones it *allows* still carry uncommitted
+    ///    work across into somewhere else, which is the case a reader cannot
+    ///    undo by pressing the same button again.
+    /// 2. **A gate, always, when the move detaches `HEAD`.** Nothing is lost and
+    ///    the sentence does not pretend otherwise; what it names is the state you
+    ///    come out in, which is the thing the row you pressed does not show. This
+    ///    is the one that bit a reader browsing the graph.
+    /// 3. **No gate at all** for a clean tree moving onto a named branch. It is
+    ///    the ordinary verb this whole page is built around, the masthead says
+    ///    where you landed, and undoing it is the same verb again.
+    ///
+    /// The rule itself is [`restore::checkout_needs_gate`] and is not restated
+    /// here: it is one sentence three doors have to answer the same way, and the
+    /// door that answered it differently — `Checkout tracking`, which reached the
+    /// repository through `issue_git_write` — is why it is written down once.
+    ///
+    /// `said` is what the gate names out loud — a short hash and a subject, or a
+    /// branch's own name — worked out by the caller, which is the only place that
+    /// still has the row.
+    fn ask_to_checkout(
+        &mut self,
+        origin: &GitOrigin,
+        root: std::path::PathBuf,
+        target: String,
+        said: String,
+        kind: restore::GitCheckoutKind,
+    ) -> Result<()> {
+        let dirty = self
+            .git_cache_at(origin)
+            .and_then(|cache| cache.status().ready())
+            .is_some_and(|status| !status.entries.is_empty());
+        if !restore::checkout_needs_gate(kind, dirty) {
+            return self.checkout_at(origin, target, kind);
+        }
+        self.raise_dirty_gate(restore::GateRequest::GitCheckout {
+            root,
+            target,
+            said,
+            kind,
+            dirty,
+        })?;
+        Ok(())
+    }
+
+    /// Stand somewhere else, from whichever surface asked — **the one place a
+    /// move onto somewhere else is actually performed**, whichever of the three
+    /// spellings it is.
+    ///
+    /// Reached only from [`Self::ask_to_checkout`] and from the gate's confirmed
+    /// answer, which is what makes "every verb that moves `HEAD` has answered the
+    /// tiers" a property of the call graph rather than of three call sites
+    /// remembering to.
+    fn checkout_at(
+        &mut self,
+        origin: &GitOrigin,
+        target: String,
+        kind: restore::GitCheckoutKind,
+    ) -> Result<()> {
+        let detach = matches!(kind, restore::GitCheckoutKind::Detach);
+        // **The branch being left is noted now or never** — see
+        // [`WindowRuntime::checkout_from`]. Noted for every checkout, including
+        // the ones git is about to refuse: a refusal clears it along with
+        // everything else the receipt does, and a note nobody reads costs one
+        // `String`.
+        self.window.checkout_from = self.git_cache_at(origin).and_then(|cache| {
+            Some((
+                cache.root()?.to_path_buf(),
+                cache
+                    .status()
+                    .ready()
+                    .and_then(|status| status.branch.clone()),
+                detach,
+            ))
+        });
+        // **The tracking spelling is a ref write and still a checkout.** git is
+        // given one command that creates the local branch and stands on it, so it
+        // goes out through the writing door — but it arrived here through the same
+        // question every other move answers, and the card afterwards is raised
+        // from the same place (see the `GitAnswer::Write` arm).
+        if matches!(kind, restore::GitCheckoutKind::Track) {
+            return self.issue_git_write(
+                origin,
+                git::GitWriteVerb::CheckoutTracking { name: target },
+                Vec::new(),
+            );
+        }
         match origin {
             GitOrigin::Column(seat) => self.checkout_from_column(*seat, target, detach),
             GitOrigin::Graph(root) => {
@@ -35545,8 +35911,38 @@ impl Runtime {
             git_graph::GraphTool::Search => self.focus_graph_search(seat)?,
             git_graph::GraphTool::SearchClear => self.clear_graph_search(seat)?,
             git_graph::GraphTool::Refresh => self.refresh_graph(seat)?,
+            git_graph::GraphTool::LeaveDetached => self.leave_detached_head(seat)?,
         }
         Ok(())
+    }
+
+    /// **The way back onto a branch** (user ruling, 2026-08-19).
+    ///
+    /// The branch is re-derived from the cache at the moment of the press rather
+    /// than read off the frame that drew the button, on this window's usual rule:
+    /// the picture is a reading and the cache is what the repository said, and
+    /// between the paint and the press the repository may have been read again.
+    /// A door whose branch has gone in the meantime does nothing rather than
+    /// checking out a name that is not there.
+    fn leave_detached_head(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.window.active_tab;
+        let Some(root) = self.window.tabs[active]
+            .git_graph_view
+            .get(&seat)
+            .map(|view| view.root.clone())
+        else {
+            return Ok(());
+        };
+        let Some(branch) = self.window.tabs[active]
+            .git_graphs
+            .get(&root)
+            .and_then(|state| git_graph::leave_detached_branch(&state.cache))
+        else {
+            return Ok(());
+        };
+        let origin = GitOrigin::Graph(root.clone());
+        let said = branch.clone();
+        self.ask_to_checkout(&origin, root, branch, said, restore::GitCheckoutKind::Stand)
     }
 
     /// Where the filter menu hangs, or nothing when it is not up.
@@ -36002,10 +36398,17 @@ impl Runtime {
     /// makes a real question: a burst of command-ends finds the first re-read
     /// still owed and issues nothing.
     ///
-    /// A graph's lanes go with the answers it is waiting for: a history rewritten
-    /// under the lane walker is not a history it can resume, and any of these
-    /// moments is exactly when that may have happened. They are rebuilt from the
-    /// answer, in `sync`, before anything is drawn from them.
+    /// **A graph's lanes are left exactly where they are.** The rule this page
+    /// keeps for its rows it has to keep for its roads: what is on screen is
+    /// still true, and a re-read does not know yet whether the history moved.
+    /// The lanes used to be thrown away here, on the chance that it had, which
+    /// drew every dot in lane zero with no lines at all — and no Uncommitted
+    /// Changes row, so every row below it shifted up — for the length of a `git
+    /// log`, and then drew the identical picture again. Under a repository
+    /// something else is writing to, the kernel says so every couple of seconds
+    /// and the whole graph blinks. `GraphState::sync` decides it from the answer
+    /// instead, by asking whether the list it got back is still the list the rows
+    /// were laid out over.
     fn reread_git_origin(&mut self, origin: &GitOrigin, ask: Ask) -> bool {
         let host = self.git_host_at(origin);
         let active = self.window.active_tab;
@@ -36015,13 +36418,7 @@ impl Runtime {
                 None => Vec::new(),
             },
             GitOrigin::Graph(root) => match self.window.tabs[active].git_graphs.get_mut(root) {
-                Some(state) => {
-                    let questions = ask.begin(&mut state.cache);
-                    if !questions.is_empty() {
-                        state.invalidate();
-                    }
-                    questions
-                }
+                Some(state) => ask.begin(&mut state.cache),
                 None => Vec::new(),
             },
         };
@@ -43657,7 +44054,7 @@ impl Runtime {
             seats::ChromeTarget::GitGraphRow { seat, index } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.press_graph_row(seat, index, Instant::now())?;
+                self.press_graph_row(seat, index)?;
             }
             // The toolbar's four controls (T1). A click chain is broken for
             // `.files-foot`'s reason: a chain of clicks on a button is a chain of
@@ -43674,7 +44071,6 @@ impl Runtime {
             seats::ChromeTarget::GitGraphDetail { seat, part, .. } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.window.git_graph_clicks.interrupt();
                 self.press_graph_detail(seat, part)?;
             }
             seats::ChromeTarget::GitAct { seat, index, act } => {
@@ -44076,7 +44472,25 @@ impl Runtime {
                     return Ok(());
                 }
                 None => {
-                    if state == ElementState::Pressed {
+                    // **A press on the button that opened it is not an outside
+                    // press** (user report, 2026-08-19), which is the exception
+                    // the pane menu and the preview menu above already make for
+                    // their own openers. Without it the second press was two
+                    // acts in one turn of the loop: this line put the menu away,
+                    // and the same press then reached the toolbar and found no
+                    // menu open to toggle — so `All branches` re-opened under
+                    // the pointer every time it was pressed and could not be
+                    // shut by pressing it again. The opener owns the toggle;
+                    // this arm is only for the rest of the window.
+                    if state == ElementState::Pressed
+                        && !matches!(
+                            self.chrome_target_at(position),
+                            Some(seats::ChromeTarget::GitGraphTool {
+                                tool: git_graph::GraphTool::Filter,
+                                ..
+                            })
+                        )
+                    {
                         self.close_graph_filter_menu()?;
                     }
                 }

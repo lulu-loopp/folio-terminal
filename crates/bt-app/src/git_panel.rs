@@ -630,6 +630,16 @@ pub struct GitHead {
     /// Whether `branch` is a name or one of this module's own sentences —
     /// which is the difference between drawing it at 600 and drawing it quietly.
     pub named: bool,
+    /// **`HEAD` is on no branch at all** (user report, 2026-08-19).
+    ///
+    /// Its own field beside [`Self::named`], because the two used to be one and
+    /// the conflation is what left this state whispered: `named: false` is also
+    /// what `Reading the repository…` and an unborn branch wear, so the one
+    /// sentence on this list that is a *warning* was drawn in the same grey as
+    /// the one that means "nothing has happened yet". A reader whose repository
+    /// had been detached by something outside this window had to notice two
+    /// quiet words to find out — and one of them did not.
+    pub detached: bool,
     /// `↑ 2` and `↓ 1`, each already measured. Empty when there is no upstream
     /// or nothing to say about it: **zero draws no pill** (mock-up 4938).
     pub pills: Vec<GitPill>,
@@ -1611,6 +1621,7 @@ fn masthead(
             branch: git_reading().to_owned(),
             branch_width: measure(git_reading(), font, MeasureFace::PLAIN),
             named: false,
+            detached: false,
             pills: Vec::new(),
             muted: false,
         };
@@ -1643,14 +1654,15 @@ fn masthead(
             measure,
         ));
     }
+    let detached = status.detached || (status.branch.is_none() && !status.unborn);
     GitHead {
-        // `600` for a name and regular for the words *detached HEAD* — the
-        // masthead's own two inks have two weights behind them, and a name
-        // measured at the lighter one is a name clipped at its own box.
+        // `600` for a name **and for the warning**, regular only for the two
+        // sentences that are neither: a state the reader has to act on is not
+        // set in the ink of a state they have to wait out.
         branch_width: measure(
             &branch,
             font,
-            MeasureFace::weighted(if named {
+            MeasureFace::weighted(if named || detached {
                 ChromeLabelWeight::SemiBold
             } else {
                 ChromeLabelWeight::Regular
@@ -1658,6 +1670,7 @@ fn masthead(
         ),
         branch,
         named,
+        detached,
         pills,
         // Filled in by the two callers that hold a cache — see the field.
         muted: false,
@@ -2451,18 +2464,26 @@ pub fn push_git_masthead(
         text: head.branch.clone(),
         rect: name_rect,
         font_size_px: font,
-        color: if head.named && !head.muted {
-            palette.git_head_text
-        } else {
-            // "detached HEAD" is a state and not a name, so it is said quietly —
-            // the same distinction `.gbr.cur` draws between the branch you are on
-            // and the ones you are not.
-            palette.git_head_muted
+        color: match (head.detached, head.named && !head.muted) {
+            // **A warning, in the ink this product warns in** (user report,
+            // 2026-08-19). Standing on no branch is not a name and it is not a
+            // quiet fact either: every commit made from here is reachable by
+            // nothing, and a reader who got here without meaning to has to be
+            // able to see it from across the room. The two words used to be set
+            // in the same grey as `Reading the repository…`, and a reader whose
+            // repository was detached from outside this window did not notice.
+            (true, _) => palette.status_warn,
+            (false, true) => palette.git_head_text,
+            // The other two sentences this can be — `Reading the repository…`
+            // and an unborn branch — are said quietly, which is the distinction
+            // `.gbr.cur` draws between the branch you are on and the ones you
+            // are not.
+            (false, false) => palette.git_head_muted,
         },
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,
-        weight: if head.named {
+        weight: if head.named || head.detached {
             ChromeLabelWeight::SemiBold
         } else {
             ChromeLabelWeight::Regular
@@ -2473,6 +2494,28 @@ pub fn push_git_masthead(
 
     let pill_radius = (GIT_PILL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let edge = (GIT_PILL_EDGE_LOGICAL_PX * scale).round().max(1.0) as u32;
+    // **The badge around the warning**, and only around the warning: a branch's
+    // name is the ordinary state of this line and boxing it would make every
+    // repository look like it had something wrong with it. Drawn after the words
+    // so its ring is over the strip rather than under the label's own clip.
+    if head.detached {
+        let inset = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
+        let height = (GIT_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+        let badge = [
+            (name_rect[0] - inset).max(rect[0]),
+            middle(height),
+            (name_rect[2] + inset).min(limit),
+            middle(height) + height,
+        ];
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPillRing {
+                radius_px: pill_radius,
+                stroke_px: edge,
+            },
+            crop(badge),
+            palette.status_warn,
+        ));
+    }
     for (pill, box_) in head.pills.iter().zip(pill_boxes(head, rect, scale)) {
         sprites.push(ChromeSprite::new(
             ChromeMark::ControlPillRing {
