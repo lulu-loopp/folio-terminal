@@ -49,6 +49,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (11, migrate_settings_v11_to_v12),
     (12, migrate_settings_v12_to_v13),
     (13, migrate_settings_v13_to_v14),
+    (14, migrate_settings_v14_to_v15),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -318,6 +319,20 @@ fn migrate_settings_v13_to_v14(mut value: Value) -> Value {
             "scrollback_lines".to_owned(),
             Value::from(crate::DEFAULT_SCROLLBACK_LINES),
         );
+    }
+    value
+}
+
+/// One key, a fifth time, and here the behaviour being carried forward is the plainest kind
+/// there is: no build that wrote a v14 file had a focus mode at all, so the answer every one of
+/// them gave is `false` and this step writes it down. The temptation a settings key like this
+/// invites — shipping the new mode *on* because it is the reason the version moved — is the
+/// same mistake `migrate_settings_v13_to_v14` refuses about scrollback: a reader who has never
+/// seen the row must open the window they opened yesterday. See `SettingsV1::focus_mode`.
+fn migrate_settings_v14_to_v15(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(15));
+        object.insert("focus_mode".to_owned(), Value::from(false));
     }
     value
 }

@@ -4380,6 +4380,15 @@ struct WindowRuntime {
     /// cannot measure, and "the button you can press is the button you can see"
     /// has to be true by one number rather than by two functions agreeing.
     preview_button_width: f32,
+    /// How wide the word `Exit` on door 5's button is drawn (§7.1.6b′ ⑤).
+    ///
+    /// Here for the field above's reason exactly, and it is the reason stated
+    /// there: the hit test cannot measure, so the box the button is drawn in and
+    /// the box the pointer is tested against have to come from one number. It is
+    /// re-measured on every chrome build, which is what carries it across a DPI
+    /// change and across a language change without either needing to know it
+    /// exists.
+    focus_exit_width: f32,
     /// When "Open in default app" was last pressed, if it still has something to
     /// say about it.
     preview_opened_at: Option<Instant>,
@@ -4884,6 +4893,30 @@ struct WindowRuntime {
     /// through the *same* [`Self::set_rail_state`], because a preference cannot
     /// mean two things depending on which door it came through.
     rail: seats::RailState,
+    /// **What shape this window is in right now: focus mode, or not**
+    /// (`docs/DESIGN.md` §7.1.6b′).
+    ///
+    /// §2.4 rule three, and the `dwm_dark_mode` shape exactly: the setting is
+    /// about every window and this is what *this* one is currently doing, so the
+    /// two live a layer apart. `settings.focus_mode` says what a new window opens
+    /// as; this says what the window in front of you is, and five doors can turn
+    /// it — the Appearance row, `Ctrl+Shift+Z`, a double-click on a pane header,
+    /// that pane's `⌄` menu, and the `Exit` button at the head of the card
+    /// column. Every one of them goes through [`Self::set_focus_mode`], because a
+    /// mode cannot mean two things depending on which door it came through.
+    ///
+    /// **Beside [`Self::rail`] rather than inside it**, though the bit is
+    /// sampled into `RailState::focus` every frame. The two are different kinds
+    /// of fact: `rail` is a *preference* the reader set and the session carries,
+    /// while this is a posture the window is holding — and the five doors that
+    /// turn it are emphatically not doors onto `Tab layout` or `Sidebar`. Folding
+    /// it in would put the mode inside the very settings §7.1.6b′ rules it must
+    /// neither read nor write.
+    ///
+    /// **Nothing is stored about what to put back.** The mode never writes the
+    /// three fields that describe the ordinary chrome, so leaving it restores
+    /// them by not having touched them.
+    focus_mode: bool,
     /// How far the rail is scrolled, in physical pixels.
     ///
     /// Its own field beside [`Self::tab_scroll`] rather than a shared one, because
@@ -4951,6 +4984,18 @@ struct WindowRuntime {
     /// they cannot both exist: `chrome_mouse_input` routes one press to one
     /// target, and the one it did not choose is cleared.
     pane_press: Option<PanePress>,
+    /// **Door 3 of five** (§7.1.6b′ ③) — two presses on one pane head paired
+    /// into a double click.
+    ///
+    /// [`Self::tab_clicks`]'s counterpart, keyed by seat and for that field's
+    /// stated reason: identity is the pane, not a pixel neighbourhood, so the
+    /// chain survives a layout that reflowed between the two presses.
+    ///
+    /// The gesture's meaning is restated by the same ruling: it used to read
+    /// "make this pane bigger" and now reads "step back and look at all my
+    /// tabs" — and, while the mode is on, "come back". One gesture, both
+    /// directions, because it writes the one bit every other door writes.
+    pane_head_clicks: MultiClicks<SeatId>,
     /// The left press being held on a **files tree row** (P81).
     ///
     /// A third field for [`Self::pane_press`]'s reason, and a fourth thing it
@@ -16067,6 +16112,11 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         active_tab,
         next_tab_id,
         pty_wake,
+        // Resting values; the caller that knows what a new window opens as
+        // (settings.focus_mode, §7.1.6b′ ①) sets the bit right after assembly.
+        focus_mode: false,
+        focus_exit_width: 0.0,
+        pane_head_clicks: MultiClicks::default(),
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
         preview_opened_at: None,
@@ -16355,6 +16405,13 @@ impl Runtime<'_> {
             render_tab_layout(session_store.loaded().tab_layout),
             render_sidebar_mode(session_store.loaded().sidebar_mode),
         );
+        // **The shape a new window opens in** (§7.1.6b′ ①). From `settings.json`
+        // and not from `session.json`, which is the whole difference between this
+        // and the two lines above it: `Tab layout` and `Sidebar` are facts about
+        // a window that was restored, while focus mode is a preference about the
+        // product — a reader who lives in the card column lives in it in every
+        // window, including the first one of a fresh profile.
+        let focus_mode = settings_store.loaded().focus_mode;
         // Probed here rather than beside the first shell, which is where it used
         // to sit: the opening window is *titled* after the default profile, and
         // resolving which profile that is needs to know what this machine can
@@ -16740,6 +16797,7 @@ impl Runtime<'_> {
             pending_restore,
             placeholder_tab,
         });
+        window.focus_mode = focus_mode;
         // **The facade is assembled here and dropped at the end of this
         // function** (multiwindow slice C). `Runtime` is two borrows now, so the
         // tail of the launch — every verb below that reads settings and writes
@@ -16959,6 +17017,7 @@ impl Runtime<'_> {
             pending_restore: Vec::new(),
             placeholder_tab: None,
         });
+        window.focus_mode = app.settings_store.loaded().focus_mode;
         let mut runtime = Runtime {
             app,
             window: &mut window,
@@ -17838,6 +17897,19 @@ impl Runtime<'_> {
                 )
             })
             .collect::<Vec<_>>();
+        // Door 5's caption, measured on the same beat as the badges (§7.1.6b′ ⑤).
+        // Unconditional rather than only in focus mode: it is one short word, and
+        // a number that existed only while the mode was on would be a number the
+        // first frame of the mode had to do without.
+        let focus_exit_width = {
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            renderer.measure_chrome_text(
+                gpu,
+                i18n::Text::FocusExit.text(),
+                bt_render::FOCUS_EXIT_FONT_LOGICAL_PX * scale,
+            )
+        };
+        self.window.focus_exit_width = focus_exit_width;
         let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
         let mut tabs = tabs
             .into_iter()
@@ -18144,6 +18216,7 @@ impl Runtime<'_> {
                 // and `seats` holds no clock to work them out for itself.
                 rail: self.sampled_rail(now),
                 rail_scroll: self.window.rail_scroll,
+                exit_caption_width: self.window.focus_exit_width,
                 preview_titles: &preview_titles,
                 float_shown: &float_shown,
                 terminal_names: &terminal_names,
@@ -18258,17 +18331,32 @@ impl Runtime<'_> {
                     .iter()
                     .position(|tab| Some(tab.id) == editor.tab())
             });
-            for (id, rect) in tab_surface_tip_boxes(
-                self.window.rail.layout,
-                &strip,
-                rail.as_ref(),
-                scale,
-                self.window.profile_menu.is_open(),
-                renaming,
-            ) {
-                anchors.push(id, rect, self.tab_surface_tip_text(id));
+            // **The same phantom this function's own doc is about, one mode
+            // later** (§7.1.6b′). `tab_strip_geometry` is a pure function of a
+            // width and a trailer list and knows nothing about focus mode, so
+            // under the card column it goes on handing back boxes for a strip
+            // nobody is drawing — and first-match-wins would answer a hover over
+            // the title bar with some tab's name. In focus mode neither tab
+            // surface is on screen, so neither registers.
+            //
+            // The column's own tips are not here and are not owed by F1: a card
+            // states its name in full and the way out says `Exit` on its face.
+            if !self.window.focus_mode {
+                for (id, rect) in tab_surface_tip_boxes(
+                    self.window.rail.layout,
+                    &strip,
+                    rail.as_ref(),
+                    scale,
+                    self.window.profile_menu.is_open(),
+                    renaming,
+                ) {
+                    anchors.push(id, rect, self.tab_surface_tip_text(id));
+                }
             }
-            for (target, rect) in seats::window_chrome_boxes(width, scale, self.window.rail) {
+            // The posture and not the preference, for `panel_covers`'s reason:
+            // the sidebar toggle is not drawn while the column is up, and a tip
+            // on a button nobody drew is a tip on the drag strip.
+            for (target, rect) in seats::window_chrome_boxes(width, scale, self.rail_posture()) {
                 let text = match target {
                     // The gear, silenced while the dialog it opens is up — the
                     // chevron's rule, for the same reason.
@@ -20607,6 +20695,19 @@ impl Runtime<'_> {
         // middle of the terminal: `tab_strip_geometry` is a pure function of a
         // width and a trailer list, so it goes on answering with a box in the
         // title bar long after the tabs have moved down the side.
+        // **The column answers first**, and it has to (§7.1.6b′): the focus rail
+        // keeps the panel's `+` and its `˅`, and `hit_focus_rail` answers
+        // `NewTabMenu` for it — so in focus mode this menu is reachable from a
+        // button that is *not* the one either branch below describes. Reading
+        // the horizontal strip's `˅` here is the very mistake this function's
+        // own comment is about, one surface later: `tab_strip_geometry` would go
+        // on answering with a box in the title bar and hang the picker there.
+        let column = self
+            .window
+            .focus_mode
+            .then(|| self.focus_rail_geometry_now(now))
+            .flatten()
+            .map(|column| (column.new_tab_menu, profiles::MenuSide::Beside));
         let (anchor, side) = match self.window.rail.layout {
             seats::TabLayoutMode::Vertical => {
                 let rail = self.rail_geometry_now(now)?;
@@ -20631,6 +20732,8 @@ impl Runtime<'_> {
                 profiles::MenuSide::Below,
             ),
         };
+        // Whichever surface is actually holding the button.
+        let (anchor, side) = column.unwrap_or((anchor, side));
         // The menu is content-sized, so laying it out is a measuring job — the
         // same renderer, the same font, the same call `build` makes when it
         // draws the strings this width was computed from.
@@ -20966,6 +21069,11 @@ impl Runtime<'_> {
                 &self.app.settings_store.loaded().dark_scheme,
                 false,
             ),
+            // **This window's posture, not the file's** (§7.1.6b′). All five
+            // doors turn the window's bit and only the row also writes the file,
+            // so the row has to report what it can see: the window it is standing
+            // in. See `settings::SettingsValues::focus_mode`.
+            focus_mode: self.window.focus_mode,
             psreadline: self.psreadline_row_state(),
             psreadline_install_available: psreadline::install_available(
                 psreadline::probe(),
@@ -22028,6 +22136,13 @@ impl Runtime<'_> {
         if let Some(layout) = settings::tab_layout_requested(target) {
             self.set_rail_state(rail_state_for(layout, self.window.rail.mode))?;
         }
+        // **Door 1 of five** (§7.1.6b′ ①). Deliberately *not* through
+        // `rail_state_for`: focus mode is orthogonal to both rail rows, so a
+        // press here must leave `Tab layout` and `Sidebar` exactly where they
+        // stand — which is what makes leaving the mode need no restoring code.
+        if let Some(on) = settings::focus_mode_requested(target) {
+            self.set_focus_mode(on)?;
+        }
         if let Some(mode) = settings::sidebar_mode_requested(target) {
             self.set_rail_state(rail_state_for(self.window.rail.layout, mode))?;
         }
@@ -22200,6 +22315,7 @@ impl Runtime<'_> {
             | Row::FontSize
             | Row::Cursor
             | Row::TabLayout
+            | Row::FocusMode
             | Row::Formulas
             | Row::InlineFormulas
             | Row::Tables
@@ -25866,6 +25982,11 @@ impl Runtime<'_> {
             // both get the same silence.
             shortcuts::Action::GitPage => self.toggle_git_page(),
             shortcuts::Action::OpenSettings => self.toggle_settings_panel(),
+            // **Door 2 of five** (§7.1.6b′ ②): one chord, both directions,
+            // because the mode is one bit and the Appearance row shows which way
+            // it is set. A separate "leave" key would be a second truth about the
+            // same bit.
+            shortcuts::Action::ToggleFocusMode => self.toggle_focus_mode(),
             // Ruling 9's row, dispatched like every other: the same verb the
             // header's save button and the editor's own `Ctrl+S` reach.
             shortcuts::Action::SavePreview => self.save_preview(),
@@ -36242,7 +36363,14 @@ impl Runtime<'_> {
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        profiles::pane_menu_build(&layout, hover, current, programs, &mut measure)
+        profiles::pane_menu_build(
+            &layout,
+            hover,
+            current,
+            programs,
+            self.window.focus_mode,
+            &mut measure,
+        )
     }
 
     fn close_pane_menu(&mut self) -> Result<bool> {
@@ -37252,6 +37380,10 @@ impl Runtime<'_> {
                 // so the match is exhaustive over a closed set rather than over
                 // a wildcard that would silently swallow a row added later.
                 profiles::PaneMenuRow::Picker | profiles::PaneMenuRow::SplitWith => Ok(()),
+                // **Door 4 of five** (§7.1.6b′ ④). One row, both directions,
+                // reading out the verb it is about to perform — so the same line
+                // is the way in and, while the mode is on, the way out.
+                profiles::PaneMenuRow::FocusMode => self.toggle_focus_mode(),
                 profiles::PaneMenuRow::NewInFolder => {
                     self.browse_for_split_root(seat);
                     Ok(())
@@ -42794,8 +42926,27 @@ impl Runtime<'_> {
         // Both branches hand back the same `ChromeTarget::Tab/TabClose/TabPin`,
         // so every click handler downstream — activation, the middle-click close,
         // the press that becomes a drag — is untouched by the axis.
-        match rail.layout {
-            seats::TabLayoutMode::Vertical => seats::hit_rail_chrome(
+        //
+        // **Focus mode is a third branch of the same one place** (§7.1.6b′): the
+        // card column is the tab list while it is up, and it answers the very
+        // same `Tab`/`TabClose` targets — which is what makes "clicking a card is
+        // clicking that tab" true without a second handler anywhere below here.
+        match if rail.draws_focus_rail() {
+            None
+        } else {
+            Some(rail.layout)
+        } {
+            None => seats::hit_focus_rail(
+                height,
+                scale,
+                &trailers,
+                self.focus_exit_caption_width(),
+                self.window.rail_scroll,
+                rail,
+                position.x,
+                position.y,
+            ),
+            Some(seats::TabLayoutMode::Vertical) => seats::hit_rail_chrome(
                 height,
                 scale,
                 &trailers,
@@ -42805,7 +42956,7 @@ impl Runtime<'_> {
                 position.x,
                 position.y,
             ),
-            seats::TabLayoutMode::Horizontal => seats::hit_tab_chrome(
+            Some(seats::TabLayoutMode::Horizontal) => seats::hit_tab_chrome(
                 width,
                 scale,
                 &trailers,
@@ -42952,11 +43103,9 @@ impl Runtime<'_> {
         // reads the seat layout, and the seat layout keeps only the *parked*
         // width clear of an icon rail — so under an open one it would go on
         // naming the pane the rail is standing over.
-        let pane = (!self
-            .rail_geometry_now(Instant::now())
-            .is_some_and(|rail| rail.covers(position.x, position.y)))
-        .then(|| seats::pane_at(&self.seat_layout, position.x, position.y))
-        .flatten();
+        let pane = (!self.panel_covers(position))
+            .then(|| seats::pane_at(&self.seat_layout, position.x, position.y))
+            .flatten();
         self.update_chrome_hover_target_in_pane(hover, pane)
     }
 
@@ -43149,6 +43298,20 @@ impl Runtime<'_> {
     /// the honest behaviour rather than a failure to handle. The horizontal strip
     /// has no such state: it is always drawn, even holding one tab.
     fn tab_run(&self, now: Instant) -> Option<seats::TabRun> {
+        // **§7.1.6b′ ③ and ④, both of them, in one answer.** In focus mode the
+        // panel holds a card column, and the column offers a dragged thing no
+        // place to land: it refuses file drops ("a list of tabs has no
+        // non-arbitrary tab to catch a file with") and v1 has no card reordering.
+        // The run it hands back is therefore a **band with no slots** — a surface
+        // that answers the drag and refuses it, rather than a hole the layout's
+        // rim shows through. That distinction is the whole of it: `None` here
+        // would hand every drop over the column to the pane behind it.
+        if self.window.focus_mode {
+            return self
+                .focus_rail_geometry_now(now)
+                .as_ref()
+                .map(seats::focus_rail_run);
+        }
         match self.window.rail.layout {
             seats::TabLayoutMode::Horizontal => {
                 let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -44387,6 +44550,18 @@ impl Runtime<'_> {
             // ever meant. Dropping it is the whole of letting go.
             let held_pane =
                 self.window.pane_press.take().is_some() | self.window.row_press.take().is_some();
+            // **Door 3** (§7.1.6b′ ③). Paired on the release, where the browser's
+            // `dblclick` fires, and only when the release lands on the head the
+            // press began on — a press that travelled to another head is two
+            // gestures, not one repeated. The focus move the ruling mentions has
+            // already happened: `focus_pane_at` ran on the way down, which is
+            // what leaves the caret where the hand already was.
+            if let Some(seats::ChromeTarget::PaneHeader(seat)) = target
+                && self.window.pane_head_clicks.register(seat, Instant::now()) == TabClick::Double
+            {
+                self.toggle_focus_mode()?;
+                return Ok(true);
+            }
             if let Some(press) = self.window.tab_press.take() {
                 self.release_tab_press(press, target)?;
                 return Ok(true);
@@ -44406,6 +44581,13 @@ impl Runtime<'_> {
         // A press that lands on something other than a row leaves no row press
         // behind. The arms below that *are* rows arm their own, after this.
         self.window.row_press = None;
+        // Door 3's chain breaks on anything that is not a press on a head —
+        // `MultiClicks::interrupt`'s own rule, applied once here rather than in
+        // every arm below: a press on the head's `×`, on a divider, on the
+        // terminal's body is not the first half of a double click on a header.
+        if !matches!(target, Some(seats::ChromeTarget::PaneHeader(_))) {
+            self.window.pane_head_clicks.interrupt();
+        }
         // D40, above the router and consuming nothing: every press inside a pane
         // moves the layout focus there, whatever else the press goes on to mean.
         // Above the rename guard too — clicking into another pane is a blur, and
@@ -44874,6 +45056,13 @@ impl Runtime<'_> {
             // *taken*, so it does not fall through to a pane the rail is drawn
             // on top of. See [`seats::ChromeTarget::RailBody`].
             seats::ChromeTarget::RailBody => {}
+            // **Door 5 of five** (§7.1.6b′ ⑤) — the one way out you can see.
+            // Four of the other doors are gestures, and a mode you can leave only
+            // by remembering one is a mode that traps people.
+            seats::ChromeTarget::FocusExit => {
+                self.window.tab_clicks.interrupt();
+                self.set_focus_mode(false)?;
+            }
         }
         Ok(true)
     }
@@ -45629,20 +45818,133 @@ impl Runtime<'_> {
     /// snapping.
     fn sampled_rail(&self, now: Instant) -> seats::RailState {
         let fold = Some(self.window.rail_fold.sample(now, self.app.motion).0);
-        if !self.window.rail.draws_icon_rail() {
+        // **The window's posture, joined to the reader's preference here and
+        // only here** (§7.1.6b′). `seats` is a pure function of the numbers it is
+        // handed and holds no clock and no window; `RailState::focus` is one more
+        // sampled input beside `open`, `text_opacity` and `fold`, and this is the
+        // one place any of them is read off the runtime.
+        let focus = self.window.focus_mode;
+        // Asked of the state as it *will be* rather than of the stored one: a
+        // window in focus mode draws no icon rail whatever `Sidebar` says, so
+        // asking the stored rail would sample the opening tween of a panel that
+        // is not on screen.
+        let resting = seats::RailState {
+            focus,
+            ..self.window.rail
+        };
+        if !resting.draws_icon_rail() {
             return seats::RailState {
                 open: 1.0,
                 text_opacity: 1.0,
                 fold,
-                ..self.window.rail
+                ..resting
             };
         }
         seats::RailState {
             open: self.window.rail_open.sample(now, self.app.motion).0,
             text_opacity: self.window.rail_text.sample(now, self.app.motion).0,
             fold,
+            ..resting
+        }
+    }
+
+    /// The rail's state as the *window* is currently wearing it — the stored
+    /// preference with this window's focus-mode bit joined to it.
+    ///
+    /// [`Self::sampled_rail`] without the clock, for the callers that ask a shape
+    /// question outside a frame: "is an icon rail live", "how much width does the
+    /// panel cost". Those must answer to the posture and not to the preference,
+    /// or a window in focus mode goes on reasoning about a rail nobody is
+    /// drawing.
+    fn rail_posture(&self) -> seats::RailState {
+        seats::RailState {
+            focus: self.window.focus_mode,
             ..self.window.rail
         }
+    }
+
+    /// How wide the word on door 5's button is drawn (§7.1.6b′ ⑤).
+    ///
+    /// Read out of the runtime rather than measured here, and that is
+    /// [`WindowRuntime::preview_button_width`]'s own reason repeated: the hit
+    /// test is `&self` by construction and cannot measure, while measuring needs
+    /// `&mut` all the way down to the glyph cache. So the number is taken once
+    /// where the picture is built and read everywhere else, which is also what
+    /// makes "the button you can press is the button you can see" true by one
+    /// number rather than by two functions agreeing.
+    fn focus_exit_caption_width(&self) -> f32 {
+        self.window.focus_exit_width
+    }
+
+    /// The focus column's live geometry — [`Self::rail_geometry_now`]'s opposite
+    /// number, and `None` in exactly the case that one is `Some`.
+    fn focus_rail_geometry_now(&self, now: Instant) -> Option<seats::FocusRailGeometry> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        seats::focus_rail_geometry(
+            height as f32,
+            scale,
+            self.window.tabs.len(),
+            self.focus_exit_caption_width(),
+            self.window.rail_scroll,
+            self.sampled_rail(now),
+        )
+    }
+
+    /// **The one door behind all five** (§7.1.6b′: "five doors, one bit, one
+    /// face").
+    ///
+    /// The Appearance row, `Ctrl+Shift+Z`, a double-click on a pane header, that
+    /// pane's `⌄` menu and the `Exit` button all arrive here, for
+    /// [`Self::set_rail_state`]'s reason one feature over: a mode cannot mean two
+    /// things depending on which door it came through, and the row in Appearance
+    /// has to show what is true however the bit was last turned.
+    ///
+    /// It writes **both halves** of §2.4 rule three: the window's own posture,
+    /// and the file that says what the next window opens as. That second write is
+    /// what the ruling asks the row to buy — a window closed in focus mode
+    /// reopens in it — and it is here rather than in the row's own handler
+    /// because all five doors are the same decision.
+    ///
+    /// **There is nothing to restore and nothing to save.** The stage is the
+    /// active tab's own tree, untouched on the way in; what changes is the width
+    /// of the panel beside it, which the next solve reads out of
+    /// [`seats::RailState::terminal_inset_logical_px`].
+    fn set_focus_mode(&mut self, on: bool) -> Result<()> {
+        if self.window.focus_mode == on {
+            return Ok(());
+        }
+        self.window.focus_mode = on;
+        // The scroll offset is the panel's, and the panel now holds a list of a
+        // different length. Left where it was, a window that had scrolled a long
+        // rail would enter focus mode looking at nothing; both geometries clamp,
+        // but neither can invent the row you were on.
+        self.window.rail_scroll = 0.0;
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.focus_mode = on;
+        let _ = self.app.settings_store.store(settings);
+        // **The panel's width changed, and that is the only thing this mode does
+        // to the stage.** The very path `set_rail_state` takes when `Sidebar`
+        // moves the terminal's left edge, and taken here for the same reason: the
+        // tree is untouched, every pane's rectangle is not, because the viewport
+        // they are solved into begins 220 logical pixels further in (or stops
+        // doing so). There is no branch anywhere below this for what is being
+        // drawn — only a different number for where it starts.
+        self.commit_seat_geometry()?;
+        self.apply_window_min_inner_size()?;
+        if let Some(position) = self.window.pointer_position {
+            self.window.seat_pointer.hover = self.chrome_target_at(position);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Door 2's verb, and the pane menu's and the double-click's: one chord, both
+    /// directions, because the mode is one bit.
+    fn toggle_focus_mode(&mut self) -> Result<()> {
+        self.set_focus_mode(!self.window.focus_mode)
     }
 
     /// The rail's trailers and the length of its pinned run, together.
@@ -45690,7 +45992,10 @@ impl Runtime<'_> {
     /// against the animating width would re-decide the question against a
     /// different boundary on every frame of the answer it just gave.
     fn drive_rail_zone(&mut self, position: Option<PhysicalPosition<f64>>) {
-        if !self.window.rail.draws_icon_rail() {
+        // Asked of the window's posture rather than of the stored preference: in
+        // focus mode there is no icon rail to reach for, and a trigger that went
+        // on opening one would be aiming a tween at a panel nobody is drawing.
+        if !self.rail_posture().draws_icon_rail() {
             return;
         }
         let scale = self.window.renderer.metrics().scale_factor;
@@ -45848,12 +46153,22 @@ impl Runtime<'_> {
     /// vertical scroller and a vertical wheel already says what it means.
     fn scroll_rail(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let now = Instant::now();
-        let Some(geometry) = self.rail_geometry_now(now) else {
+        // The two lists share `rail_scroll` because they share the panel; what
+        // differs between them is only how long the content is, which is exactly
+        // what `viewport` and `max_scroll` carry.
+        let Some((viewport, max_scroll)) = self
+            .rail_geometry_now(now)
+            .map(|geometry| (geometry.viewport, geometry.max_scroll))
+            .or_else(|| {
+                self.focus_rail_geometry_now(now)
+                    .map(|geometry| (geometry.viewport, geometry.max_scroll))
+            })
+        else {
             return Ok(());
         };
-        let travel = self.vertical_wheel_travel(delta, geometry.viewport[1] - geometry.viewport[0]);
+        let travel = self.vertical_wheel_travel(delta, viewport[1] - viewport[0]);
         // Wheel-up reveals what lies above, which is a smaller offset.
-        let scrolled = (self.window.rail_scroll - travel).clamp(0.0, geometry.max_scroll);
+        let scrolled = (self.window.rail_scroll - travel).clamp(0.0, max_scroll);
         if scrolled == self.window.rail_scroll {
             return Ok(());
         }
@@ -45997,10 +46312,32 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// Whether the pointer is over the panel on the left, whichever list it is
+    /// holding — the wheel's gate, and `.pane:hover`'s.
+    ///
+    /// One function over both surfaces because it is one rectangle: the card
+    /// column and the rail are the same panel, and a pointer inside it belongs to
+    /// it either way. Asking only the rail was right until §7.1.6b′ gave the
+    /// panel a second thing to hold.
+    fn panel_covers(&self, position: PhysicalPosition<f64>) -> bool {
+        let now = Instant::now();
+        self.rail_geometry_now(now)
+            .is_some_and(|rail| rail.covers(position.x, position.y))
+            || self
+                .focus_rail_geometry_now(now)
+                .is_some_and(|column| column.covers(position.x, position.y))
+    }
+
     /// Whether the pointer is over the rail's own box — the wheel's gate.
     fn rail_contains(&self, position: PhysicalPosition<f64>) -> bool {
-        self.rail_geometry_now(Instant::now())
-            .is_some_and(|geometry| seats::rail_run(&geometry).contains(position.x, position.y))
+        let now = Instant::now();
+        self.rail_geometry_now(now)
+            .map(|geometry| seats::rail_run(&geometry))
+            .or_else(|| {
+                self.focus_rail_geometry_now(now)
+                    .map(|geometry| seats::focus_rail_run(&geometry))
+            })
+            .is_some_and(|run| run.contains(position.x, position.y))
     }
 
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
@@ -46175,7 +46512,10 @@ impl Runtime<'_> {
         // `overflow-y: auto` where the strip is `overflow-x: auto`, and both are
         // "a wheel over a scroller scrolls it".
         if let Some(position) = self.window.pointer_position {
-            if self.window.rail.layout == seats::TabLayoutMode::Vertical {
+            // §7.1.6b′: the card column is a vertical scroller in **both** tab
+            // layouts, so the panel is asked first and the strip only when there
+            // is no panel to have been over.
+            if self.window.focus_mode || self.window.rail.layout == seats::TabLayoutMode::Vertical {
                 if self.rail_contains(position) {
                     return self.scroll_rail(delta);
                 }
@@ -46938,6 +47278,25 @@ impl Runtime<'_> {
             && !event.repeat
             && self.close_search()?
         {
+            return Ok(());
+        }
+        // **Focus mode's rung, and it is the bottom one** — the rung the comment
+        // above has been naming all along (`… pv-float, flyout, SEARCH,
+        // focus-mode`), now that there is a mode to leave (§7.1.6b′).
+        //
+        // Last because it is the biggest and quietest thing an Escape can undo:
+        // every transient above it is something that appeared in the last few
+        // seconds, while this is a layout somebody may have been living in. A
+        // press that closed the mode *and* a flyout would take away something the
+        // hand was not asking about.
+        //
+        // Below it there is nothing but the pane, so a window not in focus mode
+        // passes the key straight to the shell exactly as it did before.
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.window.focus_mode
+        {
+            self.set_focus_mode(false)?;
             return Ok(());
         }
 
@@ -50808,6 +51167,13 @@ fn rail_state_for(layout: seats::TabLayoutMode, mode: seats::RailMode) -> seats:
         // just written as `false`. A layout arriving from the settings dialog is
         // an unfolded rail standing still, not a fold caught halfway.
         fold: None,
+        // **Not a rail preference, and so not written here.** This function
+        // builds the state the `Tab layout` / `Sidebar` rows describe, and
+        // §7.1.6b′ rules focus mode orthogonal to both: it is neither read nor
+        // written by them, and turning the layout over must not turn the mode
+        // off. `sampled_rail` is where the window's own bit joins the state, on
+        // the frame clock, beside every other sampled scalar here.
+        focus: false,
     }
 }
 
@@ -62209,6 +62575,7 @@ mod tests {
                 open: 1.0,
                 text_opacity: 1.0,
                 fold: None,
+                focus: false,
             },
         )
         .expect("an expanded rail is on screen");

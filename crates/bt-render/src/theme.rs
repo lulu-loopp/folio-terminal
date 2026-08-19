@@ -167,6 +167,71 @@ const DARK_INK_SOURCE: [u8; 3] = [0xff, 0xff, 0xff];
 /// α = 1, `--ink #37352F` itself.
 const LIGHT_INK_SOURCE: [u8; 3] = [0x37, 0x35, 0x2f];
 
+/// The colour `--border` and `--border-soft` are a fraction of on the dark
+/// canvas: white, the same source the inks are drawn from.
+///
+/// Its own name and not [`DARK_INK_SOURCE`], because the two only coincide on
+/// night — the shade a hairline is struck from is **black** on paper while the
+/// ink there is `#37352F`, and reading `--border` as "the ink at .088" puts
+/// every light hairline five levels off the one the design's own renderer draws.
+const DARK_SHADE_SOURCE: [u8; 3] = [0xff, 0xff, 0xff];
+/// The same on light: `--border rgba(0,0,0,.088)`.
+const LIGHT_SHADE_SOURCE: [u8; 3] = [0x00, 0x00, 0x00];
+
+/// `--menu #2A2A2A` on the dark canvas — the face of anything that floats over
+/// the window rather than being part of its frame.
+const MENU_DARK: [u8; 3] = [0x2a, 0x2a, 0x2a];
+/// `--menu #FFFFFF` on the light canvas.
+const MENU_LIGHT: [u8; 3] = [0xff, 0xff, 0xff];
+/// `--win #202020` on the dark canvas — the window's own face, which a control
+/// inset in a panel stands on (`.focus-exit { background: var(--win) }`).
+const WIN_DARK: [u8; 3] = [0x20, 0x20, 0x20];
+/// `--win #FFFFFF` on the light canvas.
+const WIN_LIGHT: [u8; 3] = [0xff, 0xff, 0xff];
+
+/// `--border` over `--panel`, dark — the hairline worn by everything struck on
+/// the rail's own ground.
+///
+/// One constant and two fields ([`ChromePalette::rail_seam`] and
+/// [`ChromePalette::focus_card_edge`]), because it is one composite rather than
+/// two that happen to agree: the pinned run's rule and a focus card's edge are
+/// the same `--border` laid on the same `--panel`, and a second literal here
+/// would be the second definition of one quantity this repo has already been
+/// bitten by once.
+const PANEL_HAIRLINE_DARK: [u8; 3] = ink_over(PANEL_DARK, DARK_SHADE_SOURCE, 94);
+/// The same on light.
+const PANEL_HAIRLINE_LIGHT: [u8; 3] = ink_over(PANEL_LIGHT, LIGHT_SHADE_SOURCE, 88);
+
+/// A focus card's head at rest, dark — `.fc-head { background: var(--hover) }`
+/// over the card's own `--menu` face (§7.1.6b′).
+///
+/// **Over `--menu` and not over `--panel`**, even though F1 draws no part of the
+/// card's face uncovered: the head is laid on the card, and the card is laid on
+/// the column. Compositing it against the column instead would be right by
+/// accident today and wrong the day F2 puts a body under the head.
+const FOCUS_CARD_DARK: [u8; 3] = ink_over(MENU_DARK, DARK_INK_SOURCE, 55);
+/// The same on light.
+const FOCUS_CARD_LIGHT: [u8; 3] = ink_over(MENU_LIGHT, LIGHT_INK_SOURCE, 55);
+/// The staged card's head, dark — `.fcard.staged .fc-head { background:
+/// var(--active) }`, the column's answer to "which tab am I looking at".
+const FOCUS_CARD_STAGED_DARK: [u8; 3] = ink_over(MENU_DARK, DARK_INK_SOURCE, 90);
+/// The same on light.
+const FOCUS_CARD_STAGED_LIGHT: [u8; 3] = ink_over(MENU_LIGHT, LIGHT_INK_SOURCE, 90);
+/// `--active` over a resting card's head, dark — the pane-count badge's pill and
+/// the `×`'s hover pill, which are one declaration on one ground.
+const FOCUS_CARD_PILL_DARK: [u8; 3] = ink_over(FOCUS_CARD_DARK, DARK_INK_SOURCE, 90);
+/// The same on light.
+const FOCUS_CARD_PILL_LIGHT: [u8; 3] = ink_over(FOCUS_CARD_LIGHT, LIGHT_INK_SOURCE, 90);
+/// The same pair over the staged card's head, dark.
+const FOCUS_CARD_PILL_STAGED_DARK: [u8; 3] = ink_over(FOCUS_CARD_STAGED_DARK, DARK_INK_SOURCE, 90);
+/// The same on light.
+const FOCUS_CARD_PILL_STAGED_LIGHT: [u8; 3] =
+    ink_over(FOCUS_CARD_STAGED_LIGHT, LIGHT_INK_SOURCE, 90);
+/// The Exit button under the pointer, dark — `--hover` over `--win`.
+const FOCUS_EXIT_HOVER_DARK: [u8; 3] = ink_over(WIN_DARK, DARK_INK_SOURCE, 55);
+/// The same on light.
+const FOCUS_EXIT_HOVER_LIGHT: [u8; 3] = ink_over(WIN_LIGHT, LIGHT_INK_SOURCE, 55);
+
 /// `.gsec` under `.grow:hover`, dark: `--hover rgba(255,255,255,.055)`.
 const GIT_ROW_HOVER_DARK: [u8; 3] = ink_over(PANEL_DARK, DARK_INK_SOURCE, 55);
 /// The same on light: `--hover rgba(55,53,47,.055)`.
@@ -1216,6 +1281,75 @@ pub struct ChromePalette {
     /// `--termbg #1B1B1B` with: the same `.09` that reads as a soft edge on white
     /// is invisible on night.
     pub rail_shade_alpha: u8,
+
+    // ── the focus column's cards (§7.1.6b′) ──
+    //
+    // A card is a tab, so every mark it wears is the strip's own — the profile
+    // mark, the dot, the ring, the badge, the pin, the `×`. What is new is only
+    // the surface they stand on: the rail's rows lie directly on `--panel`,
+    // while a card is an object with its own `--menu` face and a `--hover` head
+    // over it. Same declarations, a different ground, so each one composites
+    // again — which is the very discipline `rail_tab_hover_text` was added
+    // under.
+    /// `.fc-head { background: var(--hover) }` over the card's `--menu` face.
+    ///
+    /// In F1 this *is* the card: the slice ships the head alone (the F2
+    /// thumbnail is the body that will hang under it), so this fill covers
+    /// everything inside the card's border.
+    pub focus_card: [u8; 3],
+    /// `.fcard.staged .fc-head { background: var(--active) }` — the tab that is
+    /// currently on the stage, marked in the column rather than removed from it.
+    pub focus_card_staged: [u8; 3],
+    /// `.fc-head { color: var(--ink2) }` over [`Self::focus_card`] — a card's
+    /// name.
+    pub focus_card_title: [u8; 3],
+    /// `.fcard.staged .fc-head { color: var(--ink) }` over
+    /// [`Self::focus_card_staged`].
+    pub focus_card_title_staged: [u8; 3],
+    /// `--ink3` over [`Self::focus_card`] — the resting `×` and the pin mark,
+    /// which the mock-up sets from one declaration (`.fc-head .pinsvg` and
+    /// `.fc-head .fc-close` are both `var(--ink3)`).
+    pub focus_card_glyph: [u8; 3],
+    /// The same over [`Self::focus_card_staged`].
+    pub focus_card_glyph_staged: [u8; 3],
+    /// `--active` over [`Self::focus_card`] — the pane-count badge's pill, and
+    /// the `×`'s own pill under the pointer.
+    ///
+    /// One field for both because the mock-up strikes both from `var(--active)`
+    /// on the same ground; two fields would be two definitions of one colour.
+    pub focus_card_pill: [u8; 3],
+    /// The same over [`Self::focus_card_staged`].
+    pub focus_card_pill_staged: [u8; 3],
+    /// `--ink` over [`Self::focus_card_pill`] — the `×` on its hover pill.
+    pub focus_card_ink_on_pill: [u8; 3],
+    /// `--ink` over [`Self::focus_card_pill_staged`] — the `×` on its pill, and
+    /// the staged card's badge digits, which the strip also lifts to `--ink`
+    /// (`.tab.active .panecount, .vtab.active .panecount { color: var(--ink) }`).
+    pub focus_card_ink_on_pill_staged: [u8; 3],
+    /// `--ink2` over [`Self::focus_card_pill`] — a resting card's badge digits.
+    pub focus_card_muted_on_pill: [u8; 3],
+    /// `.fcard { border: 1px solid var(--border) }` over `--panel`, which is the
+    /// ground the card's own edge stands on — and the same hairline the Exit
+    /// button wears.
+    ///
+    /// Numerically [`Self::rail_seam`] on both canvases, and struck from the
+    /// shared `PANEL_HAIRLINE_*` rather than written twice: it is not a
+    /// coincidence, it is the same `--border` on the same `--panel`.
+    pub focus_card_edge: [u8; 3],
+    /// The progress ring's track on a resting card — `--border` at
+    /// `opacity: .7`, the same ten-thousandths the strip's three tracks use.
+    pub ring_track_on_focus_card: [u8; 3],
+    /// The same on a staged card.
+    pub ring_track_on_focus_card_staged: [u8; 3],
+    /// `.focus-exit { background: var(--win) }` — door 5's face. Opaque on both
+    /// canvases, so there is nothing to composite.
+    pub focus_exit: [u8; 3],
+    /// `.focus-exit { color: var(--ink2) }` over [`Self::focus_exit`].
+    pub focus_exit_text: [u8; 3],
+    /// `.focus-exit:hover { background: var(--hover) }` over the same face.
+    pub focus_exit_hover: [u8; 3],
+    /// `.focus-exit:hover { color: var(--ink) }` over [`Self::focus_exit_hover`].
+    pub focus_exit_text_hover: [u8; 3],
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -1463,13 +1597,37 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // `--ink3` (white .38) over the selection fill 56.62: + 198.38×.38 = 132.0.
     rail_glyph_on_active_tab: [0x84, 0x84, 0x84],
     // `--border` (white .094) over `--panel`: 37 + 218×.094 = 57.49.
-    rail_seam: [0x39, 0x39, 0x39],
+    rail_seam: PANEL_HAIRLINE_DARK,
     // `--border-soft` (white .06) over `--panel`: 37 + 218×.06 = 50.08.
     rail_edge: [0x32, 0x32, 0x32],
     // The gradient is black on both canvases; only its alpha is theme-varied.
     rail_shade: [0x00, 0x00, 0x00],
     // `.34` of 255.
     rail_shade_alpha: 87,
+    // The focus column's cards. Derived rather than transcribed — see
+    // `ink_over`, and see the Git page's fifteen entries for why: a card wears
+    // eighteen composites over four grounds, and eighteen hand-checked sums is
+    // eighteen chances to be wrong in a way no test would catch.
+    focus_card: FOCUS_CARD_DARK,
+    focus_card_staged: FOCUS_CARD_STAGED_DARK,
+    focus_card_title: ink_over(FOCUS_CARD_DARK, DARK_INK_SOURCE, 550),
+    focus_card_title_staged: ink_over(FOCUS_CARD_STAGED_DARK, DARK_INK_SOURCE, 870),
+    focus_card_glyph: ink_over(FOCUS_CARD_DARK, DARK_INK_SOURCE, 380),
+    focus_card_glyph_staged: ink_over(FOCUS_CARD_STAGED_DARK, DARK_INK_SOURCE, 380),
+    focus_card_pill: FOCUS_CARD_PILL_DARK,
+    focus_card_pill_staged: FOCUS_CARD_PILL_STAGED_DARK,
+    focus_card_ink_on_pill: ink_over(FOCUS_CARD_PILL_DARK, DARK_INK_SOURCE, 870),
+    focus_card_ink_on_pill_staged: ink_over(FOCUS_CARD_PILL_STAGED_DARK, DARK_INK_SOURCE, 870),
+    focus_card_muted_on_pill: ink_over(FOCUS_CARD_PILL_DARK, DARK_INK_SOURCE, 550),
+    focus_card_edge: PANEL_HAIRLINE_DARK,
+    // `--border` at `opacity: .7` — `.094 × .7 = .0658`, in ten-thousandths, the
+    // same ladder `ring_track_on_active_tab` and its two siblings ride.
+    ring_track_on_focus_card: ink_over_bp(FOCUS_CARD_DARK, DARK_SHADE_SOURCE, 658),
+    ring_track_on_focus_card_staged: ink_over_bp(FOCUS_CARD_STAGED_DARK, DARK_SHADE_SOURCE, 658),
+    focus_exit: WIN_DARK,
+    focus_exit_text: ink_over(WIN_DARK, DARK_INK_SOURCE, 550),
+    focus_exit_hover: FOCUS_EXIT_HOVER_DARK,
+    focus_exit_text_hover: ink_over(FOCUS_EXIT_HOVER_DARK, DARK_INK_SOURCE, 870),
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -1700,13 +1858,33 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // `--ink3` (the ink at .45) over the selection fill 229.7/229.5/227.2.
     rail_glyph_on_active_tab: [0x97, 0x96, 0x92],
     // `--border` (black at .088) over `--panel`: 247×.912 = 225.26, 245×.912.
-    rail_seam: [0xe1, 0xe1, 0xdf],
+    rail_seam: PANEL_HAIRLINE_LIGHT,
     // `--border-soft` (black at .055) over `--panel`: 247×.945 = 233.42.
     rail_edge: [0xe9, 0xe9, 0xe8],
     // Black on both canvases; only the alpha differs.
     rail_shade: [0x00, 0x00, 0x00],
     // `.09` of 255.
     rail_shade_alpha: 23,
+    // The focus column's cards, derived exactly as the dark set is.
+    focus_card: FOCUS_CARD_LIGHT,
+    focus_card_staged: FOCUS_CARD_STAGED_LIGHT,
+    focus_card_title: ink_over(FOCUS_CARD_LIGHT, LIGHT_INK_SOURCE, 650),
+    focus_card_title_staged: ink_over(FOCUS_CARD_STAGED_LIGHT, LIGHT_INK_SOURCE, 1000),
+    focus_card_glyph: ink_over(FOCUS_CARD_LIGHT, LIGHT_INK_SOURCE, 450),
+    focus_card_glyph_staged: ink_over(FOCUS_CARD_STAGED_LIGHT, LIGHT_INK_SOURCE, 450),
+    focus_card_pill: FOCUS_CARD_PILL_LIGHT,
+    focus_card_pill_staged: FOCUS_CARD_PILL_STAGED_LIGHT,
+    focus_card_ink_on_pill: ink_over(FOCUS_CARD_PILL_LIGHT, LIGHT_INK_SOURCE, 1000),
+    focus_card_ink_on_pill_staged: ink_over(FOCUS_CARD_PILL_STAGED_LIGHT, LIGHT_INK_SOURCE, 1000),
+    focus_card_muted_on_pill: ink_over(FOCUS_CARD_PILL_LIGHT, LIGHT_INK_SOURCE, 650),
+    focus_card_edge: PANEL_HAIRLINE_LIGHT,
+    // `--border` at `opacity: .7` — `.088 × .7 = .0616`, in ten-thousandths.
+    ring_track_on_focus_card: ink_over_bp(FOCUS_CARD_LIGHT, LIGHT_SHADE_SOURCE, 616),
+    ring_track_on_focus_card_staged: ink_over_bp(FOCUS_CARD_STAGED_LIGHT, LIGHT_SHADE_SOURCE, 616),
+    focus_exit: WIN_LIGHT,
+    focus_exit_text: ink_over(WIN_LIGHT, LIGHT_INK_SOURCE, 650),
+    focus_exit_hover: FOCUS_EXIT_HOVER_LIGHT,
+    focus_exit_text_hover: ink_over(FOCUS_EXIT_HOVER_LIGHT, LIGHT_INK_SOURCE, 1000),
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -2195,6 +2373,82 @@ pub const RAIL_TEXT_FADE_MS: u64 = 100;
 /// `transition-delay: .06s` on the way *open* only — the panel gets a moment to
 /// be wide enough to hold words before the words arrive.
 pub const RAIL_TEXT_FADE_OPEN_DELAY_MS: u64 = 60;
+
+// ── §7.1.6b′: the focus column, one card per tab ──
+//
+// The card column lives in the rail, at the rail's own width, and it is the rail
+// that is scrolled and padded — `#focus-rail` contributes a gap and nothing
+// else. So almost every measurement here is the rail's, written as the rail's
+// constant, and what is genuinely new is the card's own chrome: a border, a
+// radius, a head's padding, and the bar that carries door 5.
+//
+// **F1 ships the head alone.** The mock-up draws a body under it — the whole
+// tab's split tree in miniature, tagged `F2` on its own face — and that is the
+// next slice's projection budget, not this one's. A card is therefore exactly
+// its head plus its border, and [`FOCUS_CARD_HEAD_*`] is what decides how tall
+// one is.
+
+/// `#focus-rail { gap: 8px }` — between cards.
+///
+/// Not [`RAIL_GAP_LOGICAL_PX`]'s 1px, and the difference is the point: rail rows
+/// are a list and read as one run, while cards are separate objects and have to
+/// be seen to end.
+pub const FOCUS_CARD_GAP_LOGICAL_PX: f32 = 8.0;
+/// `.fcard { border: 1px solid var(--border) }`.
+///
+/// Inside the card's box like every other border in the mock-up
+/// (`box-sizing: border-box`), so it comes out of the head's height rather than
+/// being added to it.
+pub const FOCUS_CARD_BORDER_LOGICAL_PX: f32 = 1.0;
+/// `.fcard { border-radius: 10px }`.
+pub const FOCUS_CARD_RADIUS_LOGICAL_PX: f32 = 10.0;
+/// `.fc-head { padding: 5px 8px }`.
+pub const FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX: f32 = 8.0;
+pub const FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX: f32 = 5.0;
+/// `.fc-head { gap: 6px }` — between the mark, the name and the trailing run.
+pub const FOCUS_CARD_HEAD_GAP_LOGICAL_PX: f32 = 6.0;
+/// `.fc-head { font-size: 11px }` — a card's name.
+///
+/// Two steps under the strip's 13px tab title, because a card says the same
+/// thing in a narrower column and the mock-up gives the whole card this size.
+pub const FOCUS_CARD_FONT_LOGICAL_PX: f32 = 11.0;
+/// `.fc-head .fc-close { width: 16px; height: 16px }`.
+///
+/// Its own 16 and not [`WINDOW_TAB_CLOSE_BOX_LOGICAL_PX`]'s 17: the mock-up
+/// writes a different number for the card's `×`, and it is the tallest thing in
+/// the head, so it is what sets the card's height.
+pub const FOCUS_CARD_CLOSE_BOX_LOGICAL_PX: f32 = 16.0;
+/// `.fc-head .fc-close { border-radius: 4px }` — the pill under the hovered `×`.
+pub const FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// `.fc-head .pinsvg { width: 11px; height: 11px }` — the pin mark a pinned
+/// tab's card wears.
+///
+/// A **mark and not a button**: F1's card states that its tab is pinned and
+/// offers no pinning, because the offer is a hover-revealed control on a tab row
+/// and the card has no second idiom for it. See §7.1.6b′ ④.
+pub const FOCUS_CARD_PIN_BOX_LOGICAL_PX: f32 = 11.0;
+/// `.fc-head .fc-close svg { width: 8px; height: 8px }` — the `×` inside its
+/// box, the same glyph the strip's own `×` is drawn at.
+pub const FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX;
+/// `.focus-bar { padding: 4px 2px 6px }` — the bar that stands where the rail's
+/// "Tabs" heading stands the rest of the time.
+pub const FOCUS_BAR_PADDING_TOP_LOGICAL_PX: f32 = 4.0;
+pub const FOCUS_BAR_PADDING_X_LOGICAL_PX: f32 = 2.0;
+pub const FOCUS_BAR_PADDING_BOTTOM_LOGICAL_PX: f32 = 6.0;
+/// `.focus-bar { gap: 6px }` — between the label and the way out.
+pub const FOCUS_BAR_GAP_LOGICAL_PX: f32 = 6.0;
+/// `.focus-exit { height: 22px }` — door 5.
+pub const FOCUS_EXIT_HEIGHT_LOGICAL_PX: f32 = 22.0;
+/// `.focus-exit { padding: 0 8px }`.
+pub const FOCUS_EXIT_PADDING_X_LOGICAL_PX: f32 = 8.0;
+/// `.focus-exit { border-radius: 6px }`.
+pub const FOCUS_EXIT_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `.focus-exit { gap: 5px }` — between the glyph and the word.
+pub const FOCUS_EXIT_GAP_LOGICAL_PX: f32 = 5.0;
+/// `.focus-exit svg { width: 10px; height: 10px }`.
+pub const FOCUS_EXIT_GLYPH_LOGICAL_PX: f32 = 10.0;
+/// `.focus-exit { font-size: 11px }` — the word `Exit`.
+pub const FOCUS_EXIT_FONT_LOGICAL_PX: f32 = 11.0;
 
 /// A seat title's font size (`.panehead { font-size: 11.5px }`).
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;

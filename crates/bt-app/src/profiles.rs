@@ -6520,6 +6520,12 @@ impl SplitZone {
 /// that is not there.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PaneMenuRow {
+    /// **Door 4 of five** (§7.1.6b′ ④): enter focus mode, or leave it.
+    ///
+    /// First, and separated from everything under it, because it is the one row
+    /// here that is about the *window's* shape rather than about this pane. It
+    /// reads out the verb it will perform, so one row is both directions.
+    FocusMode,
     /// The Snap-Layouts picker — a drawing, not a row of text, and the only
     /// entry here that carries its own four answers.
     Picker,
@@ -6539,7 +6545,8 @@ pub enum PaneMenuRow {
 impl PaneMenuRow {
     /// Every entry, top to bottom — the order they are laid out in and the order
     /// a keyboard walks them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::FocusMode,
         Self::Picker,
         Self::SplitWith,
         Self::NewInFolder,
@@ -6550,7 +6557,8 @@ impl PaneMenuRow {
 
     /// The five that are rows of text with a mark, in order — [`Self::ALL`]
     /// without the picker.
-    pub const TEXT_ROWS: [Self; 5] = [
+    pub const TEXT_ROWS: [Self; 6] = [
+        Self::FocusMode,
         Self::SplitWith,
         Self::NewInFolder,
         Self::Duplicate,
@@ -6563,6 +6571,10 @@ impl PaneMenuRow {
         match self {
             // The picker is the drawing; it has no column and no glyph.
             Self::Picker => None,
+            // `#i-max`, the mock-up's own choice for this row: the mode is
+            // "one thing, filling the frame", which is the glyph's sentence
+            // whichever direction the row is about to go.
+            Self::FocusMode => Some(ChromeMark::WindowMaximize),
             // The `⊞` the pane head just gave up, in the one place it still
             // means what it always meant: "another one of these, beside this".
             Self::SplitWith => Some(ChromeMark::Split),
@@ -6577,9 +6589,15 @@ impl PaneMenuRow {
         }
     }
 
-    fn text(self) -> &'static str {
+    /// The words on this row.
+    ///
+    /// `focus_on` is the window's own focus-mode bit, and only one row reads it:
+    /// door 4 states the verb it will perform, so the same line is the way in and
+    /// the way out (§7.1.6b′ ④). Every other row ignores it.
+    fn text(self, focus_on: bool) -> &'static str {
         match self {
             Self::Picker => picker_caption_text(),
+            Self::FocusMode => focus_mode_text(focus_on),
             Self::SplitWith => split_with_text(),
             Self::NewInFolder => new_in_folder_text(),
             Self::Duplicate => duplicate_pane_text(),
@@ -6592,6 +6610,21 @@ impl PaneMenuRow {
     #[must_use]
     pub fn has_submenu(self) -> bool {
         self == Self::SplitWith
+    }
+}
+
+/// **Door 4 of five** (§7.1.6b′ ④) — and the row reads out the verb it will
+/// perform, so the same line is the way in and the way out.
+///
+/// Discoverability is the whole reason this door exists: a double-click on a
+/// pane header is a gesture nobody guesses, and this menu is already hanging off
+/// the very thing that gesture is aimed at.
+#[must_use]
+pub fn focus_mode_text(on: bool) -> &'static str {
+    if on {
+        crate::i18n::Text::PaneMenuExitFocusMode.text()
+    } else {
+        crate::i18n::Text::PaneMenuEnterFocusMode.text()
     }
 }
 
@@ -6692,7 +6725,7 @@ impl PaneMenuHover {
         match current {
             // Nothing lit: the list is entered at whichever end the key names.
             None => match step {
-                MenuStep::Down => Some(Self::Zone(SplitZone::Right)),
+                MenuStep::Down => Some(Self::Row(PaneMenuRow::FocusMode)),
                 MenuStep::Up => Some(Self::Row(PaneMenuRow::ClosePane)),
                 MenuStep::Left | MenuStep::Right => None,
             },
@@ -6706,12 +6739,13 @@ impl PaneMenuHover {
                 if aimed != zone {
                     return Some(Self::Zone(aimed));
                 }
-                // Already aimed that way: walk out of the picker. Only downward
-                // leads anywhere — the picker is the first entry, so `↑` from
-                // `Up` is the top of the list and clamps, exactly as every other
-                // walk in this window clamps at its ends.
+                // Already aimed that way: walk out of the picker, in the
+                // direction that was aimed. Both ways lead somewhere now — door
+                // 4 stands above the picker (§7.1.6b′ ④), where the walk used to
+                // clamp.
                 match step {
                     MenuStep::Down => Some(Self::Row(PaneMenuRow::SplitWith)),
+                    MenuStep::Up => Some(Self::Row(PaneMenuRow::FocusMode)),
                     _ => None,
                 }
             }
@@ -6721,10 +6755,23 @@ impl PaneMenuHover {
                     .position(|it| *it == row)
                     .expect("a hovered row is one of TEXT_ROWS");
                 match step {
+                    // The picker stands between door 4 and the rest, so the row
+                    // under door 4 on screen is a *zone* — entered at the one
+                    // nearest the row being left, exactly as `↑` enters it at
+                    // `Down` from below.
+                    MenuStep::Down if row == PaneMenuRow::FocusMode => {
+                        Some(Self::Zone(SplitZone::Up))
+                    }
                     MenuStep::Down => Some(Self::Row(
                         PaneMenuRow::TEXT_ROWS[(index + 1).min(PaneMenuRow::TEXT_ROWS.len() - 1)],
                     )),
-                    MenuStep::Up if index == 0 => Some(Self::Zone(SplitZone::Down)),
+                    // The row above door 4 is nothing: it is the top of the
+                    // list, and the walk clamps there as every other walk in
+                    // this window clamps at its ends.
+                    MenuStep::Up if row == PaneMenuRow::FocusMode => None,
+                    // The row above `Split with` is the picker, entered at the
+                    // zone nearest the row being left.
+                    MenuStep::Up if index == 1 => Some(Self::Zone(SplitZone::Down)),
                     MenuStep::Up => Some(Self::Row(PaneMenuRow::TEXT_ROWS[index - 1])),
                     MenuStep::Left | MenuStep::Right => None,
                 }
@@ -6822,7 +6869,7 @@ pub struct PaneMenuLayout {
     frame: [f32; 4],
     /// One rectangle per entry of [`PaneMenuRow::ALL`], in that order. The
     /// picker's is its whole block.
-    items: [[f32; 4]; 6],
+    items: [[f32; 4]; 7],
     /// The pane at the middle of the picker's diagram.
     picker_pane: [f32; 4],
     /// The four slabs as they are **drawn**, in [`SplitZone::ALL`] order.
@@ -6837,6 +6884,15 @@ pub struct PaneMenuLayout {
     /// The rule above `Close pane`, which separates the four verbs that *make* a
     /// pane or move one from the one that ends it.
     separator: [f32; 4],
+    /// The rule under door 4 (§7.1.6b′ ④), which separates the one row about the
+    /// *window's* shape from the five about this pane.
+    ///
+    /// Its own field beside [`Self::separator`] rather than the two being an
+    /// array, because each names the sentence break it draws: an index into a
+    /// pair of rules is a number a reader has to look up, and a test asserting
+    /// "the rule falls between door 4 and the picker" would have to say which
+    /// half of the array it meant.
+    focus_separator: [f32; 4],
     /// The submenu's frame and rows, when it is open.
     submenu: Option<PaneSubmenuLayout>,
 }
@@ -6935,13 +6991,21 @@ pub fn pane_menu_layout(
     // it — a menu whose width depended on which rows had submenus would change
     // width the day a second row grew one.
     let indicator = px(SUBMENU_INDICATOR_LOGICAL_PX) + px(ITEM_GAP_LOGICAL_PX);
+    // **Measured against every caption a row can wear, not the one it is wearing
+    // now.** Door 4 reads out its own verb, so its line changes when the bit
+    // turns — and a menu sized to the shorter word would grow under the pointer
+    // the moment somebody used it. Taking the wider of the two here means the
+    // menu is the same width in both directions, which is what lets
+    // `pane_menu_build` choose the word without consulting this.
     let content = PaneMenuRow::TEXT_ROWS
         .iter()
-        .map(|row| {
-            px(ITEM_ICON_COLUMN_LOGICAL_PX)
-                + px(ITEM_GAP_LOGICAL_PX)
-                + measure(row.text(), px(ITEM_FONT_LOGICAL_PX))
-                + indicator
+        .flat_map(|row| {
+            [false, true].map(|focus_on| {
+                px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                    + px(ITEM_GAP_LOGICAL_PX)
+                    + measure(row.text(focus_on), px(ITEM_FONT_LOGICAL_PX))
+                    + indicator
+            })
         })
         // The diagram is content too, and on a narrow menu it is the widest
         // content there is: a frame that clipped its own picker would be a
@@ -6950,10 +7014,11 @@ pub fn pane_menu_layout(
     let width = (chrome + content)
         .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
         .round();
+    // Two rules now: one under door 4, one over `Close pane`.
     let height = (2.0 * (border + padding)
         + picker_height
         + PaneMenuRow::TEXT_ROWS.len() as f32 * item_height
-        + separator_block)
+        + 2.0 * separator_block)
         .round();
 
     let (surface_width, surface_height) = surface;
@@ -6973,11 +7038,24 @@ pub fn pane_menu_layout(
     // the order on screen and the order the keyboard walks from being two lists.
     let mut items = [[0.0_f32; 4]; PaneMenuRow::ALL.len()];
     let mut separator = [0.0_f32; 4];
+    let mut focus_separator = [0.0_f32; 4];
     for (index, row) in PaneMenuRow::ALL.iter().enumerate() {
         let height = match row {
             PaneMenuRow::Picker => picker_height,
             _ => item_height,
         };
+        // The mode's own rule: door 4 is about the *window's* shape and
+        // everything under it is about this pane, so the two sentences are told
+        // apart (mock-up 11176, `tm-sep` under the focus row).
+        if *row == PaneMenuRow::Picker {
+            focus_separator = [
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ];
+            cursor += separator_block;
+        }
         // The rule falls where the sentence changes: four verbs that make a pane
         // or move one, then the one that ends it. `#file-menu` puts its own rule
         // after the first row for the same kind of reason (mock-up 8089).
@@ -6993,7 +7071,7 @@ pub fn pane_menu_layout(
         items[index] = [content_left, cursor, content_right, cursor + height];
         cursor += height;
     }
-    let picker = items[0];
+    let picker = items[1];
 
     // The diagram, centred in the picker's block.
     let diagram_width = px(picker_diagram_width_logical_px());
@@ -7083,18 +7161,40 @@ pub fn pane_menu_layout(
         zone_hits,
         caption,
         separator,
+        focus_separator,
         submenu,
     }
 }
 
 /// Where the `Split with` submenu hangs.
 ///
-/// **To the right of the parent, level with the heading's own top padding, and
-/// flipped to the left when the window's right edge is too close** — the two
-/// rules every submenu in every product follows, and the second is not optional:
-/// a menu opened on a pane head near the right edge is a menu whose child has
-/// nowhere to go on that side, and a child clamped instead of flipped would sit
-/// *on top of* the parent it hangs from.
+/// **Outside the parent's right edge, level with the heading's own top padding,
+/// and flipped to outside its left edge when the window's right edge is too
+/// close** — the two rules every submenu in every product follows, and the
+/// second is not optional: a menu opened on a pane head near the right edge is a
+/// menu whose child has nowhere to go on that side, and a child clamped instead
+/// of flipped would sit *on top of* the parent it hangs from.
+///
+/// **Outside, and never over** (user report 2026-08-19). This used to seat the
+/// child `border + padding` *inside* the parent's edge, on the argument that two
+/// surfaces sharing a seam read as one object with a fold in it. On screen they
+/// do not: the child covered the right-hand column of every row it stood beside,
+/// including the `▸` on the very heading it hangs from, so the parent looked
+/// truncated rather than folded. The child now stands clear by
+/// [`MENU_OFFSET_LOGICAL_PX`], which is the same 4px every other popup in this
+/// file keeps from the control that opened it, and the two read as parent and
+/// child because that is what they are.
+///
+/// The corridor the safety triangle has to cover grows by exactly that gap,
+/// which costs it nothing: `safe_triangle_holds` aims at the child's near
+/// vertical edge wherever it is, and four pixels of travel is well inside the
+/// slop a hand already has.
+///
+/// **When neither side fits**, the child takes whichever has more room and is
+/// cropped by the window rather than moved over the parent. That is a window
+/// narrower than two menus side by side, and of the two failures available —
+/// a child running off the screen, or a child hiding the rows you are choosing
+/// between — only the first leaves the parent readable.
 #[allow(clippy::too_many_arguments)]
 fn pane_submenu_layout(
     parent: [f32; 4],
@@ -7127,17 +7227,21 @@ fn pane_submenu_layout(
 
     let (surface_width, surface_height) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
-    // Overlapping the parent's edge by its own border and padding, so the two
-    // surfaces read as one object with a fold in it rather than as two windows
-    // with a seam — and, more practically, so the corridor the safety triangle
-    // has to cover is as short as it can be.
-    let overlap = border + padding;
-    let right_of = parent[2] - overlap;
-    let left_of = parent[0] + overlap - width;
+    let gap = px(MENU_OFFSET_LOGICAL_PX);
+    let right_of = parent[2] + gap;
+    let left_of = parent[0] - gap - width;
     let left = if right_of + width + edge <= surface_width {
         right_of
+    } else if left_of >= edge {
+        left_of
+    } else if parent[0] >= surface_width - parent[2] {
+        // Neither side holds it. Take the side with more room and let the
+        // window crop it — clamping to `edge` here is what would put the child
+        // back on top of the parent, which is the one outcome this placement
+        // exists to prevent.
+        left_of
     } else {
-        left_of.max(edge)
+        right_of
     }
     .round();
     let top = (heading[1] - border - padding)
@@ -7188,7 +7292,15 @@ pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<PaneMenu
             return Some(PaneMenuHit::Zone(*zone));
         }
     }
-    for (row, rect) in PaneMenuRow::TEXT_ROWS.iter().zip(layout.items[1..].iter()) {
+    // Walked over `ALL` beside its own boxes, stepping over the picker — the
+    // painter's own walk, and one list for the same reason. `items[1..]` was
+    // true only while the picker was the first entry; door 4 now stands above
+    // it (§7.1.6b′ ④), and a hit test that assumed where the drawing sits would
+    // answer every press with the name of the row below it.
+    for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items.iter()) {
+        if *row == PaneMenuRow::Picker {
+            continue;
+        }
         if contains(*rect, x, y) {
             return Some(PaneMenuHit::Row(*row));
         }
@@ -7212,6 +7324,9 @@ pub fn pane_menu_build(
     hover: Option<PaneMenuHover>,
     current_profile: Option<usize>,
     programs: &ProfilePrograms,
+    // Whether the window is in focus mode - door 4 reads out the verb it will
+    // perform (§7.1.6b′ ④), and this is the only row that consults it.
+    focus_on: bool,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -7239,12 +7354,20 @@ pub fn pane_menu_build(
 
     push_picker(layout, hover, palette, scale, &mut quads, &mut labels);
 
-    for (row, rect) in PaneMenuRow::TEXT_ROWS.iter().zip(layout.items[1..].iter()) {
+    // **Walked over `ALL` beside its own boxes**, rather than over `TEXT_ROWS`
+    // against a slice of them. The old `items[1..]` was true only while the
+    // picker was the first entry; door 4 now stands above it, and a zip that
+    // assumes where the drawing sits is a zip that silently draws every caption
+    // one row out of place the next time the order changes.
+    for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items.iter()) {
+        if *row == PaneMenuRow::Picker {
+            continue;
+        }
         push_row(
             &Row {
                 rect: *rect,
                 mark: row.mark(),
-                name: row.text(),
+                name: row.text(focus_on),
                 hint: None,
                 hint_ink: None,
                 hovered: hover == Some(PaneMenuHover::Row(*row)),
@@ -7286,6 +7409,13 @@ pub fn pane_menu_build(
         if *row == PaneMenuRow::MoveToNewTab {
             quads.push(OverlayQuad {
                 rect: layout.separator,
+                color: palette.menu_border,
+                alpha: separator_alpha(palette.menu_border),
+            });
+        }
+        if *row == PaneMenuRow::FocusMode {
+            quads.push(OverlayQuad {
+                rect: layout.focus_separator,
                 color: palette.menu_border,
                 alpha: separator_alpha(palette.menu_border),
             });
@@ -10927,6 +11057,7 @@ mod tests {
         assert_eq!(
             PaneMenuRow::ALL,
             [
+                PaneMenuRow::FocusMode,
                 PaneMenuRow::Picker,
                 PaneMenuRow::SplitWith,
                 PaneMenuRow::NewInFolder,
@@ -10941,6 +11072,7 @@ mod tests {
             None,
             None,
             &equipped(),
+            false,
             &mut fake_measure,
         ));
         let names: Vec<&str> = layer
@@ -10948,10 +11080,16 @@ mod tests {
             .iter()
             .map(|label| label.text.as_str())
             .collect();
+        // **Paint order, which is not the order on screen**: `push_picker` runs
+        // before the row loop, so the diagram's caption is written first however
+        // high door 4 stands above it. The geometry below is where the *visual*
+        // order is claimed, and it is claimed there because that is where it is
+        // decided.
         assert_eq!(
             names,
             vec![
                 picker_caption_text(),
+                focus_mode_text(false),
                 split_with_text(),
                 new_in_folder_text(),
                 duplicate_pane_text(),
@@ -10968,7 +11106,20 @@ mod tests {
         );
         assert!(
             layout.item(PaneMenuRow::Picker)[3] <= layout.item(PaneMenuRow::SplitWith)[1],
-            "and the picker is the first entry, above every word"
+            "and the picker stands above every word about this pane"
+        );
+        // §7.1.6b' (4): door 4 is the one row here about the *window's* shape, so
+        // it stands first and is fenced off from the five that are about this
+        // pane.
+        let focus = layout.item(PaneMenuRow::FocusMode);
+        assert!(
+            focus[3] <= layout.item(PaneMenuRow::Picker)[1],
+            "door 4 stands above the picker"
+        );
+        assert!(
+            layout.focus_separator[1] >= focus[3]
+                && layout.focus_separator[3] <= layout.item(PaneMenuRow::Picker)[1],
+            "and its rule lies between it and everything about this pane"
         );
     }
 
@@ -11076,9 +11227,28 @@ mod tests {
         use PaneMenuHover as H;
         let rows = count();
         // The list is entered at whichever end the key names.
+        // Door 4 is the first entry now (§7.1.6b′ ④), so `↓` into an unlit menu
+        // lands on it rather than on the picker's first zone.
         assert_eq!(
             H::step(None, MenuStep::Down, rows),
-            Some(H::Zone(SplitZone::Right))
+            Some(H::Row(PaneMenuRow::FocusMode))
+        );
+        // And it is the top: `↑` from it clamps, exactly as every other walk in
+        // this window clamps at its ends.
+        assert_eq!(
+            H::step(Some(H::Row(PaneMenuRow::FocusMode)), MenuStep::Up, rows),
+            None
+        );
+        // `↓` from it enters the picker at the zone nearest the row being left,
+        // which is the mirror of the `↑` that leaves the picker for it.
+        assert_eq!(
+            H::step(Some(H::Row(PaneMenuRow::FocusMode)), MenuStep::Down, rows),
+            Some(H::Zone(SplitZone::Up))
+        );
+        assert_eq!(
+            H::step(Some(H::Zone(SplitZone::Up)), MenuStep::Up, rows),
+            Some(H::Row(PaneMenuRow::FocusMode)),
+            "the picker is no longer the top of the list, so aiming up twice leaves it upward"
         );
         assert_eq!(
             H::step(None, MenuStep::Up, rows),
@@ -11110,16 +11280,13 @@ mod tests {
             H::step(Some(H::Zone(SplitZone::Left)), MenuStep::Left, rows),
             None
         );
-        // Aiming twice in the same direction walks out — downward only, because
-        // the picker is the first entry and the top of a list clamps.
+        // Aiming twice in the same direction walks out — **both ways now**
+        // (§7.1.6b′ ④): the picker used to be the first entry, so `↑` from `Up`
+        // was the top of the list and clamped; door 4 stands there instead, and
+        // the clamp has moved up with it (asserted above).
         assert_eq!(
             H::step(Some(H::Zone(SplitZone::Down)), MenuStep::Down, rows),
             Some(H::Row(PaneMenuRow::SplitWith))
-        );
-        assert_eq!(
-            H::step(Some(H::Zone(SplitZone::Up)), MenuStep::Up, rows),
-            None,
-            "and the top of the list clamps, as every walk in this window does"
         );
         // Back in from below, landing on the zone nearest the row it came from.
         assert_eq!(
@@ -11250,6 +11417,7 @@ mod tests {
             Some(PaneMenuHover::Zone(SplitZone::Down)),
             None,
             &equipped(),
+            false,
             &mut fake_measure,
         ));
         let zone = layout.zone(SplitZone::Down);
@@ -11281,6 +11449,7 @@ mod tests {
             None,
             None,
             &equipped(),
+            false,
             &mut fake_measure,
         ));
         assert!(
@@ -11293,6 +11462,81 @@ mod tests {
     }
 
     // ── the submenu and the safety triangle (queue item #53) ────────────────
+
+    /// PIN (user report 2026-08-19) — **the submenu stands outside the parent,
+    /// on whichever side has room, and never over it.**
+    ///
+    /// The report was a screenshot: the child's left edge fell *inside* the
+    /// parent and covered its right-hand column, including the `▸` on the very
+    /// heading it hangs from. The cause was a deliberate `border + padding`
+    /// overlap, written so the two surfaces would read as one object with a fold
+    /// in it; on screen they read as a parent that had been truncated.
+    ///
+    /// Three claims, because three things can go wrong separately. With room on
+    /// the right the child stands to the right, clear by the same 4px every
+    /// other popup here keeps. With no room on the right it flips to the left,
+    /// clear by the same gap — and not clamped, because clamping is what put it
+    /// back on top. And in neither case do the two rectangles intersect, which
+    /// is the claim the report was actually about and the one that would still
+    /// be false if a future gap were made negative again.
+    ///
+    /// Red gate: restore `let overlap = border + padding` and both the gap
+    /// assertions and the intersection assertion go red on the right-hand case;
+    /// restore `left_of.max(edge)` and the flipped case overlaps in a window
+    /// this narrow.
+    #[test]
+    fn the_submenu_stands_clear_of_the_parent_on_whichever_side_has_room() {
+        let gap = MENU_OFFSET_LOGICAL_PX;
+        let disjoint =
+            |parent: [f32; 4], child: [f32; 4]| child[2] <= parent[0] || child[0] >= parent[2];
+
+        // Room on the right: the child hangs off the parent's right edge.
+        let roomy = pane_menu_layout(
+            [300.0, 120.0],
+            (1600.0, 900.0),
+            1.0,
+            true,
+            &mut fake_measure,
+        );
+        let parent = roomy.frame;
+        let child = roomy.submenu_frame().expect("an open submenu has a frame");
+        assert_eq!(
+            child[0],
+            parent[2] + gap,
+            "the child stands clear of the parent's right edge by the house's own 4px"
+        );
+        assert!(
+            disjoint(parent, child),
+            "and the two rectangles do not intersect: {parent:?} against {child:?}"
+        );
+
+        // The same menu opened hard against the window's right edge: no room on
+        // that side, so it flips — and stands clear on the other one.
+        let cramped = pane_menu_layout(
+            [1500.0, 120.0],
+            (1600.0, 900.0),
+            1.0,
+            true,
+            &mut fake_measure,
+        );
+        let parent = cramped.frame;
+        let child = cramped
+            .submenu_frame()
+            .expect("an open submenu has a frame");
+        assert!(
+            child[2] <= parent[0],
+            "with no room on the right the child flips to the left of the parent:              {parent:?} against {child:?}"
+        );
+        assert_eq!(
+            child[2],
+            parent[0] - gap,
+            "clear by the same gap on that side"
+        );
+        assert!(
+            disjoint(parent, child),
+            "and still no intersection: {parent:?} against {child:?}"
+        );
+    }
 
     /// PIN — **the submenu is the profile list, hung beside its heading, and the
     /// pane's own profile is marked.**
@@ -11314,7 +11558,14 @@ mod tests {
         );
         assert!(frame[1] <= heading[1] && frame[3] > heading[1]);
 
-        let layers = pane_menu_build(&layout, None, Some(1), &equipped(), &mut fake_measure);
+        let layers = pane_menu_build(
+            &layout,
+            None,
+            Some(1),
+            &equipped(),
+            false,
+            &mut fake_measure,
+        );
         let [_parent, child]: [OverlayLayer; 2] = layers
             .try_into()
             .expect("a menu with a child draws two layers");
@@ -11371,7 +11622,7 @@ mod tests {
     #[test]
     fn a_submenu_row_this_machine_cannot_start_is_drawn_and_not_offered() {
         let layout = pane_menu(true);
-        let layers = pane_menu_build(&layout, None, Some(0), &bare(), &mut fake_measure);
+        let layers = pane_menu_build(&layout, None, Some(0), &bare(), false, &mut fake_measure);
         let child = layers.last().expect("the child layer");
         assert_eq!(
             child
@@ -11487,6 +11738,7 @@ mod tests {
             None,
             None,
             &equipped(),
+            false,
             &mut fake_measure,
         ));
         let cross = layer
