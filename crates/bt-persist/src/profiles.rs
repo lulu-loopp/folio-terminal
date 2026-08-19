@@ -35,13 +35,28 @@
 //! nothing else, which is the same division `keybindings.json` keeps against the
 //! chord grammar.
 //!
-//! ## Nothing watches this file
+//! ## This file is watched, and the hand wins the field it is typing in
 //!
-//! Read once at startup; a hand edit needs a relaunch. `schemes\`'s directory
-//! watch exists because "save and see it" is that slice's product promise, and
-//! a profile table makes no such promise. The consequence is booked rather than
-//! papered over: a person hand-editing this file while Folio is open will have
-//! their edit overwritten by the next write from the dialog.
+//! It was not, and the sentence here said why: `schemes\` is watched because
+//! "save and see it" is that slice's product promise, and a profile table made
+//! no such promise. What retired that reasoning is the shape of the promise
+//! rather than its strength — a file this crate's own header calls *a list a
+//! person may edit by hand* is a file somebody will edit by hand, and the
+//! version of that which needs a relaunch is one where the dialog silently
+//! overwrites their work.
+//!
+//! So `bt-app` watches `%APPDATA%\Folio\` and re-reads this file when it stops
+//! moving (§7.1.6c-6d). What that means for the two writers:
+//!
+//! * **a document identical to the one in force is not news**, which is what
+//!   lets a window watch a folder it writes into itself;
+//! * **a document that will not parse is not taken**, and the table already in
+//!   force stays in force — the reader is looking at their own half-typed JSON,
+//!   and emptying their list because of it would be the window fighting them;
+//! * **the last write still wins, and both writers are still real.** A hand edit
+//!   made while the dialog is open reaches the window; a keystroke in the dialog
+//!   afterwards writes the whole table back. What is gone is the case where the
+//!   hand edit was never seen at all.
 
 use std::collections::BTreeMap;
 

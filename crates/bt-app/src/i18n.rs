@@ -3820,6 +3820,30 @@ fn profiles_file_unreadable_in(lang: Lang, file: &str) -> String {
     }
 }
 
+/// And the same file refusing to parse **after** a window has been running on it
+/// (§7.1.6c-6d), which is a different sentence because a different thing is in
+/// force.
+///
+/// A third function rather than a parameter on the one above, for that pair's
+/// own reason: the two differ in what stands in for the damaged file, and that
+/// is the only fact either of them exists to say. At startup the answer is the
+/// shipped table; mid-session it is the table the reader has been using all
+/// along, which is the answer `reread_schemes` gives for a scheme file that
+/// stops parsing under the hands of the person editing it.
+#[must_use]
+pub fn profiles_file_kept(file: &str) -> String {
+    profiles_file_kept_in(current(), file)
+}
+
+fn profiles_file_kept_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("{file} could not be read; the profiles already in force were kept")
+        }
+        Lang::Chinese => format!("{file} 无法读取；保留了正在生效的档案"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4442,6 +4466,10 @@ mod tests {
                 (
                     "profiles_file_unreadable",
                     profiles_file_unreadable_in(lang, "profiles.json"),
+                ),
+                (
+                    "profiles_file_kept",
+                    profiles_file_kept_in(lang, "profiles.json"),
                 ),
             ]
         };

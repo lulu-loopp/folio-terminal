@@ -311,12 +311,39 @@ pub struct ProfilesStore {
     failures: WriteFailureTracker,
 }
 
+/// What a re-read of `profiles.json` found — [`ProfilesStore::reread`]'s answer.
+///
+/// Three outcomes and not a `bool`, because the middle one is the whole reason
+/// the watcher can be trusted with a file somebody is typing into: a document
+/// that will not parse is neither "nothing happened" nor "here is the new
+/// table".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfilesNews {
+    /// The file says exactly what the document already in force says. This is
+    /// the ordinary answer — the folder moved because something else in it was
+    /// written, or because this window wrote `profiles.json` itself.
+    Unchanged,
+    /// The file has been read and is now the document in force.
+    Changed,
+    /// The file would not parse, so nothing was taken from it and the last
+    /// document that did parse is still in force.
+    Unreadable,
+}
+
 impl ProfilesStore {
     /// Read `profiles.json`, falling back to *no departures* on every failure.
     pub fn open() -> Self {
         let dir = storage_dir();
-        let path = dir.join(PROFILES_FILE_NAME);
         let _ = std::fs::create_dir_all(&dir);
+        Self::at(dir.join(PROFILES_FILE_NAME))
+    }
+
+    /// The same store over a named file, which is what makes the re-read
+    /// testable: everything below this line is about a path, and only [`open`]
+    /// knows which path this process's is.
+    ///
+    /// [`open`]: Self::open
+    fn at(path: PathBuf) -> Self {
         let (file, report) = read_profiles(&path);
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
@@ -344,6 +371,43 @@ impl ProfilesStore {
     /// frame.
     pub fn take_fault(&mut self) -> Option<String> {
         self.fault.take()
+    }
+
+    /// **Read the file again, because the folder moved** (§7.1.6c-6d).
+    ///
+    /// Three answers, and each of them is a rule this slice had to choose:
+    ///
+    /// * a document identical to the one in force is [`ProfilesNews::Unchanged`]
+    ///   and nothing else happens. This is what makes an always-armed watch over
+    ///   the *storage directory* affordable — every other file this product
+    ///   writes lives in it, and this window's own writes to `profiles.json` are
+    ///   the loudest of them all. Comparing the document rather than filtering
+    ///   the kernel's notifications is also the only comparison that is right:
+    ///   two writes with the same content are the same file, whoever made them.
+    /// * a document that parses and differs is taken, and taking it is what
+    ///   makes the next re-read quiet;
+    /// * a document that will not parse is **not** taken, and what was already
+    ///   in force stays in force. Falling back to the shipped table here would
+    ///   be the worst of both — the reader's list would empty *because* they
+    ///   typed a comma wrong, and they would be reading the error against a
+    ///   table that is not the one they are editing. That is `reread_schemes`'s
+    ///   own ruling for the scheme file in use, met one file over. Startup is
+    ///   different and stays different ([`Self::open`]): there is nothing yet in
+    ///   force to keep.
+    ///
+    /// The line printed here is §5.3's, and the card the window raises for it is
+    /// the caller's — this type has no way to say anything to anybody.
+    pub fn reread(&mut self) -> ProfilesNews {
+        let (file, report) = read_profiles(&self.path);
+        if let ReadReport::FellBackToDefaults { reason } = &report {
+            eprintln!("BT_PERSIST {PROFILES_FILE_NAME} would not parse: {reason:?}");
+            return ProfilesNews::Unreadable;
+        }
+        if self.loaded == file {
+            return ProfilesNews::Unchanged;
+        }
+        self.loaded = file;
+        ProfilesNews::Changed
     }
 
     /// Record the table as it stands now and put it on disk.
@@ -663,5 +727,121 @@ mod tests {
     fn the_storage_directory_is_named_for_the_product() {
         assert_eq!(STORAGE_NAME, crate::APP_NAME);
         assert_eq!(PREVIOUS_STORAGE_NAME, "BetterTerminal");
+    }
+
+    // ── what a re-read of `profiles.json` finds (§7.1.6c-6d) ────────────────
+
+    /// One entry, so a document can be told from the empty one by looking at it.
+    fn one_profile(id: &str) -> ProfilesV1 {
+        ProfilesV1 {
+            schema_version: bt_persist::PROFILES_SCHEMA_VERSION,
+            profiles: vec![bt_persist::ProfileEntryV1 {
+                id: id.to_owned(),
+                ..bt_persist::ProfileEntryV1::default()
+            }],
+        }
+    }
+
+    /// PIN — **this window's own writing is not news.**
+    ///
+    /// The watch is on `%APPDATA%\Folio\` and every keystroke in the profile
+    /// editor writes a file in it, so the folder moves constantly *because of
+    /// this window*. The comparison against the document already in force is the
+    /// whole of what keeps that from being a re-read that reinstalls the table
+    /// under the reader's hands.
+    ///
+    /// Red gate: answer `Changed` whenever the file parses and a window loses
+    /// its editor's focus every time it saves.
+    #[test]
+    fn a_file_that_says_what_it_already_said_is_not_news() {
+        let root = appdata("profiles-unchanged");
+        let path = root.join(PROFILES_FILE_NAME);
+        bt_persist::write_profiles_atomic(&path, &one_profile("pwsh")).unwrap();
+
+        let mut store = ProfilesStore::at(path.clone());
+        assert_eq!(store.loaded().profiles.len(), 1);
+        assert!(matches!(store.reread(), ProfilesNews::Unchanged));
+
+        // Written again, byte for byte — which is what an editor that saves an
+        // unmodified buffer does, and what this window does on a keystroke that
+        // changes nothing.
+        bt_persist::write_profiles_atomic(&path, &one_profile("pwsh")).unwrap();
+        assert!(matches!(store.reread(), ProfilesNews::Unchanged));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PIN — **a hand edit is news, and taking it once is what makes it news
+    /// once.**
+    #[test]
+    fn a_hand_edit_is_read_once_and_then_stands_as_the_document_in_force() {
+        let root = appdata("profiles-changed");
+        let path = root.join(PROFILES_FILE_NAME);
+        bt_persist::write_profiles_atomic(&path, &one_profile("pwsh")).unwrap();
+        let mut store = ProfilesStore::at(path.clone());
+
+        bt_persist::write_profiles_atomic(&path, &one_profile("cmd")).unwrap();
+        assert!(matches!(store.reread(), ProfilesNews::Changed));
+        assert_eq!(store.loaded().profiles[0].id, "cmd");
+        assert!(
+            matches!(store.reread(), ProfilesNews::Unchanged),
+            "the news was taken, so reading again finds none"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PIN — **a file that stops parsing leaves the last good document in
+    /// force**, which is the schemes watcher's ruling one file over: the
+    /// window must not change under somebody *because* they typed a comma
+    /// wrong, and the copy they can fix by hand must not be the one thing the
+    /// window threw away.
+    ///
+    /// Startup is deliberately not this: with nothing yet in force there is no
+    /// last good document to keep, so `open` falls back to the shipped table and
+    /// says so. This is the same file read from the other end of a session.
+    ///
+    /// Red gate: hand `Changed` back for a damaged file and one stray keystroke
+    /// in an editor empties somebody's profile list.
+    #[test]
+    fn a_damaged_file_keeps_the_last_good_one_and_is_reported_rather_than_taken() {
+        let root = appdata("profiles-damaged");
+        let path = root.join(PROFILES_FILE_NAME);
+        bt_persist::write_profiles_atomic(&path, &one_profile("pwsh")).unwrap();
+        let mut store = ProfilesStore::at(path.clone());
+
+        std::fs::write(&path, "{ \"schema_version\": 1, \"profiles\": [ ").unwrap();
+        assert!(matches!(store.reread(), ProfilesNews::Unreadable));
+        assert_eq!(
+            store.loaded().profiles[0].id,
+            "pwsh",
+            "the last document that parsed is still the one in force"
+        );
+
+        // And the way back is the file itself becoming readable again — no
+        // relaunch, and no flag left set by the failure.
+        bt_persist::write_profiles_atomic(&path, &one_profile("cmd")).unwrap();
+        assert!(matches!(store.reread(), ProfilesNews::Changed));
+        assert_eq!(store.loaded().profiles[0].id, "cmd");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PIN — **deleting the file is a legible edit, not a failure**: no file at
+    /// all is `profiles.json`'s own way of spelling "no departures from the
+    /// shipped table", and it means that whether it has never existed or has
+    /// just been thrown away.
+    #[test]
+    fn a_file_that_is_deleted_means_the_shipped_table_rather_than_an_error() {
+        let root = appdata("profiles-deleted");
+        let path = root.join(PROFILES_FILE_NAME);
+        bt_persist::write_profiles_atomic(&path, &one_profile("pwsh")).unwrap();
+        let mut store = ProfilesStore::at(path.clone());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(store.reread(), ProfilesNews::Changed));
+        assert_eq!(
+            store.loaded(),
+            &ProfilesV1::default(),
+            "no file is no departures, which is the shipped five"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

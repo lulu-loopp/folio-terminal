@@ -2638,7 +2638,20 @@ fn announcement_names(profile: &Profile, qualified: &str) -> Vec<String> {
 /// move, so the id is what this asks for.
 #[must_use]
 pub fn fallback_profile() -> usize {
-    with_table(|table| table.position_of_id(WINDOWS_POWERSHELL_ID).unwrap_or(0))
+    with_table(fallback_profile_in)
+}
+
+/// The same floor over a table handed in rather than the process's.
+///
+/// The three answers below are one rule read three ways and they are written
+/// against a borrowed table for one reason: a case that moved the *window's*
+/// table to ask what happens when a profile disappears would race every other
+/// case in this crate. The file can now change under a running window
+/// (§7.1.6c-6d), so "what a name resolves to after the table moved" is a
+/// question with red gates on it, and a question that cannot be asked of a
+/// private table cannot have one.
+fn fallback_profile_in(table: &ProfileTable) -> usize {
+    table.position_of_id(WINDOWS_POWERSHELL_ID).unwrap_or(0)
 }
 
 /// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from —
@@ -2665,9 +2678,26 @@ pub fn fallback_profile() -> usize {
 /// exactly as long as its cause.
 #[must_use]
 pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
-    with_table(|table| table.position_of_id(stored))
-        .filter(|index| programs.is_available(*index))
-        .unwrap_or_else(fallback_profile)
+    with_table(|table| default_profile_in(table, stored, |index| programs.is_available(index)))
+}
+
+/// The same three inputs over a table handed in — see [`fallback_profile_in`].
+///
+/// **This is also the whole of what an external deletion owes the default
+/// profile** (§7.1.6c-6d): a hand edit that takes the row away leaves
+/// `settings.json` naming an id nothing holds, which is the first of the three
+/// cases above and was already answered before the file could move. There is no
+/// second rule for a row deleted on disk, and the stored id is left alone there
+/// too — putting the entry back puts the default back.
+fn default_profile_in(
+    table: &ProfileTable,
+    stored: &str,
+    available: impl Fn(usize) -> bool,
+) -> usize {
+    table
+        .position_of_id(stored)
+        .filter(|index| available(*index))
+        .unwrap_or_else(|| fallback_profile_in(table))
 }
 
 /// Which profile a seed's `profile_id` names, or [`fallback_profile()`] when the
@@ -2689,7 +2719,22 @@ pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
 /// recovered by a build that understood it again.
 #[must_use]
 pub fn index_of_id(id: &str) -> usize {
-    with_table(|table| table.position_of_id(id)).unwrap_or_else(fallback_profile)
+    with_table(|table| index_of_id_in(table, id))
+}
+
+/// The same rule over a table handed in — see [`fallback_profile_in`].
+///
+/// **A seat that is already running reaches for this when the file moves under
+/// it** (§7.1.6c-6d). A pane holds the *index* of the profile it was born from,
+/// and an index is a position in a table somebody may now be reordering in an
+/// editor; asking by id across the change is what keeps a running pane wearing
+/// its own mark instead of whichever row slid into its slot. When the profile is
+/// gone the rule above applies unchanged — the seat costs its shell choice,
+/// never the seat.
+fn index_of_id_in(table: &ProfileTable, id: &str) -> usize {
+    table
+        .position_of_id(id)
+        .unwrap_or_else(|| fallback_profile_in(table))
 }
 
 /// Whether this build has a profile by that name at all.
@@ -12609,6 +12654,152 @@ mod tests {
             Some(0),
             "but a seat that names it still resolves to it"
         );
+    }
+
+    // ── the file changing under a running window (§7.1.6c-6d) ───────────────
+    //
+    // The watcher's own arithmetic is `dir_news`'s and the read is
+    // `ProfilesStore::reread`'s; what is claimed here is what the *table* does
+    // when a document written by somebody else is installed on top of it, which
+    // is the half every surface in the window is drawn from.
+
+    /// One profile of the reader's own, spelled the way their file spells it.
+    fn mine(id: &str) -> ProfileEntryV1 {
+        ProfileEntryV1 {
+            display_title: Some(id.to_owned()),
+            program: Some(ProgramV1::Path(r"C:\bin\claude.exe".to_owned())),
+            ..named(id)
+        }
+    }
+
+    /// PIN — **a row deleted in an editor leaves every list, and the default it
+    /// was falls back to the built-in floor without the stored name being
+    /// touched.**
+    ///
+    /// The two halves are one claim: the row goes because the array is the
+    /// order and an entry that is not in it is not in the table, and the
+    /// default goes to the floor because `default_profile` has answered "an id
+    /// nothing holds" that way since the day the setting existed. No rule was
+    /// invented for a deletion made on disk — a deletion made on disk is simply
+    /// a file that no longer names it.
+    ///
+    /// And no card: `Undo` is the verb of a deletion *this window* performed,
+    /// and an editor's deletion is a fact rather than an offer.
+    ///
+    /// Red gate: keep a row the file dropped, or rewrite `default_profile` when
+    /// its subject disappears, and putting the entry back stops putting the
+    /// default back.
+    #[test]
+    fn a_row_deleted_on_disk_leaves_the_table_and_the_default_falls_to_the_floor() {
+        let registry = Registry::shipped();
+        registry.install(&file(vec![named("pwsh"), mine("claude-7f3a")]));
+        let before = registry.revision();
+        let table = registry.table();
+        let index = table
+            .position_of_id("claude-7f3a")
+            .expect("the reader's own row is in their file");
+        assert_eq!(
+            default_profile_in(&table, "claude-7f3a", |_| true),
+            index,
+            "while it is there it is what the `+` opens"
+        );
+
+        // Somebody opens `profiles.json` in an editor and deletes the entry.
+        registry.install(&file(vec![named("pwsh")]));
+        let after = registry.table();
+        assert_eq!(after.position_of_id("claude-7f3a"), None, "the row is gone");
+        assert!(
+            registry.revision() > before,
+            "and the window is told to re-measure every width its name decided"
+        );
+        assert_eq!(
+            default_profile_in(&after, "claude-7f3a", |_| true),
+            fallback_profile_in(&after),
+            "the default falls to the floor rather than to nothing"
+        );
+        assert_eq!(
+            after.get(fallback_profile_in(&after)).map(|row| &*row.id),
+            Some(WINDOWS_POWERSHELL_ID),
+            "and the floor is the built-in every machine has"
+        );
+    }
+
+    /// PIN — **a table that moves under a running pane does not move the pane.**
+    ///
+    /// A profile is a birth certificate and not a contract: a session already
+    /// running keeps the program and the environment it was started with,
+    /// because they are in a process this window cannot re-argue with. What it
+    /// *can* lose is its own name for itself — the pane holds an index, and an
+    /// index into a table somebody is reordering in an editor is a pointer at
+    /// whichever row slid into that slot. Asking by id across the change is the
+    /// whole of the repair, and it is `index_of_id`'s existing rule rather than
+    /// a second one.
+    ///
+    /// Red gate: keep the index across a rescan and reordering two lines in a
+    /// text editor repaints the marks of panes that have been running for hours.
+    #[test]
+    fn a_seat_keeps_the_profile_it_was_born_from_when_the_file_is_reordered() {
+        let registry = Registry::shipped();
+        registry.install(&file(vec![
+            named("pwsh"),
+            mine("claude-7f3a"),
+            named("cmd"),
+        ]));
+        let before = registry.table();
+        let seat = before
+            .position_of_id("claude-7f3a")
+            .expect("the pane was born from the reader's own row");
+        let born_from = before.get(seat).expect("a seat stands on a row").id.clone();
+
+        // The same three rows, in another order — one drag in an editor.
+        registry.install(&file(vec![
+            mine("claude-7f3a"),
+            named("pwsh"),
+            named("cmd"),
+        ]));
+        let after = registry.table();
+        assert_ne!(
+            after.get(seat).map(|row| &*row.id),
+            Some("claude-7f3a"),
+            "the slot the pane was holding now belongs to somebody else, which \
+             is the whole hazard"
+        );
+        assert_eq!(
+            after
+                .get(index_of_id_in(&after, &born_from))
+                .map(|row| &*row.id),
+            Some("claude-7f3a"),
+            "the seat follows its own row rather than its old slot"
+        );
+
+        // And when the row is deleted outright, the standing answer applies: the
+        // seat costs its shell choice, never the seat.
+        registry.install(&file(vec![named("cmd"), named("pwsh")]));
+        let after = registry.table();
+        assert_eq!(
+            index_of_id_in(&after, &born_from),
+            fallback_profile_in(&after)
+        );
+    }
+
+    /// PIN — **a document that lands twice is the same table twice**, which is
+    /// what lets the watcher answer this window's own writes by comparing rather
+    /// than by remembering who wrote them.
+    ///
+    /// `Registry::publish` already refuses to advance the revision for a table
+    /// equal to the one in force; this reads that rule from the file's end,
+    /// where it is what keeps a keystroke in the editor from throwing away every
+    /// measured string in the window a moment after it was measured.
+    #[test]
+    fn the_same_document_installed_twice_moves_nothing() {
+        let registry = Registry::shipped();
+        registry.install(&file(vec![named("cmd"), mine("claude-7f3a")]));
+        let table = registry.table();
+        let revision = registry.revision();
+
+        registry.install(&file(vec![named("cmd"), mine("claude-7f3a")]));
+        assert_eq!(registry.table().profiles(), table.profiles());
+        assert_eq!(registry.revision(), revision);
     }
 
     // ── the editor (§7.1.6c-6b) ──────────────────────────────────────────────
