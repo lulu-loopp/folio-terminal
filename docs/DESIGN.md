@@ -806,6 +806,35 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **Explorer 右键动词（slice 2，本片不注册任何注册表项）。** 动词的 `command` 值就是 `"…\folio.exe" --cwd "%V"`（spike §4 的三棵 `HKCU\Software\Classes\...\shell\Folio` 树，`Background` 只认 `%V`）。spike 的探针日志同时记下了本片存在的理由：`%V` 作为**参数**到达，而被启动进程的工作目录是 exe 自己的目录——所以 `--cwd` 是必须的，且 Folio 永远不读 `current_dir()`。今天单窗口，动词只能「起一个新进程」；多窗块之后再谈开新窗还是开新 tab。
 
+### 7.3 任务栏进度（Windows landing 块 slice 1，2026-08-19，已落地）
+
+**这一片不新解析任何东西，它给一个已经在进程里的值第二个消费者。** `bt_term::ProgressState`（OSC 9;4 四相，`crates/bt-term/src/session.rs`）今天喂 tab 的进度环；从这一片起，同一批读数折成一句，写到这扇窗自己的任务栏按钮上（`ITaskbarList3::SetProgressState` / `SetProgressValue`）。落在两处：`bt_platform::Taskbar`（COM 那一侧）与 `bt-app` 的 `window_taskbar_progress` + `TaskbarMirror`（规则与闸门那一侧）。
+
+**聚合规则——本节的裁决，它明确推翻一条现行规则。**
+
+* 折的是**窗里的每一个会话**，不是每个 tab 已经挑好的那一个。否则 tab 自己的「按席位取第一个」会在窗看到之前就把失败筛掉，窗等于继承了一条它刚刚推翻的规则。
+* **按严重度取一：error > paused > normal > indeterminate**；同级按**完成度最低**者胜（任务栏回答的是「我在等的东西里，最没跑完的那个到哪了」）；再同则按到达顺序——tab 序然后席位序，两者都是树的函数而不是 hash 的函数（红线 L8 的同一条纪律）。
+* **取到的是某一个会话的整条读数，原样搬过去，绝不拼装。** 所以「最严重的状态 ＋ 所有 normal 里最低的百分比」这个听起来更细的规则**没有被采纳**：一扇窗里有个 80% 上失败的构建和一个 10% 的下载时，那条规则会把按钮画成 10% 的红——而没有任何一次失败发生在 10%。按钮说 80% 的红，因为那是真发生过的事。这正是 `TabState::fleet_progress` 自己写下的纪律（「均值、求和或取最大都会让环报告一次根本没有在跑的运行」）在窗这一层的延续。
+* **严重度这条明确推翻 `fleet_progress` 的「按席位取第一个」，且只在窗这一层。** 环画在它自己的 tab 旁边：挑中了哪个 pane，一点就能对上，所以「第一个」是答得出来的选择。任务栏按钮是**整扇窗的一条线**，而且它被看的时候 Folio **不在屏幕上**——它是用户当时唯一有的读数。一条会让失败躲在座次更靠前、恰好还在跑的下载后面的规则，会让这根条子不可信；不可信的条子比没有条子更糟。于是窗的这条线说的是它最坏的消息。
+* **`Indeterminate` 排在三个确定态之下而不是与它们并列**，这一条安放本身就是「确定的读数拿走数值」的全部：一根扫动的条子没有地方放数字，把它排在 `Normal` 之上就得再写第二条规则把自己撤销掉。四态里它也是信息量最小的一个——它只说「有事在发生」。
+* **`Error(None)` / `Paused(None)` 不说值**（不是说 0）。`ITaskbarList3` 记得上一次给过的值，于是「不说」＝把已经在那儿的条子按原长度换个颜色重画：30% 上死掉的构建红在 30%，这是更有信息量的那张图，而且是 shell 白送的。从没给过值的按钮显示整条，那也正是「失败了，而且没人说过它跑到哪」的正确答案。排序时这两者按 100 算，与 `ring_arc` 把它们画成整圈是同一个理由：OSC 9;4 的 2/4 态之所以百分比可选，是因为它们是对一次**已经在线上的**运行的修改，而线上从没有过数字时，就没有什么可以当作「没跑完」。
+* 百分比夹到 100：OSC 9;4 的数字是 shell 打出来的文本，`completed > total` 是一根画到自己外面去的条子。
+
+**明确划在界外的——本片的边界声明。** 只有 OSC 9;4 驱动这根条子。§7.1.5b 的其余几态——busy、未读·完成、未读·失败、**等你回答**、bell——这一片**一律不上任务栏**：它们没有一个是**量**，用「`TBPF_PAUSED` ＋ 满条」去回答「有人在等你」是在发明协议里没有的语义，而任务栏按钮上任何一种发明都会被用户读成进度。注意力的表面归注意力队列块（§7.1.5b 的 P1-8 徽章），那里有一个形状对得上问题的答案。
+
+**只在变化时发。** `ITaskbarList3` 是跨进程调用，而喂它的聚合每转一次事件循环就重算一次，所以 `TaskbarMirror` 拿整条读数的相等性做闸门：同一个百分比报第二次，代价是一次比较。缓存的初值是 `TaskbarProgress::CLEARED` 而不是「未知」——没人写过的按钮真的就是没有条子——这同时把 COM 对象变成**惰性**的：一扇从没见过 OSC 9;4 的窗永远不会去创建它。
+
+**两件 COM 上容易做错的事，由 `bt_platform::Taskbar` 自己担着。**
+
+1. **公寓。** `ITaskbarList3` 是 apartment-threaded，而这个对象跨很多次调用活着——与三个 shell 选择器「在展示对话框的那一次调用里 init 并配平」不同，公寓引用必须和接口活得一样久：`new` 里取，`Drop` 里在**接口释放之后**才还。`Drop::drop` 先于字段析构运行，所以 `state` 是 `Option<Box<_>>`，用一次 `take` 把这个顺序写出来，而不是交给字段声明顺序去暗示。配平位读的是 `is_ok` 而不是 `== S_OK`（`S_FALSE` ＝「已经初始化过，而且这一次也算数」，照样欠一次 `CoUninitialize`）。线程已经在 MTA（`RPC_E_CHANGED_MODE`）则**报告而不强改**，理由与选择器同：一扇没有进度条的窗是完全可以接受的结果，不值得为它掀掉别人的公寓模型。
+2. **`TaskbarButtonCreated`。** shell 用一条 `RegisterWindowMessageW` 注册消息广播每扇顶层窗的按钮，在那之前发出的每一次调用都**静默无效**；而且 `explorer.exe` 每次重启都会**再广播一次**，回来的按钮是空的。所以这个对象自己挂一层 subclass 听这条消息，并把手上那条读数**重新写一遍**——是 re-apply，不是 init once。没有这一步，长构建期间的一次 explorer 重启会让按钮一直空到这次构建的**下一次状态变化**，而对构建的最后一段来说那是永远。注册失败时该函数返回 `0`＝`WM_NULL`，是一条真消息，所以每一次比较都排除零，否则每个空闲期的 `WM_NULL` 都会变成一次重写。
+
+**挂点：`Runtime::advance_strip_animation` 的速率闸门之上。** `STRIP_ANIMATION_FRAME` 是**画面**的速率，它存在是为了一帧里不把弧线缓动两次；任务栏不是这个循环画的一张图，是这个程序对 shell 做的一句断言，而它最需要正确的那一帧恰恰是一次运行**结束**的那一帧——也正是没有任何东西会去调度的那一帧，因为一扇没有东西在动的窗根本不报 deadline（`strip_animation_deadline`）。放在闸门之下，空窗之前的最后一条读数可能是一根再也下不去的绿条。放在闸门之上，一次什么都没发生的循环的代价是一次对会话的折叠加一次比较。
+
+**多窗（片 C）。** `TaskbarMirror` 是 `WindowRuntime` 的字段而不是 `App` 的：按钮属于 HWND，第二扇窗要的是第二个，而不是这一个的一份共享（§2.4 判定规则 3）。`show` 收的是调用方的窗口句柄，所以片 C 把 `window` 换成 `HashMap<WindowId, WindowRuntime>` 之后，每扇窗照自己的会话镜像自己的按钮，这一片不用改。
+
+九条纯函数测试钉住聚合表（严重度、最低完成度、indeterminate 混合、无百分比、夹取、空窗）与只发变化的闸门（同一条读数不产生调用，用一个记录器收下「shell 本来会收到什么」）；实机四态（30% 绿 / 9;4;2 红 / 9;4;3 扫动 / 9;4;0 清空）在这台机器上逐张拍下。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
