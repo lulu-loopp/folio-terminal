@@ -28,6 +28,7 @@ use std::{
 
 mod cli;
 mod cmdrail;
+mod dir_news;
 mod file_peek;
 mod files;
 mod float;
@@ -44,6 +45,7 @@ mod peek_strip;
 mod persist;
 mod preview;
 mod preview_edit;
+mod profile_watch;
 mod profiles;
 mod psreadline;
 mod restore;
@@ -254,6 +256,16 @@ enum AppEvent {
     /// clock in the window, and a commit still asked whether a palette had
     /// changed.
     SchemesChanged,
+    /// **The kernel says something in `%APPDATA%\Folio\` moved** (§7.1.6c-6d,
+    /// `profile_watch`).
+    ///
+    /// The third of the same family, and separate from [`Self::SchemesChanged`]
+    /// for the reason that one is separate from [`Self::GitChanged`]: it carries
+    /// no answer, only a nudge to look at a clock. Sharing a variant would mean
+    /// a scheme saved in the subfolder walked the profile clock and a profile
+    /// hand-edited re-read every scheme file in the folder — two rescans for
+    /// every one piece of news, each of them about the wrong file.
+    ProfilesChanged,
     /// **The window's ground picture has been decoded** (§7.1.6c-4d).
     ///
     /// 4b decoded it on the event thread and said why: the two moments it runs
@@ -4133,6 +4145,14 @@ struct App {
     motion: Motion,
     /// The schemes folder's watch and its debounce (§7.1.6c-4c).
     scheme_watch: scheme_watch::SchemeWatch,
+    /// And the storage folder's, which is `profiles.json`'s (§7.1.6c-6d).
+    ///
+    /// A second subscription rather than a share of the one above, although the
+    /// schemes folder is *inside* this one and `DirWatch` watches a tree: one
+    /// clock for both would mean every `settings.json` toggle re-read every
+    /// scheme file on disk, and the reason to watch a folder is never "because
+    /// something in it moved" but "because this file may have".
+    profile_watch: profile_watch::ProfileWatch,
     /// The scheme file currently reported broken, so that it is reported once.
     ///
     /// **Cleared when the folder reads cleanly again**, which is the whole of
@@ -4216,6 +4236,16 @@ struct App {
     /// until it has been said — [`Self::keybindings_fault`]'s twin, for its
     /// reason.
     profiles_fault: Option<String>,
+    /// Whether the last re-read of `profiles.json` found a file that would not
+    /// parse, so that it is said once (§7.1.6c-6d).
+    ///
+    /// [`Self::scheme_fault`]'s rule, and the same sentence justifies it: a file
+    /// somebody is editing goes through a dozen unparseable states on its way to
+    /// a good one, and a card per save would be a window shouting at somebody
+    /// who is already looking at the error. **Cleared when the file reads
+    /// cleanly again**, whether or not it then says anything new, which is the
+    /// whole of "again only after it was valid in between".
+    profiles_file_broken: bool,
     /// The one store that pin, Recent and undo-close all draw from — kept beside
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
@@ -5267,6 +5297,7 @@ struct {name} {{
             "git::GitWorker",
             "git_watch::GitWatch",
             "scheme_watch::SchemeWatch",
+            "profile_watch::ProfileWatch",
         ] {
             assert!(
                 !body.contains(owned_by_the_app),
@@ -15980,6 +16011,7 @@ impl Runtime {
                 trace_perf,
                 motion: read_motion_preference(),
                 scheme_watch: scheme_watch::SchemeWatch::default(),
+                profile_watch: profile_watch::ProfileWatch::default(),
                 scheme_fault: None,
                 scheme_source: [None, None],
                 profile_programs,
@@ -15994,6 +16026,7 @@ impl Runtime {
                 cli_preview: cli_plan.preview.take(),
                 profiles_store,
                 profiles_fault,
+                profiles_file_broken: false,
                 recent,
                 theme_mode,
             },
@@ -16284,6 +16317,12 @@ impl Runtime {
         // at — the other is the instant `Customise scheme…` creates it. Nothing
         // asks whether the folder exists on a schedule; see `scheme_watch`.
         runtime.app.scheme_watch.arm(&runtime.app.event_proxy);
+        // And the folder that one is inside, for `profiles.json`'s sake
+        // (§7.1.6c-6d). One moment and not two: the storage directory was
+        // created by the first store that opened, several hundred lines above
+        // this, so there is no second moment at which arming could start
+        // succeeding.
+        runtime.app.profile_watch.arm(&runtime.app.event_proxy);
         runtime.refresh_scheme_sources();
         let background_visible = startup_started.elapsed();
         runtime.window.background_visible = Some(background_visible);
@@ -22141,12 +22180,30 @@ impl Runtime {
     /// **Three things move together and are moved in one place**: the file, the
     /// programs probe (a duplicate is a new row whose executable has never been
     /// looked for) and the window's own measurements, which follow
-    /// `profiles::profile_revision` through `LayoutKey`. Anything that changes
-    /// the table calls this and nothing else does.
+    /// `profiles::profile_revision` through `LayoutKey`. Every verb in this
+    /// window that changes the table calls this and nothing else does.
+    ///
+    /// The sentence used to read *anything* that changes the table, and
+    /// §7.1.6c-6d retired that word rather than let it rot: the table can now
+    /// also change because somebody edited the file, and a change that arrived
+    /// **from** the file has no write to make. What it does owe is the other
+    /// two, which is why they are [`Self::adopt_profile_table`] and are called
+    /// from both.
     fn store_profiles(&mut self) -> Result<()> {
+        self.app.profiles_store.store(profiles::to_file());
+        self.adopt_profile_table()
+    }
+
+    /// The two of those three that a table which arrived **from** the file owes
+    /// as well (§7.1.6c-6d).
+    ///
+    /// `reread_profiles` has no write to make — the file is where its table came
+    /// from — and everything else `store_profiles` does it owes for the same
+    /// reasons, which is why they are one call rather than two lists that have
+    /// to be kept in step.
+    fn adopt_profile_table(&mut self) -> Result<()> {
         self.app.profile_programs =
             profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
-        self.app.profiles_store.store(profiles::to_file());
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -24106,6 +24163,141 @@ impl Runtime {
                 toast::ToastAnchor::Window,
                 Some(i18n::Text::SchemeInUseGone.text().to_owned()),
                 i18n::scheme_in_use_gone(&name, &fallback),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The storage folder moved and has gone quiet: read `profiles.json` again
+    /// (§7.1.6c-6d).
+    ///
+    /// [`Self::advance_scheme_watch`]'s twin, called once per turn of the loop
+    /// beside every other clock in this window, and costing one comparison while
+    /// nothing is happening.
+    fn advance_profile_watch(&mut self, now: Instant) -> Result<()> {
+        if !self.app.profile_watch.due(now) {
+            return Ok(());
+        }
+        self.reread_profiles()
+    }
+
+    /// Read the file again, and put in force whatever that changed.
+    ///
+    /// **What follows the change, and what deliberately does not.**
+    ///
+    /// * **The lists follow, because they are never held.** The Profiles page's
+    ///   rows and the `Default profile` picker's options are derived in
+    ///   `settings_content` from the table every time the dialog is built, so
+    ///   installing a new table *is* refreshing them. The same is true of the
+    ///   `˅` menu, the pane submenu and every tab drawing its profile's name:
+    ///   `profiles::profile_revision` is in `LayoutKey`, so the widths measured
+    ///   from those names are re-measured rather than reused.
+    /// * **A session already running does not follow.** A profile is a birth
+    ///   certificate and not a contract: the program and the environment of a
+    ///   shell that is already up are in a process, and nothing on this side of
+    ///   the pipe can re-argue them. What each pane *does* follow is its own
+    ///   profile **by id**, because the index it holds is a position in a table
+    ///   somebody may have just reordered in a text editor — see
+    ///   `profiles::index_of_id`, whose standing answer for a profile that is
+    ///   gone (the fallback, and never the reader's configured default) applies
+    ///   here unchanged.
+    /// * **The editor sub-page keeps its draft and follows its subject**, for
+    ///   the reason a scheme row follows its file: the reader is looking at the
+    ///   thing that just changed, and a page that reseeded its fields would be
+    ///   this window deleting what somebody is halfway through typing. So the
+    ///   index is re-pointed at the same id, the text fields are not touched,
+    ///   and the next keystroke writes the whole table back — the person typing
+    ///   wins the field they are typing in, which is what "last writer wins"
+    ///   means when one of the writers is a hand on a keyboard. When the id is
+    ///   gone the page goes with it, exactly as it does when the row is deleted
+    ///   from the dialog itself.
+    /// * **No `Undo` card for a row that vanished.** `Undo` is the verb of a
+    ///   deletion *this window* performed and the card exists to offer the way
+    ///   back it took away; an editor's deletion is a fact, and its way back is
+    ///   the file.
+    fn reread_profiles(&mut self) -> Result<()> {
+        match self.app.profiles_store.reread() {
+            persist::ProfilesNews::Unchanged => {
+                self.app.profiles_file_broken = false;
+                return Ok(());
+            }
+            // The colours-do-not-move ruling, one file over: what is in force
+            // stays in force and one card says the file could not be read. The
+            // reader is looking at their own half-typed JSON, and emptying their
+            // profile list *because* of it would be the window fighting them.
+            persist::ProfilesNews::Unreadable => {
+                if !std::mem::replace(&mut self.app.profiles_file_broken, true) {
+                    self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        None,
+                        i18n::profiles_file_kept(persist::PROFILES_FILE_NAME),
+                    )?;
+                }
+                return Ok(());
+            }
+            persist::ProfilesNews::Changed => self.app.profiles_file_broken = false,
+        }
+        // Taken by id *before* the table moves, because after it has moved
+        // there is nothing left to ask: an index means whatever the new table
+        // says it means.
+        let editing = self
+            .window
+            .settings
+            .editor()
+            .map(|editor| profiles::id(editor.index));
+        let seated: Vec<Vec<String>> = self
+            .window
+            .tabs
+            .iter()
+            .map(|tab| {
+                tab.sessions
+                    .values()
+                    .map(|leaf| profiles::id(leaf.profile))
+                    .collect()
+            })
+            .collect();
+
+        let faults = profiles::install(self.app.profiles_store.loaded());
+
+        for (tab, held) in self.window.tabs.iter_mut().zip(seated) {
+            for (leaf, id) in tab.sessions.values_mut().zip(held) {
+                leaf.profile = profiles::index_of_id(&id);
+            }
+        }
+        if let Some(id) = editing {
+            match profiles::table().position_of_id(&id) {
+                Some(index) => {
+                    if let Some(editor) = self.window.settings.editor_mut() {
+                        editor.index = index;
+                    }
+                }
+                None => self.window.settings.close_editor(),
+            }
+        }
+        // A row menu names a row by its index and the rows have just moved under
+        // it; there is no id to follow it by, because it is not a place — it is
+        // a gesture, and the gesture was made against a list that is gone.
+        self.window.settings.close_row_menu();
+        // The dialog may be standing on a page, a row or a picker that the new
+        // table does not have. Same call the verbs of this dialog make after
+        // they move the list, for the same reason — and **before** the frame
+        // below, because the frame is what draws the ring.
+        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
+        self.window.settings.keep_focus_reachable(content);
+        self.adopt_profile_table()?;
+        // One card per refused entry, `report_skipped_schemes`' shape: a file
+        // with two bad rows is two things to fix. They are the same sentences
+        // startup prints, because it is the same reader reading the same file.
+        for fault in faults {
+            let sentence = i18n::profile_entry_fault(&fault);
+            eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                sentence,
             )?;
         }
         Ok(())
@@ -46805,6 +46997,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // in `scheme_watch`'s mailbox, and `about_to_wait` is where the
             // quiet window is read.
             AppEvent::SchemesChanged => {}
+            // And the same again for the folder that one sits in: the time it
+            // moved is in `profile_watch`'s mailbox, and `about_to_wait` is
+            // where the quiet window is read.
+            AppEvent::ProfilesChanged => {}
             // The answer is already in `psreadline::probe()`; what is owed is a
             // frame that reads it. `refresh_chrome` rebuilds the row's sentence
             // from scratch — `SettingsRow::description` asks `row_state` afresh
@@ -47019,6 +47215,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             return;
         }
         if let Err(error) = runtime.advance_scheme_watch(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        if let Err(error) = runtime.advance_profile_watch(now) {
             self.fail(event_loop, error);
             return;
         }
@@ -47301,6 +47501,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // The schemes folder's own debounce, on the same terms: absent for
             // every window whose folder nobody is editing.
             runtime.app.scheme_watch.deadline(),
+            // And the storage folder's, on exactly the same terms — absent for
+            // every window in which nothing at all has been written lately.
+            runtime.app.profile_watch.deadline(),
             // The debounce a change notification started (R31's D). Absent —
             // and therefore costing nothing — for every window that is not
             // currently holding unanswered news about a repository, which is
