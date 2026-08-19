@@ -4789,6 +4789,30 @@ struct WindowRuntime {
     /// through the *same* [`Self::set_rail_state`], because a preference cannot
     /// mean two things depending on which door it came through.
     rail: seats::RailState,
+    /// **What shape this window is in right now: focus mode, or not**
+    /// (`docs/DESIGN.md` §7.1.6b′).
+    ///
+    /// §2.4 rule three, and the `dwm_dark_mode` shape exactly: the setting is
+    /// about every window and this is what *this* one is currently doing, so the
+    /// two live a layer apart. `settings.focus_mode` says what a new window opens
+    /// as; this says what the window in front of you is, and five doors can turn
+    /// it — the Appearance row, `Ctrl+Shift+Z`, a double-click on a pane header,
+    /// that pane's `⌄` menu, and the `Exit` button at the head of the card
+    /// column. Every one of them goes through [`Self::set_focus_mode`], because a
+    /// mode cannot mean two things depending on which door it came through.
+    ///
+    /// **Beside [`Self::rail`] rather than inside it**, though the bit is
+    /// sampled into `RailState::focus` every frame. The two are different kinds
+    /// of fact: `rail` is a *preference* the reader set and the session carries,
+    /// while this is a posture the window is holding — and the five doors that
+    /// turn it are emphatically not doors onto `Tab layout` or `Sidebar`. Folding
+    /// it in would put the mode inside the very settings §7.1.6b′ rules it must
+    /// neither read nor write.
+    ///
+    /// **Nothing is stored about what to put back.** The mode never writes the
+    /// three fields that describe the ordinary chrome, so leaving it restores
+    /// them by not having touched them.
+    focus_mode: bool,
     /// How far the rail is scrolled, in physical pixels.
     ///
     /// Its own field beside [`Self::tab_scroll`] rather than a shared one, because
@@ -15779,6 +15803,13 @@ impl Runtime {
             render_tab_layout(session_store.loaded().tab_layout),
             render_sidebar_mode(session_store.loaded().sidebar_mode),
         );
+        // **The shape a new window opens in** (§7.1.6b′ ①). From `settings.json`
+        // and not from `session.json`, which is the whole difference between this
+        // and the two lines above it: `Tab layout` and `Sidebar` are facts about
+        // a window that was restored, while focus mode is a preference about the
+        // product — a reader who lives in the card column lives in it in every
+        // window, including the first one of a fresh profile.
+        let focus_mode = settings_store.loaded().focus_mode;
         // Probed here rather than beside the first shell, which is where it used
         // to sit: the opening window is *titled* after the default profile, and
         // resolving which profile that is needs to know what this machine can
@@ -16243,6 +16274,12 @@ impl Runtime {
                 shells_settled_revision: 0,
                 tab_scroll: 0.0,
                 rail,
+                // What `settings.focus_mode` says a new window opens as
+                // (§7.1.6b′ ①). Read straight from the file rather than applied
+                // afterwards, because unlike `dwm_dark_mode` there is nothing to
+                // tell the operating system: focus mode is a shape this process
+                // draws, so a window is simply born in it.
+                focus_mode,
                 rail_scroll: 0.0,
                 rail_open: RevealTween::over(RAIL_TRANSITION),
                 rail_text: RevealTween::over(RAIL_TEXT_FADE),
@@ -41743,8 +41780,27 @@ impl Runtime {
         // Both branches hand back the same `ChromeTarget::Tab/TabClose/TabPin`,
         // so every click handler downstream — activation, the middle-click close,
         // the press that becomes a drag — is untouched by the axis.
-        match rail.layout {
-            seats::TabLayoutMode::Vertical => seats::hit_rail_chrome(
+        //
+        // **Focus mode is a third branch of the same one place** (§7.1.6b′): the
+        // card column is the tab list while it is up, and it answers the very
+        // same `Tab`/`TabClose` targets — which is what makes "clicking a card is
+        // clicking that tab" true without a second handler anywhere below here.
+        match if rail.draws_focus_rail() {
+            None
+        } else {
+            Some(rail.layout)
+        } {
+            None => seats::hit_focus_rail(
+                height,
+                scale,
+                &trailers,
+                self.focus_exit_caption_width(),
+                self.window.rail_scroll,
+                rail,
+                position.x,
+                position.y,
+            ),
+            Some(seats::TabLayoutMode::Vertical) => seats::hit_rail_chrome(
                 height,
                 scale,
                 &trailers,
@@ -41754,7 +41810,7 @@ impl Runtime {
                 position.x,
                 position.y,
             ),
-            seats::TabLayoutMode::Horizontal => seats::hit_tab_chrome(
+            Some(seats::TabLayoutMode::Horizontal) => seats::hit_tab_chrome(
                 width,
                 scale,
                 &trailers,
@@ -44561,20 +44617,125 @@ impl Runtime {
     /// snapping.
     fn sampled_rail(&self, now: Instant) -> seats::RailState {
         let fold = Some(self.window.rail_fold.sample(now, self.app.motion).0);
-        if !self.window.rail.draws_icon_rail() {
+        // **The window's posture, joined to the reader's preference here and
+        // only here** (§7.1.6b′). `seats` is a pure function of the numbers it is
+        // handed and holds no clock and no window; `RailState::focus` is one more
+        // sampled input beside `open`, `text_opacity` and `fold`, and this is the
+        // one place any of them is read off the runtime.
+        let focus = self.window.focus_mode;
+        // Asked of the state as it *will be* rather than of the stored one: a
+        // window in focus mode draws no icon rail whatever `Sidebar` says, so
+        // asking the stored rail would sample the opening tween of a panel that
+        // is not on screen.
+        let resting = seats::RailState {
+            focus,
+            ..self.window.rail
+        };
+        if !resting.draws_icon_rail() {
             return seats::RailState {
                 open: 1.0,
                 text_opacity: 1.0,
                 fold,
-                ..self.window.rail
+                ..resting
             };
         }
         seats::RailState {
             open: self.window.rail_open.sample(now, self.app.motion).0,
             text_opacity: self.window.rail_text.sample(now, self.app.motion).0,
             fold,
+            ..resting
+        }
+    }
+
+    /// The rail's state as the *window* is currently wearing it — the stored
+    /// preference with this window's focus-mode bit joined to it.
+    ///
+    /// [`Self::sampled_rail`] without the clock, for the callers that ask a shape
+    /// question outside a frame: "is an icon rail live", "how much width does the
+    /// panel cost". Those must answer to the posture and not to the preference,
+    /// or a window in focus mode goes on reasoning about a rail nobody is
+    /// drawing.
+    fn rail_posture(&self) -> seats::RailState {
+        seats::RailState {
+            focus: self.window.focus_mode,
             ..self.window.rail
         }
+    }
+
+    /// How wide the word on door 5's button is drawn (§7.1.6b′ ⑤).
+    ///
+    /// Measured on demand rather than cached, because it is one text measurement
+    /// of one short word and the alternative is a field that has to be
+    /// invalidated by a DPI change and by a language change — two clocks for a
+    /// number the renderer already answers in constant time.
+    fn focus_exit_caption_width(&self) -> f32 {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        self.window.renderer.measure_chrome_text(
+            i18n::Text::FocusExit.text(),
+            bt_render::FOCUS_EXIT_FONT_LOGICAL_PX * scale,
+        )
+    }
+
+    /// The focus column's live geometry — [`Self::rail_geometry_now`]'s opposite
+    /// number, and `None` in exactly the case that one is `Some`.
+    fn focus_rail_geometry_now(&self, now: Instant) -> Option<seats::FocusRailGeometry> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        seats::focus_rail_geometry(
+            height as f32,
+            scale,
+            self.window.tabs.len(),
+            self.focus_exit_caption_width(),
+            self.window.rail_scroll,
+            self.sampled_rail(now),
+        )
+    }
+
+    /// **The one door behind all five** (§7.1.6b′: "five doors, one bit, one
+    /// face").
+    ///
+    /// The Appearance row, `Ctrl+Shift+Z`, a double-click on a pane header, that
+    /// pane's `⌄` menu and the `Exit` button all arrive here, for
+    /// [`Self::set_rail_state`]'s reason one feature over: a mode cannot mean two
+    /// things depending on which door it came through, and the row in Appearance
+    /// has to show what is true however the bit was last turned.
+    ///
+    /// It writes **both halves** of §2.4 rule three: the window's own posture,
+    /// and the file that says what the next window opens as. That second write is
+    /// what the ruling asks the row to buy — a window closed in focus mode
+    /// reopens in it — and it is here rather than in the row's own handler
+    /// because all five doors are the same decision.
+    ///
+    /// **There is nothing to restore and nothing to save.** The stage is the
+    /// active tab's own tree, untouched on the way in; what changes is the width
+    /// of the panel beside it, which the next solve reads out of
+    /// [`seats::RailState::terminal_inset_logical_px`].
+    fn set_focus_mode(&mut self, on: bool) -> Result<()> {
+        if self.window.focus_mode == on {
+            return Ok(());
+        }
+        self.window.focus_mode = on;
+        // The scroll offset is the panel's, and the panel now holds a list of a
+        // different length. Left where it was, a window that had scrolled a long
+        // rail would enter focus mode looking at nothing; both geometries clamp,
+        // but neither can invent the row you were on.
+        self.window.rail_scroll = 0.0;
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.focus_mode = on;
+        let _ = self.app.settings_store.store(settings);
+        // The panel's width changed, so the seats have to be solved again — this
+        // is the *only* thing entering or leaving the mode does to the stage.
+        self.resolve_seats()?;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Door 2's verb, and the pane menu's and the double-click's: one chord, both
+    /// directions, because the mode is one bit.
+    fn toggle_focus_mode(&mut self) -> Result<()> {
+        self.set_focus_mode(!self.window.focus_mode)
     }
 
     /// The rail's trailers and the length of its pinned run, together.
@@ -44622,7 +44783,10 @@ impl Runtime {
     /// against the animating width would re-decide the question against a
     /// different boundary on every frame of the answer it just gave.
     fn drive_rail_zone(&mut self, position: Option<PhysicalPosition<f64>>) {
-        if !self.window.rail.draws_icon_rail() {
+        // Asked of the window's posture rather than of the stored preference: in
+        // focus mode there is no icon rail to reach for, and a trigger that went
+        // on opening one would be aiming a tween at a panel nobody is drawing.
+        if !self.rail_posture().draws_icon_rail() {
             return;
         }
         let scale = self.window.renderer.metrics().scale_factor;
@@ -49395,6 +49559,13 @@ fn rail_state_for(layout: seats::TabLayoutMode, mode: seats::RailMode) -> seats:
         // just written as `false`. A layout arriving from the settings dialog is
         // an unfolded rail standing still, not a fold caught halfway.
         fold: None,
+        // **Not a rail preference, and so not written here.** This function
+        // builds the state the `Tab layout` / `Sidebar` rows describe, and
+        // §7.1.6b′ rules focus mode orthogonal to both: it is neither read nor
+        // written by them, and turning the layout over must not turn the mode
+        // off. `sampled_rail` is where the window's own bit joins the state, on
+        // the frame clock, beside every other sampled scalar here.
+        focus: false,
     }
 }
 

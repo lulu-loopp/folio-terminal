@@ -1988,6 +1988,18 @@ pub enum SettingsRow {
     AlwaysOnTop,
     Cursor,
     TabLayout,
+    /// **`Focus mode`, door 1 of five** (§7.1.6b′).
+    ///
+    /// It stands between `Tab layout` and `Sidebar` because the three answer one
+    /// question between them: what shape is this window. Unlike `Sidebar` it
+    /// carries no condition — focus mode works from either tab layout, so the
+    /// row is on the page whichever one is in force.
+    ///
+    /// It is the row that makes the mode **persist**: the other four doors write
+    /// the same one bit, and this is the one that writes it to `settings.json`
+    /// as well, so a window closed with the card column up opens with it up. A
+    /// layout somebody may live in has to be a place they can come back to.
+    FocusMode,
     Sidebar,
     /// User ruling 2026-08-10. Last, because it is the only row of the second
     /// group; it used to sit above the conditional Tab layout/Sidebar pair to
@@ -2197,6 +2209,7 @@ impl SettingsRow {
             | Self::DarkScheme
             | Self::Cursor
             | Self::TabLayout
+            | Self::FocusMode
             | Self::Sidebar
             | Self::SplitDirection
             | Self::TerminalFont
@@ -2280,6 +2293,8 @@ impl SettingsRow {
             Self::GitPanel => Text::RowGitPanel.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
+            // Mock-up 4154.
+            Self::FocusMode => Text::RowFocusMode.text(),
             // Mock-up 2374.
             Self::Sidebar => Text::RowSidebar.text(),
             Self::SplitDirection => Text::RowSplitDirection.text(),
@@ -2372,6 +2387,8 @@ impl SettingsRow {
             Self::GitPanel => Text::DescGitPanel.text(),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
+            // Mock-up 4155.
+            Self::FocusMode => Text::DescFocusMode.text(),
             // Mock-up 2375.
             Self::Sidebar => Text::DescSidebar.text(),
             // Says *which* splits, because the scope is the setting. A line
@@ -2530,6 +2547,7 @@ impl SettingsRow {
             | Self::FontSize
             | Self::Cursor
             | Self::TabLayout
+            | Self::FocusMode
             // **Out again** (user ruling 2026-08-18). The 2026-08-17 ruling
             // filed it under the disclosure and broke its adjacency to
             // `Tab layout` on the ground that the *condition* carries the
@@ -2646,6 +2664,7 @@ impl SettingsRow {
             Self::LightScheme => scheme_labels(true).len(),
             Self::DarkScheme => scheme_labels(false).len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
+            Self::FocusMode => FORMULA_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
             Self::Language => LANGUAGE_OPTIONS.len(),
@@ -2723,6 +2742,9 @@ impl SettingsRow {
             Self::LightScheme => scheme_labels(true).get(index).copied(),
             Self::DarkScheme => scheme_labels(false).get(index).copied(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
+            // `On` / `Off`, in that order — the two-state picker every other
+            // boolean row on the dialog is drawn from.
+            Self::FocusMode => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .get(index)
@@ -2976,6 +2998,14 @@ impl SettingsRow {
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
+            // **The window's own bit, not the file's.** The row shows what this
+            // window is doing right now, because that is what all five doors
+            // turn; the file is what a *new* window is born as. They agree
+            // except in the seconds after a chord in another window, and the
+            // dialog is in this one.
+            Self::FocusMode => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.focus_mode),
             Self::Sidebar => SIDEBAR_OPTIONS.iter().position(|it| *it == values.sidebar),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .iter()
@@ -3079,6 +3109,12 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         SettingsRow::FontSize,
         SettingsRow::Cursor,
         SettingsRow::TabLayout,
+        // **Beside the two rows it shares a question with** (§7.1.6b′ ①), and
+        // above `Sidebar` rather than below it because it is unconditional and
+        // `Sidebar` is not: a row that comes and goes must not have a permanent
+        // one appear underneath it, or the permanent one moves whenever the
+        // conditional one does.
+        SettingsRow::FocusMode,
     ];
     // **Directly under the row it depends on** (user ruling 2026-08-18, which
     // returns it here from the Advanced group 2026-08-17 had filed it in). It
@@ -3339,6 +3375,13 @@ pub struct SettingsValues {
     pub cursor: CursorStyle,
     pub tab_layout: TabLayoutMode,
     pub sidebar: RailMode,
+    /// **Whether this window is in focus mode right now** (§7.1.6b′).
+    ///
+    /// The window's bit and not the file's, for the reason the row's own tick
+    /// gives: five doors turn it, and the row has to show what is true of the
+    /// window the dialog is standing in. The file is what a *new* window opens
+    /// as, and the two are kept in step by the one applier that writes both.
+    pub focus_mode: bool,
     pub display_formulas: bool,
     pub inline_formulas: bool,
     /// Whether a proven markdown table in command output is drawn as a block.
@@ -3479,6 +3522,7 @@ impl SettingsValues {
             theme: ThemeModeV1::Dark,
             cursor: CursorStyle::Bar,
             tab_layout: TabLayoutMode::Horizontal,
+            focus_mode: false,
             sidebar: RailMode::Expanded,
             display_formulas: true,
             inline_formulas: true,
@@ -6151,6 +6195,15 @@ pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
 pub fn git_panel_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::GitPanel, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+/// Focus mode, as a press on its picker — door 1 of five (§7.1.6b′ ①).
+#[must_use]
+pub fn focus_mode_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::FocusMode, index) => FORMULA_OPTIONS.get(index).copied(),
         _ => None,
     }
 }

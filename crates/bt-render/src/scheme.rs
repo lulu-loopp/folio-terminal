@@ -335,6 +335,16 @@ impl ChromePalette {
         let act_pill = active(card_hover);
         let rail_active = active(panel);
         let leaf_focus = active(menu);
+        // The focus column's four grounds: a card's head at rest and on the
+        // stage, and the pill that the pane-count badge and the hovered `×`
+        // share on each. `--hover`/`--active` over `--menu` rather than over
+        // `--panel`, because a card is an object with its own face and the head
+        // is laid on that face.
+        let focus_card = hover(menu);
+        let focus_card_staged = active(menu);
+        let focus_card_pill = active(focus_card);
+        let focus_card_pill_staged = active(focus_card_staged);
+        let focus_exit_hover_ground = hover(win);
         // `.pring .track { stroke: var(--border); opacity: .7 }`. Ten-thousandths
         // because `.094 × .7` is .0658 and `.088 × .7` is .0616, and a
         // thousandth rounds the second of those onto the wrong level.
@@ -518,6 +528,30 @@ impl ChromePalette {
             rail_edge: border_soft(panel),
             rail_shade: [0x00, 0x00, 0x00],
             rail_shade_alpha: canvas.rail_shade,
+            // The focus column's cards (§7.1.6b′). A card is a tab, so every
+            // declaration here is one the strip or the rail already makes; what
+            // is new is only the ground, because a card is an object with a
+            // `--menu` face while a rail row lies straight on `--panel`.
+            focus_card,
+            focus_card_staged,
+            focus_card_title: ink2(focus_card),
+            focus_card_title_staged: ink(focus_card_staged),
+            focus_card_glyph: ink3(focus_card),
+            focus_card_glyph_staged: ink3(focus_card_staged),
+            focus_card_pill,
+            focus_card_pill_staged,
+            focus_card_ink_on_pill: ink(focus_card_pill),
+            focus_card_ink_on_pill_staged: ink(focus_card_pill_staged),
+            focus_card_muted_on_pill: ink2(focus_card_pill),
+            // The same `--border` on the same `--panel` `rail_seam` is struck
+            // from, and written as the same call for that reason.
+            focus_card_edge: border(panel),
+            ring_track_on_focus_card: ring(focus_card),
+            ring_track_on_focus_card_staged: ring(focus_card_staged),
+            focus_exit: win,
+            focus_exit_text: ink2(win),
+            focus_exit_hover: focus_exit_hover_ground,
+            focus_exit_text_hover: ink(focus_exit_hover_ground),
         }
     }
 }

@@ -45,6 +45,14 @@ pub(crate) enum Action {
     ReopenClosed,
     JumpAttention,
     CommandPalette,
+    /// **Turn focus mode on, or off** — one chord for both directions
+    /// (§7.1.6b′ ②).
+    ///
+    /// A toggle and not a pair, and the ruling says why: the mode is **one bit**
+    /// and the Appearance row shows which way it is set, so a separate "leave"
+    /// key would be a second truth about the same bit. `GitPage`'s reasoning
+    /// exactly, one surface up.
+    ToggleFocusMode,
     SplitHorizontal,
     SplitVertical,
     DuplicatePaneSplit,
@@ -551,6 +559,26 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutCommandPalette,
         Action::CommandPalette,
         Chord::new(CTRL_SHIFT, character("p")),
+    ),
+    // **`Ctrl+Shift+Z`, and the settling of the chord P2-7 left open**
+    // (§7.1.6b′ ②, user ruling 2026-08-19).
+    //
+    // The other candidate was `Ctrl+Shift+F` — freed by the retired find alias
+    // two rows up — and it lost on one argument: that chord is Find's muscle
+    // memory on every platform, and a window layout that answers to it is a
+    // window people stop trusting the first time they press it. `Z` is free in
+    // this product, means nothing to a shell, and is outside the `Ctrl+Alt`
+    // AltGr zone this table's header rules out. Redo lives on it in some
+    // editors; Folio has no Redo of its own to collide with, and the pane below
+    // keeps its own keyboard either way.
+    //
+    // The row is titled with the Appearance row's own name, on `new-tab`'s
+    // precedent: the chord and the setting turn one bit, so they are one name.
+    Binding::window(
+        "focus-mode",
+        Text::RowFocusMode,
+        Action::ToggleFocusMode,
+        Chord::new(CTRL_SHIFT, character("z")),
     ),
     Binding::window(
         "split-horizontal",
@@ -1727,6 +1755,18 @@ mod tests {
             press(character("p"), CTRL_SHIFT),
             Some(Action::CommandPalette)
         );
+        // Door 2 (§7.1.6b′ ②), and the row below it is half the assertion: the
+        // chord this one deliberately did **not** take is still Find's.
+        assert_eq!(
+            press(character("z"), CTRL_SHIFT),
+            Some(Action::ToggleFocusMode)
+        );
+        assert_eq!(
+            press(character("f"), CTRL_SHIFT),
+            None,
+            "Ctrl+Shift+F is nobody's: it is Find's muscle memory, and focus mode \
+             took Ctrl+Shift+Z rather than the chord people already aim at Find"
+        );
         assert_eq!(
             press(character("-"), ALT_SHIFT),
             Some(Action::SplitHorizontal)
@@ -2154,14 +2194,14 @@ mod tests {
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 19 single actions plus GotoTab(1..=9), plus the four picture-in-picture
+        // 20 single actions plus GotoTab(1..=9), plus the four picture-in-picture
         // summon slots (2026-08-17), of which only the first ships with a chord.
         //
         // **No row names a verb twice** (user ruling 2026-08-18). `Ctrl+Shift+F`
         // used to ride here as a second chord for `OpenSearch`, and it was the
         // only place in the table where two rows meant one thing; it is retired,
         // and anybody who wants it records it onto a row of their own.
-        assert_eq!(BINDINGS.len(), 32);
+        assert_eq!(BINDINGS.len(), 33);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -2229,6 +2269,7 @@ mod tests {
             Action::ReopenClosed,
             Action::JumpAttention,
             Action::CommandPalette,
+            Action::ToggleFocusMode,
             Action::SplitHorizontal,
             Action::SplitVertical,
             Action::DuplicatePaneSplit,

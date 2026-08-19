@@ -560,7 +560,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 14,
+        SETTINGS_SCHEMA_VERSION, 15,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -577,7 +577,14 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          changelog — and the Advanced disclosure's own list the v10→v11, one key \
          on its own day, the Tables switch the v11-to-v12, and the Rendered \
          blocks page's own Maximum height the v12-to-v13, and the Terminal page's \
-         own Scrollback the v13-to-v14 — one key on one day, four times running"
+         own Scrollback the v13-to-v14, and the Appearance page's own Focus mode \
+         the v14-to-v15 — one key on one day, five times running"
+    );
+    assert!(
+        !defaults.focus_mode,
+        "no build before v15 had a focus mode to open in, and a migration that \
+         switched a layout mode on for a reader who has never met the row would \
+         be this crate redecorating somebody's window on upgrade"
     );
     assert_eq!(
         defaults.scrollback_lines, 100_000,
@@ -1174,6 +1181,61 @@ fn settings_v13_migrates_to_the_capacity_it_always_had_and_v14_keeps_the_number_
     assert!(
         on_disk.contains(r#""scrollback_lines": 25000"#),
         "the capacity is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (§7.1.6b′, 2026-08-19) — a v14 settings file migrates to v15 with focus mode off, and a
+/// v15 file that says the reader lives in it gets that answer back through a write and a read.
+///
+/// The first half is the whole of the migration's judgement. No build before v15 could be in
+/// focus mode, so `false` is not a policy this step chooses but the behaviour it records; a
+/// step that shipped the new mode *on* — tempting precisely because it is the reason the
+/// version moved — would redecorate the window of every reader who upgrades without asking.
+/// The sibling assertion is §1.3 rule 1: the fixture is non-default in its older fields, and a
+/// copy-pasted step that resets one while inserting its own is the failure this shape catches.
+///
+/// The second half is what the row is *for*. Focus mode's other half lives on the window and
+/// dies with it; this key is the reason a window closed with the card column up opens with it
+/// up, so a `true` that did not survive the file would leave the Appearance row promising
+/// something no restart delivers.
+#[test]
+fn settings_v14_migrates_with_focus_mode_off_and_v15_keeps_the_shape_it_was_left_in() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v14_scrollback.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        !migrated.focus_mode,
+        "a v14 build had no focus mode to be in, and that is the shape it goes on opening in"
+    );
+    assert_eq!(
+        migrated.scrollback_lines, 25_000,
+        "one key crosses; every sibling crosses untouched"
+    );
+    assert_eq!(migrated.block_max_height, 480);
+
+    let (chosen, report) = read_settings(&fixture_path("settings_v15_focus_mode.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(chosen.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        chosen.focus_mode,
+        "a reader who lives in the card column is heard"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v15-focus-mode-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &chosen).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""focus_mode": true"#),
+        "the window's shape is written as its own key: {on_disk}"
     );
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);

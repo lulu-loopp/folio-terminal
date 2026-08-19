@@ -27,8 +27,17 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad, OverlayQuad,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad, FOCUS_BAR_GAP_LOGICAL_PX,
+    FOCUS_BAR_PADDING_BOTTOM_LOGICAL_PX, FOCUS_BAR_PADDING_TOP_LOGICAL_PX,
+    FOCUS_BAR_PADDING_X_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX,
+    FOCUS_CARD_CLOSE_BOX_LOGICAL_PX, FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX,
+    FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX, FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX,
+    FOCUS_CARD_HEAD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX,
+    FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX, FOCUS_CARD_PIN_BOX_LOGICAL_PX,
+    FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_EXIT_FONT_LOGICAL_PX, FOCUS_EXIT_GAP_LOGICAL_PX,
+    FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX, FOCUS_EXIT_PADDING_X_LOGICAL_PX,
+    FOCUS_EXIT_RADIUS_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
     PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
     RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
     RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
@@ -2119,7 +2128,23 @@ pub enum ChromeTarget {
     /// own hit test claims every pixel of a window's frame
     /// (`FloatPart::Body`): **a surface drawn over another surface answers for
     /// its whole rectangle, including the answer "nothing here".**
+    ///
+    /// The focus column answers with this target too, for the same reason and
+    /// through the same rectangle: it is the same panel, holding a different
+    /// list.
     RailBody,
+    /// **Door 5 — `Exit`, at the head of the focus column** (§7.1.6b′ ⑤).
+    ///
+    /// The one target this feature adds, and it carries no index because the
+    /// mode is one bit for the whole window. Its own target rather than a press
+    /// anywhere on the bar for [`Self::PaneClose`]'s reason: the bar is a
+    /// heading with a button on it, and a heading that turned a layout mode off
+    /// wherever you happened to click it would be a heading you learn to avoid.
+    ///
+    /// It exists at all because four of the five doors are gestures — a setting
+    /// behind a modal, a chord, a double-click, a menu item — and a mode you can
+    /// only leave by remembering one is a trap.
+    FocusExit,
 }
 
 /// How much room a tab has, measured the way the mock-up's own
@@ -3039,6 +3064,26 @@ pub struct RailState {
     /// `Some` therefore has one producer — the sampler that owns the frame clock
     /// — and says one thing: a fold is in flight, and this is how far it has got.
     pub fold: Option<f32>,
+    /// **Focus mode is on, and the panel on the left is a column of tab cards**
+    /// rather than the ordinary tab list (§7.1.6b′).
+    ///
+    /// Sampled here for the reason [`Self::open`] is: this module is a pure
+    /// function of the numbers it is handed, and the bit itself lives on the
+    /// window (`WindowRuntime::focus_mode`) where five doors can turn it.
+    ///
+    /// **It supersedes the other fields rather than combining with them.** Focus
+    /// mode is its own layout layer: while it is on, neither the horizontal strip
+    /// nor the ordinary vertical rail is drawn, because the card column *is* the
+    /// tab list and a second list beside it would be the same thing said twice.
+    /// So [`Self::layout`] is not a gate — both tab layouts can be in focus mode
+    /// — and [`Self::mode`] and [`Self::collapsed`] are neither read nor written
+    /// by it: the `Sidebar` setting's three resting states govern the *ordinary*
+    /// rail, and a card column has nowhere to put a card at icon width.
+    ///
+    /// That is also why leaving focus mode needs no restoring code. The mode
+    /// never wrote `layout`, `mode` or `collapsed`, so turning this bit off puts
+    /// back exactly the chrome those three already described.
+    pub focus: bool,
 }
 
 impl Default for RailState {
@@ -3050,6 +3095,7 @@ impl Default for RailState {
             open: 0.0,
             text_opacity: 1.0,
             fold: None,
+            focus: false,
         }
     }
 }
@@ -3061,9 +3107,25 @@ impl RailState {
     /// when the layout check is missing: the class "survived into horizontal
     /// mode, where the rail is `display: none` but the terminal was still
     /// keeping its 46px clear — a strip of dead space with nothing in it."
+    /// `!self.focus &&` all three, and the new clause is §7.1.6b′'s orthogonality
+    /// stated where it can be enforced: the `Sidebar` setting governs the
+    /// *ordinary* rail, and while the card column is up there is no icon rail to
+    /// be parked. Without it a window in focus mode under `Sidebar: Icons` would
+    /// draw its cards at 46px and cast the parked rail's shade over the terminal.
     #[must_use]
     pub fn draws_icon_rail(self) -> bool {
-        self.layout == TabLayoutMode::Vertical && self.mode == RailMode::Icons && !self.collapsed
+        !self.focus
+            && self.layout == TabLayoutMode::Vertical
+            && self.mode == RailMode::Icons
+            && !self.collapsed
+    }
+
+    /// Whether the panel on the left is the focus column rather than the tab
+    /// list — [`Self::draws_icon_rail`]'s opposite number, and the one question
+    /// both geometries ask before they answer anything.
+    #[must_use]
+    pub fn draws_focus_rail(self) -> bool {
+        self.focus
     }
 
     /// How much of the rail the fold leaves on screen right now.
@@ -3089,6 +3151,16 @@ impl RailState {
     /// also be somewhere in between.
     #[must_use]
     pub fn width_logical_px(self) -> f32 {
+        // **Focus mode answers first, and answers the same number in both tab
+        // layouts.** The card column is a layout layer over the window's normal
+        // tab chrome (§7.1.6b′), so it is on screen in the horizontal layout too
+        // — where the ordinary rail is not — and it is always card-width: the
+        // fold, the icon park and the `Sidebar` setting all belong to the panel
+        // this one replaces. A narrow names-only column would be focus mode's own
+        // preference some day, and it is deliberately not wired to `Sidebar`.
+        if self.focus {
+            return RAIL_WIDTH_LOGICAL_PX;
+        }
         if self.layout != TabLayoutMode::Vertical {
             return 0.0;
         }
@@ -3126,6 +3198,14 @@ impl RailState {
     /// same excuse, so it travels over the terminal rather than through it.
     #[must_use]
     pub fn terminal_inset_logical_px(self) -> f32 {
+        // [`Self::width_logical_px`]'s first clause again, and here it is also
+        // the whole of "entering focus mode moves the panes": the strip costs the
+        // terminal no width, the card column costs it 220, and that step is the
+        // one thing the mode changes about the stage. It steps rather than eases
+        // for this function's own reason — one reflow, not sixty.
+        if self.focus {
+            return RAIL_WIDTH_LOGICAL_PX;
+        }
         if self.layout != TabLayoutMode::Vertical || self.collapsed {
             return 0.0;
         }
@@ -3272,6 +3352,16 @@ pub fn rail_geometry(
     scroll: f32,
     state: RailState,
 ) -> Option<RailGeometry> {
+    // **Focus mode is not a rail this function can describe** (§7.1.6b′). The
+    // panel is still there and still 220 wide — `width_logical_px` says so, and
+    // the terminal is still keeping the room clear — but what stands in it is a
+    // column of cards, which [`focus_rail_geometry`] answers for. `None` here is
+    // therefore the same sentence it already was, read one level up: *this* rail
+    // is not on screen. Every caller that asks "does the tab list want this
+    // click" gets its answer from whichever of the two returns `Some`.
+    if state.draws_focus_rail() {
+        return None;
+    }
     let width = state.width_logical_px() * scale;
     if width <= 0.0 {
         return None;
@@ -3630,6 +3720,401 @@ pub fn hit_rail_chrome(
         }
     }
     // Inside the list's clip box but between two rows, or past the last one.
+    Some(ChromeTarget::RailBody)
+}
+
+// ── §7.1.6b′: the focus column, solved ──
+//
+// One card per tab, in strip order, in the panel the rail would otherwise hold.
+// A card **is** a tab, so nothing below invents a second vocabulary for one: the
+// boxes are the row's boxes at the card's own padding, the marks are
+// [`TabContent`]'s marks unchanged, and the hit test answers the strip's own
+// [`ChromeTarget::Tab`] / [`ChromeTarget::TabClose`] so that pressing a card runs
+// the verb pressing a tab already runs. The one target this surface adds is
+// [`ChromeTarget::FocusExit`], because a way out is the one thing a tab row has
+// never needed.
+
+/// One card of the focus column, solved.
+///
+/// [`RailTabGeometry`]'s opposite number, and deliberately shorter than it. The
+/// rail's row carries a `files` trigger and a hover-revealed pin *offer*; a card
+/// carries neither. §7.1.6b′ ④ is why: the folder peek and the offer to pin are
+/// gestures that belong to a tab row, and giving them a second home on a card
+/// would be the mode growing a vocabulary of its own — which is exactly the
+/// thing the ruling forbids. A pinned tab's card states that it is pinned, and
+/// that is all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FocusCardGeometry {
+    /// The card's own box, hairline included — `[left, top, right, bottom]`.
+    pub body: [f32; 4],
+    /// The 15px profile-mark slot, which the dot and the progress ring hang off
+    /// exactly as they do in the strip and in the rail.
+    pub mark: [f32; 4],
+    /// The `×`'s box, which closes the card's tab.
+    ///
+    /// Never `None`, and that is the difference from both other axes rather than
+    /// an oversight: the strip's width tiers can take the `×` away and a pinned
+    /// tab is written without one, while a card is a fixed-width object in a
+    /// fixed-width column, so the box is always there and it is *reveal* — the
+    /// mock-up's `.fcard:hover .fc-close { visibility: visible }` — that decides
+    /// whether it is inked. A hit box that came and went with the pointer would
+    /// be a `×` you cannot press on the frame you reach for it.
+    pub close: [f32; 4],
+    /// The name's run as `[left, right]` — a run and not a box for
+    /// [`RailTabGeometry::title`]'s reason: the card's height is fixed and the
+    /// name is centred in it.
+    pub title: [f32; 2],
+}
+
+/// The focus column, solved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FocusRailGeometry {
+    /// The column's outer box `[left, top, right, bottom]`.
+    pub body: [f32; 4],
+    /// The bar at the head of the column: the words `Focus mode` and door 5.
+    ///
+    /// It stands where the rail's `Tabs` heading stands, and the list scrolls
+    /// beneath it — which is `position: sticky; top: -6px` expressed the way
+    /// [`RailGeometry::label`] already expresses the same idea. §7.1.6b′ ⑤ is
+    /// what makes that non-negotiable: four of the five doors are gestures, and
+    /// a mode you can only leave by remembering one is a trap, so the way out
+    /// must not be scrollable off the screen.
+    pub bar: [f32; 4],
+    /// The bar's label run as `[left, right]`, ending one gap short of the exit.
+    pub label: [f32; 2],
+    /// Door 5's own box.
+    pub exit: [f32; 4],
+    /// One card per tab, in tab order — **the only order there is**. v1 ships no
+    /// card dragging (§7.1.6b′ ④), so there is no second sequence to store and
+    /// no `cardSeq` to reconcile: rearranging tabs rearranges cards because they
+    /// are the same list.
+    pub cards: Vec<FocusCardGeometry>,
+    /// The `+` row, at `min(flow, stuck)` — the rail's own sticky arithmetic,
+    /// because the column keeps the rail's `+` (`paintFocusRail` writes
+    /// `focusRailHtml() + railNewHtml()`).
+    pub new_tab: [f32; 4],
+    /// The `˅` beside it. Always `Some` here: the chevron is `None` in the rail
+    /// only while it is parked at icon width, and the focus column is never
+    /// parked.
+    pub new_tab_menu: [f32; 4],
+    /// The hairline facing the terminal.
+    pub edge: [f32; 4],
+    /// The scrolling list's clip box as `[top, bottom]`.
+    pub viewport: [f32; 2],
+    pub max_scroll: f32,
+}
+
+impl FocusRailGeometry {
+    /// Whether the column's own rectangle is over this point —
+    /// [`RailGeometry::covers`], for the same second question.
+    #[must_use]
+    pub fn covers(&self, x: f64, y: f64) -> bool {
+        contains(self.body, x as f32, y as f32)
+    }
+}
+
+/// How tall one card is, in physical pixels.
+///
+/// **F1 ships the head alone**, so a card is its border plus its head, and the
+/// head is as tall as the tallest thing in it — the 16px `×`. The mock-up draws
+/// a 92px body under this and tags it `F2` on its own face; when that slice
+/// lands it adds to this number rather than changing it.
+fn focus_card_height(scale: f32) -> f32 {
+    ((2.0 * (FOCUS_CARD_BORDER_LOGICAL_PX + FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX)
+        + FOCUS_CARD_CLOSE_BOX_LOGICAL_PX)
+        * scale)
+        .round()
+}
+
+/// How wide door 5's button is, given the measured width of the word on it.
+///
+/// The caption's width is carried in rather than derived for
+/// [`TabContent::badge_text_width`]'s reason: only the font knows how wide a word
+/// is, and "the button you can press is the button you can see" has to be true by
+/// one number rather than by two functions agreeing.
+fn focus_exit_width(exit_caption_width: f32, scale: f32) -> f32 {
+    (2.0 * FOCUS_EXIT_PADDING_X_LOGICAL_PX * scale
+        + FOCUS_EXIT_GLYPH_LOGICAL_PX * scale
+        + FOCUS_EXIT_GAP_LOGICAL_PX * scale
+        + exit_caption_width)
+        .round()
+}
+
+/// The focus column's cards, bar and furniture, scrolled by `scroll` physical
+/// pixels.
+///
+/// [`rail_geometry`]'s opposite number, and it shares that function's frame
+/// exactly: the same outer box, the same top at the title bar's lower edge, the
+/// same sticky `+` at `min(flow, stuck)`, the same clip box between the two. What
+/// differs is what fills the middle — cards at [`FOCUS_CARD_GAP_LOGICAL_PX`]
+/// instead of rows at [`RAIL_GAP_LOGICAL_PX`] — and that the heading has grown a
+/// button.
+///
+/// Returns `None` exactly when focus mode is off, which is the mirror of
+/// [`rail_geometry`]'s own `None`: between them, at most one panel is on screen,
+/// and the caller never has to decide which.
+#[must_use]
+pub fn focus_rail_geometry(
+    height: f32,
+    scale: f32,
+    tab_count: usize,
+    exit_caption_width: f32,
+    scroll: f32,
+    state: RailState,
+) -> Option<FocusRailGeometry> {
+    if !state.draws_focus_rail() {
+        return None;
+    }
+    let width = state.width_logical_px() * scale;
+    let top = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    let bottom = height.max(top);
+    // The rail's own border-box arithmetic, unchanged: the hairline comes out of
+    // the 220 rather than being added to it, so a card's run is 203 wide here for
+    // exactly the reason a row's is.
+    let border = RAIL_BORDER_LOGICAL_PX * scale;
+    let pad_x = RAIL_PADDING_X_LOGICAL_PX * scale;
+    let content_left = pad_x;
+    let content_right = (width - border - pad_x).max(content_left);
+    let gap = RAIL_GAP_LOGICAL_PX * scale;
+
+    let mut cursor = top + RAIL_PADDING_TOP_LOGICAL_PX * scale;
+    let bar_height = ((FOCUS_BAR_PADDING_TOP_LOGICAL_PX
+        + FOCUS_EXIT_HEIGHT_LOGICAL_PX
+        + FOCUS_BAR_PADDING_BOTTOM_LOGICAL_PX)
+        * scale)
+        .round();
+    let bar = [content_left, cursor, content_right, cursor + bar_height];
+    let bar_pad_x = FOCUS_BAR_PADDING_X_LOGICAL_PX * scale;
+    let bar_left = content_left + bar_pad_x;
+    let bar_right = (content_right - bar_pad_x).max(bar_left);
+    let exit_top = (cursor + FOCUS_BAR_PADDING_TOP_LOGICAL_PX * scale).round();
+    let exit_width = focus_exit_width(exit_caption_width, scale).min(bar_right - bar_left);
+    let exit = [
+        bar_right - exit_width,
+        exit_top,
+        bar_right,
+        exit_top + (FOCUS_EXIT_HEIGHT_LOGICAL_PX * scale).round(),
+    ];
+    let label = [
+        bar_left,
+        (exit[0] - FOCUS_BAR_GAP_LOGICAL_PX * scale).max(bar_left),
+    ];
+    cursor += bar_height + gap;
+
+    // The list scrolls under the bar and the `+`; only the cards move.
+    let list_top = cursor;
+    let card_height = focus_card_height(scale);
+    let card_gap = FOCUS_CARD_GAP_LOGICAL_PX * scale;
+    let card_border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0);
+    let head_pad_x = FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX * scale;
+    let head_gap = FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
+    let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+    let close_box = (FOCUS_CARD_CLOSE_BOX_LOGICAL_PX * scale).round();
+
+    let mut card_top = list_top - scroll;
+    let mut cards = Vec::with_capacity(tab_count);
+    for _ in 0..tab_count {
+        let body = [content_left, card_top, content_right, card_top + card_height];
+        // Inside the border and inside the head's padding: the flex line the
+        // mock-up writes is `mark · name (flex: 1) · badge · pin · ×`, and every
+        // box below is one item of it measured from whichever end owns it.
+        let inner_left = body[0] + card_border + head_pad_x;
+        let inner_right = (body[2] - card_border - head_pad_x).max(inner_left);
+        let centre = |size: f32| (body[1] + (card_height - size) / 2.0).round();
+        let mark_top = centre(mark);
+        let mark_rect = [inner_left, mark_top, inner_left + mark, mark_top + mark];
+        let close_top = centre(close_box);
+        let close = [
+            (inner_right - close_box).max(inner_left),
+            close_top,
+            inner_right,
+            close_top + close_box,
+        ];
+        // `title` is the run before the trailing cluster is known: the pin and
+        // the badge are per-tab facts and this function is handed a count, so
+        // [`focus_card_title_right`] is where the name's real right edge is
+        // read. What is written here is the floor under it — the run a card with
+        // neither badge nor pin gets — and it is the only value both the drawing
+        // and the clip are taken from.
+        let title_left = mark_rect[2] + head_gap;
+        let title_right = (close[0] - head_gap).max(title_left);
+        cards.push(FocusCardGeometry {
+            body,
+            mark: mark_rect,
+            close,
+            title: [title_left, title_right],
+        });
+        card_top += card_height + card_gap;
+    }
+
+    // `.rail .rail-new { position: sticky; bottom: -10px }`, unchanged — see
+    // [`rail_geometry`] for why it is `min(flow, stuck)` and not either alone.
+    let row_height = (RAIL_TAB_HEIGHT_LOGICAL_PX * scale).round();
+    let natural_top = if tab_count == 0 {
+        card_top + RAIL_NEW_MARGIN_TOP_LOGICAL_PX * scale
+    } else {
+        // `card_top` carries the trailing card gap the loop left behind it; the
+        // `+` follows the *rail's* own margin, not the column's gap, because it
+        // is the rail's furniture and not a card.
+        card_top - card_gap + gap + RAIL_NEW_MARGIN_TOP_LOGICAL_PX * scale
+    };
+    let stuck_top = bottom
+        - ((RAIL_TAB_HEIGHT_LOGICAL_PX + RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX) * scale)
+            .round();
+    let new_top = natural_top.min(stuck_top);
+    let chevron = (RAIL_NEW_CHEVRON_BOX_LOGICAL_PX * scale).round();
+    let new_gap = RAIL_NEW_GAP_LOGICAL_PX * scale;
+    let new_main_right = (content_right - chevron - new_gap).max(content_left);
+    let new_tab = [content_left, new_top, new_main_right, new_top + row_height];
+    let new_tab_menu = [
+        new_main_right + new_gap,
+        new_top,
+        content_right,
+        new_top + row_height,
+    ];
+
+    let list_bottom = (new_top - RAIL_NEW_MARGIN_TOP_LOGICAL_PX * scale - gap).max(list_top);
+    let content_height = if tab_count == 0 {
+        0.0
+    } else {
+        (card_top - card_gap) - (list_top - scroll)
+    };
+    let max_scroll = (content_height - (list_bottom - list_top)).max(0.0);
+
+    Some(FocusRailGeometry {
+        body: [0.0, top, width, bottom],
+        bar,
+        label,
+        exit,
+        cards,
+        new_tab,
+        new_tab_menu,
+        edge: [width - border, top, width, bottom],
+        viewport: [list_top, list_bottom],
+        max_scroll,
+    })
+}
+
+/// A pinned card's pin mark, or `None` on a card whose tab is not pinned.
+///
+/// Its own function rather than a field filled in by [`focus_rail_geometry`],
+/// because that function is handed a *count*: everything about a card's boxes is
+/// the same for all of them except this one mark, and threading a per-tab list
+/// through the solver to place a single 11px glyph would make the geometry
+/// depend on the list for no other reason.
+///
+/// The mark stands where the mock-up's flex line puts it — one gap left of the
+/// `×` — and the name's run is shortened to clear it by
+/// [`focus_card_title_right`], which is the one place both facts are read.
+#[must_use]
+pub fn focus_card_pin_rect(card: &FocusCardGeometry, pinned: bool, scale: f32) -> Option<[f32; 4]> {
+    pinned.then(|| {
+        let pin_box = (FOCUS_CARD_PIN_BOX_LOGICAL_PX * scale).round();
+        let right = card.close[0] - FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
+        let top = ((card.body[1] + card.body[3] - pin_box) / 2.0).round();
+        [right - pin_box, top, right, top + pin_box]
+    })
+}
+
+/// A card's pane-count badge, or `None` when the tab holds one pane.
+///
+/// C28's condition and the strip's own arithmetic, through
+/// [`badge_rect_of`] — the same box on a third surface, which is what
+/// `.tab.active .panecount, .vtab.active .panecount` being one selector means
+/// once a card is a tab too.
+#[must_use]
+pub fn focus_card_badge_rect(
+    card: &FocusCardGeometry,
+    pane_count: usize,
+    badge_text_width: f32,
+    pinned: bool,
+    scale: f32,
+) -> Option<[f32; 4]> {
+    (pane_count > 1).then(|| {
+        let trailing = focus_card_pin_rect(card, pinned, scale)
+            .map_or(card.close[0], |pin| pin[0])
+            - FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
+        badge_rect_of(card.body, trailing, badge_text_width, scale)
+    })
+}
+
+/// Where a card's name ends: one gap short of whichever of the badge, the pin or
+/// the `×` stands first.
+///
+/// [`rail_title_right`]'s opposite number and one function for the same reason —
+/// the name is drawn from this and clipped to it, and two readings of "how much
+/// room is left" is how a name comes to be painted over a badge.
+#[must_use]
+pub fn focus_card_title_right(
+    card: &FocusCardGeometry,
+    pane_count: usize,
+    badge_text_width: f32,
+    pinned: bool,
+    scale: f32,
+) -> f32 {
+    let gap = FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
+    let trailing = focus_card_badge_rect(card, pane_count, badge_text_width, pinned, scale)
+        .map(|badge| badge[0])
+        .or_else(|| focus_card_pin_rect(card, pinned, scale).map(|pin| pin[0]))
+        .unwrap_or(card.close[0]);
+    (trailing - gap).max(card.title[0])
+}
+
+/// Which part of the focus column is under this point.
+///
+/// [`hit_rail_chrome`] on the other surface, and it answers **the same targets**:
+/// a press on a card is [`ChromeTarget::Tab`] and a press on its `×` is
+/// [`ChromeTarget::TabClose`], by index, which is §7.1.6b′'s "clicking a card is
+/// clicking that tab" made true at the hit test rather than re-implemented above
+/// it. Everything downstream — `press_tab`, the double-click that renames,
+/// `close_tab` and its dirty gate — is reached without knowing this surface
+/// exists.
+///
+/// Total over its own rectangle for [`hit_rail_chrome`]'s reason: the column is
+/// opaque, so a point inside it that hits nothing is [`ChromeTarget::RailBody`]
+/// rather than a fall-through onto the pane underneath.
+#[must_use]
+#[expect(clippy::too_many_arguments, reason = "hit_rail_chrome's own argument list, one surface over: the geometry is a pure function of what is on screen and every one of these is part of that")]
+pub fn hit_focus_rail(
+    height: f32,
+    scale: f32,
+    tabs: &[TabTrailer],
+    exit_caption_width: f32,
+    scroll: f32,
+    state: RailState,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    let geometry = focus_rail_geometry(height, scale, tabs.len(), exit_caption_width, scroll, state)?;
+    if !contains(geometry.body, x, y) {
+        return None;
+    }
+    // Door 5 answers before the bar it sits in, smallest target first — the same
+    // order the `×` is asked in inside a card.
+    if contains(geometry.exit, x, y) {
+        return Some(ChromeTarget::FocusExit);
+    }
+    if contains(geometry.new_tab_menu, x, y) {
+        return Some(ChromeTarget::NewTabMenu);
+    }
+    if contains(geometry.new_tab, x, y) {
+        return Some(ChromeTarget::NewTab);
+    }
+    let [list_top, list_bottom] = geometry.viewport;
+    if y < list_top || y >= list_bottom {
+        return Some(ChromeTarget::RailBody);
+    }
+    for (index, card) in geometry.cards.iter().enumerate() {
+        if contains(card.close, x, y) {
+            return Some(ChromeTarget::TabClose(index));
+        }
+        if contains(card.body, x, y) {
+            return Some(ChromeTarget::Tab(index));
+        }
+    }
+    // Inside the list's clip box but in the gap between two cards, or past the
+    // last one. Still the column's own pixel, and still opaque.
     Some(ChromeTarget::RailBody)
 }
 
@@ -4548,6 +5033,31 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
     }
 }
 
+/// The focus column as a run.
+///
+/// It claims the same band the rail's run claims, and it exists so that the
+/// column is a *surface a drag has to be answered by* rather than a hole the
+/// layout's rim shows through. What the answer is, is the caller's: §7.1.6b′ ③
+/// rules that the column refuses file drops — "a list of tabs has no non-arbitrary
+/// tab to catch a file with" — and ④ leaves card dragging out of v1, so in this
+/// slice every source is refused. The refusal is the strip's own: no insertion
+/// caret is drawn, the ghost stays under the pointer saying what is in the hand,
+/// and letting go sends it home.
+///
+/// `slots` is therefore deliberately **empty**. A slot list is the offer of a
+/// place to land, and this surface makes none; filling it with the cards'
+/// rectangles would let a reorder be computed against a column that cannot
+/// perform one.
+#[must_use]
+pub fn focus_rail_run(geometry: &FocusRailGeometry) -> TabRun {
+    TabRun {
+        axis: Axis::Col,
+        slots: Vec::new(),
+        band: geometry.body,
+        viewport: geometry.viewport,
+    }
+}
+
 /// A divider's hit zone: the drawn band widened to something a hand can land
 /// on. One drawn pixel is not a target.
 fn hit_band(slot: SplitSlot, scale: f32) -> [f32; 4] {
@@ -4955,7 +5465,21 @@ pub struct ChromeContent<'a> {
     /// How far the rail is scrolled, in physical pixels — [`Self::tab_scroll`]'s
     /// opposite number, and its own field because the two are different lists on
     /// different axes with different lengths.
+    ///
+    /// The focus column scrolls on this same number, and deliberately: it is the
+    /// same panel holding a different list, and a second scroll offset would be
+    /// a second place for "how far down the tab list am I" to be true.
     pub rail_scroll: f32,
+    /// How wide the word on door 5's button is drawn (§7.1.6b′ ⑤).
+    ///
+    /// Measured by the renderer and carried in for [`TabContent::badge_text_width`]'s
+    /// reason: only the font knows how wide a word is, and the button's box is
+    /// sized from exactly that, so "the button you can press is the button you
+    /// can see" holds by one number rather than by two functions agreeing. It is
+    /// read only while [`RailState::focus`] is set; every other frame it is
+    /// carried and ignored, which is cheaper than making the field optional and
+    /// then having to answer what `None` means to a solver.
+    pub exit_caption_width: f32,
     /// What each preview seat's caption says — the file it is showing, **by
     /// seat**.
     ///
@@ -5294,6 +5818,7 @@ pub fn build_chrome_for_tabs(
         tab_scroll,
         rail,
         rail_scroll,
+        exit_caption_width,
         preview_titles,
         float_shown,
         terminal_names,
@@ -6291,24 +6816,49 @@ pub fn build_chrome_for_tabs(
         .filter_map(|placement| placement.device_rect)
         .map(|rect| rect.bottom as f32)
         .fold(1.0, f32::max);
-    rail_chrome(
-        surface_height,
-        scale,
-        pointer.hover,
-        Rail {
-            tabs,
-            active_tab,
-            grabbed,
-            preview: strip_preview,
-            scroll: rail_scroll,
-            state: rail,
-            profile_menu_open,
-            chevron_turn,
-            shown: float_shown,
-        },
-        palette,
-        rail_group.as_output(),
-    );
+    // **One panel, two lists** (§7.1.6b′). The branch is here and only here: the
+    // seat loop above it has already run and knows nothing about focus mode,
+    // which is what "there is no focus branch in the stage's render" means in
+    // this build — the stage is `layout`, solved from the ordinary tree, and the
+    // only thing the mode changed about it is how much width the panel on its
+    // left took ([`RailState::terminal_inset_logical_px`]).
+    if rail.draws_focus_rail() {
+        focus_rail_chrome(
+            surface_height,
+            scale,
+            pointer.hover,
+            FocusRail {
+                tabs,
+                active_tab,
+                scroll: rail_scroll,
+                exit_caption_width,
+                state: rail,
+                profile_menu_open,
+                chevron_turn,
+            },
+            palette,
+            rail_group.as_output(),
+        );
+    } else {
+        rail_chrome(
+            surface_height,
+            scale,
+            pointer.hover,
+            Rail {
+                tabs,
+                active_tab,
+                grabbed,
+                preview: strip_preview,
+                scroll: rail_scroll,
+                state: rail,
+                profile_menu_open,
+                chevron_turn,
+                shown: float_shown,
+            },
+            palette,
+            rail_group.as_output(),
+        );
+    }
     WindowChrome {
         seats: ChromeGroup {
             quads,
@@ -6670,7 +7220,18 @@ fn window_chrome(
     // `.apptitle` is `display: none` **only** under `[data-tabs="horizontal"]`
     // (mock-up 188-189), so it is the bar's resting content and the strip is the
     // thing that displaces it.
-    match layout {
+    // **Focus mode answers before the layout does** (§7.1.6b′). While the card
+    // column is up, neither the horizontal strip nor the panel toggle is drawn —
+    // the column *is* the tab list, and the toggle governs a sidebar that is not
+    // on screen — so what is left in the bar is what is left in it under a
+    // vertical rail: the program's own name. That is the mock-up's own three
+    // rules, `.window.focusmode .tabs-inline`, `.panel-toggle` and `.apptitle`,
+    // read as one branch.
+    match if rail.draws_focus_rail() {
+        TabLayoutMode::Vertical
+    } else {
+        layout
+    } {
         TabLayoutMode::Horizontal => {
             window_tab_strip(width, scale, hover, strip, palette, (labels, sprites));
         }
@@ -7564,6 +8125,13 @@ const WINDOW_TITLE_DRAG_GAP_LOGICAL_PX: f32 = 8.0;
 /// on the rail and never on this.
 #[must_use]
 pub fn panel_toggle_box(scale: f32, rail: RailState) -> Option<[f32; 4]> {
+    // `.window.focusmode .panel-toggle { display: none }` — the button folds the
+    // *sidebar*, and while the card column is up there is no sidebar for it to
+    // act on. Answering `None` here takes it out of the paint, out of the hit
+    // test and out of `app_title_left_px` in one place rather than three.
+    if rail.draws_focus_rail() {
+        return None;
+    }
     if rail.layout != TabLayoutMode::Vertical || rail.mode == RailMode::Icons {
         return None;
     }
@@ -8535,6 +9103,469 @@ fn rail_chrome(
         }
     }
     labels.append(&mut written);
+}
+
+/// What the focus column is drawn from — [`Rail`]'s opposite number, and shorter
+/// than it by everything the mode does not have.
+///
+/// No `grabbed` and no `preview`: v1 ships no card dragging (§7.1.6b′ ④), so no
+/// card ever rides the pointer and no slot is ever held open for one. No `shown`:
+/// the folder flyout is summoned from a tab row's own trigger, and a card carries
+/// no trigger to summon it with.
+struct FocusRail<'a> {
+    tabs: &'a [TabContent],
+    active_tab: usize,
+    /// How far the column is scrolled, in physical pixels.
+    scroll: f32,
+    /// The measured width of the word on door 5, at [`FOCUS_EXIT_FONT_LOGICAL_PX`].
+    exit_caption_width: f32,
+    state: RailState,
+    profile_menu_open: bool,
+    chevron_turn: f32,
+}
+
+/// Paint the focus column: its ground, its bar, its cards and the way out.
+///
+/// [`rail_chrome`]'s counterpart, and it re-uses rather than re-decides for that
+/// function's own stated reason. Every mark a card wears — the profile mark, the
+/// status dot, the progress ring, the breath, the dead session's fade, the
+/// pane-count badge, the pin — comes out of the same [`TabContent`] the strip and
+/// the rail are handed, through the same three branches. **There is no second
+/// aggregation anywhere in this function**: a tab's state is a fact about the
+/// tab, and §7.1.6b′ is explicit that the card's dot is `tabIcon`'s own answer
+/// rather than a rule written again one level up. A card that computed its own
+/// would be a card that could disagree with the tab it *is*.
+///
+/// Returns nothing when focus mode is off, which [`focus_rail_geometry`] answers
+/// with `None`.
+fn focus_rail_chrome(
+    height: f32,
+    scale: f32,
+    hover: Option<ChromeTarget>,
+    rail: FocusRail<'_>,
+    palette: ChromePalette,
+    output: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let FocusRail {
+        tabs,
+        active_tab,
+        scroll,
+        exit_caption_width,
+        state,
+        profile_menu_open,
+        chevron_turn,
+    } = rail;
+    let (quads, labels, sprites) = output;
+    let Some(geometry) = focus_rail_geometry(
+        height,
+        scale,
+        tabs.len(),
+        exit_caption_width,
+        scroll,
+        state,
+    ) else {
+        return;
+    };
+    let ground = palette.title_bar;
+    // The panel is the window's own surface wearing another name, so it is a
+    // ground and takes the window's alpha — the rail's own ruling (§7.1.6c-4f),
+    // and the card column is the same panel holding a different list.
+    quads.push(ChromeQuad::ground(geometry.body, ground));
+    quads.push(ChromeQuad::ink(geometry.edge, palette.rail_edge));
+
+    let [list_top, list_bottom] = geometry.viewport;
+    let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
+    let clip_to_list = |rect: [f32; 4]| [rect[0], rect[1].max(list_top), rect[2], rect[3].min(list_bottom)];
+
+    // ── the bar: the column's heading, and door 5 ──
+    labels.push(ChromeLabel {
+        rect: [geometry.label[0], geometry.bar[1], geometry.label[1], geometry.bar[3]],
+        text: crate::i18n::Text::RowFocusMode.text().to_owned(),
+        font_size_px: RAIL_LABEL_FONT_LOGICAL_PX * scale,
+        color: palette.title_text_muted,
+        align_right: false,
+        align_center: false,
+        // The rail's `Tabs` heading exactly — same size, same tracking, same
+        // weight, same ink. The column is still the tab list, so its heading is
+        // still a heading and not a title.
+        letter_spacing_em: RAIL_LABEL_TRACKING_EM,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: None,
+    });
+    let exit_hovered = hover == Some(ChromeTarget::FocusExit);
+    let exit_radius = (FOCUS_EXIT_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    sprites.push(ChromeSprite::new(
+        ChromeMark::ControlPill {
+            radius_px: exit_radius,
+        },
+        pixel_snapped(geometry.exit),
+        if exit_hovered {
+            palette.focus_exit_hover
+        } else {
+            palette.focus_exit
+        },
+    ));
+    sprites.push(ChromeSprite::new(
+        ChromeMark::ControlPillRing {
+            radius_px: exit_radius,
+            stroke_px: (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0) as u32,
+        },
+        pixel_snapped(geometry.exit),
+        // `.focus-exit:hover { border-color: var(--ink3) }` — the button steps up
+        // to the same muted ink the heading beside it is set in, which is where
+        // the mock-up's hover ladder ends.
+        if exit_hovered {
+            palette.title_text_muted
+        } else {
+            palette.focus_card_edge
+        },
+    ));
+    let exit_ink = if exit_hovered {
+        palette.focus_exit_text_hover
+    } else {
+        palette.focus_exit_text
+    };
+    let exit_glyph = (FOCUS_EXIT_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+    let exit_glyph_left = (geometry.exit[0] + FOCUS_EXIT_PADDING_X_LOGICAL_PX * scale).round();
+    let exit_glyph_top = ((geometry.exit[1] + geometry.exit[3] - exit_glyph) / 2.0).round();
+    sprites.push(ChromeSprite::new(
+        // `#i-close` — the same glyph every `×` in this window is drawn from.
+        // The button says `Exit` in words beside it, so the mark is what makes it
+        // read as *leaving* rather than as a link.
+        ChromeMark::TabClose,
+        [
+            exit_glyph_left,
+            exit_glyph_top,
+            exit_glyph_left + exit_glyph,
+            exit_glyph_top + exit_glyph,
+        ],
+        exit_ink,
+    ));
+    labels.push(ChromeLabel {
+        rect: [
+            exit_glyph_left + exit_glyph + FOCUS_EXIT_GAP_LOGICAL_PX * scale,
+            geometry.exit[1],
+            geometry.exit[2],
+            geometry.exit[3],
+        ],
+        text: crate::i18n::Text::FocusExit.text().to_owned(),
+        font_size_px: FOCUS_EXIT_FONT_LOGICAL_PX * scale,
+        color: exit_ink,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
+
+    // ── the cards ──
+    let card_radius = (FOCUS_CARD_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let card_border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let mark_size = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+    for (index, (card, content)) in geometry.cards.iter().zip(tabs).enumerate() {
+        if !in_list(card.body) {
+            continue;
+        }
+        let staged = index == active_tab;
+        // `.fcard:hover` is one hover: a pointer on the `×` is still a pointer on
+        // the card, exactly as `.vtab:hover` reads for a rail row.
+        let hovered = hover == Some(ChromeTarget::Tab(index))
+            || hover == Some(ChromeTarget::TabClose(index));
+        let body = clip_to_list(card.body);
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPill {
+                radius_px: card_radius,
+            },
+            body,
+            if staged {
+                palette.focus_card_staged
+            } else {
+                palette.focus_card
+            },
+        ));
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPillRing {
+                radius_px: card_radius,
+                stroke_px: card_border,
+            },
+            body,
+            // Contrast, not hue, and the order is the mock-up's own: a tab with
+            // something blocked on it outranks the pointer, and the pointer
+            // outranks the stage. `--warn` is the attention queue's colour and
+            // `--accent` is hover's; putting the stage on either would make one
+            // colour say two things, which is the collision the pane header
+            // settled the same way.
+            if content.mark.dot == Some(palette.status_warn) {
+                palette.status_warn
+            } else if hovered {
+                palette.accent
+            } else if staged {
+                palette.title_text_muted
+            } else {
+                palette.focus_card_edge
+            },
+        ));
+
+        // ── the mark slot: the strip's machinery, unchanged ──
+        let mark_rect = clip_to_list(card.mark);
+        if in_list(card.mark) {
+            match content.mark.ring {
+                Some(ring) => {
+                    let stroke = (WINDOW_TAB_RING_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32;
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ProgressRing {
+                            start_milliturns: 0,
+                            sweep_milliturns: 1000,
+                            stroke_px: stroke,
+                        },
+                        mark_rect,
+                        if staged {
+                            palette.ring_track_on_focus_card_staged
+                        } else {
+                            palette.ring_track_on_focus_card
+                        },
+                    ));
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ProgressRing {
+                            start_milliturns: ring.start_milliturns,
+                            sweep_milliturns: ring.sweep_milliturns,
+                            stroke_px: stroke,
+                        },
+                        mark_rect,
+                        ring.arc,
+                    ));
+                }
+                None => {
+                    let mut profile = ChromeSprite::new(content.mark_kind, mark_rect, palette.accent);
+                    profile.opacity = content.mark.opacity;
+                    profile.grayscale = content.mark.grayscale;
+                    sprites.push(profile);
+                }
+            }
+            if let Some(dot_color) = content.mark.dot {
+                let dot = (WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale).round().max(1.0);
+                let dot_left =
+                    (card.mark[2] - WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX * scale - dot).round();
+                let dot_top = (card.mark[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
+                let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
+                if in_list(dot_rect) {
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (dot / 2.0).round().max(1.0) as u32,
+                        },
+                        clip_to_list(dot_rect),
+                        dot_color,
+                    ));
+                }
+            }
+        }
+
+        // ── `.panecount`, the same badge on a third surface ──
+        let pinned = content.trailer.pinned;
+        if let Some(badge) = focus_card_badge_rect(
+            card,
+            content.pane_count,
+            content.badge_text_width,
+            pinned,
+            scale,
+        )
+        .filter(|badge| in_list(*badge))
+        {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: (WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+                },
+                pixel_snapped(clip_to_list(badge)),
+                if staged {
+                    palette.focus_card_pill_staged
+                } else {
+                    palette.focus_card_pill
+                },
+            ));
+            labels.push(ChromeLabel {
+                text: content.pane_count.to_string(),
+                rect: badge,
+                clip: Some(clip_to_list(badge)),
+                font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale,
+                color: if staged {
+                    palette.focus_card_ink_on_pill_staged
+                } else {
+                    palette.focus_card_muted_on_pill
+                },
+                align_right: false,
+                align_center: true,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::SemiBold,
+                tabular_numerals: true,
+            });
+        }
+
+        // ── the pin, as a state and never as an offer ──
+        if let Some(pin) = focus_card_pin_rect(card, pinned, scale).filter(|pin| in_list(*pin)) {
+            sprites.push(ChromeSprite::new(
+                // Fluent 2's fill axis, filled: this is the state "it is pinned"
+                // and there is no action beside it to be the regular one.
+                ChromeMark::Pin { filled: true },
+                clip_to_list(pin),
+                if staged {
+                    palette.focus_card_title_staged
+                } else {
+                    palette.focus_card_glyph
+                },
+            ));
+        }
+
+        // ── the name ──
+        let title_right =
+            focus_card_title_right(card, content.pane_count, content.badge_text_width, pinned, scale);
+        if title_right > card.title[0] {
+            let title_box = [card.title[0], card.body[1], title_right, card.body[3]];
+            labels.push(ChromeLabel {
+                text: content.title.clone(),
+                rect: title_box,
+                clip: Some(clip_to_list(title_box)),
+                font_size_px: FOCUS_CARD_FONT_LOGICAL_PX * scale,
+                color: if staged {
+                    palette.focus_card_title_staged
+                } else {
+                    palette.focus_card_title
+                },
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+            });
+        }
+
+        // ── the `×`, revealed by the pointer ──
+        //
+        // `.fcard:hover .fc-close { visibility: visible }` — the strip's own
+        // idiom rather than the rail's Q174 "stated at rest", and the mock-up
+        // says which: a card is wider than a rail row and the reveal costs the
+        // name nothing, because the box was reserved either way.
+        if hovered && in_list(card.close) {
+            let close_hovered = hover == Some(ChromeTarget::TabClose(index));
+            if close_hovered {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                            as u32,
+                    },
+                    pixel_snapped(clip_to_list(card.close)),
+                    if staged {
+                        palette.focus_card_pill_staged
+                    } else {
+                        palette.focus_card_pill
+                    },
+                ));
+            }
+            let glyph = (FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+            let glyph_left = ((card.close[0] + card.close[2] - glyph) / 2.0).round();
+            let glyph_top = ((card.close[1] + card.close[3] - glyph) / 2.0).round();
+            sprites.push(ChromeSprite::new(
+                ChromeMark::TabClose,
+                [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                if close_hovered {
+                    if staged {
+                        palette.focus_card_ink_on_pill_staged
+                    } else {
+                        palette.focus_card_ink_on_pill
+                    }
+                } else if staged {
+                    palette.focus_card_glyph_staged
+                } else {
+                    palette.focus_card_glyph
+                },
+            ));
+        }
+    }
+
+    // ── `.rail-new`: the `+` and the `˅`, kept exactly as the rail keeps them ──
+    //
+    // The column is still where new tabs come from, and `paintFocusRail` writes
+    // `focusRailHtml() + railNewHtml()` for that reason: focus mode replaces the
+    // *list*, not the panel's own furniture.
+    let new_hovered = hover == Some(ChromeTarget::NewTab);
+    let menu_hovered = hover == Some(ChromeTarget::NewTabMenu);
+    let row_radius = (RAIL_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    for (rect, hovered) in [
+        (geometry.new_tab, new_hovered),
+        (geometry.new_tab_menu, menu_hovered),
+    ] {
+        if hovered {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: row_radius,
+                },
+                pixel_snapped(rect),
+                palette.caption_hover,
+            ));
+        }
+    }
+    let plus_slot_left = geometry.new_tab[0] + RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX * scale;
+    let plus = (WINDOW_NEW_TAB_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+    let plus_left = (plus_slot_left + (mark_size - plus) / 2.0).round();
+    let plus_top = ((geometry.new_tab[1] + geometry.new_tab[3] - plus) / 2.0).round();
+    sprites.push(ChromeSprite::new(
+        ChromeMark::Plus,
+        [plus_left, plus_top, plus_left + plus, plus_top + plus],
+        if new_hovered {
+            palette.title_text_hover
+        } else {
+            palette.title_text_muted
+        },
+    ));
+    let words_left = plus_slot_left + mark_size + RAIL_TAB_GAP_LOGICAL_PX * scale;
+    if words_left < geometry.new_tab[2] {
+        labels.push(ChromeLabel {
+            text: crate::i18n::Text::RailNewTab.text().to_owned(),
+            rect: [
+                words_left,
+                geometry.new_tab[1],
+                geometry.new_tab[2],
+                geometry.new_tab[3],
+            ],
+            font_size_px: RAIL_TAB_FONT_LOGICAL_PX * scale,
+            color: if new_hovered {
+                palette.title_text_hover
+            } else {
+                palette.title_text_muted
+            },
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+    let chevron_width = (WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX * scale).round().max(1.0);
+    let chevron_height = (WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let chevron_left =
+        ((geometry.new_tab_menu[0] + geometry.new_tab_menu[2] - chevron_width) / 2.0).round();
+    let chevron_top =
+        ((geometry.new_tab_menu[1] + geometry.new_tab_menu[3] - chevron_height) / 2.0).round();
+    sprites.push(ChromeSprite::new(
+        ChromeMark::chevron(chevron_turn),
+        [
+            chevron_left,
+            chevron_top,
+            chevron_left + chevron_width,
+            chevron_top + chevron_height,
+        ],
+        if menu_hovered || profile_menu_open {
+            palette.title_text_hover
+        } else {
+            palette.title_text_muted
+        },
+    ));
 }
 
 /// A collapsed seat's bar carries its name and its state icon (§2.6.3) — except

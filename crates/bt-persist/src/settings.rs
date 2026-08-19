@@ -68,7 +68,15 @@ use serde::{Deserialize, Serialize};
 /// number somebody once wrote in Rust rather than an absence — `M0_FROZEN_LINE_QUOTA`, one
 /// hundred thousand lines a pane, in force since M0-alpha — and this step moves it into the
 /// file without moving it.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 14;
+///
+/// **v15 carries `focus_mode`**, the Appearance page's own `Focus mode` row (DESIGN §7.1.6b′),
+/// and it is the same shape a fifth time: one key, its own day, and a migration that writes the
+/// answer every build before it gave. Here that answer is genuinely an absence — no build before
+/// this one had a focus mode to be in — so the step writes `false`, and a reader who has never
+/// met the row opens exactly the window they opened yesterday. The key is what makes the mode a
+/// place somebody can *live* rather than a verb they re-press every morning: a window closed
+/// with the card column up reopens with it up.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 15;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -186,10 +194,10 @@ pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
 /// sentence [`DEFAULT_BLOCK_MAX_HEIGHT`] is written under.
 pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 
-/// `settings.json` v13 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v15 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 14,
+///   "schema_version": 15,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -211,7 +219,8 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 ///   "acrylic": true | false,
 ///   "always_on_top": true | false,
 ///   "advanced_open": ["appearance", …],
-///   "scrollback_lines": 25000 | 50000 | 100000 | 200000
+///   "scrollback_lines": 25000 | 50000 | 100000 | 200000,
+///   "focus_mode": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -513,6 +522,26 @@ pub struct SettingsV1 {
     /// becomes. See `settings::scrollback_index`.
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: u32,
+    /// **What shape a new window opens in** — the Appearance page's `Focus mode` row, and the
+    /// only half of that mode which outlives the process (DESIGN §7.1.6b′, §2.4 rule three).
+    ///
+    /// The bit a window is *currently* in lives on the window (`WindowRuntime::focus_mode`),
+    /// because "what is this window doing right now" is a fact about one window and five doors
+    /// can turn it. This key is the other half of the same `dwm_dark_mode` shape: the setting
+    /// says what every *new* window is born as, and the row in Appearance is what makes the
+    /// answer survive a restart. A layout mode somebody may live in has to be a place they can
+    /// come back to; a mode that reset itself every launch would be a verb wearing a
+    /// preference's clothes.
+    ///
+    /// `false` is the default and is not a judgement about the mode — it is what every build
+    /// before v15 did, which is the sentence every migration in this file is written under.
+    ///
+    /// It is emphatically **not** a second spelling of `session.json`'s `tab_layout` /
+    /// `sidebar_mode`. Focus mode supersedes the chrome those two describe while it is on and
+    /// writes neither of them, so both survive it untouched and there is nothing to restore on
+    /// the way out.
+    #[serde(default)]
+    pub focus_mode: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -553,6 +582,8 @@ impl Default for SettingsV1 {
             // with a triangle on it.
             advanced_open: Vec::new(),
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
+            // The shape every window this product has ever opened in.
+            focus_mode: false,
         }
     }
 }
