@@ -10975,7 +10975,17 @@ fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
         chrome.labels.len()
     );
     for quad in &chrome.quads {
-        let _ = writeln!(out, "quad   {:?} {}", quad.rect, ink(quad.color));
+        // The surface class is printed because a quad that *is* the window and a
+        // quad struck on one are the same four numbers and the same colour on
+        // screen until the window goes translucent — which is exactly the report
+        // this line was added for (§7.1.6c-4f).
+        let _ = writeln!(
+            out,
+            "quad   {:?} {} {:?}",
+            quad.rect,
+            ink(quad.color),
+            quad.surface
+        );
     }
     for sprite in &chrome.sprites {
         let _ = writeln!(
@@ -19424,45 +19434,20 @@ impl Runtime {
         self.renderer.set_modal_overlay(layers)
     }
 
-    /// The rail's own level of the stack, or nothing when there is no rail.
+    /// The rail's own level of the stack — [`rail_overlay_layer`] with this
+    /// window's two answers filled in.
     ///
-    /// A straight lift of [`Runtime::rail_chrome`] into the overlay's vocabulary.
-    /// Chrome fills are opaque by construction — every translucent thing the rail
-    /// draws (a hover pill, a landing wash, the shade it casts) is a *sprite*,
-    /// which carries its own opacity — so the per-quad alpha here is 1.0 and the
-    /// lift changes not one pixel of what the rail looked like. All it changes is
-    /// when the three channels are drawn, which is the whole of that fix.
-    ///
-    /// **The layer's own opacity is the fold** — `.rail { transition: … opacity
-    /// .18s ease }` with `.window.rail-collapsed .rail { opacity: 0 }` (mock-up
-    /// 814/823). CSS `opacity` on the element the layer *is*, which is exactly
-    /// what this field means, so the panel and everything standing in it leave
-    /// together rather than the ground going while the icons stay. Reading it
-    /// here rather than baking it into each sprite is also what keeps the fade
-    /// from compounding with the label fade the rail already runs (Q183): they
-    /// are two different declarations on two different elements, and CSS
-    /// multiplies them exactly once each.
+    /// The fold is sampled *here* rather than inside the lift because it is a
+    /// reading of a clock, and a pure function that asks the time is a function
+    /// nothing can pin. Reading it once at the layer rather than baking it into
+    /// each sprite is also what keeps the fade from compounding with the label
+    /// fade the rail already runs (Q183): they are two declarations on two
+    /// elements, and CSS multiplies them exactly once each.
     fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
-        let rail = &self.rail_chrome;
-        if rail.quads.is_empty() && rail.labels.is_empty() && rail.sprites.is_empty() {
-            return Vec::new();
-        }
-        let opacity = self.rail_fold.sample(Instant::now(), self.motion).0;
-        vec![marks::OverlayLayer {
-            quads: rail
-                .quads
-                .iter()
-                .map(|quad| bt_render::OverlayQuad {
-                    rect: quad.rect,
-                    color: quad.color,
-                    alpha: 1.0,
-                })
-                .collect(),
-            labels: rail.labels.clone(),
-            sprites: rail.sprites.clone(),
-            opacity: opacity.clamp(0.0, 1.0),
-            ..marks::OverlayLayer::default()
-        }]
+        rail_overlay_layer(
+            &self.rail_chrome,
+            self.rail_fold.sample(Instant::now(), self.motion).0,
+        )
     }
 
     /// **K124/N157 — the pane's stand-in in the strip**, and the slot it takes.
@@ -46734,6 +46719,68 @@ fn rail_zone_wants_open(
     inside || matches!(peek_origin, Some(float::FloatTrigger::Tab(_)))
 }
 
+/// The rail's own level of the overlay stack — [`seats::WindowChrome::rail`]
+/// lifted into the overlay's vocabulary, or nothing when there is no rail.
+///
+/// **The lift keeps the surface class, and that is the whole of §7.1.6c-4f's
+/// second amendment.** The rail is not drawn in the chrome pass at all — R1 puts
+/// it on a floating level, because an open icon rail overlaps the terminal for
+/// 174 of its 220 pixels and a rail drawn under the panes would simply vanish
+/// the moment it opened. So `ChromeSurface` never reached the pipeline that
+/// reads it: every rail quad came out of here as an `OverlayQuad { alpha: 1.0 }`,
+/// and the one-translucency ruling of 2026-08-18 landed on every band in the
+/// window except the one this function carries. Measured at 30% over a bright
+/// desktop, the tab strip let it through and the rail did not — a dark column
+/// down the left edge of a window you could see the desk through.
+///
+/// A ground therefore travels the ground channel and everything else stays a
+/// quad. The comment this replaces was right about the ink and wrong about only
+/// one thing: "chrome fills are opaque by construction" is true of a hairline,
+/// a hover pill and a landing wash, and false of the panel they are struck on.
+///
+/// **The layer's own opacity is still the fold** — `.rail { transition: …
+/// opacity .18s ease }` with `.window.rail-collapsed .rail { opacity: 0 }`
+/// (mock-up 814/823). CSS `opacity` on the element the layer *is*, so the panel
+/// and everything standing in it leave together rather than the ground going
+/// while the icons stay. It reaches the ground channel as a blend constant
+/// rather than as a source alpha — see [`bt_render::OverlayGround`] — which is
+/// what lets a *fading* panel still be glass instead of going opaque on its way
+/// out.
+///
+/// Red gate: send the grounds through the quad channel as this used to and the
+/// pin below finds the rail's panel among the fills; drop the fold and a
+/// collapsing rail pops instead of fading.
+fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> Vec<marks::OverlayLayer> {
+    if rail.quads.is_empty() && rail.labels.is_empty() && rail.sprites.is_empty() {
+        return Vec::new();
+    }
+    let (grounds, quads): (Vec<bt_render::ChromeQuad>, Vec<bt_render::ChromeQuad>) = rail
+        .quads
+        .iter()
+        .partition(|quad| quad.surface == bt_render::ChromeSurface::Ground);
+    vec![marks::OverlayLayer {
+        grounds: grounds
+            .into_iter()
+            .map(|quad| bt_render::OverlayGround {
+                rect: quad.rect,
+                color: quad.color,
+            })
+            .collect(),
+        quads: quads
+            .into_iter()
+            .map(|quad| bt_render::OverlayQuad {
+                rect: quad.rect,
+                color: quad.color,
+                alpha: 1.0,
+            })
+            .collect(),
+        labels: rail.labels.clone(),
+        sprites: rail.sprites.clone(),
+        opacity: fold.clamp(0.0, 1.0),
+        ..marks::OverlayLayer::default()
+    }]
+}
+
 /// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**
 ///
 /// Every route into the rail goes through here — today the settings dialog's two
@@ -55588,6 +55635,66 @@ mod tests {
             claimed(ModifiersState::CONTROL | ModifiersState::SHIFT),
             Some(shortcuts::Action::CommandPalette)
         );
+    }
+
+    /// PIN (user report 2026-08-18; `docs/DESIGN.md` §7.1.6c-4f) — **the rail's
+    /// panel survives the lift onto the overlay stack as a ground.**
+    ///
+    /// The one-translucency ruling named the rail among the window's grounds and
+    /// [`seats::rail_chrome`] duly marks its panel [`ChromeSurface::Ground`] —
+    /// and then the class was thrown away one function later, because the rail
+    /// is not drawn in the chrome pass at all. Every quad came through
+    /// [`rail_overlay_layer`] as an `OverlayQuad { alpha: 1.0 }`, which is the
+    /// overlay's word for "opaque", so the fix landed on every band in the
+    /// window except this one: at 30% over a bright desktop the tab strip let it
+    /// through and the rail was a solid dark column.
+    ///
+    /// Both halves are asserted, and both are load-bearing: routing *everything*
+    /// through the ground channel would take the hairline and the seam with it,
+    /// and a hairline drawn at the window's alpha is a hairline that dissolves
+    /// into the panel it is meant to separate.
+    ///
+    /// Mutation: map every quad into `quads` as the lift used to, and the first
+    /// assertion finds no ground; map every quad into `grounds` and the second
+    /// finds no ink.
+    #[test]
+    fn the_rails_panel_reaches_the_overlay_as_a_ground_and_its_hairline_as_ink() {
+        let panel = [0.0, 40.0, 220.0, 900.0];
+        let hairline = [219.0, 40.0, 220.0, 900.0];
+        let rail = seats::ChromeGroup {
+            quads: vec![
+                bt_render::ChromeQuad::ground(panel, [24, 24, 24]),
+                bt_render::ChromeQuad::ink(hairline, [60, 60, 60]),
+            ],
+            labels: Vec::new(),
+            sprites: Vec::new(),
+        };
+        let layers = rail_overlay_layer(&rail, 1.0);
+        let [layer] = layers.as_slice() else {
+            panic!("a rail with quads in it is one layer");
+        };
+        assert_eq!(
+            layer.grounds,
+            vec![bt_render::OverlayGround {
+                rect: panel,
+                color: [24, 24, 24],
+            }],
+            "`.rail {{ background: var(--panel) }}` is the window at that rectangle"
+        );
+        assert_eq!(
+            layer.quads.iter().map(|quad| quad.rect).collect::<Vec<_>>(),
+            vec![hairline],
+            "the border-right is struck on the panel and stays opaque"
+        );
+        // The fold is the layer's, not the panel's: a ground has no alpha of its
+        // own to fade, and lowering the layer's opacity must not be answered by
+        // moving the panel out of the ground channel.
+        let folding = rail_overlay_layer(&rail, 0.4);
+        assert_eq!(folding[0].grounds, layer.grounds);
+        assert!((folding[0].opacity - 0.4).abs() < 1e-6);
+        // An empty rail is no layer at all, which is what a horizontal layout
+        // and a collapsed rail both hand this function.
+        assert!(rail_overlay_layer(&seats::ChromeGroup::default(), 1.0).is_empty());
     }
 
     /// **Red gate (user report, 2026-08-15): a peek summoned from a pane head

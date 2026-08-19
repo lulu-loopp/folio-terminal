@@ -857,7 +857,7 @@ pub enum PresentOutcome {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
 struct RectInstance {
     rect: [f32; 4],
     color: [f32; 4],
@@ -918,6 +918,13 @@ struct MathDraw {
 /// and whether its text made it into the atlas. Held apart per layer so the pass
 /// can draw all three channels of one layer before starting the next.
 struct PreparedOverlayLayer {
+    /// This layer's grounds, and the constant the pass fades them in with — see
+    /// [`OverlayGround`] and [`create_ground_fade_rect_pipeline`]. The opacity
+    /// travels with the buffer because it is a piece of pass state the draw
+    /// cannot be issued without.
+    ground_buffer: Option<wgpu::Buffer>,
+    ground_count: u32,
+    ground_opacity: f32,
     rect_buffer: Option<wgpu::Buffer>,
     rect_count: u32,
     icon_buffer: Option<wgpu::Buffer>,
@@ -937,6 +944,12 @@ struct PreparedSeat {
     clip: SeatViewport,
     /// Which entry of `seat_slots` holds this seat's prepared glyph batches.
     slot: usize,
+    /// The cell backgrounds a program set, premultiplied by the window's alpha —
+    /// see [`WindowRenderer::rectangles`]. Its own buffer for the reason the
+    /// chrome's grounds have one: they are the same surface as the clear and are
+    /// drawn with the clear's arithmetic, under everything else in the seat.
+    ground_rect_buffer: wgpu::Buffer,
+    ground_rect_count: usize,
     rect_buffer: wgpu::Buffer,
     rect_count: usize,
     math_vertex_buffer: Option<wgpu::Buffer>,
@@ -946,6 +959,20 @@ struct PreparedSeat {
     status_rect_count: usize,
     math_overlay_buffer: wgpu::Buffer,
     math_overlay_count: usize,
+}
+
+/// One seat's flat fills for a frame, in the two classes [`WindowRenderer::rectangles`]
+/// tells apart: the window's own surface, and the marks struck on it.
+///
+/// Two lists rather than one list with a flag, because the two are drawn by two
+/// pipelines and the split is what the caller needs. Order between them is not a
+/// judgement call: a ground is the bottom of its own cell by construction, so
+/// "grounds, then ink" is the order the single list already had.
+struct SeatRects {
+    /// Premultiplied by the window's ground alpha, for the `Replace` pipeline.
+    grounds: Vec<RectInstance>,
+    /// Straight, for the alpha-blending pipeline — exactly as before.
+    ink: Vec<RectInstance>,
 }
 
 /// One frame's math block draws plus the indices of the `frame.math_blocks` entries that actually
@@ -2222,6 +2249,9 @@ pub struct GpuContext {
     /// The same pipeline blending `Replace`, for the chrome quads that *are*
     /// the window's ground — see [`ChromeSurface::Ground`].
     ground_rect_pipeline: wgpu::RenderPipeline,
+    /// The same again, cross-faded by the pass's blend constant, for a ground on
+    /// a floating layer that carries its own opacity — see [`OverlayGround`].
+    ground_fade_rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
     math_sampler: wgpu::Sampler,
@@ -2713,6 +2743,12 @@ pub enum ChromeSurface {
     /// premultiplied arithmetic at [`WindowGround::alpha`], so a window at 30%
     /// is 30% here too — one sheet of glass, not a translucent hole in an
     /// opaque one.
+    ///
+    /// **A ground that floats travels [`OverlayGround`] instead.** The vertical
+    /// rail is drawn on a level of the overlay stack rather than in the chrome
+    /// pass, and for nine days the class was simply dropped at that lift —
+    /// §7.1.6c-4f's second amendment, and the reason the rail was the one band
+    /// in the window this enum did not reach.
     Ground,
 }
 
@@ -2924,6 +2960,29 @@ pub struct OverlayQuad {
     pub alpha: f32,
 }
 
+/// One rectangle of an overlay layer that **is** the window at that place —
+/// [`ChromeSurface::Ground`] arriving on a floating level of the stack
+/// (`docs/DESIGN.md` §7.1.6c-4f, the rail's amendment of 2026-08-18).
+///
+/// Its own type rather than an [`OverlayQuad`] with a flag, because the flag
+/// would have to say what `alpha` then meant. An overlay quad's alpha is a
+/// coverage — how much of a colour lands on an unknown surface — and a ground
+/// has no such number to give: it does not land *on* the window, it **is** the
+/// window there, at the window's own alpha and nobody else's. A type that cannot
+/// express a coverage is the only way to say that once instead of in every
+/// caller's comment.
+///
+/// The one fade a ground answers to is its **layer's** — CSS `opacity` on the
+/// element the layer is — and that fade is a cross-fade towards what stands
+/// under the layer rather than a coverage on the source. See
+/// [`create_ground_fade_rect_pipeline`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayGround {
+    /// `[left, top, right, bottom]`.
+    pub rect: [f32; 4],
+    pub color: [u8; 3],
+}
+
 /// One stacking layer of the modal overlay: its fills, its marks and its text.
 ///
 /// The overlay draws in three channels — instanced rectangles, rasterized marks,
@@ -2940,6 +2999,21 @@ pub struct OverlayQuad {
 /// them later.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverlayLayer {
+    /// This layer's **grounds**, drawn before its fills (§7.1.6c-4f).
+    ///
+    /// A channel of its own and not a class inside `quads`, for the reason the
+    /// channels are channels at all: the order between them is fixed rather than
+    /// argued about per caller, and a ground is the bottom of its own region by
+    /// construction — it is the surface everything else in the layer is struck
+    /// on. Seat chrome makes the same split with a field on the quad because its
+    /// quads are one flat list with no layers to hang a channel from; here there
+    /// are layers, so the channel is the cheaper true statement.
+    ///
+    /// Empty for every layer but the rail's. A menu, a dialog, a tip and a
+    /// scrim are all things laid *over* the window — "text and menus stay
+    /// opaque" — and the rail is the one floating level that is a panel of the
+    /// window itself.
+    pub grounds: Vec<OverlayGround>,
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub icons: Vec<ChromeIcon>,
@@ -2987,6 +3061,7 @@ impl Default for OverlayLayer {
     /// and "I did not say" has to keep meaning "fully there".
     fn default() -> Self {
         Self {
+            grounds: Vec::new(),
             quads: Vec::new(),
             labels: Vec::new(),
             icons: Vec::new(),
@@ -3002,7 +3077,10 @@ impl OverlayLayer {
     /// to draw exactly nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        (self.quads.is_empty() && self.labels.is_empty() && self.icons.is_empty())
+        (self.grounds.is_empty()
+            && self.quads.is_empty()
+            && self.labels.is_empty()
+            && self.icons.is_empty())
             || self.opacity <= 0.0
     }
 
@@ -3364,6 +3442,7 @@ impl GpuContext {
         let atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
         let rect_pipeline = create_rect_pipeline(&device, format);
         let ground_rect_pipeline = create_ground_rect_pipeline(&device, format);
+        let ground_fade_rect_pipeline = create_ground_fade_rect_pipeline(&device, format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
             create_math_pipeline(&device, format);
         let (background_pipeline, background_bind_group_layout, background_sampler) =
@@ -3382,6 +3461,7 @@ impl GpuContext {
             atlas,
             rect_pipeline,
             ground_rect_pipeline,
+            ground_fade_rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
             math_sampler,
@@ -4582,6 +4662,12 @@ impl WindowRenderer {
             .find(|entry| entry.focused)
             .map_or(self.seat, |entry| entry.seat);
         let empty_rect = [RectInstance::zeroed()];
+        // How much of the window reaches the eye, read **once** for the whole
+        // frame (§7.1.6c-4b/4f): the clear, a program's cell backgrounds, every
+        // chrome band and the rail's own panel are one sheet of glass, and two
+        // reads of a value a settings write can move between them is how a sheet
+        // becomes two.
+        let ground_alpha = ground::window_ground().alpha;
         let mut prepared: Vec<PreparedSeat> = Vec::with_capacity(seats.len());
         // Every rendered table on screen, from every seat, gathered as this frame's extra preview
         // bodies. They join the list the caller set rather than forming a pass of their own: a
@@ -4675,11 +4761,27 @@ impl WindowRenderer {
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             });
-            let rects = self.rectangles(
+            let SeatRects {
+                grounds: ground_rects,
+                ink: rects,
+            } = self.rectangles(
                 frame,
                 &math_batch.drawn,
                 self.window_focused && entry.focused,
+                ground_alpha,
             );
+            let ground_rect_data = if ground_rects.is_empty() {
+                empty_rect.as_slice()
+            } else {
+                ground_rects.as_slice()
+            };
+            let ground_rect_buffer =
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("terminal cell grounds"),
+                        contents: bytemuck::cast_slice(ground_rect_data),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
             let rect_data = if rects.is_empty() {
                 empty_rect.as_slice()
             } else {
@@ -4748,6 +4850,8 @@ impl WindowRenderer {
                 // rectangle, which is the other half of that validation.
                 clip: entry.clip.clamped_to(self.config.width, self.config.height),
                 slot: index,
+                ground_rect_buffer,
+                ground_rect_count: ground_rects.len(),
                 rect_buffer,
                 rect_count: rects.len(),
                 math_vertex_buffer,
@@ -4800,7 +4904,6 @@ impl WindowRenderer {
         // arithmetic, the ink is opaque and blends over them. Splitting them
         // costs nothing in order — a ground is the bottom of its own region's
         // stack by construction, since it is the band the rest is struck on.
-        let ground_alpha = ground::window_ground().alpha;
         let chrome_ground_rects: Vec<RectInstance> = self
             .chrome_quads
             .iter()
@@ -4917,6 +5020,30 @@ impl WindowRenderer {
         let overlay_layers = std::mem::take(&mut self.overlay_layers);
         let mut overlay_draws: Vec<PreparedOverlayLayer> = Vec::with_capacity(overlay_layers.len());
         for (index, layer) in overlay_layers.iter().enumerate() {
+            // The layer's grounds, on the clear's own arithmetic and in their own
+            // buffer: the pass draws them under everything else this layer has,
+            // through a pipeline the layer's opacity is a blend constant of.
+            let ground_rects: Vec<RectInstance> = layer
+                .grounds
+                .iter()
+                .map(|ground| {
+                    premultiplied_surface_pixel_rect(
+                        ground.rect,
+                        ground.color,
+                        ground_alpha,
+                        self.config.width,
+                        self.config.height,
+                    )
+                })
+                .collect();
+            let ground_buffer = (!ground_rects.is_empty()).then(|| {
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay layer grounds"),
+                        contents: bytemuck::cast_slice(ground_rects.as_slice()),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            });
             let mut rects: Vec<RectInstance> = layer
                 .faded_quads()
                 .iter()
@@ -4988,6 +5115,9 @@ impl WindowRenderer {
                 )
                 .is_ok();
             overlay_draws.push(PreparedOverlayLayer {
+                ground_buffer,
+                ground_count: ground_rects.len() as u32,
+                ground_opacity: layer.opacity.clamp(0.0, 1.0),
                 rect_buffer,
                 rect_count: rects.len() as u32,
                 icon_buffer,
@@ -4997,7 +5127,10 @@ impl WindowRenderer {
         }
         self.overlay_layers = overlay_layers;
         let overlay_has_work = overlay_draws.iter().any(|layer| {
-            layer.rect_buffer.is_some() || layer.icon_buffer.is_some() || layer.text_prepared
+            layer.ground_buffer.is_some()
+                || layer.rect_buffer.is_some()
+                || layer.icon_buffer.is_some()
+                || layer.text_prepared
         });
         let rectangles_prepared_at = Instant::now();
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
@@ -5111,6 +5244,15 @@ impl WindowRenderer {
                 // precisely the mock-up's counter-scale (see [`SeatFrame::clip`]).
                 pass.set_scissor_rect(seat.clip.x, seat.clip.y, seat.clip.width, seat.clip.height);
                 let slot = &self.seat_slots[seat.slot];
+                // The paper a program declared, before the ink printed on it: the
+                // same order the one list had, drawn with the clear's own
+                // arithmetic so a banner is the window wearing another colour
+                // rather than a slab laid on it (§7.1.6c-4f).
+                if seat.ground_rect_count > 0 {
+                    pass.set_pipeline(&gpu.ground_rect_pipeline);
+                    pass.set_vertex_buffer(0, seat.ground_rect_buffer.slice(..));
+                    pass.draw(0..6, 0..seat.ground_rect_count as u32);
+                }
                 if seat.rect_count > 0 {
                     pass.set_pipeline(&gpu.rect_pipeline);
                     pass.set_vertex_buffer(0, seat.rect_buffer.slice(..));
@@ -5317,6 +5459,23 @@ impl WindowRenderer {
                 // it is the reason a picker's popup covers the row under it
                 // whether that row drew itself as a fill, a mark or a caption.
                 for (index, layer) in overlay_draws.iter().enumerate() {
+                    // The grounds first, as they are in the chrome's own pass and
+                    // for the same reason: a ground is the surface the rest of
+                    // this layer is struck on. The blend constant is this layer's
+                    // opacity, which is the whole of how a floating ground fades
+                    // — see [`create_ground_fade_rect_pipeline`].
+                    if let Some(buffer) = layer.ground_buffer.as_ref() {
+                        let fade = f64::from(layer.ground_opacity);
+                        pass.set_pipeline(&gpu.ground_fade_rect_pipeline);
+                        pass.set_blend_constant(wgpu::Color {
+                            r: fade,
+                            g: fade,
+                            b: fade,
+                            a: fade,
+                        });
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..6, 0..layer.ground_count);
+                    }
                     if let Some(buffer) = layer.rect_buffer.as_ref() {
                         pass.set_pipeline(&gpu.rect_pipeline);
                         pass.set_vertex_buffer(0, buffer.slice(..));
@@ -6151,14 +6310,67 @@ impl WindowRenderer {
     /// the window holds focus *and* this is the pane being typed into. Every other
     /// pane on screen is, as far as its caret is concerned, in exactly the
     /// position a window that lost focus is in.
+    /// Every flat fill one seat draws, split into the two classes the
+    /// one-translucency ruling names (§7.1.6c-4f, ruling of 2026-08-18).
+    ///
+    /// **A background is a background wherever it was declared.** The clear
+    /// under a pane carries the window's alpha; a cell whose background a
+    /// *program* set is the same surface at that rectangle, wearing another
+    /// colour, so it carries the same alpha through the same premultiplied
+    /// arithmetic. Until this ruling it did not, and the difference was visible
+    /// in one screenshot: an agent's grey message bars and its "jump to bottom"
+    /// chip stood as opaque slabs on a window you could otherwise see the desk
+    /// through — a banner that was *more* solid than the terminal it was printed
+    /// into.
+    ///
+    /// The line is **not** "cell fills versus everything else". It is content
+    /// against state, and the fills are enumerated here rather than sampled
+    /// because the failure this guards is one of them landing on the wrong side:
+    ///
+    /// *Content backgrounds — the ground, and they take the window's alpha:*
+    /// - **A resolved cell background** that differs from the theme's default:
+    ///   SGR 40-49/100-107, `48;5;N`, `48;2;r;g;b`, and a theme index the palette
+    ///   answered. The program said "the paper here is this colour", and paper is
+    ///   what the window's alpha is *about*.
+    /// - **A reverse-video cell**, which reaches this loop already swapped by
+    ///   [`resolve_colors`] and is therefore not a special case: `SGR 7` is how a
+    ///   program declares a background with the two colours it already has. A
+    ///   selected menu row in `fzf` and a highlighted bar in `top` are both this,
+    ///   and neither is Folio's state.
+    ///
+    /// *State — Folio's own marks, and they stay opaque:*
+    /// - **The selection.** It answers a drag the reader is making right now; it
+    ///   must read as one continuous sweep over whatever it crosses, and a
+    ///   translucent sweep over a program's own banner would be two colours
+    ///   mixing into a third that means nothing.
+    /// - **The search grounds**, both of them — the matches and the current one.
+    ///   Same argument, plus a second: the pair is only legible as a *pair* if
+    ///   the difference between them survives what they are drawn over.
+    /// - **The caret.** A cursor is the one thing on screen that must never be
+    ///   ambiguous, and it is a block of ink by design.
+    /// - **The math block's hover dim, its failure marker and its overflow
+    ///   fades**, which decorate a raster the block itself put down rather than
+    ///   the window — a fill on a picture, not a picture's paper.
+    /// - **Box-drawing geometry and underlines**, which are foreground: they are
+    ///   drawn in the cell's *ink* colour and are glyphs by another means.
+    ///
+    /// The seat's status band and the math toolbar are outside this function and
+    /// stay where they are, for the same reason as the last two: chrome the app
+    /// draws inside a pane is a mark on it.
+    ///
+    /// Red gate: hand the cell backgrounds back to the ink list and a 30% window
+    /// shows an opaque banner again; hand the selection to the grounds and a
+    /// selection over glass goes half-transparent.
     fn rectangles(
         &self,
         frame: &ViewportFrame,
         drawn_math_blocks: &HashSet<usize>,
         seat_focused: bool,
-    ) -> Vec<RectInstance> {
+        ground_alpha: f32,
+    ) -> SeatRects {
         let columns = frame.columns.get() as usize;
         let drawable_rows = frame.drawable_rows();
+        let mut grounds = Vec::new();
         let mut rects = Vec::new();
         for (index, cell) in frame
             .cells
@@ -6168,7 +6380,10 @@ impl WindowRenderer {
         {
             let (_, background) = resolve_colors(&cell.style);
             if background != default_background() {
-                rects.push(self.cell_rect(frame, index / columns, index % columns, background));
+                grounds.push(premultiplied_by_ground(
+                    self.cell_rect(frame, index / columns, index % columns, background),
+                    ground_alpha,
+                ));
             }
         }
         // Read once per frame from the same atomic word the background comes
@@ -6359,7 +6574,10 @@ impl WindowRenderer {
             );
             index = end;
         }
-        rects
+        SeatRects {
+            grounds,
+            ink: rects,
+        }
     }
 
     /// A display formula is never wrapped, so one too wide for its band is cut off at the pane
@@ -7155,11 +7373,29 @@ fn premultiplied_surface_pixel_rect(
     width: u32,
     height: u32,
 ) -> RectInstance {
+    premultiplied_by_ground(
+        surface_pixel_rect_with_alpha(rect, color, 1.0, width, height),
+        alpha,
+    )
+}
+
+/// The same encoding, applied to a rectangle whose geometry is already settled:
+/// `(A·colour, A)` in linear light, which is what a `Replace` pipeline onto a
+/// premultiplied surface requires and what [`ground::premultiplied_clear`]
+/// writes.
+///
+/// Split out from [`premultiplied_surface_pixel_rect`] because the grid's own
+/// grounds are laid out in **seat-local** pixels (`pixel_rect`) rather than
+/// whole-surface ones, and the encoding must be the one arithmetic whichever
+/// coordinate space the rectangle came out of. A second copy of it in the seat
+/// lane is exactly how a program's banner would end up a shade off the pane it
+/// is printed into.
+fn premultiplied_by_ground(mut instance: RectInstance, alpha: f32) -> RectInstance {
     let alpha = alpha.clamp(0.0, 1.0);
-    let mut instance = surface_pixel_rect_with_alpha(rect, color, alpha, width, height);
     for channel in &mut instance.color[..3] {
         *channel *= alpha;
     }
+    instance.color[3] = alpha;
     instance
 }
 
@@ -9145,6 +9381,49 @@ fn create_ground_rect_pipeline(
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     create_rect_pipeline_with_blend(device, format, "chrome ground", wgpu::BlendState::REPLACE)
+}
+
+/// The ground pipeline again, **cross-fading** towards whatever it is being laid
+/// over by the pass's blend constant — what an [`OverlayGround`] is drawn with
+/// (§7.1.6c-4f, the rail's amendment).
+///
+/// A ground on a floating layer has one thing the chrome's grounds do not: the
+/// layer's own CSS `opacity`, which the rail's fold animates from 0 to 1. That
+/// fade cannot be a source alpha. `Replace` would ignore it, and `ALPHA_BLENDING`
+/// would land the destination on `o + (1 − o)·A` — a rail mid-fold going *more*
+/// opaque than the window it is folding into, which is the same arithmetic the
+/// one-translucency ruling threw out. What a fading element actually is, is a
+/// lerp between the element and what stands behind it, and `Constant` /
+/// `OneMinusConstant` on both components is that lerp exactly:
+///
+/// ```text
+/// out = o·(A·colour, A) + (1 − o)·dst
+/// ```
+///
+/// At `o = 1` — the rail at rest, which is every frame but the ~180 ms of a fold
+/// — it reduces to `Replace` on a premultiplied source, byte for byte the
+/// arithmetic every other ground is drawn with. At `A = 1` it reduces to the
+/// `ALPHA_BLENDING` this channel used before it existed, byte for byte, which is
+/// why an opaque window's rail is unchanged at every point of its fold.
+fn create_ground_fade_rect_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    create_rect_pipeline_with_blend(device, format, "overlay ground", ground_fade_blend())
+}
+
+/// The blend state [`create_ground_fade_rect_pipeline`] is built with, named on
+/// its own so the pin can assert the arithmetic rather than a pipeline handle.
+fn ground_fade_blend() -> wgpu::BlendState {
+    let fade = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Constant,
+        dst_factor: wgpu::BlendFactor::OneMinusConstant,
+        operation: wgpu::BlendOperation::Add,
+    };
+    wgpu::BlendState {
+        color: fade,
+        alpha: fade,
+    }
 }
 
 fn create_rect_pipeline_with_blend(
@@ -14655,6 +14934,7 @@ mod tests {
             }],
             opacity: 0.25,
             body: None,
+            grounds: Vec::new(),
         };
 
         let quads = layer.faded_quads();
@@ -15056,6 +15336,233 @@ mod tests {
             )
             .expect("an offscreen window");
             assert!(window.alpha_report().is_none());
+        }
+    }
+
+    /// §7.1.6c-4f's second half: **a background is a background wherever it was
+    /// declared**, and Folio's own state fills are not backgrounds.
+    ///
+    /// Every test in here needs a real adapter, for `two_layers`' reason: what is
+    /// under test is what the render path actually hands the two pipelines, and
+    /// the only honest way to ask that is to ask a window renderer.
+    mod one_translucency {
+        use super::*;
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+        fn context() -> GpuContext {
+            pollster::block_on(GpuContext::headless(FORMAT))
+                .expect("a headless device context on this machine's adapter")
+        }
+
+        /// A four-column, two-row grid: one cell whose background a program set
+        /// outright, one that set it by reversing what it already had, the rest
+        /// left at the theme's default — and a selection over the second row.
+        fn grid() -> ViewportFrame {
+            let columns = 4_usize;
+            let rows = 2_usize;
+            let mut cells = vec![CapturedCell::plain(" "); columns * rows];
+            cells[0].style.background = TerminalColor::Rgb(38, 38, 38);
+            cells[1].style.flags = CellFlags::INVERSE;
+            ViewportFrame {
+                columns: NonZeroU32::new(columns as u32).unwrap(),
+                grid_rows: NonZeroU32::new(rows as u32).unwrap(),
+                rows: NonZeroU32::new(rows as u32).unwrap(),
+                presentation_offset_subpixels: 0,
+                cells,
+                cursor: bt_viewport::GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+                cell_anchors: test_cell_anchors(columns * rows),
+                row_map: test_row_map(rows as u32),
+                selection_spans: vec![bt_viewport::SelectionSpan {
+                    row: 1,
+                    start_column: 0,
+                    end_column: 4,
+                }],
+                search_spans: Vec::new(),
+                current_search_spans: Vec::new(),
+                math_blocks: Vec::new(),
+                math_failures: Vec::new(),
+                status_text: None,
+                viewport_origin: FrameViewportOrigin::Bottom,
+                scroll_offset_rows: 0,
+                layout_key: bt_doc_layout_key(columns as u32),
+                view_generation: bt_doc::ViewGeneration(1),
+            }
+        }
+
+        /// PIN (user ruling 2026-08-18; `docs/DESIGN.md` §7.1.6c-4f) — **a cell
+        /// background a program set carries the window's alpha, and Folio's own
+        /// state fills stay opaque.**
+        ///
+        /// The screenshot this comes from is an agent's transcript in a 30%
+        /// window: its grey message bars and its "jump to bottom" chip stood as
+        /// solid slabs on a window the desk showed through, because the grid
+        /// painted every resolved background at alpha 1 while the clear beside it
+        /// was glass. A banner more solid than the paper it is printed on is the
+        /// wrong way round.
+        ///
+        /// Both classes are asserted from one call, because the failure that
+        /// matters is a fill on the wrong side of the line and either direction
+        /// is a bug: a selection at the ground's alpha is a selection that cannot
+        /// be read over a program's own colour.
+        ///
+        /// **The reversed cell is in the list on purpose.** `SGR 7` is how a
+        /// program declares a background out of the two colours it already has,
+        /// and it reaches this loop already swapped — so it is not a special case
+        /// here, and a reading that treated "declared background" as "SGR 4x
+        /// only" would leave every `fzf` row and every `top` header opaque.
+        ///
+        /// Mutation: push the cell backgrounds onto `ink` and the first
+        /// assertion finds no grounds; push the selection onto `grounds` and the
+        /// count goes to three.
+        #[test]
+        fn a_programs_cell_background_is_glass_and_a_selection_is_not() {
+            const ALPHA: f32 = 0.3;
+            let mut gpu = context();
+            let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
+                .expect("an offscreen window");
+            let frame = grid();
+            let rects = window.rectangles(&frame, &HashSet::new(), true, ALPHA);
+
+            assert_eq!(
+                rects.grounds.len(),
+                2,
+                "the two declared backgrounds — the explicit one and the reversed one — \
+                 and nothing else: a default cell is the clear itself"
+            );
+            for ground in &rects.grounds {
+                assert!(
+                    (ground.color[3] - ALPHA).abs() < 1e-6,
+                    "a background is the window at that cell: {}",
+                    ground.color[3]
+                );
+            }
+            // The explicit one, against the arithmetic the clear runs. Same
+            // colour, same encoding, same sheet of glass.
+            let expected = ground::premultiplied_clear(srgb_rgb_to_linear([38, 38, 38]), ALPHA);
+            assert!((rects.grounds[0].color[0] - expected.r as f32).abs() < 1e-5);
+            assert!((rects.grounds[0].color[1] - expected.g as f32).abs() < 1e-5);
+            assert!((rects.grounds[0].color[2] - expected.b as f32).abs() < 1e-5);
+            assert!((rects.grounds[0].color[3] - expected.a as f32).abs() < 1e-5);
+
+            let selection = rect_gpu_color(selection_background_rgb());
+            assert!(
+                rects.ink.iter().any(|rect| rect.color == selection),
+                "a selection is Folio saying where the reader is dragging, and it \
+                 stays legible over whatever it crosses"
+            );
+        }
+
+        /// PIN — **at 100% opacity the split changes nothing.**
+        ///
+        /// The grounds are premultiplied by 1 and drawn with `Replace`, which
+        /// writes what `ALPHA_BLENDING` at alpha 1 writes; they are also the
+        /// leading block of the list they were split out of, so "grounds then
+        /// ink" is the order the one buffer already had. Between them those two
+        /// facts are the whole claim that §2.3's zero-diff shots still stand, and
+        /// they are asserted rather than argued.
+        ///
+        /// Mutation: premultiply by anything but the alpha handed in and the
+        /// second assertion finds a channel that moved.
+        #[test]
+        fn an_opaque_window_draws_the_same_bytes_it_drew_before_the_split() {
+            let mut gpu = context();
+            let window = WindowRenderer::offscreen(&mut gpu, 400, 200, 1.0, FORMAT)
+                .expect("an offscreen window");
+            let frame = grid();
+            let opaque = window.rectangles(&frame, &HashSet::new(), true, 1.0);
+            for ground in &opaque.grounds {
+                assert!(
+                    (ground.color[3] - 1.0).abs() < 1e-6,
+                    "an opaque window's ground is opaque"
+                );
+            }
+            assert_eq!(
+                opaque.grounds[0].color,
+                rect_gpu_color([38, 38, 38]),
+                "premultiplying by one is the identity, so the byte that reaches \
+                 the pipeline is the byte that reached it before"
+            );
+            // And the ink half is untouched at every alpha: it is the same list,
+            // built by the same arithmetic, whatever the window's opacity is.
+            let glass = window.rectangles(&frame, &HashSet::new(), true, 0.3);
+            assert_eq!(opaque.ink, glass.ink);
+        }
+
+        /// PIN (§7.1.6c-4f, the rail's amendment) — **a floating ground fades by
+        /// cross-fading towards what is under it, and never by going opaque.**
+        ///
+        /// The rail is the one overlay level that is a panel of the window rather
+        /// than a surface laid over it, and it carries a fold: `.rail { opacity }`
+        /// from 0 to 1 over 180 ms. `ALPHA_BLENDING` cannot express that on a
+        /// translucent window — it would land the destination on
+        /// `o + (1 − o)·A`, a rail *more* opaque mid-fold than the glass it is
+        /// folding into, which is the very arithmetic the one-translucency ruling
+        /// threw out. The blend constant is the lerp that can.
+        ///
+        /// The model below is the blend state itself, applied by hand, so the
+        /// three claims are made against the factors the pipeline is built with:
+        /// at rest it is `Replace`, on an opaque window it is what the old
+        /// alpha-blended path wrote, and mid-fold on a glass window it never
+        /// leaves the destination more opaque than either surface.
+        ///
+        /// Mutation: swap the factors back to `SrcAlpha`/`OneMinusSrcAlpha` and
+        /// the third claim fails at every fraction of the fold.
+        #[test]
+        fn a_folding_ground_lerps_towards_what_it_covers() {
+            let blend = ground_fade_blend();
+            assert_eq!(blend.color, blend.alpha, "one lerp, both components");
+            assert_eq!(blend.color.src_factor, wgpu::BlendFactor::Constant);
+            assert_eq!(blend.color.dst_factor, wgpu::BlendFactor::OneMinusConstant);
+            assert_eq!(blend.color.operation, wgpu::BlendOperation::Add);
+
+            // `out = o·src + (1 − o)·dst`, which is what those three lines say.
+            let composite = |src: [f32; 4], dst: [f32; 4], o: f32| {
+                let mut out = [0.0f32; 4];
+                for channel in 0..4 {
+                    out[channel] = o * src[channel] + (1.0 - o) * dst[channel];
+                }
+                out
+            };
+            let panel = [24u8, 24, 24];
+            for alpha in [1.0f32, 0.3] {
+                let src = premultiplied_surface_pixel_rect(
+                    [0.0, 0.0, 220.0, 900.0],
+                    panel,
+                    alpha,
+                    800,
+                    600,
+                )
+                .color;
+                // Whatever stands under the rail: the pane's own glass.
+                let dst = premultiplied_surface_pixel_rect(
+                    [0.0, 0.0, 220.0, 900.0],
+                    [17, 17, 17],
+                    alpha,
+                    800,
+                    600,
+                )
+                .color;
+                assert_eq!(
+                    composite(src, dst, 1.0),
+                    src,
+                    "a rail at rest is `Replace`: the ground and nothing of what it covers"
+                );
+                for step in 0..=10 {
+                    let o = step as f32 / 10.0;
+                    let out = composite(src, dst, o);
+                    assert!(
+                        out[3] <= alpha + 1e-6,
+                        "alpha {alpha}, fold {o}: a folding panel must not be more \
+                         opaque than the window it folds into — {}",
+                        out[3]
+                    );
+                }
+            }
         }
     }
 

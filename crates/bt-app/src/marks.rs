@@ -880,6 +880,11 @@ impl ChromeSprite {
 /// pushed later into the same layer buys nothing across channels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverlayLayer {
+    /// The rectangles of this layer that **are** the window — see
+    /// [`bt_render::OverlayGround`]. Drawn under the layer's fills, and empty for
+    /// every layer but the rail's, which is the one floating level that is a
+    /// panel of the window rather than a surface laid over it.
+    pub grounds: Vec<bt_render::OverlayGround>,
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub sprites: Vec<ChromeSprite>,
@@ -912,6 +917,7 @@ impl Default for OverlayLayer {
     /// reason spelled out on the renderer's twin.
     fn default() -> Self {
         Self {
+            grounds: Vec::new(),
             quads: Vec::new(),
             labels: Vec::new(),
             sprites: Vec::new(),
@@ -929,7 +935,8 @@ impl OverlayLayer {
     /// empty by the same argument.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        (self.quads.is_empty()
+        (self.grounds.is_empty()
+            && self.quads.is_empty()
             && self.labels.is_empty()
             && self.sprites.is_empty()
             && self.images.is_empty())
@@ -976,6 +983,7 @@ impl ChromeMarkRasters {
         let resolved = layers
             .into_iter()
             .map(|layer| bt_render::OverlayLayer {
+                grounds: layer.grounds,
                 quads: layer.quads,
                 labels: layer.labels,
                 icons: {
