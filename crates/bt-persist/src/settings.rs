@@ -61,7 +61,14 @@ use serde::{Deserialize, Serialize};
 /// **v13 carries `block_max_height`**, the Rendered blocks page's own `Maximum height` row, and
 /// it is the same shape once more: one key, its own day, and a migration that writes the answer
 /// every build before it gave — no cap at all.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 13;
+///
+/// **v14 carries `scrollback_lines`**, the Terminal page's own `Scrollback` row, and it is
+/// the same shape a fourth time: one key, its own day, and a migration that writes the
+/// answer every build before it gave. The difference from v13 is only that the answer is a
+/// number somebody once wrote in Rust rather than an absence — `M0_FROZEN_LINE_QUOTA`, one
+/// hundred thousand lines a pane, in force since M0-alpha — and this step moves it into the
+/// file without moving it.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 14;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -168,10 +175,21 @@ pub const MINIMUM_BACKGROUND_OPACITY: u8 = 30;
 /// answer they cannot have asked for.
 pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
 
+/// How many lines of past output a pane keeps when the file has never named a number:
+/// **100,000**, per pane.
+///
+/// Not a new answer. It is `bt_app`'s `M0_FROZEN_LINE_QUOTA`, which has been the capacity of
+/// every pane this product has ever drawn, moved to the place a user can now reach it from —
+/// so the row ships without changing what anybody's terminal does. A product that started
+/// keeping less history the day it grew a control for history would be answering a question
+/// on the reader's behalf with the one answer they cannot have asked for, which is the same
+/// sentence [`DEFAULT_BLOCK_MAX_HEIGHT`] is written under.
+pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
+
 /// `settings.json` v13 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 13,
+///   "schema_version": 14,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -192,7 +210,8 @@ pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
 ///   "background_opacity": 30..=100,
 ///   "acrylic": true | false,
 ///   "always_on_top": true | false,
-///   "advanced_open": ["appearance", …]
+///   "advanced_open": ["appearance", …],
+///   "scrollback_lines": 25000 | 50000 | 100000 | 200000
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +488,40 @@ pub struct SettingsV1 {
     /// window they happened to have open.
     #[serde(default)]
     pub advanced_open: Vec<String>,
+    /// **How many lines of past output one terminal pane keeps** — the Terminal page's
+    /// `Scrollback` row, and the frozen-history capacity `bt_transcript::TranscriptStore`
+    /// enforces.
+    ///
+    /// **Lines and not bytes**, because a line is the unit the reader scrolls in and the
+    /// unit the picture on the right edge is drawn from. Bytes would make the same file
+    /// mean a different amount of history on a machine that prints wider lines, which is
+    /// the one thing a number in a settings file must not do.
+    ///
+    /// **Never zero and never a sentinel**, which is where this key differs from
+    /// [`SettingsV1::block_max_height`]. There, `0` is a legal answer that means "no
+    /// limit"; here there is no such answer to spell, because P2-9 has ruled that真·无限
+    /// 回滚 is not a thing this product does — unbounded history means writing output to
+    /// disk, which is the "输出历史" honeypot under another name. Every value of this key
+    /// is a real capacity, so a reader editing the file by hand cannot write a number that
+    /// silently means its opposite.
+    ///
+    /// This crate does not clamp it. A file naming a capacity this build's picker does not
+    /// offer is honoured as written — every positive number is meaningful, unlike a scheme
+    /// name or a profile id — and the picker simply shows no tick. Zero is the one value
+    /// that has no meaning as a capacity, and it is answered at the door rather than here:
+    /// `bt_app::scrollback_quota` turns it into the same `NonZeroUsize` every other value
+    /// becomes. See `settings::scrollback_index`.
+    #[serde(default = "default_scrollback_lines")]
+    pub scrollback_lines: u32,
+}
+
+/// `serde`'s door for a v14 key that is missing from a file this build is reading.
+///
+/// A function rather than `#[serde(default)]`'s `Default::default()`, because a `u32`'s own
+/// default is `0` and zero lines is not a capacity — a file that had lost this key would
+/// come back as a pane that keeps nothing.
+fn default_scrollback_lines() -> u32 {
+    DEFAULT_SCROLLBACK_LINES
 }
 
 impl Default for SettingsV1 {
@@ -499,6 +552,7 @@ impl Default for SettingsV1 {
             // disclosure that arrived already disclosed would be a longer page
             // with a triangle on it.
             advanced_open: Vec::new(),
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
     }
 }

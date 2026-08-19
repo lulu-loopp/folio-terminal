@@ -48,6 +48,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (10, migrate_settings_v10_to_v11),
     (11, migrate_settings_v11_to_v12),
     (12, migrate_settings_v12_to_v13),
+    (13, migrate_settings_v13_to_v14),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -297,6 +298,25 @@ fn migrate_settings_v12_to_v13(mut value: Value) -> Value {
         object.insert(
             "block_max_height".to_owned(),
             Value::from(crate::DEFAULT_BLOCK_MAX_HEIGHT),
+        );
+    }
+    value
+}
+
+/// One key, and it carries a behaviour forward for the fourth time running — with the one
+/// difference that here the behaviour was a written number rather than an absence. Every build
+/// that wrote a v13 file kept exactly 100,000 frozen lines a pane, because `M0_FROZEN_LINE_QUOTA`
+/// said so and there was no control that could say otherwise; this step writes that number into
+/// the file rather than choosing a new one, so a reader who has never opened the row keeps the
+/// history they already had. Shrinking here would delete a stranger's output on the strength of
+/// a control they have not seen; growing here would spend their memory the same way. See
+/// `SettingsV1::scrollback_lines`.
+fn migrate_settings_v13_to_v14(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(14));
+        object.insert(
+            "scrollback_lines".to_owned(),
+            Value::from(crate::DEFAULT_SCROLLBACK_LINES),
         );
     }
     value

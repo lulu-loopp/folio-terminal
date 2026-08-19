@@ -560,7 +560,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 13,
+        SETTINGS_SCHEMA_VERSION, 14,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -576,8 +576,14 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          quarter of, and because a schema version is a file format rather than a \
          changelog — and the Advanced disclosure's own list the v10→v11, one key \
          on its own day, the Tables switch the v11-to-v12, and the Rendered \
-         blocks page's own Maximum height the v12-to-v13 — one key on one \
-         day, three times running"
+         blocks page's own Maximum height the v12-to-v13, and the Terminal page's \
+         own Scrollback the v13-to-v14 — one key on one day, four times running"
+    );
+    assert_eq!(
+        defaults.scrollback_lines, 100_000,
+        "the capacity every build has kept since M0-alpha, written down rather \
+         than changed: a row that shipped by quietly shrinking somebody's history \
+         would be answering a question they had not been asked"
     );
     assert!(
         defaults.advanced_open.is_empty(),
@@ -1118,6 +1124,60 @@ fn settings_v12_migrates_uncapped_and_v13_keeps_the_height_it_was_given() {
         on_disk.contains(r#""block_max_height": 0"#),
         "no limit is written down rather than left out: {on_disk}"
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (the Scrollback row) — a v13 file migrates to v14 keeping **the capacity every
+/// build before it kept**, and a v14 file naming a smaller one is read as naming it.
+///
+/// The migration half is the fourth running of the same shape, and here the behaviour being
+/// carried forward is a literal constant rather than an absence: every build up to v13 held
+/// 100,000 frozen lines per pane because `M0_FROZEN_LINE_QUOTA` said so and nothing could say
+/// otherwise. Writing a smaller number here would be shrinking a stranger's history on the
+/// strength of a control they have not seen; writing a larger one would be spending their
+/// memory the same way.
+///
+/// The second half pins that the number survives the write and the read as a number. There is
+/// no `0` sentinel on this key — unlike `block_max_height`, "no limit" is a thing this product
+/// has ruled it does not do (P2-9: 真·无限 = 输出必须写盘), so every value of this key is a
+/// real capacity and a reader who chose one must get it back.
+#[test]
+fn settings_v13_migrates_to_the_capacity_it_always_had_and_v14_keeps_the_number_it_was_given() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v13_block_max_height.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.scrollback_lines, 100_000,
+        "a v13 build kept a hundred thousand lines a pane, and that is what it keeps doing"
+    );
+    assert_eq!(
+        migrated.block_max_height, 240,
+        "one key crosses; every sibling crosses untouched"
+    );
+
+    let (chosen, report) = read_settings(&fixture_path("settings_v14_scrollback.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(chosen.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        chosen.scrollback_lines, 25_000,
+        "a reader who asked for less is heard"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v14-scrollback-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &chosen).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""scrollback_lines": 25000"#),
+        "the capacity is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, chosen);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
